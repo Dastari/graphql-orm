@@ -115,7 +115,7 @@ let policy = AiDependentEffectPolicy::new()
     .with_maximum_dependent_rows(1_000);
 ```
 
-The declaration is checked against ORM 0.164.0's introspected physical graph
+The declaration is checked against ORM 0.165.0's introspected physical graph
 and locked dependent row plan before any write. Every transitive cascade and
 set-null must match, including effects with zero current rows. Row bounds are
 execution limits: exceeding one aborts the transaction and rolls everything back.

@@ -10,7 +10,7 @@ pub(super) fn invalid() -> RuntimeGraphqlError {
     RuntimeGraphqlError::new("invalid_graphql_input")
 }
 pub(super) fn query_error(e: RuntimeQueryError) -> RuntimeGraphqlError {
-    RuntimeGraphqlError::new(e.code().as_str())
+    RuntimeGraphqlError::new(e.detail().unwrap_or(e.code().as_str()))
 }
 fn record_error(e: RuntimeRecordError) -> RuntimeGraphqlError {
     RuntimeGraphqlError::new(e.code().as_str())

@@ -252,7 +252,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                     InputValue::new(
                         &f.api_name,
                         TypeRef::named_nn(if c.live_subscriptions.is_some() {
-                            super::live::key_scalar(f.value_kind)
+                            super::live::key_scalar(module, f.value_kind)
                         } else {
                             super::scalar::name(f.value_kind)
                         }),
@@ -594,7 +594,7 @@ fn input_fields(
             let value = if value == &Value::Null {
                 RuntimeValue::Null
             } else if c.live_subscriptions.is_some() && c.primary_key.contains(&field.id) {
-                super::live::decode_key_value(field.value_kind, value, limits.scalars)?
+                super::live::decode_key_value(module, field.value_kind, value, limits.scalars)?
             } else {
                 super::scalar::decode(field.value_kind, value, limits.scalars)?
             };

@@ -10,11 +10,23 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.164.0 adds opt-in transaction-bound dependent-effect verification.
+Version 0.165.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan
 and enforces dependent row limits before writes. Generated physical opt-out and
 bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
-See the [migration guide](../../MIGRATION.md#ormmacros-01640-guarded-dependent-deletes).
+See the [migration guide](../../MIGRATION.md#ormmacros-01650-guarded-dependent-deletes).
+
+Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
+page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
+of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and
+`schema_roots!(max_page_limit: N)` publishes the real maximum in the semantic
+catalogue and refuses a `Database` configured differently. Runtime GraphQL can
+serve `RecordVersion` and integer live keys as `RuntimeInt64` strings
+(`with_int64_identity_strings`). A runtime page whose stored sort key is too
+long for a cursor is refused with `cursor_key_too_large`. A subscriber that
+lagged now ends on the next authority tick instead of at once. Defaults are
+unchanged except for that timing. See the
+[migration guide](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
 
 Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
 per-entity wrapper objects (edges, connections, mutation results, change

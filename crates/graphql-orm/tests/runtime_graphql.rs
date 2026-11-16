@@ -142,6 +142,9 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -> Runtim
     }
 }
 fn schema() -> Arc<ValidatedRuntimeSchema> {
+    schema_with_child_order(vec![])
+}
+fn schema_with_child_order(child_order: Vec<RuntimeOrderTerm>) -> Arc<ValidatedRuntimeSchema> {
     let mut parent = RuntimeCollection {
         node_identity: None,
         live_subscriptions: None,
@@ -190,7 +193,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         relations: vec![],
         indexes: vec![],
         composite_unique: vec![],
-        default_order: vec![],
+        default_order: child_order,
         label_fields: Vec::new(),
         search: None,
     };
@@ -1231,6 +1234,104 @@ async fn protected_cursor_is_bound_to_the_callers_filter() {
     // An empty filter is the same query as no filter.
     let empty = run(serde_json::json!({}), unfiltered).await;
     assert!(empty.errors.is_empty(), "{:?}", empty.errors);
+    #[cfg(feature = "postgres")]
+    owned.cleanup().unwrap();
+}
+
+// #580: a cursor carries the order values of its row. One stored string
+// longer than `max_cursor_bytes` cannot be carried, so a page ordered by that
+// field is refused with its own stable code, not the request's
+// `resource_limit`. Other orders keep working.
+#[tokio::test]
+async fn a_stored_sort_key_too_long_for_a_cursor_refuses_the_page_with_a_stable_code() {
+    let _query_counts = QUERY_COUNTS.lock().await;
+    #[cfg(feature = "postgres")]
+    let mut owned = owned_postgres::OwnedPostgres::start("runtime-graphql-k").unwrap();
+    #[cfg(feature = "postgres")]
+    let database = Database::connect_postgres(&owned.url).await.unwrap();
+    #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+    let database = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+    #[cfg(feature = "postgres")]
+    let json_type = "JSONB";
+    #[cfg(not(feature = "postgres"))]
+    let json_type = "TEXT";
+    // 9,000 bytes: the hex cursor exceeds the 16 KiB a protected cursor may
+    // carry. 20,000 bytes: the cursor itself exceeds `max_cursor_bytes`.
+    for length in [9_000, 20_000] {
+        graphql_orm::sqlx::query(&format!("CREATE TABLE gql_parents (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, label TEXT NOT NULL, caption TEXT NOT NULL DEFAULT 'caption', document {json_type}, required {json_type} NOT NULL DEFAULT 'null')")).execute(database.pool()).await.unwrap();
+        graphql_orm::sqlx::query("CREATE TABLE gql_children (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, owner BIGINT NOT NULL, label TEXT NOT NULL)").execute(database.pool()).await.unwrap();
+        let long = "k".repeat(length);
+        graphql_orm::sqlx::query(&format!("INSERT INTO gql_parents(id,tenant,label) VALUES (1,'north','{long}'),(2,'north','short')")).execute(database.pool()).await.unwrap();
+        graphql_orm::sqlx::query(&format!(
+            "INSERT INTO gql_children VALUES (11,'north',1,'{long}'),(12,'north',1,'b')"
+        ))
+        .execute(database.pool())
+        .await
+        .unwrap();
+        // Related children page in their collection's default order: the label.
+        let runtime = schema_with_child_order(vec![RuntimeOrderTerm {
+            field: fid("child.label"),
+            direction: RuntimeOrderDirection::Asc,
+        }]);
+        let module = RuntimeGraphqlModule::compile(runtime.clone(), Default::default()).unwrap();
+        let api = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+            .unwrap()
+            .cursor_protection(
+                Arc::new(TestAead),
+                RuntimeCursorAudience::new("synthetic-tests").unwrap(),
+                Default::default(),
+            )
+            .unwrap()
+            .install(module)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let authority = Arc::new(Authority {
+            deny_child: AtomicBool::new(false),
+            deny_count: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            tenant: "north",
+        });
+        let run = |query: &'static str| {
+            api.execute(request(
+                &runtime,
+                authority.clone(),
+                query,
+                serde_json::json!({}),
+            ))
+        };
+        let code = |response: &async_graphql::Response| {
+            assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+            let error = &response.errors[0];
+            assert!(!error.message.contains("kkkk"), "no stored value is echoed");
+            match error.extensions.as_ref().unwrap().get("code") {
+                Some(async_graphql::Value::String(code)) => code.clone(),
+                other => panic!("no code: {other:?}"),
+            }
+        };
+        // Root page ordered by the long key.
+        let refused = run("{parents(first:1,orderBy:{field:label}){edges{node{id}}}}").await;
+        assert_eq!(code(&refused), "cursor_key_too_large");
+        // Nested relation page ordered by the long key.
+        let refused = run(
+            "{parents(first:2,orderBy:{field:id}){edges{node{id children(first:2){edges{node{id}}}}}}}",
+        )
+        .await;
+        assert_eq!(code(&refused), "cursor_key_too_large");
+        // The same rows page normally in an order whose values fit.
+        let served = run("{parents(first:1,orderBy:{field:id}){edges{node{id}cursor}}}").await;
+        assert!(served.errors.is_empty(), "{:?}", served.errors);
+        assert_eq!(
+            served.data.into_json().unwrap()["parents"]["edges"][0]["node"]["id"],
+            "1"
+        );
+        for table in ["gql_parents", "gql_children"] {
+            graphql_orm::sqlx::query(&format!("DROP TABLE {table}"))
+                .execute(database.pool())
+                .await
+                .unwrap();
+        }
+    }
     #[cfg(feature = "postgres")]
     owned.cleanup().unwrap();
 }

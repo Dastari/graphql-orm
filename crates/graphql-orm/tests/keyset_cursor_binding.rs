@@ -548,3 +548,125 @@ async fn value_drift_after_the_cursor_is_accepted_and_resumes_by_value() {
     // 100) sorts after it and is returned again.
     assert_eq!(ids(&resumed, |n| &n.id), ["b", "c", "a"]);
 }
+
+/// Row policy that shows only group `x`, completely in SQL.
+struct GroupXOnly;
+
+impl RowPolicy for GroupXOnly {
+    fn read_visibility<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async move {
+            Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<
+                SqliteBackend,
+                _,
+            >(&group("x"))?))
+        })
+    }
+
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let visible = row
+            .downcast_ref::<BindingItem>()
+            .is_some_and(|row| row.group_name == "x");
+        Box::pin(async move { Ok(visible) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+/// The cursor checksum: FNV-1a over the JSON of `(version, order, values)`.
+/// It uses no secret, so anyone can compute it.
+fn public_checksum(version: u64, order: &str, values: &Value) -> String {
+    let payload = serde_json::to_vec(&(version, order, values)).unwrap();
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in payload {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
+        .collect()
+}
+
+// #448: a static keyset cursor is an integrity envelope, not an authenticated
+// token. A client can rewrite its values and recompute the checksum. All that
+// buys is a different resume position in the same order: every page is still
+// read under the caller's row policy, so no hidden row is returned.
+#[tokio::test]
+async fn a_rewritten_cursor_only_moves_the_position_and_row_policy_still_applies() {
+    // Whole pages, so a hidden row would show if policy were skipped.
+    let wide = |after: Option<String>| KeysetPageInput {
+        after,
+        limit: Some(10),
+        include_total_count: false,
+    };
+    let mut db = setup().await;
+    db.set_row_policy(GroupXOnly);
+    // Rows: a (x, rank 1), b (y, 2), c (x, 3), d (y, 4). The caller sees a, c.
+    let honest = BindingItem::keyset_page(&db, BindingItemWhereInput::default(), wide(None))
+        .await
+        .unwrap();
+    assert_eq!(ids(&honest, |row| &row.id), ["a", "c"]);
+
+    let cursor = honest.edges[0].cursor.clone();
+    let mut envelope: Value =
+        serde_json::from_slice(&unhex(cursor.strip_prefix("gomk1.").unwrap())).unwrap();
+    // The envelope is plain JSON: the order values of row `a` are readable.
+    assert_eq!(envelope["values"][0]["v"], 1);
+    assert_eq!(envelope["values"][1]["v"], "a");
+
+    // A changed value with the old checksum is refused...
+    envelope["values"][0]["v"] = json!(2);
+    envelope["values"][1]["v"] = json!("b");
+    let stale = format!("gomk1.{}", hex(&serde_json::to_vec(&envelope).unwrap()));
+    refused_public(
+        BindingItem::keyset_page(&db, BindingItemWhereInput::default(), wide(Some(stale))).await,
+    );
+
+    // ...but the checksum is not a secret. Recomputed, the cursor is accepted
+    // and points at the hidden row `b`.
+    envelope["checksum"] = json!(public_checksum(
+        envelope["version"].as_u64().unwrap(),
+        envelope["order"].as_str().unwrap(),
+        &envelope["values"],
+    ));
+    let forged = format!("gomk1.{}", hex(&serde_json::to_vec(&envelope).unwrap()));
+    let moved = BindingItem::keyset_page(&db, BindingItemWhereInput::default(), wide(Some(forged)))
+        .await
+        .unwrap();
+    // The page resumes after (2, "b"). Row policy still hides `d`, and `b`
+    // itself is never returned.
+    assert_eq!(ids(&moved, |row| &row.id), ["c"]);
+}

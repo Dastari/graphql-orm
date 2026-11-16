@@ -1555,6 +1555,11 @@ impl Default for PaginationConfig {
 }
 
 impl PaginationConfig {
+    /// Build a client policy without changing the configuration's public fields.
+    pub fn into_client_policy(self, refuse: bool) -> ClientPaginationConfig {
+        ClientPaginationConfig::from(self).with_oversized_limit_refusal(refuse)
+    }
+
     /// Secure recommended default connection limit.
     pub const SECURE_DEFAULT_LIMIT: i64 = 50;
     /// Secure recommended maximum connection limit.
@@ -1775,6 +1780,189 @@ impl PaginationConfig {
             None => normalized,
         }
     }
+}
+
+/// Client pagination policy, separate from the source-compatible limit configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct ClientPaginationConfig {
+    config: PaginationConfig,
+    refuse_oversized_limit: bool,
+}
+impl From<PaginationConfig> for ClientPaginationConfig {
+    fn from(config: PaginationConfig) -> Self {
+        Self {
+            config,
+            refuse_oversized_limit: false,
+        }
+    }
+}
+impl std::ops::Deref for ClientPaginationConfig {
+    type Target = PaginationConfig;
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+impl ClientPaginationConfig {
+    pub(crate) fn with_read_maximum(mut self, maximum: Option<i64>) -> Self {
+        self.config = self.config.with_read_maximum(maximum);
+        self
+    }
+    /// Return a copy that refuses, or reduces, a client page limit above
+    /// `max_limit`; see [`Self::with_oversized_limit_refusal`].
+    pub fn with_oversized_limit_refusal(mut self, refuse: bool) -> Self {
+        self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Check a client page limit against [`Self::with_oversized_limit_refusal`].
+    ///
+    /// Does nothing unless the refusal is enabled and `limit` is above a
+    /// configured `max_limit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrmErrorCode::PageLimitExceeded`](crate::graphql::errors::OrmErrorCode::PageLimitExceeded)
+    /// with a message naming the requested limit and the maximum. Both are
+    /// values the client supplied or may be told.
+    pub fn admit_client_limit(
+        &self,
+        limit: Option<i64>,
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        if !self.refuse_oversized_limit {
+            return Ok(());
+        }
+        match (limit, self.max_limit) {
+            (Some(limit), Some(maximum)) if limit > maximum.max(0) => {
+                Err(crate::graphql::errors::OrmPublicError::with_message(
+                    crate::graphql::errors::OrmErrorCode::PageLimitExceeded,
+                    format!(
+                        "requested limit {limit} exceeds the maximum page limit {}",
+                        maximum.max(0)
+                    ),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Resolve a client page like [`PaginationConfig::resolve_page`], after
+    /// [`Self::admit_client_limit`].
+    ///
+    /// Generated GraphQL resolvers use this. A custom resolver that takes a
+    /// client `PageInput` should too, so the opt-in refusal covers it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PAGE_LIMIT_EXCEEDED` as [`Self::admit_client_limit`] does.
+    pub fn resolve_client_page(
+        &self,
+        page: Option<&PageInput>,
+        apply_default_limit: bool,
+    ) -> Result<PaginationRequest, crate::graphql::errors::OrmPublicError> {
+        self.admit_client_limit(page.and_then(|page| page.limit))?;
+        Ok(self.resolve_page(page, apply_default_limit))
+    }
+}
+
+/// Schema-local declared bound used by generated complexity expressions.
+#[doc(hidden)]
+pub struct DeclaredPageMaximum(pub Option<u32>);
+
+// The upstream complexity callback has no schema-data accessor. Carry the
+// schema's bound only for this validation future; scopes restore on exit and
+// do not share values across schemas or concurrent tasks.
+tokio::task_local! { static VALIDATING_PAGE_MAXIMUM: i64; }
+
+/// Schema-local bridge from schema data to the upstream complexity callback.
+#[doc(hidden)]
+pub struct PageMaximumValidation;
+impl async_graphql::extensions::ExtensionFactory for PageMaximumValidation {
+    fn create(&self) -> std::sync::Arc<dyn async_graphql::extensions::Extension> {
+        std::sync::Arc::new(Self)
+    }
+}
+#[async_graphql::async_trait::async_trait]
+impl async_graphql::extensions::Extension for PageMaximumValidation {
+    async fn validation(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        next: async_graphql::extensions::NextValidation<'_>,
+    ) -> Result<async_graphql::ValidationResult, Vec<async_graphql::ServerError>> {
+        let maximum = ctx
+            .data_opt::<DeclaredPageMaximum>()
+            .and_then(|value| value.0)
+            .map(i64::from)
+            .unwrap_or(PaginationConfig::DEFAULT_MAX_LIMIT);
+        VALIDATING_PAGE_MAXIMUM.scope(maximum, next.run(ctx)).await
+    }
+}
+
+/// Return the bound of the schema currently being validated, or the legacy estimate.
+#[doc(hidden)]
+pub fn page_complexity_maximum() -> i64 {
+    VALIDATING_PAGE_MAXIMUM
+        .try_with(|maximum| *maximum)
+        .unwrap_or(PaginationConfig::DEFAULT_MAX_LIMIT)
+}
+
+/// Check, when a generated schema is built, that its declared maximum page
+/// limit is the one `database` applies, for its schema-local complexity estimate. A schema that declares none is not checked.
+///
+/// # Panics
+///
+/// Panics when the two differ: the semantic catalogue would publish a bound
+/// the database does not apply, and the complexity estimate would count
+/// fewer rows than a query can return.
+#[doc(hidden)]
+pub fn admit_declared_page_maximum<B: OrmBackend>(
+    database: &crate::db::Database<B>,
+    declared: Option<u32>,
+) {
+    let Some(declared) = declared.map(i64::from) else {
+        return;
+    };
+    let configured = database.pagination_config().max_limit;
+    assert!(
+        configured == Some(declared),
+        "schema_roots! declares `max_page_limit: {declared}`, but the Database applies {}; \
+         configure it with `DatabaseBuilder::max_page_limit(Some({declared}))` or declare the \
+         maximum the Database uses",
+        match configured {
+            Some(maximum) => format!("a maximum page limit of {maximum}"),
+            None => "no maximum page limit".to_owned(),
+        }
+    );
+}
+
+/// Publish a schema's declared maximum page limit in one entity's semantic
+/// metadata: every pageable relationship list takes it as its ceiling in
+/// place of the compile-time default. Without a declaration the metadata is
+/// returned unchanged.
+#[doc(hidden)]
+pub fn with_declared_page_maximum(
+    mut metadata: super::GraphqlEntitySemanticMetadata,
+    declared: Option<u32>,
+) -> super::GraphqlEntitySemanticMetadata {
+    let Some(declared) = declared else {
+        return metadata;
+    };
+    for field in metadata.fields.iter_mut() {
+        let pageable = field.relationship.as_ref().is_some_and(|relationship| {
+            matches!(
+                relationship.collection_bound,
+                Some(super::GraphqlSemanticCollectionBound::Pageable { .. })
+            )
+        });
+        if pageable
+            && let super::GraphqlSemanticTypeRef::List {
+                maximum_items: Some(maximum),
+                ..
+            } = &mut field.type_ref
+        {
+            *maximum = declared;
+        }
+    }
+    metadata
 }
 
 /// Row bound of one Rust repository read. See
@@ -2502,6 +2690,11 @@ pub trait PoolProvider<B: OrmBackend = DefaultBackend> {
         PaginationConfig::default()
     }
 
+    /// Client pagination policy; existing providers keep the default clamping behavior.
+    fn client_pagination_config(&self) -> ClientPaginationConfig {
+        self.pagination_config().into()
+    }
+
     /// Observe a completed read without disclosing parameter values.
     fn observe_read(&self, _sql: &str, _rows: usize) {}
 }
@@ -2553,6 +2746,10 @@ impl<B: OrmBackend> PoolProvider<B> for crate::db::Database<B> {
 
     fn pagination_config(&self) -> PaginationConfig {
         crate::db::Database::pagination_config(self)
+    }
+
+    fn client_pagination_config(&self) -> ClientPaginationConfig {
+        crate::db::Database::client_pagination_config(self)
     }
 }
 
@@ -4673,6 +4870,8 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
     pub(crate) keyset_filter_identities: Vec<String>,
+    /// Per-read maximum of this query's keyset and scan pages.
+    pub(crate) max_limit: Option<i64>,
     _marker: PhantomData<(T, B)>,
 }
 
@@ -4687,6 +4886,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             entity_matchers: self.entity_matchers.clone(),
             filter_is_valid: self.filter_is_valid,
             keyset_filter_identities: self.keyset_filter_identities.clone(),
+            max_limit: self.max_limit,
             _marker: PhantomData,
         }
     }
@@ -4707,6 +4907,7 @@ where
             entity_matchers: Vec::new(),
             filter_is_valid: true,
             keyset_filter_identities: Vec::new(),
+            max_limit: None,
             _marker: PhantomData,
         }
     }
@@ -4824,6 +5025,20 @@ where
 
     pub fn paginate(mut self, page: &PageInput) -> Self {
         self.page = Some(page.clone());
+        self
+    }
+
+    /// Override the database's maximum page limit for this query's keyset
+    /// and authorized-scan pages (`fetch_authorized_keyset*`,
+    /// `fetch_authorized_scan`).
+    ///
+    /// Trusted Rust code that pages through a set, or reads `bound + 1` rows
+    /// to detect an overflow, uses this to ask for more rows a page than
+    /// GraphQL clients may. The page is still bounded by `maximum`. Never
+    /// pass a value a client chose without validating it first. A negative
+    /// `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
         self
     }
 
@@ -5675,6 +5890,10 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        provider
+            .client_pagination_config()
+            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if self.requires_in_memory_filtering() {
             let nodes = self.fetch_unpaged_filtered(provider).await?;
             let total = nodes.len() as i64;
@@ -5773,6 +5992,10 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        provider
+            .client_pagination_config()
+            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         self.ensure_filter_valid()?;
         if self.requires_in_memory_filtering() || (selection.rows && selection.count) {
             return self.fetch_connection_with_auth(provider, auth).await;
@@ -5863,6 +6086,10 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        provider
+            .client_pagination_config()
+            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if self.requires_in_memory_filtering() {
             let nodes = self
                 .fetch_unpaged_filtered_with_auth(provider, auth)

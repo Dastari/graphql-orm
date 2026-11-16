@@ -173,6 +173,8 @@ async fn setup(capacity: usize) -> (AppSchema, DiagnosticPolicy, Database) {
     if capacity > 0 {
         db.set_event_channel_capacity(capacity);
     }
+    // The shortest authority tick: a lagging stream ends on its next tick.
+    db.set_subscription_authority_recheck_interval(Duration::from_secs(1));
     sqlx::query("CREATE TABLE probe_records (id TEXT PRIMARY KEY, owner TEXT NOT NULL, label TEXT NOT NULL)")
         .execute(db.pool())
         .await
@@ -286,6 +288,9 @@ async fn dropped_event_diagnostics_do_not_reach_lag_frames() {
         for i in 0..5 {
             publish(&schema, mutation, &format!("hidden-{i}"), "bob").await;
         }
+        // Lag does not end the stream when it is detected (#387), only on
+        // the next authority tick.
+        registered(&mut stream).await;
         let frame = timeout(Duration::from_secs(5), stream.next())
             .await
             .unwrap()

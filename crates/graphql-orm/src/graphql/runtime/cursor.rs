@@ -255,14 +255,20 @@ pub(super) async fn open(
     }
     Ok(plaintext)
 }
+fn key_too_large() -> RuntimeGraphqlError {
+    RuntimeGraphqlError::new("cursor_key_too_large")
+}
 pub(super) async fn seal(
     provider: &dyn RuntimeCursorProtector,
     context: &RuntimeCursorContext,
     plaintext: &str,
     limits: RuntimeCursorProtectionLimits,
 ) -> Result<String, RuntimeGraphqlError> {
+    // The plaintext is built from the order values of a stored row, never
+    // from caller input. One too long to protect is a sort key too long for a
+    // cursor: the same stable code as the unprotected bound.
     if plaintext.len() > limits.max_plaintext_bytes {
-        return Err(invalid());
+        return Err(key_too_large());
     }
     let sealed = provider.seal(context, plaintext, limits).await?;
     sealed.validate(limits)?;
@@ -286,7 +292,7 @@ pub(super) async fn seal(
         .and_then(|n| n.checked_add(encoded_size))
         .ok_or_else(invalid)?;
     if size > limits.max_token_bytes {
-        return Err(invalid());
+        return Err(key_too_large());
     }
     Ok(format!(
         "gormgqlc1.{}.{}",
