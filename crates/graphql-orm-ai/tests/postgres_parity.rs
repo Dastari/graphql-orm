@@ -1804,6 +1804,7 @@ impl AiRuntimeEpochAnchorStore for ParityEpochAnchor {
         expected: Option<&AiRuntimeEpochAnchor>,
         anchor: &AiRuntimeEpochAnchor,
     ) -> Result<bool, AiError> {
+        tokio::task::yield_now().await;
         let mut value = self.0.lock().expect("anchor");
         if value.as_ref() != expected {
             return Ok(false);

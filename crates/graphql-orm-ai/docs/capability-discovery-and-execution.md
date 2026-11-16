@@ -167,7 +167,7 @@ negotiation metadata, never authority.
 | --- | --- | --- |
 | `EagerExact` | All already-filtered exact definitions | Small sets within exact count and byte limits |
 | `ClientDeferred` | Exact static bootstrap plus discovery; freshly loaded generated-query definitions on the next continuation | Stateless/local or client-executed search |
-| `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search, for a set within the eager limits or a provider with no fixed broker |
+| `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search, including large non-frozen surfaces unless the broker preference is enabled |
 | `FixedBroker` | Exact static bootstrap plus frozen discover/describe/execute definitions | Retained sessions whose generated definitions cannot change |
 
 `ProviderDeferred` remains the default for large non-frozen surfaces.

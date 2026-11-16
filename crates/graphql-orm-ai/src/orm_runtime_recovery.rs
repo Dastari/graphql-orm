@@ -2695,6 +2695,9 @@ mod tests {
             expected: Option<&AiRuntimeEpochAnchor>,
             anchor: &AiRuntimeEpochAnchor,
         ) -> Result<bool, AiError> {
+            // Force scheduling at both the stage and finalize CAS boundaries.
+            // Concurrent openers must hold the rotation lease across this yield.
+            tokio::task::yield_now().await;
             if anchor.pending_generation().is_none()
                 && self
                     .fail_committed_write
