@@ -70,7 +70,13 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+### workspace-2026.11.16.3
+
+Commit `cd8072d8e576` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.3)
+
+Packages (changed in bold): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 Breaking batch, collected on `next/breaking` (ORM/macros 0.166.0, backup 0.27.0, AI 0.147.0, catalogue 0.9.0, AI tool profiles 0.24.0, router 0.16.0; versions are placeholders):
 
