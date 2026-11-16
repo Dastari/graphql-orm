@@ -61,9 +61,12 @@ Host steps:
 1. Deploy AI and tool profiles together, and admit the four new broker
    definition fingerprints wherever you list them by value.
 2. Make host capability policy decide `GeneratedEntity` entries as well as
-   root entries. Discover and describe ask about the entity; describe,
-   `describe_type` and execute also ask about each root, and describe lists
-   only the roots you admit.
+   root entries, in every delivery mode. Discover asks about each matching
+   entity and its grouped roots in one batch and lists, and ranks on, only
+   the roots you admit; describe, `describe_type` and execute ask about the
+   entity and each root again; client-deferred discovery, load and execute
+   need a root's entity admitted too. A policy that admits only root IDs
+   discovers nothing until it decides entity entries.
 3. Large surfaces now default to the fixed broker when the provider supports
    both it and `ProviderDeferred`. To keep native deferred loading, set
    `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to

@@ -327,6 +327,10 @@ pub struct AiCapabilityIndex {
     /// Never serialized, compared or counted against the limits.
     #[serde(skip)]
     operation_entries: OperationEntryCache,
+    /// Per-root search view, derived from `entries` on first per-root search.
+    /// Never serialized or compared.
+    #[serde(skip)]
+    root_search: RootSearchCache,
 }
 
 impl AiCapabilityIndex {
@@ -527,6 +531,7 @@ impl AiCapabilityIndex {
             limits,
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
         };
         let member_ids = index
             .entries
@@ -542,6 +547,26 @@ impl AiCapabilityIndex {
         index.search_terms();
         index.operation_entries();
         Ok(index)
+    }
+
+    /// Executable roots of this index ranked one by one: every non-entity
+    /// entry, and every root an entity entry groups.
+    fn root_search_view(&self) -> &RootSearchView {
+        self.root_search.0.get_or_init(|| {
+            let entries = self
+                .entries
+                .values()
+                .filter(|entry| entry.kind != AiCapabilityKind::GeneratedEntity)
+                .map(|entry| (entry.id.clone(), entry.clone()))
+                .chain(
+                    self.operation_entries()
+                        .iter()
+                        .map(|(id, (_, entry))| (id.clone(), entry.clone())),
+                )
+                .collect::<BTreeMap<_, _>>();
+            let terms = SearchTermIndex::compile(&self.target_id, &entries);
+            Arc::new(RootSearchView { entries, terms })
+        })
     }
 
     /// Root entries of every entity entry's members, keyed by root ID, each
@@ -888,15 +913,14 @@ impl AiCapabilityIndexSet {
             .collect())
     }
 
-    /// Ranks like [`Self::ranked_matches`], then replaces every matching
-    /// [`AiCapabilityKind::GeneratedEntity`] entry with the root entries it
-    /// groups, so each match is one executable root.
+    /// Ranks every executable root that matches one query, each on its own
+    /// metadata: the roots an entity entry groups are ranked as the
+    /// standalone [`AiCapabilityKind::GeneratedQuery`] entries they are, and
+    /// entity entries themselves are not listed.
     ///
-    /// The roots of one entity follow its rank: roots of the query's
-    /// operation shape first, then in operation-name order. The query's kind
-    /// and entity-or-operation filters apply to the roots. This is the
-    /// per-root ranking that delivery modes installing one exact definition
-    /// per root use.
+    /// A root's rank depends only on the query and that root, never on its
+    /// entity's other roots. This is the per-root ranking that delivery modes
+    /// installing one exact definition per root use.
     ///
     /// # Errors
     ///
@@ -913,6 +937,70 @@ impl AiCapabilityIndexSet {
                 .map(|(index, entry)| AiCapabilityRankedMatch { index, entry })
                 .collect(),
         )
+    }
+
+    /// Ranks matches again after host policy, counting for each entity entry
+    /// only the operations host policy admitted.
+    ///
+    /// [`Self::ranked_matches`] scores an entity entry on its own metadata
+    /// and on every grouped root's operation name and description, so a
+    /// caller can send policy every entity a root might surface. Once policy
+    /// has decided, `admitted` pairs each match the caller keeps with the
+    /// root IDs it admitted. This method scores each entry on its own
+    /// metadata plus the admitted roots only, applies the query's filters
+    /// and shape intent to those roots, and returns the positions in
+    /// `admitted` of the entries that still match, in rank order. A denied
+    /// root's text therefore never decides whether or where its entity
+    /// appears. For an entry that groups no roots the admitted set is
+    /// ignored and the rank is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid query or result ceiling, or for a
+    /// match that does not belong to this set.
+    pub fn rank_admitted(
+        &self,
+        query: &AiCapabilitySearchQuery,
+        admitted: &[(AiCapabilityRankedMatch<'_>, BTreeSet<AiToolId>)],
+    ) -> Result<Vec<usize>, AiError> {
+        query.validate(self.maximum_search_results)?;
+        let terms = SearchTerms::parse(query);
+        let mut ranked = Vec::with_capacity(admitted.len());
+        for (position, (candidate, roots)) in admitted.iter().enumerate() {
+            let owned = self
+                .index(&candidate.index.target_id)
+                .is_some_and(|index| std::ptr::eq(index.as_ref(), candidate.index));
+            if !owned {
+                return Err(input_error("ranked match does not belong to this set"));
+            }
+            let index = candidate.index;
+            let searchable = index.search_terms();
+            let Some(entry_position) = searchable.positions.get(&candidate.entry.id) else {
+                return Err(input_error("ranked match does not belong to this set"));
+            };
+            let admits = |operation: usize| {
+                candidate
+                    .entry
+                    .operations
+                    .get(operation)
+                    .is_some_and(|member| roots.contains(&member.capability_id))
+            };
+            if let Some(rank) =
+                terms.rank(searchable, *entry_position, candidate.entry, query, &admits)
+            {
+                ranked.push((rank, position));
+            }
+        }
+        ranked.sort_by(|left, right| {
+            right.0.cmp(&left.0).then_with(|| {
+                admitted[left.1]
+                    .0
+                    .entry
+                    .id
+                    .cmp(&admitted[right.1].0.entry.id)
+            })
+        });
+        Ok(ranked.into_iter().map(|(_, position)| position).collect())
     }
 }
 
@@ -938,8 +1026,55 @@ impl<'a> AiCapabilityRankedMatch<'a> {
     }
 
     /// Compact model-safe search candidate for the matched entry.
+    ///
+    /// For an entity entry it lists every grouped operation; use
+    /// [`Self::admitted_candidate`] after host policy.
     pub fn candidate(&self) -> AiCapabilitySearchCandidate {
         search_candidate(self.entry)
+    }
+
+    /// Compact search candidate listing only the grouped operations whose
+    /// root ID is in `admitted`. For an entry that groups no roots this is
+    /// [`Self::candidate`].
+    pub fn admitted_candidate(&self, admitted: &BTreeSet<AiToolId>) -> AiCapabilitySearchCandidate {
+        let mut candidate = search_candidate(self.entry);
+        if !self.entry.operations.is_empty() {
+            candidate.operations = self
+                .entry
+                .operations
+                .iter()
+                .filter(|member| admitted.contains(&member.capability_id))
+                .map(|member| AiCapabilityCandidateOperation {
+                    operation_name: member.operation_name.clone(),
+                    operation_shape: member.operation_shape,
+                })
+                .collect();
+        }
+        candidate
+    }
+
+    /// Matches for the root entries an entity entry groups, in operation
+    /// order. Empty for every other entry.
+    pub fn operations(&self) -> Vec<AiCapabilityRankedMatch<'a>> {
+        self.entry
+            .operations
+            .iter()
+            .filter_map(|member| self.index.entry(&member.capability_id))
+            .map(|entry| AiCapabilityRankedMatch {
+                index: self.index,
+                entry,
+            })
+            .collect()
+    }
+
+    /// Match for the entity entry that groups this root, if any.
+    pub fn entity(&self) -> Option<AiCapabilityRankedMatch<'a>> {
+        self.index
+            .entity_entry_of(&self.entry.id)
+            .map(|entry| AiCapabilityRankedMatch {
+                index: self.index,
+                entry,
+            })
     }
 }
 
@@ -1055,22 +1190,59 @@ pub struct AiCapabilityIndexSetSearchResult {
     pub candidates: Vec<AiCapabilitySearchCandidate>,
 }
 
-/// Fixed per-field weights of one search term in one entry: one posting.
+/// One search field of an entry, as a bit in a field mask.
+const FIELD_ID: u16 = 1;
+const FIELD_NAME: u16 = 1 << 1;
+const FIELD_OPERATION: u16 = 1 << 2;
+const FIELD_ENTITY: u16 = 1 << 3;
+const FIELD_TARGET: u16 = 1 << 4;
+const FIELD_NAMESPACE: u16 = 1 << 5;
+const FIELD_DESCRIPTION: u16 = 1 << 6;
+const FIELD_RELATIONSHIPS: u16 = 1 << 7;
+const FIELD_SCALARS: u16 = 1 << 8;
+
+/// Fixed weight of each root field.
+const ROOT_FIELD_WEIGHTS: [(u16, u16); 7] = [
+    (FIELD_ID, 12),
+    (FIELD_NAME, 11),
+    (FIELD_OPERATION, 10),
+    (FIELD_ENTITY, 9),
+    (FIELD_TARGET, 8),
+    (FIELD_NAMESPACE, 8),
+    (FIELD_DESCRIPTION, 7),
+];
+
+/// Fixed weight of each nested field.
+const NESTED_FIELD_WEIGHTS: [(u16, u8); 2] = [(FIELD_RELATIONSHIPS, 3), (FIELD_SCALARS, 2)];
+
+/// The fields of one entry that hold one search term: one posting.
 ///
-/// Scores are per entry and fixed-weight by design. They never depend on how
-/// many other entries hold a term, so the rank of an entry a principal may see
-/// cannot reveal anything about entries it may not. No inverse document
-/// frequency, BM25 or other catalogue-wide statistic is computed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Scores are per entry and fixed-weight by design: a field holding a term
+/// adds its fixed weight once. They never depend on how many other entries
+/// hold a term, so the rank of an entry a principal may see cannot reveal
+/// anything about entries it may not. No inverse document frequency, BM25 or
+/// other catalogue-wide statistic is computed.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Posting {
     /// Position of the entry in the owning index's entry order.
     entry: u32,
-    /// Summed weights of the root fields (ID, name, operation, entity,
-    /// target, namespace, description) that hold the term.
-    root: u16,
-    /// Summed weights of the nested fields (relationships, scalar fields)
-    /// that hold the term.
-    nested: u8,
+    /// Fields of the entry's own metadata that hold the term.
+    own: u16,
+    /// For an entity entry, each grouped operation (by position in
+    /// `operations`) whose operation name or description holds the term,
+    /// with those fields. A grouped operation contributes only when the
+    /// caller admits it.
+    operations: Box<[(u16, u16)]>,
+}
+
+impl Posting {
+    /// Fields that hold the term once only the admitted operations count.
+    fn fields(&self, admits: &dyn Fn(usize) -> bool) -> u16 {
+        self.operations
+            .iter()
+            .filter(|(operation, _)| admits(usize::from(*operation)))
+            .fold(self.own, |fields, (_, operation)| fields | operation)
+    }
 }
 
 /// Filter keys of one entry, computed once when its index is compiled.
@@ -1078,12 +1250,11 @@ struct Posting {
 struct EntrySearchKeys {
     /// Identifier of the entry at this position.
     id: AiToolId,
-    /// Semantic keys of the entry's operation name and, for an entity entry,
-    /// of every operation it groups.
-    operation_keys: BTreeSet<String>,
+    /// Semantic key of the entry's own operation name.
+    operation_key: String,
     entity_key: Option<String>,
-    /// The entry's own shape and, for an entity entry, every grouped shape.
-    shapes: BTreeSet<AiCapabilityOperationShape>,
+    /// Semantic key of each grouped operation's name, in operation order.
+    operation_keys: Vec<String>,
 }
 
 /// Inverted search index of one capability index: term to postings.
@@ -1098,6 +1269,18 @@ struct SearchTermIndex {
     postings: Vec<Vec<Posting>>,
     /// Indexed by entry position.
     entries: Vec<EntrySearchKeys>,
+    /// Entry position by identifier.
+    positions: BTreeMap<AiToolId, u32>,
+}
+
+fn add_terms(fields: &mut BTreeMap<String, u16>, terms: BTreeSet<String>, field: u16) {
+    for term in terms {
+        // A shape word in a query selects a shape and never scores, so it is
+        // not stored.
+        if !search_shape_term(&term) {
+            *fields.entry(term).or_default() |= field;
+        }
+    }
 }
 
 impl SearchTermIndex {
@@ -1109,49 +1292,30 @@ impl SearchTermIndex {
         let mut postings = Vec::<Vec<Posting>>::new();
         let target = search_terms(target_id.as_str());
         let mut keys = Vec::with_capacity(entries.len());
+        let mut positions = BTreeMap::new();
         for (position, entry) in entries.values().enumerate() {
             let position = u32::try_from(position).unwrap_or(u32::MAX);
-            let mut weights = BTreeMap::<u32, (u16, u8)>::new();
-            let mut add = |terms: &BTreeSet<String>, root: u16, nested: u8| {
-                for term in terms {
-                    // A shape word in a query selects a shape and never
-                    // scores, so it is not stored.
-                    if search_shape_term(term) {
-                        continue;
-                    }
-                    let id = match dictionary.get(term) {
-                        Some(id) => *id,
-                        None => {
-                            let id = u32::try_from(dictionary.len()).unwrap_or(u32::MAX);
-                            dictionary.insert(term.clone(), id);
-                            postings.push(Vec::new());
-                            id
-                        }
-                    };
-                    let weight = weights.entry(id).or_default();
-                    weight.0 += root;
-                    weight.1 += nested;
-                }
-            };
-            add(&search_terms(entry.id.as_str()), 12, 0);
-            add(&search_terms(&entry.name), 11, 0);
-            // An entity entry is found by any of its operations' names and
-            // descriptions, each counted once per field like a root's own.
-            let mut operation = search_terms(&entry.operation_name);
-            let mut description = search_terms(&entry.description);
-            for member in &entry.operations {
-                operation.extend(search_terms(&member.operation_name));
-                description.extend(search_terms(&member.description));
-            }
-            add(&operation, 10, 0);
+            let mut own = BTreeMap::<String, u16>::new();
+            add_terms(&mut own, search_terms(entry.id.as_str()), FIELD_ID);
+            add_terms(&mut own, search_terms(&entry.name), FIELD_NAME);
+            add_terms(
+                &mut own,
+                search_terms(&entry.operation_name),
+                FIELD_OPERATION,
+            );
             if let Some(entity) = &entry.entity_name {
-                add(&search_terms(entity), 9, 0);
+                add_terms(&mut own, search_terms(entity), FIELD_ENTITY);
             }
-            add(&target, 8, 0);
-            add(&search_terms(&entry.namespace), 8, 0);
-            add(&description, 7, 0);
-            add(
-                &entry
+            add_terms(&mut own, target.clone(), FIELD_TARGET);
+            add_terms(&mut own, search_terms(&entry.namespace), FIELD_NAMESPACE);
+            add_terms(
+                &mut own,
+                search_terms(&entry.description),
+                FIELD_DESCRIPTION,
+            );
+            add_terms(
+                &mut own,
+                entry
                     .relationships
                     .iter()
                     .flat_map(|relationship| {
@@ -1161,40 +1325,69 @@ impl SearchTermIndex {
                         ))
                     })
                     .collect(),
-                0,
-                3,
+                FIELD_RELATIONSHIPS,
             );
-            add(
-                &entry
+            add_terms(
+                &mut own,
+                entry
                     .scalar_fields
                     .iter()
                     .flat_map(|field| {
                         search_terms(&format!("{} {}", field.name, field.description))
                     })
                     .collect(),
-                0,
-                2,
+                FIELD_SCALARS,
             );
-            for (term, (root, nested)) in weights {
-                postings[term as usize].push(Posting {
+            // Grouped operations are recorded per operation, so ranking can
+            // count only the ones host policy admits.
+            let mut grouped = BTreeMap::<String, Vec<(u16, u16)>>::new();
+            for (operation, member) in entry.operations.iter().enumerate() {
+                let operation = u16::try_from(operation).unwrap_or(u16::MAX);
+                let mut fields = BTreeMap::<String, u16>::new();
+                add_terms(
+                    &mut fields,
+                    search_terms(&member.operation_name),
+                    FIELD_OPERATION,
+                );
+                add_terms(
+                    &mut fields,
+                    search_terms(&member.description),
+                    FIELD_DESCRIPTION,
+                );
+                for (term, fields) in fields {
+                    grouped.entry(term).or_default().push((operation, fields));
+                }
+            }
+            let terms = own
+                .keys()
+                .chain(grouped.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for term in terms {
+                let id = match dictionary.get(&term) {
+                    Some(id) => *id,
+                    None => {
+                        let id = u32::try_from(dictionary.len()).unwrap_or(u32::MAX);
+                        dictionary.insert(term.clone(), id);
+                        postings.push(Vec::new());
+                        id
+                    }
+                };
+                postings[id as usize].push(Posting {
                     entry: position,
-                    root,
-                    nested,
+                    own: own.get(&term).copied().unwrap_or(0),
+                    operations: grouped.remove(&term).unwrap_or_default().into_boxed_slice(),
                 });
             }
+            positions.insert(entry.id.clone(), position);
             keys.push(EntrySearchKeys {
                 id: entry.id.clone(),
-                operation_keys: std::iter::once(semantic_key(&entry.operation_name))
-                    .chain(
-                        entry
-                            .operations
-                            .iter()
-                            .map(|member| semantic_key(&member.operation_name)),
-                    )
-                    .collect(),
+                operation_key: semantic_key(&entry.operation_name),
                 entity_key: entry.entity_name.as_deref().map(semantic_key),
-                shapes: std::iter::once(entry.operation_shape)
-                    .chain(entry.operations.iter().map(|member| member.operation_shape))
+                operation_keys: entry
+                    .operations
+                    .iter()
+                    .map(|member| semantic_key(&member.operation_name))
                     .collect(),
             });
         }
@@ -1202,9 +1395,160 @@ impl SearchTermIndex {
             dictionary,
             postings,
             entries: keys,
+            positions,
         }
     }
 }
+
+/// One query, tokenised once and scored against precomputed postings.
+struct SearchTerms {
+    terms: BTreeSet<String>,
+    shape_intent: Option<AiCapabilityOperationShape>,
+    name_key: Option<String>,
+}
+
+impl SearchTerms {
+    fn parse(query: &AiCapabilitySearchQuery) -> Self {
+        let tokens = search_tokens(&query.text);
+        let shape_intent = search_shape_intent(&tokens);
+        Self {
+            terms: tokens
+                .into_iter()
+                .filter(|term| !search_shape_term(term))
+                .collect(),
+            shape_intent,
+            name_key: query.entity_or_operation.as_deref().map(semantic_key),
+        }
+    }
+
+    /// Scores of every entry of `searchable` with at least one posting for
+    /// the query, counting every grouped operation, keyed by entry position.
+    fn scores(&self, searchable: &SearchTermIndex) -> BTreeMap<u32, (u64, u64)> {
+        let mut scores = BTreeMap::<u32, (u64, u64)>::new();
+        for term in &self.terms {
+            let Some(id) = searchable.dictionary.get(term) else {
+                continue;
+            };
+            for posting in &searchable.postings[*id as usize] {
+                let (root, nested) = field_weights(posting.fields(&|_| true));
+                let score = scores.entry(posting.entry).or_default();
+                score.0 += root;
+                score.1 += nested;
+            }
+        }
+        scores
+    }
+
+    /// Rank of one entry counting only admitted grouped operations, or
+    /// `None` when the entry does not match the query and its filters.
+    fn rank(
+        &self,
+        searchable: &SearchTermIndex,
+        position: u32,
+        entry: &AiCapabilityIndexEntry,
+        query: &AiCapabilitySearchQuery,
+        admits: &dyn Fn(usize) -> bool,
+    ) -> Option<SearchRank> {
+        let mut root_semantics = 0_u64;
+        let mut nested_semantics = 0_u64;
+        for term in &self.terms {
+            let Some(id) = searchable.dictionary.get(term) else {
+                continue;
+            };
+            let postings = &searchable.postings[*id as usize];
+            if let Ok(found) = postings.binary_search_by_key(&position, |posting| posting.entry) {
+                let (root, nested) = field_weights(postings[found].fields(admits));
+                root_semantics += root;
+                nested_semantics += nested;
+            }
+        }
+        self.filtered_rank(
+            &searchable.entries[position as usize],
+            entry,
+            query,
+            (root_semantics, nested_semantics),
+            admits,
+        )
+    }
+
+    fn filtered_rank(
+        &self,
+        keys: &EntrySearchKeys,
+        entry: &AiCapabilityIndexEntry,
+        query: &AiCapabilitySearchQuery,
+        (root_semantics, nested_semantics): (u64, u64),
+        admits: &dyn Fn(usize) -> bool,
+    ) -> Option<SearchRank> {
+        let admitted_operations = || {
+            entry
+                .operations
+                .iter()
+                .enumerate()
+                .filter(|(operation, _)| admits(*operation))
+        };
+        if query
+            .namespace
+            .as_ref()
+            .is_some_and(|namespace| &entry.namespace != namespace)
+            || query.kind.is_some_and(|kind| entry.kind != kind)
+            || self.name_key.as_ref().is_some_and(|name| {
+                &keys.operation_key != name
+                    && keys.entity_key.as_ref() != Some(name)
+                    && !admitted_operations()
+                        .any(|(operation, _)| keys.operation_keys.get(operation) == Some(name))
+            })
+        {
+            return None;
+        }
+        let shape = self.shape_intent.is_some_and(|shape| {
+            entry.operation_shape == shape
+                || admitted_operations().any(|(_, member)| member.operation_shape == shape)
+        });
+        let rank = SearchRank {
+            root_semantics,
+            nested_semantics,
+            shape: u8::from(shape),
+        };
+        rank.has_semantic_match().then_some(rank)
+    }
+}
+
+/// Summed fixed root and nested weights of a field mask.
+fn field_weights(fields: u16) -> (u64, u64) {
+    let root = ROOT_FIELD_WEIGHTS
+        .iter()
+        .filter(|(field, _)| fields & field != 0)
+        .map(|(_, weight)| u64::from(*weight))
+        .sum();
+    let nested = NESTED_FIELD_WEIGHTS
+        .iter()
+        .filter(|(field, _)| fields & field != 0)
+        .map(|(_, weight)| u64::from(*weight))
+        .sum();
+    (root, nested)
+}
+
+/// Executable roots of one index, each a standalone entry: every
+/// non-entity entry, and every root an entity entry groups. Ranked for
+/// per-root delivery, so no root's rank depends on its entity's other roots.
+#[derive(Debug)]
+struct RootSearchView {
+    entries: BTreeMap<AiToolId, AiCapabilityIndexEntry>,
+    terms: SearchTermIndex,
+}
+
+/// Lazily built, never serialized, never compared per-root search view.
+#[derive(Clone, Debug, Default)]
+struct RootSearchCache(OnceLock<Arc<RootSearchView>>);
+
+impl PartialEq for RootSearchCache {
+    fn eq(&self, _: &Self) -> bool {
+        // Derived from the entries, which the owning index already compares.
+        true
+    }
+}
+
+impl Eq for RootSearchCache {}
 
 /// Lazily built, never serialized, never compared cache of the root entries
 /// that entity entries group.
@@ -1247,7 +1591,8 @@ impl SearchRank {
     }
 }
 
-/// Ranks every matching entry of `indexes` against one query.
+/// Ranks every matching entry of `indexes` against one query, counting
+/// every grouped operation of an entity entry.
 ///
 /// Only the query text is tokenised. Each entry is scored from the postings
 /// of the query's terms, precomputed when its index was compiled, with fixed
@@ -1263,111 +1608,84 @@ fn rank_entries<'a>(
         .collect()
 }
 
-fn ranked_entries<'a>(
-    indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
-    query: &AiCapabilitySearchQuery,
-) -> Vec<(
+type RankedEntry<'a> = (
     SearchRank,
     &'a AiCapabilityIndex,
     &'a AiCapabilityIndexEntry,
-)> {
-    let tokens = search_tokens(&query.text);
-    let shape_intent = search_shape_intent(&tokens);
-    let terms = tokens
-        .into_iter()
-        .filter(|term| !search_shape_term(term))
-        .collect::<BTreeSet<_>>();
-    let name_key = query.entity_or_operation.as_deref().map(semantic_key);
+);
+
+fn ranked_entries<'a>(
+    indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
+    query: &AiCapabilitySearchQuery,
+) -> Vec<RankedEntry<'a>> {
+    let terms = SearchTerms::parse(query);
     let mut ranked = Vec::new();
     for index in indexes {
-        let searchable = index.search_terms();
-        let mut scores = BTreeMap::<u32, (u64, u64)>::new();
-        for term in &terms {
-            let Some(id) = searchable.dictionary.get(term) else {
-                continue;
-            };
-            for posting in &searchable.postings[*id as usize] {
-                let score = scores.entry(posting.entry).or_default();
-                score.0 += u64::from(posting.root);
-                score.1 += u64::from(posting.nested);
-            }
-        }
-        if scores.is_empty() {
-            // No entry of this index holds any query term.
+        rank_view(
+            &terms,
+            query,
+            index,
+            &index.entries,
+            index.search_terms(),
+            &mut ranked,
+        );
+    }
+    sort_ranked(&mut ranked);
+    ranked
+}
+
+fn rank_view<'a>(
+    terms: &SearchTerms,
+    query: &AiCapabilitySearchQuery,
+    index: &'a AiCapabilityIndex,
+    entries: &'a BTreeMap<AiToolId, AiCapabilityIndexEntry>,
+    searchable: &SearchTermIndex,
+    ranked: &mut Vec<RankedEntry<'a>>,
+) {
+    for (position, score) in terms.scores(searchable) {
+        let keys = &searchable.entries[position as usize];
+        let Some(entry) = entries.get(&keys.id) else {
             continue;
-        }
-        for (position, (root_semantics, nested_semantics)) in scores {
-            let keys = &searchable.entries[position as usize];
-            let Some(entry) = index.entries.get(&keys.id) else {
-                continue;
-            };
-            if query
-                .namespace
-                .as_ref()
-                .is_some_and(|namespace| &entry.namespace != namespace)
-                || query.kind.is_some_and(|kind| entry.kind != kind)
-                || name_key.as_ref().is_some_and(|name| {
-                    !keys.operation_keys.contains(name) && keys.entity_key.as_ref() != Some(name)
-                })
-            {
-                continue;
-            }
-            let rank = SearchRank {
-                root_semantics,
-                nested_semantics,
-                shape: u8::from(shape_intent.is_some_and(|shape| keys.shapes.contains(&shape))),
-            };
-            if rank.has_semantic_match() {
-                ranked.push((rank, index, entry));
-            }
+        };
+        if let Some(rank) = terms.filtered_rank(keys, entry, query, score, &|_| true) {
+            ranked.push((rank, index, entry));
         }
     }
+}
+
+fn sort_ranked(ranked: &mut [RankedEntry<'_>]) {
     ranked.sort_by(|left, right| {
         right
             .0
             .cmp(&left.0)
             .then_with(|| left.2.id.cmp(&right.2.id))
     });
-    ranked
 }
 
-/// Ranks matching entries, then replaces each entity entry with the root
-/// entries it groups: roots of the query's shape first, then in operation
-/// order. Kind and name filters apply to the roots, not to the entity entry.
+/// Ranks every executable root of `indexes` on its own metadata
+/// ([`AiCapabilityIndexSet::ranked_operation_matches`]).
 fn rank_operation_entries<'a>(
     indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
     query: &AiCapabilitySearchQuery,
 ) -> Vec<(&'a AiCapabilityIndex, &'a AiCapabilityIndexEntry)> {
-    let mut grouped = query.clone();
-    grouped.kind = None;
-    grouped.entity_or_operation = None;
-    let shape_intent = search_shape_intent(&search_tokens(&query.text));
-    let name_key = query.entity_or_operation.as_deref().map(semantic_key);
-    let mut expanded = Vec::new();
-    for (_, index, entry) in ranked_entries(indexes, &grouped) {
-        let roots = if entry.kind == AiCapabilityKind::GeneratedEntity {
-            let mut members = entry.operations.iter().collect::<Vec<_>>();
-            members.sort_by_key(|member| Some(member.operation_shape) != shape_intent);
-            members
-                .into_iter()
-                .filter_map(|member| index.entry(&member.capability_id))
-                .collect::<Vec<_>>()
-        } else {
-            vec![entry]
-        };
-        for root in roots {
-            if query.kind.is_some_and(|kind| root.kind != kind)
-                || name_key.as_ref().is_some_and(|name| {
-                    &semantic_key(&root.operation_name) != name
-                        && root.entity_name.as_deref().map(semantic_key).as_ref() != Some(name)
-                })
-            {
-                continue;
-            }
-            expanded.push((index, root));
-        }
+    let terms = SearchTerms::parse(query);
+    let mut ranked = Vec::new();
+    for index in indexes {
+        let view = index.root_search_view();
+        rank_view(
+            &terms,
+            query,
+            index,
+            &view.entries,
+            &view.terms,
+            &mut ranked,
+        );
     }
-    expanded
+    sort_ranked(&mut ranked);
+    ranked
+        .into_iter()
+        .map(|(_, index, entry)| (index, entry))
+        .collect()
 }
 
 fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandidate {
@@ -1526,30 +1844,8 @@ fn entity_entry(
         ));
     }
     let id = AiToolId::parse(entity_capability_id(&namespace, entity))?;
-    let shapes = members
-        .iter()
-        .map(|member| shape_name(member.operation_shape).to_lowercase())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let result_record_cost = members.iter().fold(
-        AiGraphqlResultRecordCostEstimate {
-            maximum_root_records: 0,
-            maximum_total_records: 0,
-            root_bound_required: false,
-        },
-        |total, member| AiGraphqlResultRecordCostEstimate {
-            maximum_root_records: total
-                .maximum_root_records
-                .max(member.result_record_cost.maximum_root_records),
-            maximum_total_records: total
-                .maximum_total_records
-                .max(member.result_record_cost.maximum_total_records),
-            root_bound_required: total.root_bound_required
-                || member.result_record_cost.root_bound_required,
-        },
-    );
+    let result_description = entity_result_description(entity, &members);
+    let result_record_cost = combined_record_cost(&members);
     let capability_fingerprint = sha256_json(&json!({
         "version": AI_CAPABILITY_ENTITY_VERSION,
         "kind": "generated_entity",
@@ -1581,9 +1877,7 @@ fn entity_entry(
         relationships: first.relationships.clone(),
         aggregate_features: first.aggregate_features.clone(),
         result_classification: first.result_classification,
-        result_description: format!(
-            "Bounded {entity} reads ({shapes}); choose one operation per call."
-        ),
+        result_description,
         result_record_cost,
         risk: members
             .iter()
@@ -1622,6 +1916,80 @@ fn entity_entry(
         }
     }
     Ok(entry)
+}
+
+/// Result description of an entity entry over the given operations.
+fn entity_result_description<'a>(
+    entity: &str,
+    members: impl IntoIterator<Item = &'a AiCapabilityOperationMember>,
+) -> String {
+    let shapes = members
+        .into_iter()
+        .map(|member| shape_name(member.operation_shape).to_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Bounded {entity} reads ({shapes}); choose one operation per call.")
+}
+
+/// Largest result-record bounds over the given operations.
+fn combined_record_cost<'a>(
+    members: impl IntoIterator<Item = &'a AiCapabilityOperationMember>,
+) -> AiGraphqlResultRecordCostEstimate {
+    members.into_iter().fold(
+        AiGraphqlResultRecordCostEstimate {
+            maximum_root_records: 0,
+            maximum_total_records: 0,
+            root_bound_required: false,
+        },
+        |total, member| AiGraphqlResultRecordCostEstimate {
+            maximum_root_records: total
+                .maximum_root_records
+                .max(member.result_record_cost.maximum_root_records),
+            maximum_total_records: total
+                .maximum_total_records
+                .max(member.result_record_cost.maximum_total_records),
+            root_bound_required: total.root_bound_required
+                || member.result_record_cost.root_bound_required,
+        },
+    )
+}
+
+impl AiCapabilityIndexEntry {
+    /// Result description counting only the grouped operations whose root ID
+    /// is in `admitted`. The stored `result_description` of an entity entry
+    /// names every grouped operation's shape; show this one to a principal
+    /// instead. For an entry that groups no roots it is the stored value.
+    pub fn admitted_result_description(&self, admitted: &BTreeSet<AiToolId>) -> String {
+        match &self.entity_name {
+            Some(entity) if !self.operations.is_empty() => entity_result_description(
+                entity,
+                self.operations
+                    .iter()
+                    .filter(|member| admitted.contains(&member.capability_id)),
+            ),
+            _ => self.result_description.clone(),
+        }
+    }
+
+    /// Largest result-record bounds over the grouped operations whose root
+    /// ID is in `admitted`. The stored `result_record_cost` of an entity
+    /// entry covers every grouped operation; show this one to a principal
+    /// instead. For an entry that groups no roots it is the stored value.
+    pub fn admitted_result_record_cost(
+        &self,
+        admitted: &BTreeSet<AiToolId>,
+    ) -> AiGraphqlResultRecordCostEstimate {
+        if self.operations.is_empty() {
+            return self.result_record_cost;
+        }
+        combined_record_cost(
+            self.operations
+                .iter()
+                .filter(|member| admitted.contains(&member.capability_id)),
+        )
+    }
 }
 
 /// Rebuilds the standalone [`AiCapabilityKind::GeneratedQuery`] entry of one
@@ -2287,6 +2655,7 @@ mod tests {
             limits: AiCapabilityIndexLimits::default(),
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
         }
     }
 
@@ -2452,6 +2821,7 @@ mod tests {
             limits: AiCapabilityIndexLimits::default(),
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -2496,6 +2866,7 @@ mod tests {
             limits: AiCapabilityIndexLimits::default(),
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -3146,6 +3517,7 @@ mod tests {
             entries,
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
             ..roots
         }
     }
@@ -3265,5 +3637,207 @@ mod tests {
             .get(&semantic_key("SyntheticEntity004"))
             .expect("entity term");
         assert_eq!(searchable.postings[*term as usize].len(), 1);
+    }
+
+    /// One entity with five roots; only the keyset root's description holds
+    /// the term `zebra`.
+    fn zebra_entity_index() -> AiCapabilityIndex {
+        let roots = synthetic_shape_index(1);
+        let members = roots
+            .entries
+            .values()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                entry.description =
+                    if entry.operation_shape == AiCapabilityOperationShape::KeysetList {
+                        entry.result_record_cost.maximum_total_records = 9_999;
+                        "Page through zebra stripes.".to_owned()
+                    } else {
+                        format!("{} of operator records.", shape_name(entry.operation_shape))
+                    };
+                entry.fingerprint = entry_fingerprint(&entry);
+                entry
+            })
+            .collect::<Vec<_>>();
+        let entity = entity_entry(
+            "SyntheticEntity000",
+            "Operator investigations.",
+            members,
+            &"c".repeat(64),
+        )
+        .expect("entity entry");
+        AiCapabilityIndex {
+            entries: BTreeMap::from([(entity.id.clone(), entity)]),
+            search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
+            ..roots
+        }
+    }
+
+    fn root_id(index: &AiCapabilityIndex, shape: AiCapabilityOperationShape) -> AiToolId {
+        index
+            .entries()
+            .flat_map(|entry| entry.operations.iter())
+            .find(|member| member.operation_shape == shape)
+            .expect("member")
+            .capability_id
+            .clone()
+    }
+
+    #[test]
+    fn rank_admitted_counts_only_the_admitted_operations() {
+        let index = zebra_entity_index();
+        let set = AiCapabilityIndexSet::compile([Arc::new(index.clone())]).expect("set");
+        let keyset = root_id(&index, AiCapabilityOperationShape::KeysetList);
+        let every = index
+            .entries()
+            .flat_map(|entry| {
+                entry
+                    .operations
+                    .iter()
+                    .map(|member| member.capability_id.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let without_keyset = every
+            .iter()
+            .filter(|id| **id != keyset)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        // `zebra` appears only in the keyset root's description: the entity
+        // is a candidate for policy, and survives only if that root is
+        // admitted.
+        let zebra = query("zebra");
+        let ranked = set.ranked_matches(&zebra).expect("ranked");
+        assert_eq!(ranked.len(), 1);
+        let with = |admitted: &BTreeSet<AiToolId>| {
+            set.rank_admitted(&zebra, &[(ranked[0], admitted.clone())])
+                .expect("rank admitted")
+        };
+        assert_eq!(with(&every), vec![0]);
+        assert!(with(&without_keyset).is_empty());
+        assert!(with(&BTreeSet::new()).is_empty());
+        // Scores and shape intent equal the reference computed over the
+        // entity with only its admitted operations.
+        for text in [
+            "keyset SyntheticEntity000",
+            "count operator records",
+            "operator investigation",
+        ] {
+            let query = query(text);
+            let ranked = set.ranked_matches(&query).expect("ranked");
+            let Some(candidate) = ranked.first() else {
+                continue;
+            };
+            let terms = SearchTerms::parse(&query);
+            for admitted in [&every, &without_keyset] {
+                let mut narrowed = candidate.entry().clone();
+                narrowed
+                    .operations
+                    .retain(|member| admitted.contains(&member.capability_id));
+                let expected = reference_search_rank(
+                    &index.target_id,
+                    &narrowed,
+                    &search_tokens(&query.text).into_iter().collect(),
+                    search_shape_intent(&search_tokens(&query.text)),
+                );
+                let searchable = index.search_terms();
+                let actual = terms.rank(
+                    searchable,
+                    searchable.positions[&candidate.entry().id],
+                    candidate.entry(),
+                    &query,
+                    &|operation| {
+                        admitted.contains(&candidate.entry().operations[operation].capability_id)
+                    },
+                );
+                assert_eq!(
+                    actual,
+                    expected.has_semantic_match().then_some(expected),
+                    "{text:?}"
+                );
+            }
+        }
+        // Entity-level shapes and bounds count only admitted operations.
+        let entity = ranked[0].entry();
+        assert!(entity.admitted_result_description(&every).contains("page"));
+        assert!(
+            !entity
+                .admitted_result_description(&without_keyset)
+                .contains("page")
+        );
+        assert_eq!(
+            entity
+                .admitted_result_record_cost(&every)
+                .maximum_total_records,
+            9_999
+        );
+        assert!(
+            entity
+                .admitted_result_record_cost(&without_keyset)
+                .maximum_total_records
+                < 9_999
+        );
+        // The admitted candidate lists only admitted operations.
+        let candidate = ranked[0].admitted_candidate(&without_keyset);
+        assert_eq!(candidate.operations.len(), 4);
+        assert!(
+            candidate.operations.iter().all(
+                |operation| operation.operation_shape != AiCapabilityOperationShape::KeysetList
+            )
+        );
+    }
+
+    #[test]
+    fn per_root_ranking_scores_each_root_on_its_own_metadata() {
+        let index = zebra_entity_index();
+        let set = AiCapabilityIndexSet::compile([Arc::new(index.clone())]).expect("set");
+        let keyset = root_id(&index, AiCapabilityOperationShape::KeysetList);
+        // Only the root whose own description holds the term matches; its
+        // siblings do not inherit it.
+        let zebra = set
+            .ranked_operation_matches(&AiCapabilitySearchQuery {
+                kind: Some(AiCapabilityKind::GeneratedQuery),
+                ..query("zebra")
+            })
+            .expect("roots");
+        assert_eq!(
+            zebra
+                .iter()
+                .map(|candidate| candidate.entry().id.clone())
+                .collect::<Vec<_>>(),
+            [keyset]
+        );
+        // Every root ranks exactly as a standalone entry would.
+        let standalone = index
+            .entries()
+            .flat_map(|entry| entry.operations.iter())
+            .map(|member| index.entry(&member.capability_id).expect("root").clone())
+            .collect::<Vec<_>>();
+        let roots = AiCapabilityIndex {
+            entries: standalone
+                .into_iter()
+                .map(|entry| (entry.id.clone(), entry))
+                .collect(),
+            search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
+            root_search: RootSearchCache::default(),
+            ..index.clone()
+        };
+        for text in [
+            "list SyntheticEntity000",
+            "operator records",
+            "count",
+            "zebra stripes",
+        ] {
+            let query = query(text);
+            let actual = set
+                .ranked_operation_matches(&query)
+                .expect("roots")
+                .into_iter()
+                .map(|candidate| candidate.entry().id.as_str().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference_ranking(&[&roots], &query), "{text:?}");
+        }
     }
 }

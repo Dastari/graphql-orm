@@ -146,10 +146,11 @@ catalogue-wide statistic is computed, so an entry's score never depends on
 how many other entries hold a term, and the rank of an entry a principal may
 see carries no information about entries it may not. An entity entry is also
 found by its roots' operation names and descriptions, and matches a shape
-intent when any of its roots has that shape.
-`AiCapabilityIndexSet::ranked_operation_matches` ranks the same way and then
-replaces each entity entry with its roots, for delivery that installs one
-definition per root. A host may later
+intent when any of its roots has that shape. Each root's contribution is
+recorded separately, so after host policy the broker scores an entity on its
+own metadata and its admitted roots only (`rank_admitted`).
+`AiCapabilityIndexSet::ranked_operation_matches` ranks each executable root
+on its own metadata, for delivery that installs one definition per root. A host may later
 implement the closed current-index-set and authority traits with a reviewed
 search service, but returned IDs and fingerprints must still bind to the
 canonical set and the candidate's exact owning index.
@@ -355,11 +356,21 @@ describe, `graphql.capabilities.describe_type` and execute.
   selection paths as before. `operation` may be omitted when the description
   admitted exactly one operation.
 
-Host policy decides the entity and each root. Discover asks about the entity
-entry; describe asks about the entity and then each root entry, and lists only
-the roots admitted (none admitted refuses the load). `describe_type` and
-execute re-check the entity and the chosen root, including their fingerprints
-and the policy fingerprints recorded at describe, before anything runs. The
+Host policy decides the entity and each root. Discover sends each matching
+entity entry followed by its grouped roots in one `authorize_discovery`
+batch. An entity is returned only with the roots admitted, its `operations`
+list only those, and it is ranked again on its own metadata and the admitted
+roots alone (`AiCapabilityIndexSet::rank_admitted`), so a denied root's name,
+description or shape decides neither whether nor where the entity appears.
+An entity with no admitted root is not listed. Describe asks about the entity
+and then each root entry, and lists only the roots admitted (none admitted
+refuses the load); its entity-level `resultDescription` and
+`resultRecordCost` count only those roots. `describe_type` and execute
+re-check the entity and the chosen root, including their fingerprints and the
+policy fingerprints recorded at describe, before anything runs.
+Client-deferred discovery ranks each root on its own metadata
+(`ranked_operation_matches`) and sends a grouped root's entity before the
+root; a root is returned, loaded and executed only while both are admitted. The
 chosen root's own capability, fingerprint and plan compiler execute the plan,
 then the ordinary resolver path and disclosure schema apply. An `operation`
 the description did not return is `invalid_arguments` with a fixed

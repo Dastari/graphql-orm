@@ -38,13 +38,26 @@ Steps:
    version 2 binding, so the provider-session fence refuses to resume it; the
    Grok registration check also refuses a tool set that carries the three
    version 1 definitions.
-2. **Host policy.** `AiCapabilityAuthorityPolicy` now sees
-   `AiCapabilityKind::GeneratedEntity` entries at discover and describe, and
-   each root's `GeneratedQuery` entry at describe, describe-type and execute.
-   A policy that allows only listed root IDs must also decide the entity
-   entry (for example from `entry.operations`), or the entity is never
-   discovered. A root the policy denies is left out of the description and
-   cannot be executed.
+2. **Host policy.** `AiCapabilityAuthorityPolicy` now decides
+   `AiCapabilityKind::GeneratedEntity` entries as well as each root's
+   `GeneratedQuery` entry, in every mode:
+   - fixed-broker discover sends each matching entity followed by its grouped
+     roots in one `authorize_discovery` batch. The entity is returned only
+     with the roots admitted, lists only those, and is ranked on its own
+     metadata and those roots alone; with none admitted it is not listed;
+   - describe asks about the entity and each root, and lists only admitted
+     roots; `describe_type` and execute ask about the entity and the chosen
+     root again;
+   - client-deferred discovery ranks roots one by one and sends each root's
+     entity before its first root; a root is returned, loaded and executed
+     only while both are admitted.
+
+   A policy that allows only listed root IDs therefore refuses everything
+   until it also decides the entity entry (for example from
+   `entry.operations`). A host `authorize_discovery` override must answer
+   for the mixed batch, one decision per entry in order. A root the policy
+   denies is never listed, never affects ranking, and cannot be described or
+   executed.
 3. **Delivery default.** Above the eager limits, a provider that supports
    both `ProviderDeferred` and `FixedBroker` now gets `FixedBroker`. To keep
    native deferred loading, set

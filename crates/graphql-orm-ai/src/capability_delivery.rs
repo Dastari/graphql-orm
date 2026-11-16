@@ -915,13 +915,20 @@ pub trait AiCapabilityAuthorityPolicy: Send + Sync {
     ///
     /// The broker passes every entry that matches the query, in rank order and
     /// before the query's result ceiling, and truncates only after this
-    /// returns. A restricted principal therefore receives its permitted
+    /// returns. Each [`AiCapabilityKind::GeneratedEntity`] match is followed
+    /// by the [`AiCapabilityKind::GeneratedQuery`] entries of the roots it
+    /// groups; the broker returns the entity only with the roots this batch
+    /// admits, lists only those roots, and ranks it on its own metadata and
+    /// those roots alone. In per-root (client-deferred) discovery, the entity
+    /// entry of a grouped root precedes that root's first match, and the root
+    /// is returned only when both are admitted. A restricted principal therefore receives its permitted
     /// candidates even when unpermitted entries rank above them. When every
     /// policy call succeeds, the amount of policy work depends on the query
     /// and catalogue, never on which candidates the principal may use.
     ///
     /// One search can therefore evaluate up to the index set's
-    /// `maximum_entries` matches (16,384 by default). Bound it with
+    /// `maximum_entries` matches (16,384 by default), plus the grouped roots
+    /// of each matching entity. Bound it with
     /// [`AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations`].
     ///
     /// The result must hold exactly one decision per match, in the same order,
@@ -1041,6 +1048,9 @@ pub struct AiLoadedCapabilityBinding {
     /// Operations of an entity capability current host policy admitted at
     /// load, in operation-name order. Empty for every other kind.
     operations: Vec<AiLoadedCapabilityOperation>,
+    /// For a root an entity capability groups, the host-policy fingerprint
+    /// of the entity entry, which is decided at load and again at execute.
+    entity_policy_fingerprint: Option<String>,
 }
 
 /// One operation of a loaded entity capability, as admitted at load.
@@ -1187,8 +1197,10 @@ impl AiCapabilityDiscoveryBroker {
         Ok(self)
     }
 
-    /// Caps how many ranked matches one discovery query may send to host
-    /// policy. Unset by default, so every match is evaluated.
+    /// Caps how many entries one discovery query may send to host policy:
+    /// the ranked matches plus each matching entity's grouped roots (or each
+    /// matching root's entity, in per-root discovery). Unset by default, so
+    /// every match is evaluated.
     ///
     /// A query that matches more entries than `maximum` is refused before any
     /// policy call with [`AiError::InvalidInput`] carrying
@@ -1309,9 +1321,39 @@ impl AiCapabilityDiscoveryBroker {
             indexes.ranked_matches(query)?
         };
         ranked.retain(|candidate| admit(candidate.entry()));
+        // One policy batch decides every match together with the entries it
+        // depends on: an entity entry's grouped roots follow it, and in
+        // per-root ranking a root's entity entry precedes its first root.
+        let mut batch = Vec::new();
+        let mut slots = Vec::with_capacity(ranked.len());
+        let mut entity_slots = BTreeMap::<AiToolId, usize>::new();
+        for candidate in &ranked {
+            let entity_at = if per_root {
+                candidate.entity().map(|entity| {
+                    *entity_slots
+                        .entry(entity.entry().id.clone())
+                        .or_insert_with(|| {
+                            batch.push(entity);
+                            batch.len() - 1
+                        })
+                })
+            } else {
+                None
+            };
+            batch.push(*candidate);
+            let at = batch.len() - 1;
+            let mut roots = Vec::new();
+            if !per_root {
+                for root in candidate.operations() {
+                    batch.push(root);
+                    roots.push(batch.len() - 1);
+                }
+            }
+            slots.push((at, roots, entity_at));
+        }
         if self
             .maximum_discovery_authorizations
-            .is_some_and(|maximum| ranked.len() > maximum)
+            .is_some_and(|maximum| batch.len() > maximum)
         {
             return Err(AiError::InvalidInput(
                 AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
@@ -1319,22 +1361,49 @@ impl AiCapabilityDiscoveryBroker {
         }
         let decisions = self
             .authority
-            .authorize_discovery(&principal, &ranked, run)
+            .authorize_discovery(&principal, &batch, run)
             .await?;
-        if decisions.len() != ranked.len()
-            || ranked
+        if decisions.len() != batch.len()
+            || batch
                 .iter()
                 .zip(&decisions)
                 .any(|(candidate, decision)| decision.capability_id != candidate.entry().id)
         {
             return Err(AiError::Forbidden);
         }
-        let candidates = ranked
-            .iter()
-            .zip(decisions)
-            .filter(|(_, decision)| decision.allowed)
+        // An entity is kept only with its admitted roots, and a root only
+        // with its admitted entity. Nothing of a denied root is returned.
+        let mut kept = Vec::with_capacity(slots.len());
+        for (at, roots, entity_at) in slots {
+            if !decisions[at].allowed || entity_at.is_some_and(|entity| !decisions[entity].allowed)
+            {
+                continue;
+            }
+            let admitted = roots
+                .iter()
+                .filter(|root| decisions[**root].allowed)
+                .map(|root| batch[*root].entry().id.clone())
+                .collect::<BTreeSet<_>>();
+            if batch[at].entry().kind == AiCapabilityKind::GeneratedEntity && admitted.is_empty() {
+                continue;
+            }
+            kept.push((batch[at], admitted));
+        }
+        // Rank again on each entity's own metadata and its admitted roots,
+        // so a denied root's text decides neither whether nor where its
+        // entity appears. Per-root ranks depend on the root alone already.
+        let order = if per_root {
+            (0..kept.len()).collect::<Vec<_>>()
+        } else {
+            indexes.rank_admitted(query, &kept)?
+        };
+        let candidates = order
+            .into_iter()
             .take(usize::from(query.maximum_results))
-            .map(|(candidate, _)| candidate.candidate())
+            .map(|position| {
+                let (candidate, admitted) = &kept[position];
+                candidate.admitted_candidate(admitted)
+            })
             .collect();
         Ok(AiCapabilityIndexSetSearchResult {
             index_set_fingerprint: indexes.fingerprint().to_owned(),
@@ -1378,6 +1447,23 @@ impl AiCapabilityDiscoveryBroker {
         if !decision.allowed || !valid_binding_value(&decision.policy_fingerprint) {
             return Err(AiError::Forbidden);
         }
+        // A root an entity groups is loadable only while host policy also
+        // admits its entity, as at discovery.
+        let entity_policy_fingerprint = match index.entity_entry_of(&entry.id) {
+            Some(entity) => {
+                let entity_decision = self
+                    .authority
+                    .authorize(&principal, index, entity, run)
+                    .await?;
+                if !entity_decision.allowed
+                    || !valid_binding_value(&entity_decision.policy_fingerprint)
+                {
+                    return Err(AiError::Forbidden);
+                }
+                Some(entity_decision.policy_fingerprint)
+            }
+            None => None,
+        };
         // Each operation of an entity capability is its own root entry, and
         // host policy decides each one. Only admitted operations are loaded.
         let mut operations = Vec::new();
@@ -1408,6 +1494,7 @@ impl AiCapabilityDiscoveryBroker {
         }
         Ok(AiLoadedCapabilityBinding {
             operations,
+            entity_policy_fingerprint,
             nonce: Uuid::new_v4(),
             principal_reference_fingerprint: principal_reference_fingerprint(principal.reference()),
             capability_id: entry.id.clone(),
@@ -1501,6 +1588,27 @@ impl AiCapabilityDiscoveryBroker {
             }
             if decision.policy_fingerprint != loaded.policy_fingerprint {
                 return Err(stale_capability());
+            }
+            // A grouped root also needs its entity admitted, with the policy
+            // fingerprint recorded at load.
+            match (
+                index.entity_entry_of(&entry.id),
+                &loaded.entity_policy_fingerprint,
+            ) {
+                (None, None) => {}
+                (Some(entity), Some(recorded)) => {
+                    let entity_decision = self
+                        .authority
+                        .authorize(&principal, index, entity, run)
+                        .await?;
+                    if !entity_decision.allowed {
+                        return Err(AiError::Forbidden);
+                    }
+                    if &entity_decision.policy_fingerprint != recorded {
+                        return Err(stale_capability());
+                    }
+                }
+                _ => return Err(stale_capability()),
             }
         }
         Ok((principal, indexes))
@@ -2584,6 +2692,13 @@ fn planning_contract(
     loaded_reference: &str,
     expires_in_seconds: i64,
 ) -> serde_json::Value {
+    // Entity-level shapes and bounds count only the roots this principal
+    // may use, never a denied one.
+    let admitted = loaded
+        .operations
+        .iter()
+        .map(|operation| operation.capability_id.clone())
+        .collect::<BTreeSet<_>>();
     let operations = if entry.kind == AiCapabilityKind::GeneratedEntity {
         loaded
             .operations
@@ -2620,8 +2735,8 @@ fn planning_contract(
         "namespace": entry.namespace,
         "entity": entry.entity_name,
         "resultClassification": entry.result_classification,
-        "resultDescription": entry.result_description,
-        "resultRecordCost": entry.result_record_cost,
+        "resultDescription": entry.admitted_result_description(&admitted),
+        "resultRecordCost": entry.admitted_result_record_cost(&admitted),
         "risk": entry.risk,
         "approval": entry.approval,
         "aggregates": entry.aggregate_features,
@@ -3849,7 +3964,7 @@ mod tests {
             GraphqlSemanticOperationDescriptor::custom(
                 GraphqlOperationKind::Query,
                 "RecordBySubject",
-                "Read one reviewed application record by its subject.",
+                "Read one reviewed application record by its subject heading.",
                 vec![GraphqlSemanticArgumentDescriptor {
                     graphql_name: "subject".to_owned(),
                     description: "Reviewed record subject.".to_owned(),
@@ -6800,14 +6915,31 @@ mod tests {
                 .await,
             Err(AiError::Forbidden)
         ));
-        // With every root denied the entity cannot be loaded at all.
+        // With every root denied the entity is neither discovered nor, from a
+        // candidate the run already holds, loadable.
+        let held = fixture.discover().await["candidates"][0].clone();
         fixture
             .authority
             .denied
             .write()
             .expect("policy")
             .insert(fixture.root_id("RecordBySubject").as_str().to_owned());
-        assert!(matches!(fixture.describe().await, Err(AiError::Forbidden)));
+        assert_eq!(fixture.discover().await["candidates"], json!([]));
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &fixture.session,
+                    &json!({
+                        "capabilityId": held["capabilityId"],
+                        "candidateFingerprint": held["candidateFingerprint"],
+                    }),
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
     }
 
     #[tokio::test]
@@ -7059,6 +7191,182 @@ mod tests {
                 .with_operation_signatures(Vec::new(), 1_024)
                 .is_err(),
             "one summary per operation"
+        );
+    }
+
+    impl EntityBrokerFixture {
+        fn deny(&self, operation: &str) {
+            let id = self.root_id(operation);
+            self.authority
+                .denied
+                .write()
+                .expect("policy")
+                .insert(id.as_str().to_owned());
+        }
+
+        fn entity_id(&self) -> AiToolId {
+            self.index
+                .0
+                .read()
+                .expect("index")
+                .entries()
+                .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+                .expect("entity entry")
+                .id
+                .clone()
+        }
+
+        async fn discover_text(&self, text: &str) -> serde_json::Value {
+            self.broker
+                .dispatch_discover(
+                    &self.principal,
+                    &self.run,
+                    &self.session,
+                    &json!({"text": text, "maximumResults": 4}),
+                )
+                .await
+                .expect("discovery")
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_lists_and_ranks_only_admitted_roots() {
+        let fixture = EntityBrokerFixture::new();
+        // `heading` appears only in RecordBySubject's description.
+        let found = fixture.discover_text("subject heading").await;
+        assert_eq!(found["candidates"].as_array().map(Vec::len), Some(1));
+        let only_heading = fixture.discover_text("heading").await;
+        assert_eq!(only_heading["candidates"].as_array().map(Vec::len), Some(1));
+
+        fixture.deny("RecordBySubject");
+        // The denied root is not listed.
+        let discovered = fixture.discover_text("reviewed application record").await;
+        assert_eq!(
+            discovered["candidates"][0]["operations"],
+            json!([{"operation": "GeneratedRecord", "shape": "custom"}]),
+            "{discovered}"
+        );
+        // A term only the denied root's description holds no longer surfaces
+        // the entity.
+        let hidden = fixture.discover_text("heading").await;
+        assert_eq!(hidden["candidates"], json!([]), "{hidden}");
+        // Nor does the denied root's operation name.
+        let by_name = fixture
+            .broker
+            .dispatch_discover(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({"text": "record", "entityOrClass": "RecordBySubject", "maximumResults": 4}),
+            )
+            .await
+            .expect("discovery");
+        assert_eq!(by_name["candidates"], json!([]), "{by_name}");
+
+        // An entity whose roots are all denied is not listed at all.
+        fixture.deny("GeneratedRecord");
+        let none = fixture.discover_text("reviewed application record").await;
+        assert_eq!(none["candidates"], json!([]), "{none}");
+
+        // An entity the policy denies hides its admitted roots too.
+        fixture.authority.denied.write().expect("policy").clear();
+        let entity = fixture.entity_id();
+        fixture
+            .authority
+            .denied
+            .write()
+            .expect("policy")
+            .insert(entity.as_str().to_owned());
+        let denied_entity = fixture.discover_text("reviewed application record").await;
+        assert_eq!(denied_entity["candidates"], json!([]), "{denied_entity}");
+    }
+
+    #[tokio::test]
+    async fn describe_shapes_and_cost_count_only_admitted_roots() {
+        let fixture = EntityBrokerFixture::new();
+        fixture.deny("RecordBySubject");
+        let described = fixture.describe().await.expect("describe");
+        let index = fixture.index.0.read().expect("index").clone();
+        let entity = index
+            .entries()
+            .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+            .expect("entity")
+            .clone();
+        let admitted = BTreeSet::from([fixture.root_id("GeneratedRecord")]);
+        let contract = described.contract();
+        assert_eq!(
+            contract["resultDescription"],
+            entity.admitted_result_description(&admitted)
+        );
+        assert_eq!(
+            contract["resultRecordCost"],
+            json!(entity.admitted_result_record_cost(&admitted))
+        );
+        assert_eq!(contract["operations"].as_array().map(Vec::len), Some(1));
+        assert!(!contract.to_string().contains("RecordBySubject"));
+        assert!(!contract.to_string().contains("heading"));
+    }
+
+    #[tokio::test]
+    async fn client_deferred_roots_need_their_entity_admitted() {
+        let fixture = EntityBrokerFixture::new();
+        let session =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let discover = |session: AiCapabilityBrokerSession| {
+            let fixture = &fixture;
+            async move {
+                fixture
+                    .broker
+                    .dispatch_client_deferred_discover(
+                        &fixture.principal,
+                        &fixture.run,
+                        &session,
+                        &json!({"text": "reviewed application record", "maximumResults": 4}),
+                    )
+                    .await
+                    .map(|value| (value, session))
+            }
+        };
+        let (allowed, session) = discover(session).await.expect("discover");
+        let roots = allowed["candidates"].as_array().expect("roots");
+        assert_eq!(roots.len(), 2, "{allowed}");
+        assert!(roots.iter().all(|root| root["kind"] == "generated_query"));
+        let loaded = session.loaded_bindings();
+        assert_eq!(loaded.len(), 2);
+
+        // Denying the entity hides its roots from per-root discovery and
+        // refuses execution of a root already loaded.
+        let entity = fixture.entity_id();
+        fixture
+            .authority
+            .denied
+            .write()
+            .expect("policy")
+            .insert(entity.as_str().to_owned());
+        for binding in &loaded {
+            assert!(matches!(
+                fixture
+                    .broker
+                    .authorize_execution(&fixture.principal, &fixture.run, binding)
+                    .await,
+                Err(AiError::Forbidden)
+            ));
+        }
+        let fresh =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let (hidden, _) = discover(fresh).await.expect("discover");
+        assert_eq!(hidden["candidates"], json!([]), "{hidden}");
+
+        // A denied root is not discovered; its sibling still is.
+        fixture.authority.denied.write().expect("policy").clear();
+        fixture.deny("RecordBySubject");
+        let fresh =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let (narrowed, _) = discover(fresh).await.expect("discover");
+        assert_eq!(narrowed["candidates"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            narrowed["candidates"][0]["capabilityId"],
+            fixture.root_id("GeneratedRecord").as_str()
         );
     }
 }
