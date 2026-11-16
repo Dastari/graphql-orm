@@ -42,6 +42,10 @@ Follow a focused task rather than reading reference material end-to-end.
 
 ## Reference
 
+Upgrading across several releases? The [cumulative upgrade guide](reference/upgrade-guide.md)
+lists every workspace release, newest first, with each change marked
+**Action needed** or **No action**.
+
 Start with the [`graphql-orm` reference](reference/graphql-orm/README.md) for
 core runtime mechanics and configuration. Use the [macro and attribute
 reference](reference/graphql-orm/macros-and-attributes.md) for the accepted
