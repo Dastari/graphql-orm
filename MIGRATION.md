@@ -17,20 +17,29 @@ operation catalogues and fingerprints are unchanged.
 
 - **Input-object values on generated `schema_builder` schemas. No action.**
   A request that sends a scalar, list or enum where an input object is
-  expected (as a literal, a variable or a variable default, at any depth), or
-  a variable whose declared type does not fit the position it is used in, is
+  expected (as a literal, a variable or a variable default, at any depth) is
   now refused as a whole before any resolver runs, with message and
   `extensions.code` `invalid_graphql_input`. It used to fail while that field
   resolved, with an uncoded async-graphql coercion message, after earlier
-  fields had run. async-graphql 7.2.1 never applies the rule that a
-  variable's declared type must fit its position, so a wrongly typed variable
-  was not caught by validation in either `ValidationMode`. Requests whose
-  values are valid behave as before. A request whose variable stood at a
-  position the GraphQL rule does not allow but whose value happened to coerce
-  (for example a nullable variable without a default at a required argument,
-  or a list of nullable items where the items must be non-null) is now refused
-  too; declare the variable with the position's type. A variable that is not a
-  list still stands where a list is expected when the item type admits it.
+  fields had run. The check covers field arguments; directive arguments
+  (`@include`, `@skip` and custom directives) are left to async-graphql.
+  Spec-valid requests behave as before.
+- **Client documents with a variable at a position the GraphQL rule does not
+  allow. Action needed** only for clients that send such documents.
+  async-graphql 7.2.1 never applies the rule "All Variable Usages Are
+  Allowed" (its validator does not pass argument values on to it, in either
+  `ValidationMode`), so such a request used to run whenever its value happened
+  to coerce. Generated static schemas and runtime GraphQL schemas, whose
+  guard uses the same checker, now refuse it before any resolver runs.
+  Examples: a variable of another type, a nullable variable without a default
+  at a required argument, a list of nullable items where the items must be
+  non-null, and a nullable variable, or one that is `null` or omitted, as the
+  member of a oneof input object. To spot affected documents, look for
+  responses with `extensions.code` `invalid_graphql_input` and no data where
+  the same document used to run; declare each variable with the type of the
+  position it is used in. A variable that is not a list may still stand where
+  a list is expected when the list's item type admits it, since execution
+  coerces its value to a one-element list.
 - **Schemas built by hand from generated roots. Action needed.** Such a
   schema does not get this check: generated roots do not install it
   themselves. Add

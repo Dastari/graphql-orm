@@ -118,9 +118,7 @@ fn value_valid(
         return false;
     };
     *budget = remaining;
-    if let Value::Binary(bytes) = value
-        && let Some(name) = bytes.strip_prefix(VARIABLE_PLACEHOLDER)
-    {
+    if let Some(name) = placeholder_name(value) {
         return variable_use_valid(check, ty, location_default, name);
     }
     let registry = check.registry;
@@ -157,7 +155,7 @@ fn value_valid(
                     let Value::Object(values) = value else {
                         return false;
                     };
-                    if *oneof && (values.len() != 1 || values.values().any(|v| v == &Value::Null)) {
+                    if *oneof && !oneof_member_valid(check, values.values()) {
                         return false;
                     }
                     values
@@ -185,6 +183,39 @@ fn value_valid(
     }
 }
 
+/// The variable name a placeholder stands for.
+fn placeholder_name(value: &Value) -> Option<&[u8]> {
+    match value {
+        Value::Binary(bytes) => bytes.strip_prefix(VARIABLE_PLACEHOLDER),
+        _ => None,
+    }
+}
+
+/// The selected operation's definition of the variable `name`.
+fn variable<'a>(check: &Check<'a>, name: &[u8]) -> Option<&'a VariableUse> {
+    std::str::from_utf8(name)
+        .ok()
+        .and_then(|name| check.variables?.get(name))
+}
+
+/// The GraphQL rule for a oneof input object literal: exactly one field, its
+/// value not `null`, and a variable standing for it declared non-null and
+/// resolving to a value. A nullable variable may otherwise stand at the
+/// member's nullable field type and resolve to `null`, or be omitted.
+fn oneof_member_valid<'v>(check: &Check<'_>, mut members: impl Iterator<Item = &'v Value>) -> bool {
+    let (Some(member), None) = (members.next(), members.next()) else {
+        return false;
+    };
+    if member == &Value::Null {
+        return false;
+    }
+    placeholder_name(member).is_none_or(|name| {
+        variable(check, name).is_some_and(|variable| {
+            MetaTypeName::create(&variable.declared).is_non_null() && variable.non_null
+        })
+    })
+}
+
 /// Whether a reference to the variable `name` may stand at a position of type
 /// `ty`: the GraphQL rule "All Variable Usages Are Allowed", then the resolved
 /// value's nullability.
@@ -192,10 +223,7 @@ fn value_valid(
 /// async-graphql 7.2.1 declares that rule but never applies it: its validator
 /// does not pass input values on to the rule, in either validation mode.
 fn variable_use_valid(check: &Check<'_>, ty: &str, location_default: bool, name: &[u8]) -> bool {
-    let Some(variable) = std::str::from_utf8(name)
-        .ok()
-        .and_then(|name| check.variables?.get(name))
-    else {
+    let Some(variable) = variable(check, name) else {
         return false;
     };
     let position = MetaTypeName::create(ty);
@@ -480,7 +508,9 @@ fn document_nodes(document: &ExecutableDocument) -> usize {
 /// The check also refuses a variable whose declared type does not fit the
 /// position it is used in (the GraphQL rule "All Variable Usages Are
 /// Allowed"), which async-graphql 7.2.1 does not apply in either validation
-/// mode.
+/// mode, and a nullable, `null` or omitted variable standing for the member of
+/// a oneof input object. Field arguments are checked; directive arguments are
+/// left to async-graphql.
 ///
 /// Generated `schema_builder` helpers install this automatically. A schema
 /// built by hand from generated roots does not get the check unless it

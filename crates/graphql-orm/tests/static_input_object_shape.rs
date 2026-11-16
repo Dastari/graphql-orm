@@ -576,3 +576,102 @@ async fn a_large_pre_parsed_document_is_not_refused() {
     let response = schema.execute(request).await;
     assert_refused(&response, "pre-parsed document");
 }
+
+/// A hand-built schema with a oneof input, for the oneof variable rule.
+mod oneof {
+    use graphql_orm::async_graphql::{self, EmptySubscription, Object, OneofObject, Schema};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(OneofObject)]
+    pub enum Choice {
+        A(i32),
+        B(String),
+    }
+
+    pub struct Query;
+    #[Object]
+    impl Query {
+        async fn ok(&self) -> bool {
+            true
+        }
+    }
+
+    pub struct Mutation(pub Arc<AtomicUsize>);
+    #[Object]
+    impl Mutation {
+        async fn bump(&self) -> usize {
+            self.0.fetch_add(1, Ordering::SeqCst) + 1
+        }
+        async fn take(&self, arg: Choice) -> bool {
+            matches!(arg, Choice::A(_) | Choice::B(_))
+        }
+    }
+
+    pub fn schema(
+        mode: async_graphql::ValidationMode,
+    ) -> (Schema<Query, Mutation, EmptySubscription>, Arc<AtomicUsize>) {
+        let bumps = Arc::new(AtomicUsize::new(0));
+        let schema = Schema::build(Query, Mutation(bumps.clone()), EmptySubscription)
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+            .validation_mode(mode)
+            .finish();
+        (schema, bumps)
+    }
+}
+
+/// A variable standing for a oneof member must be declared non-null and
+/// resolve to a value: a nullable one may otherwise be null or omitted, which
+/// the oneof rule forbids.
+#[tokio::test]
+async fn a_nullable_or_null_variable_in_a_oneof_field_is_refused_in_every_mode() {
+    const NULLABLE: &str = "mutation($v: Int) { first: bump second: take(arg: {a: $v}) }";
+    const REQUIRED: &str = "mutation($v: Int!) { first: bump second: take(arg: {a: $v}) }";
+    for mode in [
+        async_graphql::ValidationMode::Fast,
+        async_graphql::ValidationMode::Strict,
+    ] {
+        for (query, variables) in [
+            (NULLABLE, serde_json::json!({ "v": null })),
+            (NULLABLE, serde_json::json!({})),
+            (NULLABLE, serde_json::json!({ "v": 5 })),
+            (REQUIRED, serde_json::json!({})),
+        ] {
+            let (schema, bumps) = oneof::schema(mode);
+            let response = schema
+                .execute(Request::new(query).variables(Variables::from_json(variables.clone())))
+                .await;
+            let probe = format!("{mode:?} {query} {variables}");
+            assert_eq!(response.data, Value::Null, "{probe}: {response:?}");
+            assert!(!response.errors.is_empty(), "{probe}");
+            // Strict validation catches an explicit `null` itself, with its
+            // own message; either way nothing runs.
+            if matches!(mode, async_graphql::ValidationMode::Fast) {
+                assert_refused(&response, &probe);
+            }
+            assert_eq!(bumps.load(Ordering::SeqCst), 0, "{probe}: bump ran");
+        }
+
+        // A non-null variable with a value, and a literal member, still run.
+        for (query, variables) in [
+            (REQUIRED, serde_json::json!({ "v": 5 })),
+            (
+                "mutation { first: bump second: take(arg: {b: \"x\"}) }",
+                serde_json::json!({}),
+            ),
+        ] {
+            let (schema, bumps) = oneof::schema(mode);
+            let response = schema
+                .execute(Request::new(query).variables(Variables::from_json(variables.clone())))
+                .await;
+            assert!(
+                response.errors.is_empty(),
+                "{mode:?} {query} {variables}: {:?}",
+                response.errors
+            );
+            assert_eq!(bumps.load(Ordering::SeqCst), 1, "{mode:?} {query}");
+        }
+    }
+}

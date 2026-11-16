@@ -416,7 +416,9 @@ GraphQL rule "All Variable Usages Are Allowed" admits its declared type: a
 nullable variable stands where a value is required only with a non-null
 default behind it (its own or the position's), and list wrapping must match,
 except that a variable that is not a list may stand where the list's item type
-admits it, since execution coerces it to a one-element list. A
+admits it, since execution coerces it to a one-element list. In a oneof input
+object a variable standing for the member must be declared non-null and
+resolve to a value. A
 scalar, list or enum sent for an input object at any depth, or a variable whose
 type does not fit its position, refuses the whole request before any resolver,
 policy callback or SQL runs. The error is the one runtime GraphQL schemas
@@ -424,7 +426,10 @@ return: message and `extensions.code` both `invalid_graphql_input`, without a
 position or the offending value. `null` for an optional input object is still
 accepted, and async-graphql still refuses `null` for a required one. The
 check's work bound is sized from the parsed document, so a request supplied
-already parsed (`Request::set_parsed_query`) is checked the same way.
+already parsed (`Request::set_parsed_query`) is checked the same way. The
+check covers field arguments; directive arguments (`@include`, `@skip` and
+custom directives) are left to async-graphql. Runtime GraphQL schemas use the
+same checker.
 
 A schema built by hand from generated roots does not get this check unless it
 installs the extension:
