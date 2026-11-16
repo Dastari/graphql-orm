@@ -12,14 +12,21 @@ supersedes: []
 
 ## 0.16.0 (unreleased)
 
-**Windows local roots — Action needed:** `LocalStorageBackend::new` now refuses
-construction (panics) on Windows. Explicitly use
-`LocalStorageBackend::new_trusted_windows_root` only when the host protects the
-root, its ancestors and descendants from concurrent mutation. Links are not
-enforced as a security boundary in this mode. The no-follow guarantees below
-apply to Unix. Windows conditional creation uses atomic no-replace rename.
-Unix conditional-create fallback retries temporary unlink and rolls back on
-persistent failure, returning an error rather than success with two links.
+**Windows local roots — Action needed (Windows hosts):**
+`LocalStorageBackend::new` no longer exists on Windows, so a Windows build that
+calls it fails to compile. Call `LocalStorageBackend::new_trusted_windows_root`
+instead, and only when the host protects the root, its ancestors and
+descendants from concurrent mutation. Links are not enforced as a security
+boundary in this mode, and Windows directory handles are held with read and
+write sharing but without delete sharing. The no-follow guarantees below apply
+to Unix. Unix hosts need no change. Windows conditional creation uses atomic
+no-replace rename.
+
+Unix conditional-create fallback retries the temporary unlink (a temporary that
+is already gone counts as published) and rolls back on persistent failure,
+returning an error rather than success with two links. If the rollback itself
+fails the key may remain published: that error is single-attempt
+(`StorageError::is_retryable()` is false) and must not be replayed.
 
 - Unix local storage never follows a filesystem link below its root, including
   one that replaces a directory while an operation runs. Every local

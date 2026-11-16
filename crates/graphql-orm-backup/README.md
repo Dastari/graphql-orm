@@ -11,7 +11,8 @@ supersedes: []
 # graphql-orm-backup
 
 Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
-construction for a host-protected tree; `new` panics on Windows. This mode does
+construction for a host-protected tree; `new` does not exist on Windows; `LocalBackupRepository::new_trusted_windows_root`
+is its counterpart. This mode does
 not enforce links as a security boundary. Unix keeps its no-follow boundary.
 See the storage [trust boundary documentation](../graphql-orm-storage/docs/blob-store.md#local-filesystem-trust-boundary).
 
@@ -119,10 +120,13 @@ changes or runtime behavior; see the [migration guide](MIGRATION.md).
 The repository is concrete; the database and object index are deliberately
 host-provided traits. A full backup requires both:
 
+On Unix and other non-Windows targets:
+
 ```rust,no_run
 use graphql_orm_backup::{create_full_backup, BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter, LocalBackupRepository, ManifestAuthenticator, ManifestKey};
 use uuid::Uuid;
 
+# #[cfg(not(windows))]
 # async fn example(database: &dyn GraphqlOrmBackupAdapter, objects: &dyn BackupObjectIndex, key_material: &[u8], repository_id: Uuid) -> Result<(), graphql_orm_backup::BackupError> {
 // Host-held secret, at least 32 random bytes, never stored in the repository.
 // Stable UUID retained in host configuration, independent of repository contents.
@@ -136,6 +140,16 @@ let result = create_full_backup(&repository, database, objects, FullBackupReques
 println!("{}", result.manifest.snapshot_id);
 # Ok(())
 # }
+```
+
+On Windows `LocalBackupRepository::new` does not exist; links are not enforced
+there, so the host must protect the whole repository tree from concurrent
+mutation and construct the repository explicitly:
+
+```rust,ignore
+// Windows only; the rest of the example above is unchanged.
+let repository = LocalBackupRepository::new_trusted_windows_root("./backups")
+    .with_manifest_authenticator(authenticator);
 ```
 
 Run `restore_snapshot` in `RestoreMode::DryRun` first, then apply only after

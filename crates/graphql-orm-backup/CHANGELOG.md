@@ -12,14 +12,21 @@ supersedes: []
 
 ## 0.25.0 (unreleased)
 
-**Windows local roots — Action needed:** `LocalStorageBackend::new` now refuses
-construction (panics) on Windows. Explicitly use
-`LocalStorageBackend::new_trusted_windows_root` only when the host protects the
-root, its ancestors and descendants from concurrent mutation. Links are not
-enforced as a security boundary in this mode. The no-follow guarantees below
-apply to Unix. Windows conditional creation uses atomic no-replace rename.
-Unix conditional-create fallback retries temporary unlink and rolls back on
-persistent failure, returning an error rather than success with two links.
+**Windows local roots — Action needed (Windows hosts):**
+`LocalBackupRepository::new` and `LocalBackupRepository::open_existing` no
+longer exist on Windows, so a Windows build that calls them fails to compile.
+Call `LocalBackupRepository::new_trusted_windows_root` or
+`LocalBackupRepository::open_existing_trusted_windows_root` instead, and only
+when the host protects the repository root, its ancestors and descendants from
+concurrent mutation. Links are not enforced as a security boundary in this
+mode. Hosts that build `LocalStorageBackend` themselves call
+`LocalStorageBackend::new_trusted_windows_root`. The no-follow guarantees below
+apply to Unix; Unix hosts need no change. Windows conditional creation uses
+atomic no-replace rename.
+
+Unix conditional-create fallback retries the temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links. A
+failed rollback is a single-attempt error that must not be replayed.
 
 Requires `graphql-orm-storage` 0.16.0, whose Unix local backend refuses keys
 through filesystem links and pages listings with bounded work. No backup API

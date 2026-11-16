@@ -561,7 +561,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                                 })
                             }
                         }
-                        Err(source) => Err(StorageError::io(&target_path, source)),
+                        Err(source) => Err(crate::local::publish_error(&target_path, source)),
                     }
                 } else {
                     target

@@ -44,9 +44,10 @@ const MAX_DURABLE_DIRS: usize = 4_096;
 /// symbolic links below the root and reads of files with multiple hard links.
 /// The configured root itself may be a link.
 ///
-/// On Windows, [`Self::new`] refuses construction. Hosts must explicitly use
-/// [`Self::new_trusted_windows_root`] and protect the complete root tree from
-/// concurrent mutation; links are not enforced as a security boundary there.
+/// On Windows, [`Self::new`] does not exist: construction is a compile-time
+/// choice. Hosts must explicitly use [`Self::new_trusted_windows_root`] and
+/// protect the complete root tree from concurrent mutation; links are not
+/// enforced as a security boundary there.
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,
@@ -62,15 +63,12 @@ pub struct LocalStorageBackend {
 impl LocalStorageBackend {
     /// Creates a local storage backend rooted at the given directory.
     ///
-    /// # Panics
-    /// On Windows: use [`Self::new_trusted_windows_root`] only for a trusted tree.
+    /// Not available on Windows, where path operations cannot promise the
+    /// link boundary this constructor stands for; use
+    /// [`Self::new_trusted_windows_root`] there.
+    #[cfg(not(windows))]
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        if cfg!(windows) {
-            panic!(
-                "Windows local storage requires explicit trusted-root opt-in via new_trusted_windows_root; links are not enforced"
-            );
-        }
         Self::from_root(root.into())
     }
 
@@ -81,7 +79,12 @@ impl LocalStorageBackend {
     /// do not enforce a race-safe link boundary. Prefer Unix or native SMB
     /// storage when this trust requirement cannot be met.
     ///
-    /// On Unix this is equivalent to [`Self::new`]; the link boundary remains
+    /// The plain constructor `new` does not exist on Windows so that a host
+    /// cannot obtain a backend by accident: a call that would silently
+    /// promise the Unix link boundary fails to compile there, and the host
+    /// must name this trusted-root constructor and accept its requirement.
+    ///
+    /// On Unix this is equivalent to `new`; the link boundary remains
     /// enforced. The method is available there to support portable hosts.
     #[must_use]
     pub fn new_trusted_windows_root(root: impl Into<PathBuf>) -> Self {
@@ -326,6 +329,20 @@ pub(crate) fn fs_error(error: std::io::Error, key: &str, path: &Path) -> Storage
         }
     } else {
         StorageError::io(path, error)
+    }
+}
+
+/// An I/O failure of a no-replace publication. When the entry may remain
+/// published although the call failed (a failed rollback), a retry would find
+/// its own key taken, so the failure is reported as a non-retryable,
+/// outcome-unknown error, like a failed directory sync after publication.
+pub(crate) fn publish_error(path: &Path, source: std::io::Error) -> StorageError {
+    let unknown = local_fs::is_outcome_unknown(&source);
+    let error = StorageError::io(path, source);
+    if unknown {
+        StorageError::single_attempt(error)
+    } else {
+        error
     }
 }
 
@@ -602,7 +619,7 @@ impl BlobStore for LocalStorageBackend {
                         Ok(true)
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-                    Err(source) => Err(StorageError::io(&target, source)),
+                    Err(source) => Err(publish_error(&target, source)),
                 }
             })
             .await;
@@ -2578,6 +2595,7 @@ pub(crate) mod listing_log {
     }
 
     /// Removes and returns the pages recorded for `root`, in order.
+    #[cfg(not(windows))]
     pub(crate) fn take(root: &Path) -> Vec<PageWork> {
         let mut pages = PAGES.lock().expect("listing log");
         let (mine, others) = pages
@@ -2781,7 +2799,8 @@ mod resume_tests {
     }
 }
 
-#[cfg(test)]
+// These build backends with `LocalStorageBackend::new`, absent on Windows.
+#[cfg(all(test, not(windows)))]
 mod listing_work_tests {
     use bytes::Bytes;
     use tempfile::TempDir;
@@ -2919,13 +2938,36 @@ mod listing_work_tests {
 mod windows_construction_tests {
     use super::LocalStorageBackend;
 
+    /// `LocalStorageBackend::new` does not exist on Windows; the trusted-root
+    /// constructor is the only one and touches nothing.
     #[test]
-    fn default_construction_refuses_before_touching_the_root() {
+    fn trusted_construction_does_not_touch_the_root() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("not-created");
-        assert!(std::panic::catch_unwind(|| LocalStorageBackend::new(&root)).is_err());
-        assert!(!root.exists());
         let _trusted = LocalStorageBackend::new_trusted_windows_root(&root);
         assert!(!root.exists());
+    }
+}
+
+#[cfg(test)]
+mod publish_error_tests {
+    use std::{io, path::Path};
+
+    use super::{local_fs, publish_error};
+    use crate::StorageError;
+
+    #[test]
+    fn an_unknown_publication_outcome_is_not_retryable() {
+        let unknown = local_fs::outcome_unknown("rollback failed".to_string());
+        let error = publish_error(Path::new("/root/key"), unknown);
+        assert!(matches!(error, StorageError::SingleAttemptFailed { .. }));
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn an_ordinary_publication_failure_keeps_its_retry_classification() {
+        let error = publish_error(Path::new("/root/key"), io::Error::other("transient"));
+        assert!(matches!(error, StorageError::Io { .. }));
+        assert!(error.is_retryable());
     }
 }

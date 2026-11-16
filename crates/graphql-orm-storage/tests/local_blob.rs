@@ -1,3 +1,7 @@
+// `LocalStorageBackend::new` does not exist on Windows (see
+// `new_trusted_windows_root`); these tests exercise the Unix link boundary.
+#![cfg(not(windows))]
+
 use bytes::Bytes;
 use graphql_orm_storage::{
     BlobPutOptions, BlobStore, LocalStorageBackend, StorageByteStream, StorageError,

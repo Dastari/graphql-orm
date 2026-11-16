@@ -80,7 +80,8 @@ since SMB files have none; see [object restore](restore-semantics.md#object-rest
 ## Mounted SMB legacy mode
 
 An OS-mounted share can remain a separately named legacy provider using
-`LocalBackupRepository::open_existing`. The deployment then owns mount creation,
+`LocalBackupRepository::open_existing` (on Windows,
+`open_existing_trusted_windows_root`, which does not enforce links). The deployment then owns mount creation,
 credentials, reconnect behavior, permissions, and capacity monitoring.
 
 Local repository key validation still rejects empty/absolute keys, empty

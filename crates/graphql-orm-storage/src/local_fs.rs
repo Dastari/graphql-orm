@@ -57,6 +57,34 @@ pub(crate) fn is_refusal(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|inner| inner.is::<Refused>())
 }
 
+/// A no-replace publication that may have left the key published although the
+/// call failed: the temporary unlink and its retry failed and the rollback
+/// could not remove the published entry either.
+#[derive(Debug)]
+struct OutcomeUnknown(String);
+
+impl fmt::Display for OutcomeUnknown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OutcomeUnknown {}
+
+/// An I/O error reporting a publication whose outcome is unknown.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn outcome_unknown(message: String) -> io::Error {
+    io::Error::other(OutcomeUnknown(message))
+}
+
+/// Whether `error` reports a publication whose outcome is unknown, so a retry
+/// must not replay it.
+pub(crate) fn is_outcome_unknown(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<OutcomeUnknown>())
+}
+
 const LINK: &str = "local storage refuses filesystem links below its root";
 const HARD_LINK: &str = "local storage refuses files with more than one hard link";
 
@@ -330,7 +358,10 @@ mod sys {
         io::Errno,
     };
 
-    use super::{Dir, Entry, Info, Kind, LINK, check_readable, refused};
+    #[cfg(test)]
+    use std::collections::VecDeque;
+
+    use super::{Dir, Entry, Info, Kind, LINK, check_readable, outcome_unknown, refused};
 
     pub(super) struct Handle(OwnedFd);
 
@@ -516,42 +547,76 @@ mod sys {
             Err(Errno::EXIST) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
             Err(errno) => return Err(errno.into()),
         }
-        if let Err(first) = unlink_temp(dir, from)
-            && let Err(second) = unlink_temp(dir, from)
-        {
-            rollback_link(dir, to, identity).map_err(|rollback| {
-                io::Error::other(format!(
-                    "temporary unlink failed ({first}; {second}); publication rollback failed: {rollback}"
-                ))
-            })?;
-            return Err(second);
+        if let Err(first) = unlink_temp(dir, from) {
+            match unlink_temp(dir, from) {
+                Ok(()) => {}
+                // The temporary file is already gone, so the publication is
+                // complete.
+                Err(second) if second.kind() == io::ErrorKind::NotFound => {}
+                Err(second) => {
+                    return Err(match rollback_link(dir, to, identity) {
+                        Ok(()) => second,
+                        Err(Rollback::Changed) => io::Error::other(format!(
+                            "temporary unlink failed ({first}; {second}); publication rollback failed: publication identity changed before rollback"
+                        )),
+                        // The published entry may remain: the outcome is
+                        // unknown and must not be retried.
+                        Err(Rollback::Failed(rollback)) => outcome_unknown(format!(
+                            "temporary unlink failed ({first}; {second}); publication rollback failed: {rollback}"
+                        )),
+                    });
+                }
+            }
         }
         Ok(())
     }
 
-    fn rollback_link(dir: &Dir, name: &str, identity: (u64, u64)) -> io::Result<()> {
-        match info(dir, name)? {
+    enum Rollback {
+        /// Another file now holds the name; it is not ours to remove.
+        Changed,
+        Failed(io::Error),
+    }
+
+    fn rollback_link(dir: &Dir, name: &str, identity: (u64, u64)) -> Result<(), Rollback> {
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_ROLLBACK.with(std::cell::Cell::get) {
+            hook(dir, name);
+        }
+        #[cfg(test)]
+        if ROLLBACK_FAILS.with(std::cell::Cell::get) {
+            return Err(Rollback::Failed(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            )));
+        }
+        match info(dir, name).map_err(Rollback::Failed)? {
             None => Ok(()),
-            Some(found) if found.identity == identity => remove_file(dir, name),
-            Some(_) => Err(io::Error::other(
-                "publication identity changed before rollback",
-            )),
+            Some(found) if found.identity == identity => {
+                remove_file(dir, name).map_err(Rollback::Failed)
+            }
+            Some(_) => Err(Rollback::Changed),
         }
     }
 
     #[cfg(test)]
+    type UnlinkFaults = std::cell::RefCell<VecDeque<io::ErrorKind>>;
+
+    #[cfg(test)]
+    type RollbackHook = fn(&Dir, &str);
+
+    #[cfg(test)]
     std::thread_local! {
-        static UNLINK_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Injected failures for the next temporary unlinks, one per call.
+        static UNLINK_FAULTS: UnlinkFaults = const { UnlinkFaults::new(VecDeque::new()) };
+        /// Runs after the temporary unlink fails twice, before the rollback.
+        static BEFORE_ROLLBACK: std::cell::Cell<Option<RollbackHook>> =
+            const { std::cell::Cell::new(None) };
+        static ROLLBACK_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     fn unlink_temp(dir: &Dir, name: &str) -> io::Result<()> {
         #[cfg(test)]
-        if UNLINK_FAILURES.with(|left| {
-            let count = left.get();
-            left.set(count.saturating_sub(1));
-            count > 0
-        }) {
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        if let Some(kind) = UNLINK_FAULTS.with(|faults| faults.borrow_mut().pop_front()) {
+            return Err(io::Error::from(kind));
         }
         rfs::unlinkat(fd(dir), name, AtFlags::empty()).map_err(io::Error::from)
     }
@@ -634,6 +699,7 @@ mod sys {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::local_fs::is_outcome_unknown;
 
         #[test]
         fn directory_identity_uses_opened_handles_and_refuses_links() {
@@ -647,15 +713,30 @@ mod sys {
             assert!(dir.same_child_directory("a", "alias").is_err());
         }
 
+        fn fail_unlinks(kinds: &[io::ErrorKind]) {
+            UNLINK_FAULTS.with(|faults| faults.borrow_mut().extend(kinds.iter().copied()));
+        }
+
         #[test]
         fn fallback_retries_temp_unlink() {
             let temp = tempfile::tempdir().unwrap();
             let dir = Dir::open_root(temp.path()).unwrap().unwrap();
             dir.create_new("temp").unwrap();
-            UNLINK_FAILURES.with(|left| left.set(1));
+            fail_unlinks(&[io::ErrorKind::PermissionDenied]);
             link_noreplace(&dir, "temp", "published").unwrap();
             assert!(dir.info("temp").unwrap().is_none());
             assert_eq!(dir.info("published").unwrap().unwrap().links, 1);
+        }
+
+        #[test]
+        fn fallback_treats_a_missing_temp_on_retry_as_published() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Dir::open_root(temp.path()).unwrap().unwrap();
+            dir.create_new("temp").unwrap();
+            // The first unlink fails; the retry reports the temp already gone.
+            fail_unlinks(&[io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound]);
+            link_noreplace(&dir, "temp", "published").unwrap();
+            assert!(dir.info("published").unwrap().is_some());
         }
 
         #[test]
@@ -663,10 +744,44 @@ mod sys {
             let temp = tempfile::tempdir().unwrap();
             let dir = Dir::open_root(temp.path()).unwrap().unwrap();
             dir.create_new("temp").unwrap();
-            UNLINK_FAILURES.with(|left| left.set(2));
-            assert!(link_noreplace(&dir, "temp", "published").is_err());
+            fail_unlinks(&[io::ErrorKind::PermissionDenied; 2]);
+            let error = link_noreplace(&dir, "temp", "published").unwrap_err();
+            // Rolled back: nothing was published, so the failure is plain.
+            assert!(!is_outcome_unknown(&error));
             assert!(dir.info("published").unwrap().is_none());
             assert_eq!(dir.info("temp").unwrap().unwrap().links, 1);
+        }
+
+        #[test]
+        fn fallback_reports_an_unknown_outcome_when_rollback_fails() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Dir::open_root(temp.path()).unwrap().unwrap();
+            dir.create_new("temp").unwrap();
+            fail_unlinks(&[io::ErrorKind::PermissionDenied; 2]);
+            ROLLBACK_FAILS.with(|fails| fails.set(true));
+            let error = link_noreplace(&dir, "temp", "published").unwrap_err();
+            ROLLBACK_FAILS.with(|fails| fails.set(false));
+            assert!(is_outcome_unknown(&error));
+            // The published entry remains, so a retry must not replay it.
+            assert!(dir.info("published").unwrap().is_some());
+        }
+
+        #[test]
+        fn fallback_does_not_mark_a_replaced_publication_unknown() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Dir::open_root(temp.path()).unwrap().unwrap();
+            dir.create_new("temp").unwrap();
+            fail_unlinks(&[io::ErrorKind::PermissionDenied; 2]);
+            BEFORE_ROLLBACK.with(|hook| {
+                hook.set(Some(|dir, name| {
+                    remove_file(dir, name).unwrap();
+                    dir.create_new(name).unwrap();
+                }));
+            });
+            let error = link_noreplace(&dir, "temp", "published").unwrap_err();
+            BEFORE_ROLLBACK.with(|hook| hook.set(None));
+            assert!(!is_outcome_unknown(&error));
+            assert!(error.to_string().contains("identity changed"));
         }
     }
 }
@@ -691,9 +806,10 @@ mod sys {
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-    /// Every directory from the root to this one, held with read sharing
-    /// only (neither write nor delete), so none can be renamed or removed while
-    /// the handle lives.
+    /// Every directory from the root to this one, held with read and write
+    /// sharing but without delete sharing. This is a best-effort guard, not a
+    /// race-safe boundary: trusted-root mode promises none, and denying write
+    /// sharing would only risk sharing violations on ordinary renames.
     pub(super) struct Handle(Arc<Vec<File>>);
 
     impl Handle {
@@ -709,7 +825,7 @@ mod sys {
         }
         OpenOptions::new()
             .read(true)
-            .share_mode(FILE_SHARE_READ)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(flags)
             .open(path)
     }

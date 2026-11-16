@@ -11,7 +11,7 @@ supersedes: []
 # graphql-orm-storage
 
 Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
-construction for a host-protected tree; `new` panics on Windows. This mode does
+construction for a host-protected tree; `new` does not exist on Windows. This mode does
 not enforce links as a security boundary. Unix keeps its no-follow boundary.
 See the storage [trust boundary documentation](docs/blob-store.md#local-filesystem-trust-boundary).
 

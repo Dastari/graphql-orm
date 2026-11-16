@@ -1,3 +1,7 @@
+// `LocalBackupRepository::new` does not exist on Windows; see
+// `new_trusted_windows_root`.
+#![cfg(not(windows))]
+
 use bytes::Bytes;
 use graphql_orm_backup::{
     BackupByteLimit, BackupError, collect_backup_stream, decompress_payload_with_limit,

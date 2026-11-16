@@ -357,15 +357,14 @@ Leaf operations act on the held parent directory, never on a full path:
 | Linux and Android | A directory chain is opened in one `openat2` call with `RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS \| RESOLVE_NO_MAGICLINKS`. Where the kernel lacks `openat2` or a sandbox refuses it, each component is opened with `openat(O_DIRECTORY \| O_NOFOLLOW)` relative to its parent's descriptor. |
 | Other Unix | Each component is opened with `openat(O_DIRECTORY \| O_NOFOLLOW)` relative to its parent's descriptor. |
 | All Unix | Files are opened with `openat(O_NOFOLLOW)`, created with `O_CREAT \| O_EXCL \| O_NOFOLLOW`, published with `renameat` (conditional creates with `renameat2(RENAME_NOREPLACE)` on Linux and `RENAME_EXCL` on Apple platforms), removed with `unlinkat`, created with `mkdirat` and inspected with `fstatat(AT_SYMLINK_NOFOLLOW)`, all on the held parent descriptor. Directory syncs use the held descriptors. |
-| Windows | `LocalStorageBackend::new` panics before constructing storage. A host must explicitly use `LocalStorageBackend::new_trusted_windows_root` for a trusted root tree. This mode uses path-based operations and does **not** enforce a race-safe link boundary. Protect the root, its ancestors and descendants from concurrent mutation. Existing reparse-point checks are best effort only. Conditional creation uses atomic `MoveFileExW` without replacement, never hard links. |
+| Windows | `LocalStorageBackend::new` does not exist on Windows, so a call to it fails to compile. A host must explicitly use `LocalStorageBackend::new_trusted_windows_root` for a trusted root tree. This mode uses path-based operations and does **not** enforce a race-safe link boundary. Protect the root, its ancestors and descendants from concurrent mutation. Existing reparse-point checks are best effort only. Conditional creation uses atomic `MoveFileExW` without replacement, never hard links. |
 
 On Unix, a directory replaced by a link after an operation resolved it never
 redirects that operation: it keeps using the handle it holds, and the next
 operation is refused.
 
 **What is refused on Unix.** A key whose path below the root names or passes through
-a symbolic link (on Windows, also a junction, mount point, other name-surrogate
-reparse point, or reparse-point directory), wherever it points, fails with
+a symbolic link, wherever it points, fails with
 `StorageError::InvalidStorageKey` before the link's target is touched. Writes
 are refused before they create any directory. A FIFO, socket or device file at
 a key is refused too, as opening one can block. Listings never list or enter a
@@ -385,17 +384,21 @@ links the temporary file at the key and then unlinks the temporary name. A
 concurrent read may refuse the two-link file. Temporary unlink is checked and
 retried once. If both attempts fail, publication is rolled back only after
 verifying the published inode is the one we linked, and the call returns an
-error. Rollback failures also return an error; success is never reported with
-both names left behind. Hosts must resolve persistent filesystem errors before
+error. A temporary that is already gone when the retry runs counts as
+published. A rollback that itself fails may leave the key published, so that
+error is single-attempt (`StorageError::is_retryable()` is false): the outcome
+is unknown and a retry must not replay it. Success is never reported with both
+names left behind. Hosts must resolve persistent filesystem errors before
 retrying. Windows uses an atomic no-replace rename and never this fallback.
 A delete of a hard-linked key removes only the link inside the root.
 
 **What is not covered.** The root itself, and anything that can change the
 files the root's own directories hold, such as a process with the storage
 account's permissions writing file contents directly, are the deployment's to
-protect. On Windows, trusted-root local storage holds directory handles that deny write and delete
-sharing while an operation runs, so another process that removes or renames a
-storage directory at that moment fails with a sharing violation.
+protect. On Windows, trusted-root local storage promises no race-safe boundary: it
+holds directory handles that deny only delete sharing (read and write sharing
+stay allowed) while an operation runs, a best-effort guard that does not make
+concurrent mutation of the tree safe.
 
 ## Error Taxonomy
 
