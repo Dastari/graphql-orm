@@ -12,6 +12,10 @@ supersedes: []
 
 ## Unreleased - 0.146.0
 
+- Keep 1A delivery selection opt-in; unchanged retained bindings stay stable.
+- Verify dependent-delete declarations and row bounds with the ORM transaction planner; unsupported executors and plans refuse.
+- Serialize host-anchor rotations and finalize with compare-and-swap.
+
 Capability scale (part of #551), with tool profiles 0.24.0. No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.81.0`. Capability, index, broker-definition and session-binding fingerprints are unchanged for a host that changes nothing. See the [migration guide](MIGRATION.md#01450-to-01460-capability-scale).
 
 - **Added:** reviewed static read tools can be reached through the fixed broker instead of being offered as bootstrap definitions (#551, ask 5C). `AiCapabilityBrokerSession::with_brokered_static_tools` lists them by exact descriptor fingerprint. A brokered tool is not a provider definition, so it does not count against the 128 static bootstrap fingerprints of a retained session, and the list never changes the session binding or the three broker definitions. Discover returns it, describe returns its review metadata and reviewed argument schema, and execute runs it through registered-schema validation, current tool authorization, the ordinary resolver path and its own static disclosure schema. The fingerprint must match the indexed entry and the registered descriptor at every step. The coordinator refuses a turn whose hierarchical rules do not admit every brokered fingerprint. Only an approval-free, read-only, idempotent application query below `Restricted` without result media can be brokered; a brokered call carries no `AiToolExecutionProvenance`. `AiCapabilityExecution::capability_kind` and `AI_CAPABILITY_MAXIMUM_BROKERED_STATIC_TOOLS` are new.

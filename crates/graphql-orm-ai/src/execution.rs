@@ -787,6 +787,23 @@ pub trait AuthenticatedGraphqlExecutor: Send + Sync {
         let _ = binding;
         self.execute(context, request).await
     }
+    /// Executes a generated delete with a transaction-bound ORM effect guard.
+    /// The implementation must attach `guard.clone()` to GraphQL request data.
+    /// The bridge verifies the ORM committed it; unsupported executors refuse.
+    /// GraphQL authorization and the registered binding remain mandatory.
+    ///
+    /// # Errors
+    /// Returns authorization refusal by default, or the executor's safe error.
+    async fn execute_registered_with_effect_guard(
+        &self,
+        _context: GraphqlRequestContext,
+        _binding: &AiRegisteredToolExecutionBinding,
+        _request: ToolGraphqlRequest,
+        _guard: graphql_orm::graphql::orm::DependentDeleteGuard,
+    ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
+        Err(ToolExecutionError::Authorization)
+    }
+
     /// Executes with the canonical host request context.
     async fn execute(
         &self,
@@ -862,6 +879,7 @@ impl AuthenticatedToolBridge {
         capability_fingerprint: &str,
         descriptor: &AiToolDescriptor,
         request: ToolGraphqlRequest,
+        effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         let binding = AiRegisteredToolExecutionBinding::generated_mutation(
             capability_id,
@@ -869,7 +887,7 @@ impl AuthenticatedToolBridge {
             descriptor,
             &request,
         )?;
-        self.execute_with_binding(principal_reference, descriptor, request, binding)
+        self.execute_with_binding_and_effect_guard(principal_reference, descriptor, request, binding, effect_guard)
             .await
     }
 
@@ -879,6 +897,17 @@ impl AuthenticatedToolBridge {
         descriptor: &AiToolDescriptor,
         request: ToolGraphqlRequest,
         binding: AiRegisteredToolExecutionBinding,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        self.execute_with_binding_and_effect_guard(principal_reference, descriptor, request, binding, None).await
+    }
+
+    async fn execute_with_binding_and_effect_guard(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+        binding: AiRegisteredToolExecutionBinding,
+        effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         if !binding.matches_request(&request) {
             return Err(ToolExecutionError::StaleContract);
@@ -921,10 +950,10 @@ impl AuthenticatedToolBridge {
                 crate::execution_rejection::before_executor_error(&binding, &request, error)
             })?;
         let expected_request = request.clone();
-        let response = self
-            .executor
-            .execute_registered(context, &binding, request)
-            .await
+        let response = match &effect_guard {
+            Some(guard) => self.executor.execute_registered_with_effect_guard(context, &binding, request, guard.clone()).await,
+            None => self.executor.execute_registered(context, &binding, request).await,
+        }
             .map_err(|error| match error {
                 ToolExecutionError::RejectedBeforeExecution(proof) => {
                     crate::execution_rejection::validate_rejection(
@@ -935,6 +964,9 @@ impl AuthenticatedToolBridge {
                 }
                 error => error,
             })?;
+        if effect_guard.as_ref().is_some_and(|guard| !guard.was_committed()) {
+            return Err(ToolExecutionError::Authorization);
+        }
         Ok((response, authorization))
     }
 
@@ -996,10 +1028,12 @@ impl AuthenticatedToolBridge {
             expected_policy_version,
             expected_authorization_state_digest,
             required_approval,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_registered_bound(
         &self,
         principal_reference: &PrincipalReference,
@@ -1008,6 +1042,7 @@ impl AuthenticatedToolBridge {
         binding: AiRegisteredToolExecutionBinding,
         expected_policy_version: &str,
         expected_authorization_state_digest: &str,
+        effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         self.execute_registered_bound_requiring(
             principal_reference,
@@ -1017,6 +1052,7 @@ impl AuthenticatedToolBridge {
             expected_policy_version,
             expected_authorization_state_digest,
             None,
+            effect_guard,
         )
         .await
     }
@@ -1031,6 +1067,7 @@ impl AuthenticatedToolBridge {
         expected_policy_version: &str,
         expected_authorization_state_digest: &str,
         required_approval: Option<AiApprovalRule>,
+        effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         if !binding.matches_request(&request) {
             return Err(ToolExecutionError::StaleContract);
@@ -1065,10 +1102,10 @@ impl AuthenticatedToolBridge {
                 crate::execution_rejection::before_executor_error(&binding, &request, error)
             })?;
         let expected_request = request.clone();
-        let response = self
-            .executor
-            .execute_registered(context, &binding, request)
-            .await
+        let response = match &effect_guard {
+            Some(guard) => self.executor.execute_registered_with_effect_guard(context, &binding, request, guard.clone()).await,
+            None => self.executor.execute_registered(context, &binding, request).await,
+        }
             .map_err(|error| match error {
                 ToolExecutionError::RejectedBeforeExecution(proof) => {
                     crate::execution_rejection::validate_rejection(
@@ -1079,6 +1116,7 @@ impl AuthenticatedToolBridge {
                 }
                 error => error,
             })?;
+        if effect_guard.as_ref().is_some_and(|guard| !guard.was_committed()) { return Err(ToolExecutionError::Authorization); }
         Ok((response, authorization))
     }
 }

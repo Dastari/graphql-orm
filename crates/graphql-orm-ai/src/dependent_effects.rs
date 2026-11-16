@@ -85,10 +85,9 @@ impl AiDependentEffect {
         })
     }
 
-    /// Declares the most dependent rows this effect can touch in one delete.
-    /// It is the bound the application's own dependent-write limits enforce;
-    /// this crate compares it with the policy ceiling and enforces nothing at
-    /// execution.
+    /// Maximum dependent rows this effect may touch in one delete. The ORM
+    /// counts the locked execution plan inside its transaction and refuses
+    /// before writes when this bound is exceeded.
     #[must_use]
     pub const fn with_maximum_rows(mut self, maximum_rows: u32) -> Self {
         self.maximum_rows = Some(maximum_rows);
@@ -170,11 +169,12 @@ pub(crate) struct AiMutationFacts<'a> {
 ///
 /// # What this proves and does not prove
 ///
-/// The decision is as complete as the declaration. This crate cannot see the
-/// database, so a physical cascade the host did not declare is not detected;
-/// a root is trusted to cause exactly the declared effects. Generate the
-/// declaration from the same relation metadata that defines the cascades,
-/// and declare every transitive effect, not only direct children.
+/// Declarations are checked against the ORM's physical dependency graph and
+/// locked row plan before writes. The executor must implement
+/// [`crate::AuthenticatedGraphqlExecutor::execute_registered_with_effect_guard`]
+/// and attach the supplied guard to request data. Unsupported execution paths,
+/// unknown dependencies and effects not modeled by that planner refuse. Physical
+/// opt-out and bulk deletes refuse rather than trusting host declarations.
 ///
 /// The policy is an AI decision made before execution. It is independent of,
 /// and never replaces, GraphQL entity, row and field authorization: the ORM

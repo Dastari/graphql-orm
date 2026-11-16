@@ -12,6 +12,8 @@ supersedes: []
 
 ## Unreleased - 0.24.0
 
+- Preserve root description, title, examples and default through shared-schema compilation and expansion.
+
 Capability scale (part of #551). Capability, catalogue and index fingerprints are unchanged for existing inputs.
 
 - **Added:** `AiSharedTypePlanSchema` renders a compact plan schema with each repeated subschema defined once in a dictionary and referenced as `{"$ref": "#/types/<Name>"}`. The rendering is lossless (`expand` returns the input) and deterministic. `AiGraphqlQueryCapability::shared_type_plan_schema` names dictionary entries after the GraphQL input types they were generated from.

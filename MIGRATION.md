@@ -10,19 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## ORM/macros 0.164.0: guarded dependent deletes
+
+**No action** for unchanged hosts. No data or schema migration is needed.
+For the opt-in AI dependent-effect policy, implement the authenticated
+executor's `execute_registered_with_effect_guard` method and attach its guard
+to request data. The ORM checks the physical graph and locked row counts before
+writes; mismatched or unknown effects refuse and excess bounds roll back.
+Unsupported physical opt-out, bulk and unprovable ORM-managed paths refuse.
+
+The opt-in epoch anchor now requires atomic `compare_exchange` and an exclusive
+`lock_rotation` lease shared across processes through commit and finalization.
+Existing unanchored hosts are unaffected.
+
 ## AI 0.145.0 to 0.146.0 and tool profiles 0.23.0 to 0.24.0: capability scale
 
 Upgrade AI and tool profiles together. No SDL, schema or data migration, and
-no ORM change. Details are in the
+ORM/macros 0.164.0 provide transaction-bound effect verification. Details are in the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale)
 and the
 [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale).
 
-- **Delivery-mode selection. Action needed** only when a provider declares
-  both `ProviderDeferred` and `FixedBroker` and is given a non-frozen surface
-  above the eager limits: it now selects `FixedBroker`, and a retained session
-  for it rebinds once. Remove `FixedBroker` from the provider's declared
-  modes to keep native deferred loading.
+- **Delivery-mode selection. No action.** Existing hosts keep native deferred
+  selection and their exact retained binding. Opt in with
+  `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+  prefer the fixed broker above the eager limits; opting in requires rebinding.
 - **Describe output. No action.** Fixed-broker `describe` returns repeated
   input types once under `planSchema.types`. Execute arguments and all
   fingerprints are unchanged.

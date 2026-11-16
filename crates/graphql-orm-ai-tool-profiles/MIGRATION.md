@@ -28,7 +28,8 @@ fingerprints are unchanged for inputs that compiled before.
   admitted capability keeps its own fingerprint.
 - **Search terms. No action.** `AiCapabilityIndex` serializes exactly as
   before. Ranking is unchanged.
-- **Shared type dictionary. No action.** `compact_argument_schema` is
+- **Shared type dictionary. No action.** Root annotations (description, title,
+  examples and default) now round-trip without loss. `compact_argument_schema` is
   unchanged; `shared_type_plan_schema` is an additional rendering.
 
 `AiGraphqlQueryCapabilityOptions` gains a private field. Code that builds it

@@ -66,15 +66,19 @@ impl AiSharedTypePlanSchema {
             return Err(invalid("plan schema already declares a type dictionary"));
         }
         let mut arena = Arena::default();
-        let (root, _) = arena.intern(schema, 0)?;
+        let (root, description) = arena.intern(schema, 0)?;
         let hoisted = arena.hoisted(root);
         let names = arena.names(&hoisted, type_names);
         let mut types = BTreeMap::new();
         for (id, name) in &names {
             types.insert(name.clone(), arena.emit(*id, &names));
         }
+        let mut schema = arena.emit(root, &names);
+        if let (Some(object), Some(description)) = (schema.as_object_mut(), description) {
+            object.insert(DESCRIPTION_KEY.to_owned(), description.clone());
+        }
         Ok(Self {
-            schema: arena.emit(root, &names),
+            schema,
             types,
         })
     }
@@ -548,6 +552,23 @@ mod tests {
                 "RecordWhereInput".to_owned(),
             ),
         ])
+    }
+
+    #[test]
+    fn every_fixture_round_trips_with_root_annotations() {
+        let fixtures = [json!({"type":"object"}), string_filter(), where_input(), plan_schema()];
+        for fixture in fixtures {
+            for description in [json!("x"), json!(null), json!({"extension":true})] {
+                let mut schema = fixture.clone();
+                let root = schema.as_object_mut().unwrap();
+                root.insert("description".into(), description);
+                root.insert("title".into(), json!("Root"));
+                root.insert("examples".into(), json!([{}, {"description":"data"}]));
+                root.insert("default".into(), json!({"title":"data"}));
+                let compiled = AiSharedTypePlanSchema::compile(&schema, &names()).unwrap();
+                assert_eq!(compiled.expand().unwrap(), schema);
+            }
+        }
     }
 
     #[test]

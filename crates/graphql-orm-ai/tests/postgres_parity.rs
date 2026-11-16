@@ -1785,7 +1785,7 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
 
 /// Host anchor storage for the epoch-anchor parity test.
 #[derive(Default)]
-struct ParityEpochAnchor(std::sync::Mutex<Option<AiRuntimeEpochAnchor>>);
+struct ParityEpochAnchor(std::sync::Mutex<Option<AiRuntimeEpochAnchor>>, Arc<tokio::sync::Mutex<()>>);
 
 #[async_trait]
 impl AiRuntimeEpochAnchorStore for ParityEpochAnchor {
@@ -1793,9 +1793,14 @@ impl AiRuntimeEpochAnchorStore for ParityEpochAnchor {
         Ok(self.0.lock().expect("anchor").clone())
     }
 
-    async fn store(&self, anchor: &AiRuntimeEpochAnchor) -> Result<(), AiError> {
-        *self.0.lock().expect("anchor") = Some(anchor.clone());
-        Ok(())
+    async fn lock_rotation(&self) -> Result<Box<dyn Send>, AiError> {
+        Ok(Box::new(self.1.clone().lock_owned().await))
+    }
+    async fn compare_exchange(&self, expected: Option<&AiRuntimeEpochAnchor>, anchor: &AiRuntimeEpochAnchor) -> Result<bool, AiError> {
+        let mut value = self.0.lock().expect("anchor");
+        if value.as_ref() != expected { return Ok(false); }
+        *value = Some(anchor.clone());
+        Ok(true)
     }
 }
 
@@ -1832,6 +1837,9 @@ async fn owned_postgres_epoch_anchor_rotates_and_refuses_a_generation_it_does_no
         .with_epoch_anchor(anchor.clone());
 
     let first = recovery.readiness_proof().await.expect("first open");
+    let parallel = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone()).with_epoch_anchor(anchor.clone());
+    let (a, b) = tokio::join!(recovery.readiness_proof(), parallel.readiness_proof());
+    assert_eq!(a.expect("rotation a").epoch_id(), b.expect("rotation b").epoch_id());
     let image_anchor = anchor.0.lock().expect("anchor").clone().expect("anchor");
     let second = recovery.readiness_proof().await.expect("ordinary restart");
     assert_eq!(second.epoch_id(), first.epoch_id());
@@ -1841,7 +1849,7 @@ async fn owned_postgres_epoch_anchor_rotates_and_refuses_a_generation_it_does_no
 
     // The store and the host anchor disagree by one rotation, as they do
     // after a physical restore of an earlier image.
-    let stale = Arc::new(ParityEpochAnchor(std::sync::Mutex::new(Some(image_anchor))));
+    let stale = Arc::new(ParityEpochAnchor(std::sync::Mutex::new(Some(image_anchor)), Arc::default()));
     let mismatched = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
         .with_epoch_anchor(stale.clone());
     assert!(matches!(

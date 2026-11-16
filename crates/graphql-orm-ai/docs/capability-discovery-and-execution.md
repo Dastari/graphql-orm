@@ -170,15 +170,11 @@ negotiation metadata, never authority.
 | `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search, for a set within the eager limits or a provider with no fixed broker |
 | `FixedBroker` | Exact static bootstrap plus frozen discover/describe/execute definitions | Retained sessions whose generated definitions cannot change |
 
-`ProviderDeferred` still sends every definition in every request, so its
-request size grows with the catalogue. `select_capability_delivery_mode`
-therefore selects `FixedBroker` for a surface above the eager count or byte
-limit whenever the provider declares both modes. A provider that declares no
-fixed broker keeps `ProviderDeferred`, and so does a surface within the eager
-limits on a provider with no eager mode. To keep native deferred loading for
-a large surface, leave `FixedBroker` out of that provider's declared modes.
-The delivery mode is part of the provider capability-session binding, so a
-retained session whose mode changes rebinds once.
+`ProviderDeferred` remains the default for large non-frozen surfaces.
+Opt into `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces`
+to choose `FixedBroker` above the eager count or byte limit when both modes
+are supported. Opting in changes the retained binding and requires a rebind.
+Unchanged hosts keep their delivery mode and binding fingerprint.
 
 Provider-session bindings admit at most 128 exact static bootstrap fingerprints.
 Grok SDK and Codex dynamic tools independently enforce 128-definition ceilings

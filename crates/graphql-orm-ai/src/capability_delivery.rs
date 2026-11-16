@@ -55,6 +55,9 @@ pub enum AiCapabilityDeliveryMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiCapabilityDeliveryLimits {
+    /// Prefer a fixed broker for large surfaces. Opt-in to preserve retained bindings.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prefer_fixed_broker_for_large_surfaces: bool,
     /// Maximum definitions admitted into eager mode.
     pub maximum_eager_definitions: u16,
     /// Maximum canonical definition bytes admitted into eager mode.
@@ -72,6 +75,8 @@ pub struct AiCapabilityDeliveryLimits {
     pub maximum_describe_bytes: u32,
 }
 
+fn is_false(value: &bool) -> bool { !value }
+
 const fn default_maximum_retained_searches() -> u16 {
     4
 }
@@ -87,6 +92,7 @@ const fn default_maximum_describe_bytes() -> u32 {
 impl Default for AiCapabilityDeliveryLimits {
     fn default() -> Self {
         Self {
+            prefer_fixed_broker_for_large_surfaces: false,
             maximum_eager_definitions: 16,
             maximum_eager_definition_bytes: 256 * 1024,
             maximum_deferred_definitions: 8,
@@ -496,12 +502,10 @@ fn broker_definition(
 /// Selects the safest admissible delivery mode from provider declarations and
 /// exact definition size. Prompt text cannot influence this decision.
 ///
-/// `ProviderDeferred` still sends every definition in every request, so its
-/// request bytes grow with the catalogue. A surface above the eager count or
-/// byte limit therefore selects `FixedBroker` instead whenever the provider
-/// declares it, and `ProviderDeferred` only when the provider declares no
-/// fixed broker. A provider that must keep native deferred loading for a
-/// large surface omits `FixedBroker` from its declared modes.
+/// Native deferred loading remains the default for unchanged hosts. Set
+/// [`AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces`] to
+/// prefer a constant-size broker above the eager limits. This changes the
+/// selected mode and requires rebinding retained sessions.
 ///
 /// # Errors
 ///
@@ -525,7 +529,8 @@ pub fn select_capability_delivery_mode(
     } else if eager_fits && supported.contains(&AiCapabilityDeliveryMode::EagerExact) {
         Some(AiCapabilityDeliveryMode::EagerExact)
     } else if supported.contains(&AiCapabilityDeliveryMode::ProviderDeferred) {
-        if !eager_fits && supported.contains(&AiCapabilityDeliveryMode::FixedBroker) {
+        if limits.prefer_fixed_broker_for_large_surfaces
+            && !eager_fits && supported.contains(&AiCapabilityDeliveryMode::FixedBroker) {
             // Never choose a mode whose request size grows with the
             // catalogue while a constant-size one is available.
             Some(AiCapabilityDeliveryMode::FixedBroker)
@@ -3119,6 +3124,28 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_host_keeps_native_delivery_and_binding() {
+        let provider = ProviderCapabilities {
+            capability_delivery_modes: BTreeSet::from([
+                AiCapabilityDeliveryMode::ProviderDeferred,
+                AiCapabilityDeliveryMode::FixedBroker,
+            ]),
+            ..ProviderCapabilities::default()
+        };
+        let selected = select_capability_delivery_mode(
+            &provider, 55, 4_917_706, false, AiCapabilityDeliveryLimits::default()
+        ).unwrap().mode();
+        assert_eq!(selected, AiCapabilityDeliveryMode::ProviderDeferred);
+        let binding = |mode| AiProviderCapabilitySessionBinding::new(
+            mode, "a".repeat(64), BTreeSet::new(), "v1", "model",
+            ModelReasoningEffort::default(), "b".repeat(64)
+        ).unwrap();
+        assert_eq!(binding(selected).fingerprint(), binding(AiCapabilityDeliveryMode::ProviderDeferred).fingerprint());
+        assert_eq!(binding(selected).fingerprint(), "525f9e792f18b8e566073f853724cd03161da7535a59dd5d9d9c1420e501f9dc");
+        assert!(serde_json::to_value(AiCapabilityDeliveryLimits::default()).unwrap().get("prefer_fixed_broker_for_large_surfaces").is_none());
+    }
+
+    #[test]
     fn frozen_retained_and_large_native_surfaces_select_distinct_modes() {
         let mut capabilities = ProviderCapabilities {
             custom_tools: true,
@@ -3136,6 +3163,10 @@ mod tests {
                 .mode(),
             AiCapabilityDeliveryMode::EagerExact
         );
+        let limits = AiCapabilityDeliveryLimits {
+            prefer_fixed_broker_for_large_surfaces: true,
+            ..limits
+        };
         // A surface above the eager limits never selects the mode that sends
         // every definition while the provider also offers the fixed broker.
         assert_eq!(

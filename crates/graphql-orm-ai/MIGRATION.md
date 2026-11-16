@@ -10,27 +10,30 @@ supersedes: []
 
 # Migration Guide
 
+## ORM/macros 0.164.0: guarded dependent deletes
+
+**No action** for unchanged hosts. No data or schema migration is needed.
+For the opt-in AI dependent-effect policy, implement the authenticated
+executor's `execute_registered_with_effect_guard` method and attach its guard
+to request data. The ORM checks the physical graph and locked row counts before
+writes; mismatched or unknown effects refuse and excess bounds roll back.
+Unsupported physical opt-out, bulk and unprovable ORM-managed paths refuse.
+
+The opt-in epoch anchor now requires atomic `compare_exchange` and an exclusive
+`lock_rotation` lease shared across processes through commit and finalization.
+Existing unanchored hosts are unaffected.
+
 ## 0.145.0 to 0.146.0: capability scale
 
 Upgrade tool profiles to 0.24.0 with this release. There is no GraphQL SDL,
 persistent schema or data migration; AI schema module stays `0.81.0`.
 Capability, index, broker-definition and session-binding fingerprints are
-unchanged for a host that changes nothing, with the one exception described
-under delivery-mode selection.
+unchanged for a host that changes nothing.
 
-- **Delivery-mode selection. Action needed** only for a provider that
-  declares both `ProviderDeferred` and `FixedBroker` and is given a surface
-  above the eager count or byte limit without `retained_definitions_frozen`.
-  `select_capability_delivery_mode` now returns `FixedBroker` for it, where it
-  returned `ProviderDeferred`. Native OpenAI is affected only when
-  `with_native_tool_search_models` is set. The delivery mode is part of
-  `AiProviderCapabilitySessionBinding`, so a retained session for such a
-  provider goes through the ordinary cleanup and rebind once. The broker
-  costs discover and describe calls before the first execute; size turn and
-  tool-call ceilings as the delivery documentation describes. To keep native
-  deferred loading for a large surface, remove `FixedBroker` from that
-  provider's declared `capability_delivery_modes`. Every other combination
-  selects as before.
+- **Delivery-mode selection. No action.** Existing hosts keep native deferred
+  selection and their exact retained binding. Opt in with
+  `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+  prefer the fixed broker above the eager limits; opting in requires rebinding.
 - **Shared type dictionary in describe. No action.** Fixed-broker `describe`
   now returns `planSchema` with repeated input types under `planSchema.types`
   and `{"$ref": "#/types/<Name>"}` at each use. Execute arguments, plan

@@ -849,6 +849,56 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         if nodes.len() - 1 + nulls.len() > self.limits.max_rows() {
             return Err(refusal());
         }
+        if let Some(guard) = ctx.data_opt::<super::DependentDeleteGuard>() {
+            use super::DependentDeleteEffect;
+            // Walk the physical graph, including effects with zero current rows.
+            // Unknown tables, composite keys and unmodeled relations refuse.
+            let mut reachable = BTreeSet::from([table.to_owned()]);
+            let mut visited = BTreeSet::new();
+            let mut counts = BTreeMap::new();
+            while let Some(target) = reachable.pop_first() {
+                if !visited.insert(target.clone()) { continue; }
+                let target_entity = self.entities.get(target.as_str()).ok_or_else(refusal)?.metadata();
+                for adapter in self.entities.values() {
+                    if adapter.metadata().relations.iter().any(|relation|
+                        !relation.is_multiple && !relation.emit_foreign_key
+                        && relation.target_type == target_entity.entity_name
+                        && relation.on_delete != DeletePolicy::Restrict) {
+                        return Err(refusal()); // ORM-managed relation not provable on this path.
+                    }
+                }
+                for source in &physical.tables {
+                    for fk in source.foreign_keys.iter().filter(|fk| fk.target_table == target) {
+                        let metadata = self.entities.get(source.table_name.as_str()).ok_or_else(refusal)?.metadata();
+                        match fk.on_delete {
+                            DeletePolicy::Restrict => {},
+                            DeletePolicy::Cascade => {
+                                counts.entry(DependentDeleteEffect::Delete(metadata.entity_name.to_owned())).or_insert(0usize);
+                                reachable.insert(source.table_name.clone());
+                            },
+                            DeletePolicy::SetNull => {
+                                for pair in &fk.column_pairs {
+                                    let field = metadata.fields.iter().find(|field| field.name == pair.source_column).ok_or_else(refusal)?;
+                                    counts.entry(DependentDeleteEffect::SetNull(metadata.entity_name.to_owned(), field.api_name.to_owned())).or_insert(0usize);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for node in nodes.iter().skip(1) {
+                let entity = self.entities[node.table.as_str()].metadata().entity_name;
+                *counts.get_mut(&DependentDeleteEffect::Delete(entity.to_owned())).ok_or_else(refusal)? += 1;
+            }
+            for (table, _, fields) in &nulls {
+                let metadata = self.entities[table.as_str()].metadata();
+                for column in fields {
+                    let field = metadata.fields.iter().find(|field| field.name == column).ok_or_else(refusal)?;
+                    *counts.get_mut(&DependentDeleteEffect::SetNull(metadata.entity_name.to_owned(), field.api_name.to_owned())).ok_or_else(refusal)? += 1;
+                }
+            }
+            guard.check(root.metadata().entity_name, &counts)?;
+        }
         let root_write = match root
             .prepare(ctx, &mut tx, nodes[0].row.clone(), Vec::new(), expected)
             .await?
@@ -943,6 +993,7 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         tx.commit_and_emit()
             .await
             .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+        if let Some(guard) = ctx.data_opt::<super::DependentDeleteGuard>() { guard.committed(); }
         Ok((None, notifications))
     }
 }

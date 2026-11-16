@@ -329,7 +329,11 @@ Operate it with these rules:
   mints proofs or acknowledges restores for a store must use the same anchor
   storage. A per-instance anchor makes each instance's rotation look like a
   restore to the others. Two instances opening at the same moment are
-  handled: the later one re-reads the anchor and retries.
+  serialized by the host store's `lock_rotation` lease, held through the
+  database commit and finalization. It must work across processes, not just
+  service clones. `compare_exchange` must atomically compare the entire value
+  (including absence and pending generation) and durably write only on a match.
+  A lost CAS returns `Conflict` without overwriting the winning anchor.
 - **What it does not detect.** A restore of an image taken since the last
   rotation is not detected, because nothing outside the database has changed
   in that window. Call `readiness_proof` on a timer to bound the window; each

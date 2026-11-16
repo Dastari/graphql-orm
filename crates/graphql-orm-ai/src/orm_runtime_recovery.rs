@@ -160,8 +160,9 @@ impl AiRuntimeEpochAnchor {
 ///
 /// One anchor belongs to one store. Every instance that opens that store
 /// must share the same anchor storage: a per-instance anchor makes every
-/// other instance's rotation look like a restore. `store` must be durable
-/// before it returns, and must replace the whole value.
+/// other instance's rotation look like a restore. `compare_exchange` must be durable and atomic across all instances.
+/// `lock_rotation` must serialize the entire rotation across those instances,
+/// including the database commit and final CAS.
 ///
 /// A file on a volume that is not part of the database backup, a secret or
 /// configuration store entry, or a row in a different database are all
@@ -180,13 +181,24 @@ pub trait AiRuntimeEpochAnchorStore: Send + Sync {
     /// stays closed; an unreadable anchor is never treated as absent.
     async fn load(&self) -> Result<Option<AiRuntimeEpochAnchor>, AiError>;
 
-    /// Durably replaces the stored anchor.
+    /// Acquires an exclusive rotation lease shared by every opener of this store.
+    /// The lease must remain exclusive until the returned guard is dropped,
+    /// including across processes. Use a distributed store lock or a database
+    /// advisory lock on a dedicated connection. Cancellation must release it.
+    ///
+    /// # Errors
+    /// Returns an error if exclusive ownership cannot be acquired.
+    async fn lock_rotation(&self) -> Result<Box<dyn Send>, AiError>;
+
+    /// Atomically replaces the anchor only if its current value equals `expected`.
+    /// Returns false without writing when another writer won. An absent value
+    /// is distinct from a stored empty anchor. Success must be durable.
     ///
     /// # Errors
     ///
     /// Returns an error when the anchor cannot be stored. The runtime then
     /// stays closed.
-    async fn store(&self, anchor: &AiRuntimeEpochAnchor) -> Result<(), AiError>;
+    async fn compare_exchange(&self, expected: Option<&AiRuntimeEpochAnchor>, anchor: &AiRuntimeEpochAnchor) -> Result<bool, AiError>;
 }
 
 /// The anchor state one open presents to its transaction.
@@ -194,6 +206,7 @@ pub trait AiRuntimeEpochAnchorStore: Send + Sync {
 struct AnchorRotation {
     /// Generations the host held before this open staged its own.
     held: Vec<String>,
+    staged: AiRuntimeEpochAnchor,
     /// Generation this open writes to the live epoch.
     next: String,
 }
@@ -379,8 +392,9 @@ impl OrmAiRuntimeRecoveryService {
     /// anchor cannot be read or written; and [`AiError::PersistenceFailed`]
     /// or [`AiError::Conflict`] for persistence failure.
     pub async fn readiness_proof(&self) -> Result<AiRuntimeReadinessProof, AiError> {
+        let _rotation_lease = self.lock_anchor_rotation().await?;
         let module_fingerprint = ai_schema_module_fingerprint()?;
-        let Some(anchor_store) = &self.epoch_anchor else {
+        let Some(_anchor_store) = &self.epoch_anchor else {
             return match self.readiness_retrying(module_fingerprint, None).await? {
                 Readiness::Proof(proof) => Ok(proof),
                 Readiness::Refused(error) => Err(error),
@@ -388,31 +402,13 @@ impl OrmAiRuntimeRecoveryService {
             };
         };
         for _ in 0..MAXIMUM_ANCHOR_ATTEMPTS {
-            let held = anchor_store.load().await?.unwrap_or_default();
-            let rotation = AnchorRotation {
-                held: held.held(),
-                next: new_anchor_generation(),
-            };
-            // Stage the new generation before the transaction can commit it,
-            // so a crash between the commit and the final anchor write still
-            // leaves the host holding the generation the store carries.
-            anchor_store
-                .store(&AiRuntimeEpochAnchor {
-                    generation: held.generation.clone(),
-                    pending_generation: Some(rotation.next.clone()),
-                })
-                .await?;
+            let rotation = self.stage_anchor().await?.ok_or(AiError::Conflict)?;
             match self
                 .readiness_retrying(module_fingerprint.clone(), Some(rotation.clone()))
                 .await?
             {
                 Readiness::Proof(proof) => {
-                    anchor_store
-                        .store(&AiRuntimeEpochAnchor {
-                            generation: Some(rotation.next),
-                            pending_generation: None,
-                        })
-                        .await?;
+                    self.commit_anchor(Some(rotation)).await?;
                     return Ok(proof);
                 }
                 Readiness::Refused(error) => return Err(error),
@@ -445,34 +441,44 @@ impl OrmAiRuntimeRecoveryService {
 
     /// Stages a generation for an epoch an acknowledgement is about to
     /// record, keeping the generation the host already holds.
-    async fn stage_anchor(&self) -> Result<Option<AnchorRotation>, AiError> {
-        let Some(anchor_store) = &self.epoch_anchor else {
-            return Ok(None);
-        };
-        let held = anchor_store.load().await?.unwrap_or_default();
-        let rotation = AnchorRotation {
-            held: held.held(),
-            next: new_anchor_generation(),
-        };
-        anchor_store
-            .store(&AiRuntimeEpochAnchor {
-                generation: held.generation,
-                pending_generation: Some(rotation.next.clone()),
-            })
-            .await?;
-        Ok(Some(rotation))
+    async fn lock_anchor_rotation(&self) -> Result<Option<Box<dyn Send>>, AiError> {
+        match &self.epoch_anchor {
+            Some(store) => store.lock_rotation().await.map(Some),
+            None => Ok(None),
+        }
     }
 
-    /// Makes the staged generation the anchor's only generation once the
-    /// acknowledged epoch is recorded.
+    async fn stage_anchor(&self) -> Result<Option<AnchorRotation>, AiError> {
+        let Some(store) = &self.epoch_anchor else { return Ok(None); };
+        let expected = store.load().await?;
+        let held = expected.clone().unwrap_or_default();
+        // A previous final CAS may have failed after commit. Preserve the
+        // generation actually in the database before replacing its pending
+        // slot, so cancellation before this transaction cannot discard it.
+        let recorded = self.database.transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move { Ok(current_epoch(tx).await?.and_then(|epoch| anchor_generation(&epoch).map(str::to_owned))) })
+        }).await.map_err(map_transaction)?;
+        let generation = recorded.filter(|recorded| held.held().contains(recorded)).or_else(|| held.generation.clone());
+        let next = new_anchor_generation();
+        let staged = AiRuntimeEpochAnchor {
+            generation,
+            pending_generation: Some(next.clone()),
+        };
+        if !store.compare_exchange(expected.as_ref(), &staged).await? {
+            return Err(AiError::Conflict);
+        }
+        Ok(Some(AnchorRotation { held: held.held(), staged, next }))
+    }
+
+    /// Finalize only the value staged by this rotation.
     async fn commit_anchor(&self, rotation: Option<AnchorRotation>) -> Result<(), AiError> {
-        if let (Some(anchor_store), Some(rotation)) = (&self.epoch_anchor, rotation) {
-            anchor_store
-                .store(&AiRuntimeEpochAnchor {
-                    generation: Some(rotation.next),
-                    pending_generation: None,
-                })
-                .await?;
+        if let (Some(store), Some(rotation)) = (&self.epoch_anchor, rotation) {
+            let committed = AiRuntimeEpochAnchor {
+                generation: Some(rotation.next), pending_generation: None,
+            };
+            if !store.compare_exchange(Some(&rotation.staged), &committed).await? {
+                return Err(AiError::Conflict);
+            }
         }
         Ok(())
     }
@@ -601,6 +607,7 @@ impl OrmAiRuntimeRecoveryService {
         let module_fingerprint = ai_schema_module_fingerprint()?;
         // The operator's acknowledgement is what re-establishes the anchor
         // after a restore or a lost anchor, so it does not require a match.
+        let _rotation_lease = self.lock_anchor_rotation().await?;
         let anchor = self.stage_anchor().await?;
         let mut attempt = 0;
         loop {
@@ -669,6 +676,7 @@ impl OrmAiRuntimeRecoveryService {
             ));
         }
         let module_fingerprint = ai_schema_module_fingerprint()?;
+        let _rotation_lease = self.lock_anchor_rotation().await?;
         let anchor = self.stage_anchor().await?;
         let mut attempt = 0;
         loop {
@@ -2634,6 +2642,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryAnchor {
         value: std::sync::Mutex<Option<AiRuntimeEpochAnchor>>,
+        rotation: Arc<tokio::sync::Mutex<()>>,
         fail_committed_write: std::sync::atomic::AtomicBool,
     }
 
@@ -2653,7 +2662,11 @@ mod tests {
             Ok(self.value.lock().expect("anchor").clone())
         }
 
-        async fn store(&self, anchor: &AiRuntimeEpochAnchor) -> Result<(), AiError> {
+        async fn lock_rotation(&self) -> Result<Box<dyn Send>, AiError> {
+            Ok(Box::new(self.rotation.clone().lock_owned().await))
+        }
+
+        async fn compare_exchange(&self, expected: Option<&AiRuntimeEpochAnchor>, anchor: &AiRuntimeEpochAnchor) -> Result<bool, AiError> {
             if anchor.pending_generation().is_none()
                 && self
                     .fail_committed_write
@@ -2661,8 +2674,10 @@ mod tests {
             {
                 return Err(AiError::PersistenceFailed);
             }
-            *self.value.lock().expect("anchor") = Some(anchor.clone());
-            Ok(())
+            let mut value = self.value.lock().expect("anchor");
+            if value.as_ref() != expected { return Ok(false); }
+            *value = Some(anchor.clone());
+            Ok(true)
         }
     }
 
@@ -2799,6 +2814,43 @@ mod tests {
             recovery.readiness_proof().await,
             Err(AiError::RuntimeNotReady)
         ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_restaging_preserves_a_previously_committed_pending_value() {
+        let database = database().await;
+        let anchor = Arc::new(MemoryAnchor::default());
+        let recovery = anchored(&database, &anchor);
+        recovery.readiness_proof().await.unwrap();
+        anchor.fail_committed_write.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(recovery.readiness_proof().await.is_err());
+        anchor.fail_committed_write.store(false, std::sync::atomic::Ordering::SeqCst);
+        recovery.stage_anchor().await.unwrap(); // cancellation before DB work
+        recovery.readiness_proof().await.expect("committed generation remains held");
+    }
+
+    #[tokio::test]
+    async fn a_stale_finalizer_cannot_overwrite_a_winning_anchor() {
+        let database = database().await;
+        let anchor = Arc::new(MemoryAnchor::default());
+        let recovery = anchored(&database, &anchor);
+        let rotation = recovery.stage_anchor().await.unwrap().unwrap();
+        let winner = AiRuntimeEpochAnchor { generation: Some(new_anchor_generation()), pending_generation: None };
+        assert!(anchor.compare_exchange(Some(&rotation.staged), &winner).await.unwrap());
+        assert!(matches!(recovery.commit_anchor(Some(rotation)).await, Err(AiError::Conflict)));
+        assert_eq!(anchor.held(), winner);
+    }
+
+    #[tokio::test]
+    async fn concurrent_rotations_leave_a_reopenable_anchor() {
+        let database = database().await;
+        let anchor = Arc::new(MemoryAnchor::default());
+        let first = anchored(&database, &anchor);
+        first.readiness_proof().await.unwrap();
+        let second = anchored(&database, &anchor);
+        let (a, b) = tokio::join!(first.readiness_proof(), second.readiness_proof());
+        assert_eq!(a.unwrap().epoch_id(), b.unwrap().epoch_id());
+        anchored(&database, &anchor).readiness_proof().await.unwrap();
     }
 
     #[tokio::test]

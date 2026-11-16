@@ -115,25 +115,25 @@ let policy = AiDependentEffectPolicy::new()
     .with_maximum_dependent_rows(1_000);
 ```
 
-The decision is as complete as the declaration. The crate cannot see the
-database, so it trusts a declared root to cause exactly the declared effects:
+The declaration is checked against ORM 0.164.0's introspected physical graph
+and locked dependent row plan before any write. Every transitive cascade and
+set-null must match, including effects with zero current rows. Row bounds are
+execution limits: exceeding one aborts the transaction and rolls everything back.
+Restrict edges with matching rows refuse through the ORM planner.
 
-- **Physical cascades.** A foreign-key action the host did not declare is not
-  detected. Generate the declaration from the relation metadata that defines
-  the cascades, and declare every transitive effect.
-- **ORM dependent deletes.** For entities that opt in to
-  `#[graphql_entity(dependent_deletes)]`, the ORM plans the dependent writes
-  inside the delete transaction, authorizes each one, and refuses unknown
-  physical dependents. Declare the same graph here.
-- **Authorization is separate.** This is an AI decision made before
-  execution. The ORM still applies GraphQL entity, row and field
-  authorization to the root and to every dependent write, and rolls the
-  whole delete back when any of them is refused. Passing this policy never
-  substitutes for that, and approval never substitutes for either.
+The authenticated executor must implement
+`execute_registered_with_effect_guard`, attach the supplied guard clone to
+GraphQL request data, and preserve the ordinary binding and authorization.
+The bridge requires an ORM commit receipt. Unsupported executors refuse by
+default. Use `StaticDependentDeletes` with all participating entities registered.
+Unknown physical dependents, unmanaged relation semantics and ORM-managed
+relations that this planner cannot prove refuse. Physical opt-out and bulk
+deletes also refuse when guarded; they cannot silently bypass the policy.
+This is option B where planning is supported, with option A as the fallback.
 
-Reviewed static mutation tools are host-authored documents and are not
-covered. The ORM does not yet export its planned dependent effect set, so the
-declaration is host-supplied.
+AI admission is independent of GraphQL entity, row and field authorization.
+The ORM still authorizes every write. Reviewed static mutation tools remain
+host-authored operations outside this generated-delete policy.
 
 ## Content protection scope
 

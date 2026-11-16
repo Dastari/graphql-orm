@@ -897,6 +897,7 @@ impl AiRuntime {
         if prepared.execution_policy != AiMutationExecutionPolicy::Automatic {
             return Err(AiError::Forbidden);
         }
+        let effect_guard = self.mutation_effect_guard(&prepared);
         let (response, authorization) = self
             .tool_bridge
             .execute_generated_mutation(
@@ -905,6 +906,7 @@ impl AiRuntime {
                 &prepared.capability_fingerprint,
                 &prepared.descriptor,
                 prepared.request,
+                effect_guard,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -942,6 +944,7 @@ impl AiRuntime {
             &prepared.request,
         )
         .map_err(|_| AiError::Forbidden)?;
+        let effect_guard = self.mutation_effect_guard(&prepared);
         let (response, authorization) = self
             .tool_bridge
             .execute_registered_bound(
@@ -951,6 +954,7 @@ impl AiRuntime {
                 registered,
                 &binding.policy_version,
                 &binding.authorization_state_digest,
+                effect_guard,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -960,6 +964,23 @@ impl AiRuntime {
             response,
             authorization,
         )
+    }
+
+    fn mutation_effect_guard(&self, prepared: &AiPreparedGraphqlMutation) -> Option<graphql_orm::graphql::orm::DependentDeleteGuard> {
+        self.dependent_effect_policy.as_ref().and_then(|policy| {
+            let capability = self.tool_catalog.mutation_capability(&prepared.descriptor.id)?;
+            if !matches!(capability.generated_category(), Some(graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory::Delete | graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory::DeleteMany)) { return None; }
+            let root = capability.generated_entity_name()?;
+            let effects = policy.declared_effects(capability.target_id(), root)?;
+            Some(graphql_orm::graphql::orm::DependentDeleteGuard::new(root.to_owned(), effects.iter().map(|effect| {
+                use graphql_orm::graphql::orm::DependentDeleteEffect;
+                let kind = match effect.effect() {
+                    crate::AiDependentEffectKind::Delete => DependentDeleteEffect::Delete(effect.entity().to_owned()),
+                    crate::AiDependentEffectKind::SetNull { field } => DependentDeleteEffect::SetNull(effect.entity().to_owned(), field.clone()),
+                };
+                (kind, effect.maximum_rows())
+            }).collect()))
+        })
     }
 
     fn validate_prepared_mutation(
@@ -1103,6 +1124,7 @@ impl AiRuntime {
                 &binding.policy_version,
                 &binding.authorization_state_digest,
                 escalated_automatic.then_some(AiApprovalRule::OneShot),
+                None,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
