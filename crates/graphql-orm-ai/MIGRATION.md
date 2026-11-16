@@ -34,8 +34,10 @@ Steps:
 1. **Rebind once.** Deploy, and let each retained fixed-broker session go
    through cleanup-and-rebind. Admit the four new broker definition
    fingerprints wherever you list them by value (hierarchical rule policy).
-   A provider registration that still carries the three version 1
-   definitions is refused by the Codex and Grok capability-binding checks.
+   A session stored under a version 1 binding fingerprint matches no
+   version 2 binding, so the provider-session fence refuses to resume it; the
+   Grok registration check also refuses a tool set that carries the three
+   version 1 definitions.
 2. **Host policy.** `AiCapabilityAuthorityPolicy` now sees
    `AiCapabilityKind::GeneratedEntity` entries at discover and describe, and
    each root's `GeneratedQuery` entry at describe, describe-type and execute.

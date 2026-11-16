@@ -414,9 +414,10 @@ What else the binding covers depends on the mode:
 | `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` (2) | keeps the retained session |
 
 Bumping the broker version changes the fixed broker definitions and every
-fixed-broker binding, so a session bound under version 1 rebinds once; a
-provider registration that still carries the version 1 definitions is
-refused. The four fixed broker definitions are the same for every catalogue, so a
+fixed-broker binding, so a session bound under version 1 matches no current
+binding and rebinds once; the Grok registration check also refuses a tool set
+that carries the version 1 definitions. The four fixed broker definitions are
+the same for every catalogue, so a
 retained fixed-broker session, and the chat it carries, survives a schema
 change in any target. The index is checked where it matters instead: every
 describe and execute compares the current index-set, index, schema, semantic
