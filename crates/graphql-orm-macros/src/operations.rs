@@ -2478,6 +2478,16 @@ fn generate_graphql_operations_unfiltered(
     let update_many_scope_enforcement = scope_enforcement("update_many")?;
     let delete_scope_enforcement = scope_enforcement("delete")?;
     let delete_many_scope_enforcement = scope_enforcement("delete_many")?;
+    let reject_unplanned_delete_effects = if entity_meta.dependent_deletes {
+        quote! {}
+    } else {
+        quote! {
+            if ctx.data_opt::<::graphql_orm::graphql::orm::DependentDeleteGuard>().is_some() {
+                return Err(::graphql_orm::async_graphql::Error::new("Dependent delete effect plan unavailable"));
+            }
+        }
+    };
+
     let subscription_scope_enforcement = scope_enforcement("subscription")?;
     let key_bind_from_key_tokens = if has_composite_primary_key {
         primary_key_fields
@@ -9623,6 +9633,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
+                #reject_unplanned_delete_effects
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #delete_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -9764,6 +9775,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery};
 
+                #reject_unplanned_delete_effects
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #delete_many_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(

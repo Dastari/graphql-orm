@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.166.0
+
+- Add request-local `DependentDeleteGuard`: compare admitted effects with the
+  introspected dependent-delete graph and enforce row bounds inside the write
+  transaction. Unknown and unsupported effect paths refuse. No default change.
+
+## Unreleased - AI 0.146.0, tool profiles 0.24.0
+
+- AI capability scale (part of #551): reviewed static read tools can sit behind the fixed broker instead of the provider surface, fixed-broker `describe` defines each repeated input type once, capability search no longer re-tokenises the catalogue, one oversized generated root no longer fails its target, large surfaces can opt into the fixed broker over native deferred loading, and a startup benchmark is published from CI. Also adds an opt-in host-held epoch anchor that keeps a file-level database restore closed (#572), an opt-in dependent-effect policy for generated deletes (#389), and opt-in strict query roots (#463). No schema change, and no fingerprint changes for a host that changes nothing. Opting into the delivery preference requires rebinding; see the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460) and [migration guidance](MIGRATION.md#ai-01450-to-01460-and-tool-profiles-0230-to-0240-capability-scale).
+
 ## Unreleased - ORM/macros 0.165.0, backup 0.26.0
 
 - **A snapshot restores in one transaction on PostgreSQL and SQLite (#574).** `restore_backup_rows` imports every table, runs the row-count and row-hash checks and commits once. A table the database refuses, or a failed check, rolls back the tables imported before it, so a failed restore leaves the target empty and can be retried without cleanup. The hash check used to run after each table's commit. `import_table_rows` still restores one table in its own transaction.
