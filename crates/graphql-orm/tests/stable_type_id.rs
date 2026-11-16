@@ -63,9 +63,15 @@ fn catalog(ops: &'static [GeneratedGraphqlOperationDescriptor]) -> GraphqlOperat
     GraphqlOperationCatalog::compose([(ops, true, true)])
 }
 #[test]
-fn default_fingerprint_from_main() {
-    // Captured at origin/main 0c53b384; rechecked after merging main 19e42ca4.
-    // Default SQLite profile; do not recapture from this branch.
+fn default_fingerprint_is_pinned_for_algorithm_v2() {
+    // `graphql-orm-sha256-len-v2`, default SQLite profile. The version 1
+    // values, which hashed the Rust module path, were
+    // ce2af58f85324bf49aa949f1b4326fbb3e3bcb481df6e074c921e96f84f836c7 and
+    // 7e62b13d0c914d59bd071830ab3dc3e513195adb72f5cbd6be3c1afe80a6c6a6.
+    assert_eq!(
+        GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM,
+        "graphql-orm-sha256-len-v2"
+    );
     let ops = original::Record::generated_graphql_operations();
     assert_eq!(
         ops[0].entity_rust_type(),
@@ -73,18 +79,23 @@ fn default_fingerprint_from_main() {
     );
     assert_eq!(
         ops[0].fingerprint(),
-        "ce2af58f85324bf49aa949f1b4326fbb3e3bcb481df6e074c921e96f84f836c7"
+        "43df67731872a606b06dc83153448b0e4dc56499f6c50685a3fd9c7d4d6081de"
     );
     assert_eq!(
         catalog(ops).fingerprint(),
-        "7e62b13d0c914d59bd071830ab3dc3e513195adb72f5cbd6be3c1afe80a6c6a6"
+        "57eaa5ce462f4719d04e768d58c01236d8ac010ea602d4524542ef3a79957a37"
     );
 }
 #[test]
-fn stable_identity_survives_module_moves() {
+fn fingerprints_survive_module_moves_without_any_declaration() {
+    // The same entity declared in another module, with no `stable_type_id`.
     let original = original::Record::generated_graphql_operations();
     let moved = moved::Record::generated_graphql_operations();
-    assert_ne!(original[0].fingerprint(), moved[0].fingerprint());
+    assert_ne!(original[0].entity_rust_type(), moved[0].entity_rust_type());
+    assert_eq!(
+        moved[0].diagnostic_rust_type(),
+        "stable_type_id::moved::Record"
+    );
     assert_eq!(
         original[0].entity_rust_type(),
         original[0].diagnostic_rust_type()
@@ -95,14 +106,20 @@ fn stable_identity_survives_module_moves() {
         a[0].diagnostic_rust_type(),
         "stable_type_id::stable_a::Record"
     );
-    assert_ne!(
-        catalog(original).fingerprint(),
-        catalog(moved).fingerprint()
-    );
-    for ops in [a, b] {
+    // A declared `stable_type_id` is accepted and changes no fingerprint.
+    for ops in [moved, a, b] {
+        assert_eq!(original.len(), ops.len());
         assert_eq!(catalog(original).fingerprint(), catalog(ops).fingerprint());
+        assert_eq!(
+            catalog(original).router_export_fingerprint(),
+            catalog(ops).router_export_fingerprint()
+        );
         for (before, after) in original.iter().zip(ops) {
             assert_eq!(before.fingerprint(), after.fingerprint());
+            assert_eq!(
+                before.authorization_fingerprint(),
+                after.authorization_fingerprint()
+            );
             assert_eq!(
                 before.router_export_fingerprint(),
                 after.router_export_fingerprint()
@@ -122,8 +139,8 @@ fn composition_rejects_duplicate_identity() {
 #[test]
 fn tool_binding_survives_move() {
     use graphql_orm_ai_tool_profiles::{GraphqlExecutionTargetId, GraphqlOperationContract};
-    let before = catalog(stable_a::Record::generated_graphql_operations());
-    let after = catalog(stable_b::Record::generated_graphql_operations());
+    let before = catalog(original::Record::generated_graphql_operations());
+    let after = catalog(moved::Record::generated_graphql_operations());
     let operation = before
         .operations()
         .iter()

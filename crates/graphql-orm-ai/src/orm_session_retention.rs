@@ -6315,15 +6315,25 @@ mod tests {
             .expect("checkpoint tool dependency should bind");
     }
 
+    // The seeded session has a single message, so position 1 is its only valid
+    // checkpoint position, and a session holds one checkpoint per position.
     async fn seed_context_checkpoints(database: &Database<SqliteBackend>, session_id: Uuid) {
-        for index in 0..2 {
+        seed_context_checkpoint_positions(database, session_id, &[1]).await;
+    }
+
+    async fn seed_context_checkpoint_positions(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        positions: &[i64],
+    ) {
+        for through_sequence in positions {
             AiContextCheckpointRecord::insert(
                 database,
                 CreateAiContextCheckpointRecordInput {
                     id: Uuid::new_v4(),
                     session_id,
-                    through_sequence: 1,
-                    source_hash: format!("context-source-{index}"),
+                    through_sequence: *through_sequence,
+                    source_hash: format!("context-source-{through_sequence}"),
                     token_estimate: 10,
                     provider_kind: "mock".to_owned(),
                     provider_model: "retention-test".to_owned(),
@@ -6647,7 +6657,7 @@ mod tests {
         assert_eq!(report.sessions_scanned, 1);
         assert_eq!(report.sessions_changed, 1);
         assert_eq!(report.live_delta_events_deleted, 1);
-        assert_eq!(report.context_checkpoints_invalidated, 2);
+        assert_eq!(report.context_checkpoints_invalidated, 1);
         assert_eq!(report.message_contents_purged, 1);
         assert_eq!(report.message_blocks_deleted, 1);
         assert!(report.next_session_cursor.is_none());
@@ -6777,7 +6787,9 @@ mod tests {
         seed_policy(&database, &scope).await;
         let session_id = seed_session(&database, &scope).await;
         let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
-        seed_context_checkpoints(&database, session_id).await;
+        // Two checkpoints against a bound of one. The bound is checked before
+        // any checkpoint is read, so the second position is never validated.
+        seed_context_checkpoint_positions(&database, session_id, &[1, 2]).await;
         let limits = AiSessionRetentionLimits::new_with_context_checkpoints(10, 10, 1, 10, 100)
             .expect("retention limits should validate");
         let service = OrmAiSessionRetentionService::new(
@@ -6870,21 +6882,14 @@ mod tests {
         assert_eq!(report.message_contents_purged, 0);
         assert_eq!(report.message_blocks_deleted, 0);
 
-        let next_page = service
-            .prune_session_content(None)
-            .await
-            .expect("next bounded deleting-session retention pass should succeed");
-        assert_eq!(next_page.sessions_changed, 1);
-        assert_eq!(next_page.deleting_session_events_deleted, 1);
-        assert_eq!(next_page.deleting_session_context_checkpoints_deleted, 1);
-        assert_eq!(next_page.message_contents_purged, 0);
-
+        // The one context checkpoint is already gone, so the pass that deletes
+        // the last event also reaches the message content.
         let content_page = service
             .prune_session_content(None)
             .await
             .expect("post-checkpoint deleting-session retention pass should succeed");
         assert_eq!(content_page.sessions_changed, 1);
-        assert_eq!(content_page.deleting_session_events_deleted, 0);
+        assert_eq!(content_page.deleting_session_events_deleted, 1);
         assert_eq!(content_page.deleting_session_context_checkpoints_deleted, 0);
         assert_eq!(content_page.message_contents_purged, 1);
         assert_eq!(content_page.message_blocks_deleted, 1);
@@ -6994,7 +6999,9 @@ mod tests {
         assert!(events.is_empty());
         assert!(context_checkpoints.is_empty());
         assert!(run_checkpoints.is_empty());
-        assert_eq!(audits.len(), 8);
+        // One audit per changing pass; the single context checkpoint needs one
+        // pass fewer than two did.
+        assert_eq!(audits.len(), 7);
         assert_eq!(
             audits
                 .iter()
@@ -7007,7 +7014,7 @@ mod tests {
                 .iter()
                 .filter(|audit| audit.reason_code == "session_deletion_retention_expired")
                 .count(),
-            6
+            5
         );
         assert_eq!(
             audits

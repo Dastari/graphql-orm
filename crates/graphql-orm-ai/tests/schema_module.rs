@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.81.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.82.0");
     assert_eq!(catalog.entities().len(), 49);
     assert!(
         catalog
@@ -464,4 +464,200 @@ fn ai_schema_identifiers_fit_postgres_identifier_limit() {
             .starts_with("idx_graphql_orm_ai_provider_webhook_receipts_p_")
             && index.name.len() == 63
     }));
+}
+
+/// Schema module 0.82.0 adds three unique indexes. A store at 0.81.0 whose rows
+/// already repeat one of those keys is refused with a typed error before any
+/// migration statement runs, and upgrades once the repeated row is resolved.
+#[cfg(feature = "sqlite")]
+mod unique_constraint_upgrade {
+    use graphql_orm::graphql::orm::{
+        ApplyOptions, MigrationStep, OrmSchemaModule, SchemaModuleCatalog, UniqueIndexDuplicates,
+    };
+    use graphql_orm::prelude::{Database, SqliteBackend};
+    use graphql_orm::uuid::Uuid;
+    use graphql_orm_ai::AiSchemaModule;
+
+    const CHECKPOINTS: &str = "graphql_orm_ai_context_checkpoints";
+
+    /// The added unique indexes, as (table, key columns).
+    const ADDED: [(&str, &[&str]); 3] = [
+        ("graphql_orm_ai_approvals", &["tool_call_id"]),
+        (
+            "graphql_orm_ai_run_attempts",
+            &["run_id", "lease_generation"],
+        ),
+        (CHECKPOINTS, &["session_id", "through_sequence"]),
+    ];
+
+    fn added_index_names() -> Vec<String> {
+        let module = AiSchemaModule;
+        let catalog = SchemaModuleCatalog::compose(&[&module]).expect("AI module should compose");
+        let model = catalog.schema_model();
+        ADDED
+            .iter()
+            .map(|(table, columns)| {
+                model
+                    .tables
+                    .iter()
+                    .find(|candidate| candidate.table_name == *table)
+                    .and_then(|table| {
+                        table
+                            .indexes
+                            .iter()
+                            .find(|index| index.is_unique && index.columns == *columns)
+                    })
+                    .map(|index| index.name.to_owned())
+                    .unwrap_or_else(|| panic!("{table} should declare a unique index"))
+            })
+            .collect()
+    }
+
+    async fn existing_indexes(database: &Database<SqliteBackend>, names: &[String]) -> Vec<String> {
+        let mut found = Vec::new();
+        for name in names {
+            let present = graphql_orm::sqlx::query_as::<_, (i64,)>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .bind(name)
+            .fetch_one(database.pool())
+            .await
+            .expect("index catalogue should read")
+            .0;
+            if present == 1 {
+                found.push(name.clone());
+            }
+        }
+        found
+    }
+
+    async fn insert_checkpoint(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        through_sequence: i64,
+    ) -> Result<String, graphql_orm::sqlx::Error> {
+        let id = Uuid::new_v4().to_string();
+        graphql_orm::sqlx::query(&format!(
+            "INSERT INTO {CHECKPOINTS} (id, session_id, through_sequence, source_hash, \
+             token_estimate, provider_kind, provider_model, protected_summary) \
+             VALUES (?, ?, ?, 'source', 1, 'mock', 'upgrade-test', '{{}}')"
+        ))
+        .bind(&id)
+        .bind(session_id.to_string())
+        .bind(through_sequence)
+        .execute(database.pool())
+        .await
+        .map(|_| id)
+    }
+
+    #[tokio::test]
+    async fn upgrade_refuses_existing_duplicate_keys_before_any_ddl_then_applies_once_clean() {
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let module = AiSchemaModule;
+        let initial = database
+            .schema()
+            .plan_migration_to_entities("ai-unique-v1", "AI module", module.entities())
+            .await
+            .expect("AI module should plan");
+        database
+            .schema()
+            .apply_migration(&initial, ApplyOptions::default())
+            .await
+            .expect("AI module should apply");
+
+        // Reproduce a schema module 0.81.0 store: the three indexes are absent
+        // and one of the keys already repeats.
+        let names = added_index_names();
+        for name in &names {
+            graphql_orm::sqlx::query(&format!("DROP INDEX \"{name}\""))
+                .execute(database.pool())
+                .await
+                .expect("added unique index should drop");
+        }
+        let session_id = Uuid::new_v4();
+        insert_checkpoint(&database, session_id, 7)
+            .await
+            .expect("first checkpoint should insert");
+        let duplicate = insert_checkpoint(&database, session_id, 7)
+            .await
+            .expect("a 0.81.0 store accepts the repeated key");
+        insert_checkpoint(&database, session_id, 8)
+            .await
+            .expect("a distinct key should insert");
+
+        let upgrade = database
+            .schema()
+            .plan_migration_to_entities("ai-unique-v2", "unique indexes", module.entities())
+            .await
+            .expect("upgrade should plan");
+        assert_eq!(upgrade.steps.len(), 3, "{:?}", upgrade.statements);
+        for (table, columns) in ADDED {
+            assert!(upgrade.steps.iter().any(|step| matches!(
+                &step.step,
+                MigrationStep::CreateIndex { table_name, index }
+                    if table_name == table && index.is_unique && index.columns == columns
+            )));
+        }
+
+        let refused = database
+            .schema()
+            .apply_migration(&upgrade, ApplyOptions::default())
+            .await
+            .expect_err("repeated keys must refuse the upgrade");
+        let duplicates = UniqueIndexDuplicates::from_error(&refused)
+            .unwrap_or_else(|| panic!("refusal should be typed: {refused:?}"));
+        assert_eq!(duplicates.table, CHECKPOINTS);
+        assert_eq!(duplicates.columns, ["session_id", "through_sequence"]);
+        assert!(names.contains(&duplicates.index));
+        // Nothing ran: no index was created, including those on clean tables,
+        // and the version was not recorded.
+        assert_eq!(
+            existing_indexes(&database, &names).await,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            database
+                .schema()
+                .current_version()
+                .await
+                .expect("version should read"),
+            Some("ai-unique-v1".to_owned())
+        );
+
+        // The host resolves the duplicate and applies the same plan.
+        let removed = graphql_orm::sqlx::query(&format!("DELETE FROM {CHECKPOINTS} WHERE id = ?"))
+            .bind(&duplicate)
+            .execute(database.pool())
+            .await
+            .expect("duplicate checkpoint should delete")
+            .rows_affected();
+        assert_eq!(removed, 1);
+        database
+            .schema()
+            .apply_migration(&upgrade, ApplyOptions::default())
+            .await
+            .expect("a clean store should upgrade");
+        let mut created = existing_indexes(&database, &names).await;
+        created.sort();
+        let mut expected = names.clone();
+        expected.sort();
+        assert_eq!(created, expected);
+        assert!(
+            database
+                .schema()
+                .plan_migration_to_entities("ai-unique-v3", "replan", module.entities())
+                .await
+                .expect("replan should succeed")
+                .steps
+                .is_empty()
+        );
+
+        // The constraint now holds for new rows.
+        assert!(insert_checkpoint(&database, session_id, 7).await.is_err());
+        insert_checkpoint(&database, session_id, 9)
+            .await
+            .expect("a new key should insert");
+    }
 }

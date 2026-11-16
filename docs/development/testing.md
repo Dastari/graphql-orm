@@ -304,11 +304,14 @@ scripts/run-owned-database-lanes.sh ai-postgres
 
 `scripts/run-owned-database-lanes.sh page-limit-contract` runs
 `page_limit_contract` (the opt-in oversized page refusal, the declared
-`schema_roots!` maximum and host keyset maxima) on SQLite, an owned PostgreSQL
+`schema_roots!` maximum, host keyset maxima and exact host connection pages) on SQLite, an owned PostgreSQL
 container and an owned SQL Server container.
 `scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
 authorized page regressions (`authorized_page_context_binding`) on SQLite,
 PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
+`scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
+unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
+predicate column, duplicate keys inside the filter, and duplicates outside it.
 
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order

@@ -10,12 +10,22 @@ supersedes: []
 
 # Migration Guide
 
-## 0.23.0 to 0.24.0: runtime live keys under default identities
+## 0.24.0 to 0.25.0: runtime live keys under default identities
 
 **No action.** Runtime collections with live subscriptions and a node identity
 compile under both ORM identity modes: the default `RuntimeInt64` strings and
 the opt-in `with_legacy_int_identities()`. Capability sets and fingerprints are
 unchanged for schemas that already compiled. No SDL or data migration is needed.
+
+## 0.23.0 to 0.24.0: operation fingerprint algorithm v2
+
+**Action needed.** Upgrade together with operation catalogue 0.9.0 and
+ORM/macros 0.160.0. Generated-operation fingerprints no longer include the
+Rust module path, so every operation and catalogue fingerprint changes once.
+Regenerate tool manifests and operation contracts from the upgraded catalogue;
+ones bound under `graphql-orm-sha256-len-v1` are refused as stale. No Rust API
+or data change. Host steps are in the root
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 

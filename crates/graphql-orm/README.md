@@ -10,17 +10,32 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.160.0 (placeholder for the breaking batch) fixes each schema's
+Version 0.161.0 (placeholder for the breaking batch) fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side
-keyset pages refuse a limit above the maximum instead of returning fewer
-rows; runtime GraphQL serves `RecordVersion` and integer live keys as
-`RuntimeInt64` strings; an uncoded host callback error reads as
-`INTERNAL_ERROR` unless the host opts in; and the policy-free relation preload
-API is removed. `#[graphql_entity(key_only_deletes)]` adds an opt-in key-only
-delete signal for `Key`/`Keys` subscribers. Every item needs action; see the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+keyset pages and host `paginate(PageInput)` connection and search reads
+refuse a limit above the maximum instead of returning fewer rows; runtime
+GraphQL serves `RecordVersion` and integer live keys as `RuntimeInt64`
+strings; an uncoded host callback error reads as `INTERNAL_ERROR` unless the
+schema's `Database` opts in; and the policy-free relation preload API and
+string-key relation loads are removed. `#[graphql_entity(key_only_deletes)]`
+adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
+items need action.
 
+Version 0.160.0 (placeholder, **breaking fingerprints**) uses operation
+catalogue 0.9.0: generated-operation fingerprints no longer include the Rust
+module path, so moving an entity keeps them and every fingerprint changes once
+at this upgrade. `stable_type_id` is still accepted and no longer affects
+fingerprints. Applying a planned migration now refuses, before any statement
+runs, a new unique index whose key existing rows repeat
+(`UniqueIndexDuplicates`). For conditional indexes, the check applies the
+structured closed-set predicate and examines only included rows. If the plan
+adds either a key column or the predicate column, the database enforces
+uniqueness when creating the index instead of running the preflight. Predicate
+dependencies come from metadata, not SQL text; predicates that cannot be
+analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
 Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead

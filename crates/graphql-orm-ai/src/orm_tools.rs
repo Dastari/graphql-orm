@@ -1420,9 +1420,8 @@ impl OrmAiApplicationToolCallService {
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
         let operation = crate::AiCapabilityBrokerOperation::from_tool_id(provider_call.tool_id())
             .ok_or(AiError::Forbidden)?;
-        let expected = crate::capability_broker_definitions(delivery.index_fingerprint())?
-            .into_iter()
-            .find(|definition| definition.tool_id == operation.tool_id())
+        let expected = delivery
+            .broker_definition(operation)
             .ok_or(AiError::Forbidden)?;
         let offered = provider_result
             .request_snapshot()
@@ -4601,17 +4600,45 @@ fn valid_audit_reference(value: &str) -> bool {
 
 /// A correction is selected only after loaded-capability authorization and a
 /// failed local compile. It contains no model values, schema values or errors.
+///
+/// The two stale outcomes carry a fixed recovery instruction instead. Each is
+/// a crate-authored constant selected by the exact safe error alone, so it
+/// discloses nothing about the catalogue beyond the code it accompanies.
 struct BrokerCallFailure {
     error: AiError,
-    correction: Option<&'static str>,
+    correction: Option<BrokerCorrection>,
 }
+
+#[derive(Clone, Copy)]
+struct BrokerCorrection {
+    text: &'static str,
+    disclosure_contract: &'static [u8],
+}
+
+const QUERY_PLAN_CORRECTION_CONTRACT: &[u8] = b"graphql-orm-ai/capability-query-plan-correction/v2";
+
+const CAPABILITY_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
+    text: "Nothing was executed. The published capability catalogue changed after this capability was discovered or described, so its candidateFingerprint, planSchema and loadedReference are no longer valid. Call discover again, describe the new candidate, then issue a new call using only the new planSchema and loadedReference.",
+    disclosure_contract: b"graphql-orm-ai/capability-stale-correction/v1",
+};
+
+const SELECTION_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
+    text: "Nothing was executed. This run does not hold that candidate or loadedReference; it may have expired. Call discover to obtain a current candidate, describe it, then issue a new call with the returned loadedReference.",
+    disclosure_contract: b"graphql-orm-ai/capability-selection-stale-correction/v1",
+};
 
 impl From<AiError> for BrokerCallFailure {
     fn from(error: AiError) -> Self {
-        Self {
-            error,
-            correction: None,
-        }
+        let correction = match &error {
+            AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_STALE => {
+                Some(CAPABILITY_STALE_CORRECTION)
+            }
+            AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_SELECTION_STALE => {
+                Some(SELECTION_STALE_CORRECTION)
+            }
+            _ => None,
+        };
+        Self { error, correction }
     }
 }
 
@@ -4634,12 +4661,16 @@ impl BrokerCallFailure {
                         })
                     })
             };
-            Some(if unsupported("relationshipMaximumItems") {
+            let text = if unsupported("relationshipMaximumItems") {
                 "Remove relationshipMaximumItems entries not listed in planSchema.properties.relationshipMaximumItems.properties. If that properties object is empty, send relationshipMaximumItems as an empty array. Use the described relationshipArguments for connection paging; do not add a collection bound. Issue a new corrected call."
             } else if unsupported("relationshipArguments") {
                 "Remove relationshipArguments entries not listed in planSchema.properties.relationshipArguments.properties. Use only the described argument names and types, then issue a new corrected call."
             } else {
                 "The query was not executed. Compare the plan with the described planSchema: use only its exact selection paths, argument types and paging limits, omit unsupported bounds, then issue a new corrected call."
+            };
+            Some(BrokerCorrection {
+                text,
+                disclosure_contract: QUERY_PLAN_CORRECTION_CONTRACT,
             })
         } else {
             None
@@ -4654,10 +4685,8 @@ impl BrokerCallFailure {
         let mut output = crate::AiApplicationToolFailureEnvelope::new(code).to_json();
         let fingerprint = if let Some(correction) = self.correction {
             output["version"] = json!(2);
-            output["correction"] = json!(correction);
-            hex::encode(Sha256::digest(
-                b"graphql-orm-ai/capability-query-plan-correction/v2",
-            ))
+            output["correction"] = json!(correction.text);
+            hex::encode(Sha256::digest(correction.disclosure_contract))
         } else {
             safe_failure_disclosure_fingerprint()
         };
@@ -4789,6 +4818,43 @@ mod broker_correction_tests {
             assert_ne!(fingerprint, safe_failure_disclosure_fingerprint());
             assert!(output.to_string().len() < 1024);
         }
+    }
+
+    #[test]
+    fn stale_outcomes_carry_distinct_codes_and_fixed_recovery_instructions() {
+        use crate::AiApplicationToolFailureCode as Code;
+        let mut seen = std::collections::BTreeSet::new();
+        for (message, expected_code, expected) in [
+            (
+                crate::AI_CAPABILITY_STALE,
+                Code::CapabilityStale,
+                "catalogue changed",
+            ),
+            (
+                crate::AI_CAPABILITY_SELECTION_STALE,
+                Code::SelectionStale,
+                "does not hold",
+            ),
+        ] {
+            let failure = BrokerCallFailure::from(AiError::InvalidInput(message.to_owned()));
+            let code = crate::classify_safe_application_tool_error(&failure.error)
+                .expect("stale outcomes are model-visible");
+            assert_eq!(code, expected_code);
+            let (output, fingerprint) = failure.model_failure(code);
+            assert_eq!(output["code"], expected_code.as_str());
+            assert_eq!(output["retryable"], true);
+            assert_eq!(output["version"], 2);
+            let correction = output["correction"].as_str().unwrap();
+            assert!(correction.contains(expected), "{correction}");
+            assert!(correction.contains("discover"));
+            assert!(output.to_string().len() < 1024);
+            assert_ne!(fingerprint, safe_failure_disclosure_fingerprint());
+            assert!(seen.insert(fingerprint));
+            assert!(seen.insert(output["code"].to_string()));
+        }
+        // Other safe input failures keep the plain envelope.
+        let failure = BrokerCallFailure::from(AiError::InvalidInput("other".to_owned()));
+        assert!(failure.correction.is_none());
     }
 
     #[test]
