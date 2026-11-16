@@ -327,13 +327,15 @@ pub async fn entity_capability_round_trip(database: Database) {
             .any(|field| field["name"] == "eq")
     );
     let selection = expand("select").await;
-    assert!(
-        selection["fields"]
-            .as_array()
-            .expect("selection fields")
-            .iter()
-            .any(|field| field["name"] == "subject")
-    );
+    let subject_field = selection["fields"]
+        .as_array()
+        .expect("selection fields")
+        .iter()
+        .find(|field| field["name"] == "subject")
+        .expect("subject selection")
+        .clone();
+    // The root selection carries the field's own index description.
+    assert_eq!(subject_field["description"], "Reviewed record subject");
 
     let mut execute = json!({
         "loadedReference": described.loaded_reference(),

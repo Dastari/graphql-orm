@@ -348,8 +348,9 @@ describe, `graphql.capabilities.describe_type` and execute.
   name: one from `inputTypes`, `select`, or `select.<path>` for a
   relationship path. It returns the type's fields (name, type, whether
   required, description), an enum's values, or a selection level (scalars,
-  and relationships with their arguments and `maximumItems`), at most 128 per
-  page with `offset` and `nextOffset`.
+  and relationships with their arguments and `maximumItems`; the root level
+  also carries each field's index description), at most 128 per page with
+  `offset` and `nextOffset`.
 - **Execute** takes `operation` and the same flattened arguments and
   selection paths as before. `operation` may be omitted when the description
   admitted exactly one operation.

@@ -1,6 +1,6 @@
 //! Provider-neutral capability delivery, loading, and run fencing.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
@@ -2676,6 +2676,9 @@ pub struct AiCapabilityTypeRequest {
     type_name: String,
     offset: u32,
     limit: u16,
+    /// Index descriptions of the capability's top-level scalar fields and
+    /// relationships, added to the root selection page.
+    field_descriptions: BTreeMap<String, String>,
 }
 
 impl AiCapabilityTypeRequest {
@@ -2701,6 +2704,9 @@ impl AiCapabilityTypeRequest {
 
     /// Renders the page from the operation's signature.
     ///
+    /// The root selection page also carries each top-level field's
+    /// model-safe index description.
+    ///
     /// # Errors
     ///
     /// Returns [`AiError::InvalidInput`] carrying
@@ -2712,6 +2718,23 @@ impl AiCapabilityTypeRequest {
         let mut page = signature
             .describe_type(&self.type_name, self.offset, self.limit)
             .ok_or_else(|| AiError::InvalidInput(AI_CAPABILITY_TYPE_UNKNOWN.to_owned()))?;
+        if self.type_name == crate::AI_CAPABILITY_SELECTION_TYPE
+            && let Some(fields) = page
+                .get_mut("fields")
+                .and_then(serde_json::Value::as_array_mut)
+        {
+            for field in fields {
+                let description = field
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|name| self.field_descriptions.get(name))
+                    .filter(|description| !description.is_empty())
+                    .cloned();
+                if let (Some(object), Some(description)) = (field.as_object_mut(), description) {
+                    object.insert("description".to_owned(), json!(description));
+                }
+            }
+        }
         if let Some(object) = page.as_object_mut() {
             object.insert("operation".to_owned(), json!(self.operation.operation_name));
         }
@@ -3014,8 +3037,24 @@ impl AiCapabilityDiscoveryBroker {
                 parsed.operation.as_deref(),
             )
             .await?;
+        let field_descriptions = self
+            .current_indexes
+            .current_index_set(run)?
+            .entry(&loaded.capability_id)
+            .map(|(_, entry)| {
+                entry
+                    .scalar_fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.description.clone()))
+                    .chain(entry.relationships.iter().map(|relationship| {
+                        (relationship.name.clone(), relationship.description.clone())
+                    }))
+                    .collect()
+            })
+            .unwrap_or_default();
         session.record_describe_type();
         Ok(AiCapabilityTypeRequest {
+            field_descriptions,
             operation: AiCapabilityDescribedOperation {
                 operation_name: target.operation_name,
                 capability_id: target.capability_id,
