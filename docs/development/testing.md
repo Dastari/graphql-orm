@@ -20,6 +20,10 @@ compiler's diagnostics, and the locked S3/Azure SDK lane requires Rust 1.94.1
 or newer. Rust 1.90.0 is the separate router minimum-version lane; it is not
 a workspace-wide compiler requirement.
 
+The `runtime-live` owned lane includes the runtime GraphQL CI test sets for
+SQLite and PostgreSQL, including assurance, format, many-to-many and long-table
+search regressions.
+
 The `callback-errors` owned lane runs callback refusal and keyset compatibility
 regressions on SQLite and a test-owned PostgreSQL container:
 `bash scripts/run-owned-database-lanes.sh callback-errors`. SQL Server callback
