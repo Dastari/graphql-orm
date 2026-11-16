@@ -574,27 +574,78 @@ impl MssqlPool {
         self.typed_restore_refusal(result).await
     }
 
-    /// Replace the server's refusal of the restore gate with the typed
-    /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) error.
+    /// Replace the server's refusal of the restore gate with a typed error:
+    /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) when a
+    /// restore holds the lock or its marker is present, and
+    /// [`RestoreStateUnavailable`](crate::graphql::orm::RestoreStateUnavailable)
+    /// when the gate could not read the marker at all.
     async fn typed_restore_refusal<T>(&self, result: crate::Result<T>) -> crate::Result<T> {
         match result {
-            Err(error) if is_restore_refusal(&error) => Err(self.restore_in_progress_error().await),
-            other => other,
+            Err(error) => match restore_refusal(&error) {
+                Some(RestoreRefusal::InProgress) => Err(self.restore_in_progress_error().await),
+                Some(RestoreRefusal::Unavailable(reason)) => {
+                    Err(restore_state_unavailable(reason, error))
+                }
+                None => Err(error),
+            },
+            ok => ok,
         }
     }
 
     async fn restore_in_progress_error(&self) -> sqlx::Error {
-        // A restore that holds the lock but has not recorded its marker yet
-        // has no identifier to report.
-        let marker = self.read_restore_marker().await.ok().flatten();
-        let (restore_id, started_at) = marker.unwrap_or_default();
-        crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
+        match self.read_restore_marker().await {
+            Ok(marker) => {
+                // A restore that holds the lock but has not recorded its
+                // marker yet has no identifier to report.
+                let (restore_id, started_at) = marker.unwrap_or_default();
+                crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
+            }
+            // The marker cannot be read now: say so instead of naming a restore.
+            Err(unavailable) => unavailable,
+        }
     }
 
-    /// The restore marker row, if the marker table exists and holds one.
+    /// Install the canonical infrastructure table as the schema owner, before
+    /// using the ORM. Runtime roles need SELECT; restore roles also need INSERT
+    /// and DELETE. This does not clear an existing marker.
+    ///
+    /// Idempotent and safe to run from several replicas at once: installs
+    /// serialise on an application lock, a table created by someone else in
+    /// the meantime (error 2714) counts as installed, and the table's shape is
+    /// verified afterwards, so a table of the wrong shape fails here rather
+    /// than at runtime.
+    ///
+    /// Needs a pool built with the explicit external-writable constructor.
+    pub async fn install_restore_marker(&self) -> crate::Result<()> {
+        self.require_external_writable()?;
+        let mut lease = self.acquire().await?;
+        let result = self
+            .bounded(execute_with_client(
+                &mut lease.client,
+                CREATE_RESTORE_MARKER,
+                &[],
+            ))
+            .await;
+        self.finish(lease, result).await.map(|_| ())
+    }
+
+    /// The restore marker row. Unreadable or missing infrastructure fails
+    /// closed with [`RestoreStateUnavailable`](crate::graphql::orm::RestoreStateUnavailable),
+    /// which says why.
     pub(crate) async fn read_restore_marker(&self) -> crate::Result<Option<(String, i64)>> {
-        let rows = self.fetch_rows_ungated(READ_RESTORE_MARKER, &[]).await?;
-        rows.first().map(restore_marker_from_row).transpose()
+        let rows = self
+            .fetch_rows_ungated(READ_RESTORE_MARKER, &[])
+            .await
+            .map_err(|error| restore_state_unavailable(classify_marker_error(&error), error))?;
+        rows.first()
+            .map(restore_marker_from_row)
+            .transpose()
+            .map_err(|error| {
+                restore_state_unavailable(
+                    crate::graphql::orm::RestoreStateUnavailableReason::Other,
+                    error,
+                )
+            })
     }
 
     /// Take the exclusive restore lock on a dedicated connection and record
@@ -627,7 +678,6 @@ impl MssqlPool {
             return self.typed_restore_refusal(Err(failure.error)).await;
         }
         let claimed = async {
-            execute_with_client(&mut lease.client, CREATE_RESTORE_MARKER, &[]).await?;
             let id = [SqlValue::String(restore_id.to_string())];
             if !resume {
                 execute_with_client(&mut lease.client, INSERT_RESTORE_MARKER, &id).await?;
@@ -637,7 +687,7 @@ impl MssqlPool {
         let rows = self
             .bounded(claimed)
             .await
-            .map_err(|failure| failure.error)?;
+            .map_err(|failure| marker_access_error(failure.error))?;
         match rows.first().map(restore_marker_from_row).transpose()? {
             Some((present, _)) if present == restore_id => Ok(MssqlRestore {
                 pool: self.clone(),
@@ -869,19 +919,50 @@ const RESTORE_LOCK_WAIT_MS: u32 = 250;
 /// Prefix of the message the restore gate raises.
 const RESTORE_REFUSAL: &str = "graphql-orm restore in progress";
 
-const READ_RESTORE_MARKER: &str = "IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NOT NULL \
-     SELECT restore_id, started_at FROM [__graphql_orm_restore_marker] \
-     ELSE SELECT CAST(NULL AS NVARCHAR(200)) AS restore_id, CAST(NULL AS BIGINT) AS started_at WHERE 1 = 0";
+/// Prefix of the message the restore gate raises when it cannot read the
+/// marker. The server error number follows `error `.
+const RESTORE_UNAVAILABLE: &str = "graphql-orm restore state unavailable";
 
-const CREATE_RESTORE_MARKER: &str = "IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NULL \
-     CREATE TABLE [__graphql_orm_restore_marker] (\
-     marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), \
-     restore_id NVARCHAR(200) NOT NULL, \
-     started_at BIGINT NOT NULL)";
+const READ_RESTORE_MARKER: &str =
+    "SELECT restore_id, started_at FROM [dbo].[__graphql_orm_restore_marker]";
 
-const INSERT_RESTORE_MARKER: &str = "INSERT INTO [__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
+/// Install batch for the marker table: serialised on a session application
+/// lock (not a transaction, which error 2714 would doom), tolerant of a
+/// concurrent creator (2714), and ending in a shape check.
+const CREATE_RESTORE_MARKER: &str = "\
+     DECLARE @gorm_install_lock INT, @gorm_install_error INT; \
+     EXEC @gorm_install_lock = sp_getapplock @Resource = N'graphql_orm_restore_marker_install', \
+         @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 30000; \
+     IF @gorm_install_lock < 0 \
+         THROW 50000, N'graphql-orm restore marker install: another installation held the install lock too long', 1; \
+     BEGIN TRY \
+         IF OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') IS NULL \
+         CREATE TABLE [dbo].[__graphql_orm_restore_marker] (\
+         marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), \
+         restore_id NVARCHAR(200) NOT NULL, \
+         started_at BIGINT NOT NULL); \
+     END TRY \
+     BEGIN CATCH \
+         SET @gorm_install_error = ERROR_NUMBER(); \
+         IF @gorm_install_error <> 2714 BEGIN \
+             EXEC sp_releaseapplock @Resource = N'graphql_orm_restore_marker_install', @LockOwner = 'Session'; \
+             THROW; \
+         END; \
+     END CATCH; \
+     EXEC sp_releaseapplock @Resource = N'graphql_orm_restore_marker_install', @LockOwner = 'Session'; \
+     IF OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') IS NULL \
+        OR (SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U')) <> 3 \
+        OR (SELECT COUNT(*) FROM sys.columns AS c JOIN sys.types AS t ON t.user_type_id = c.user_type_id \
+            WHERE c.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND c.is_nullable = 0 AND ( \
+                (c.name = N'marker_key' AND t.name = N'tinyint') \
+                OR (c.name = N'restore_id' AND t.name = N'nvarchar' AND c.max_length = 400) \
+                OR (c.name = N'started_at' AND t.name = N'bigint'))) <> 3 \
+        OR NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND is_primary_key = 1) \
+         THROW 50000, N'dbo.__graphql_orm_restore_marker exists but does not have the documented shape', 1;";
+
+const INSERT_RESTORE_MARKER: &str = "INSERT INTO [dbo].[__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
      SELECT 1, @P1, DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()) \
-     WHERE NOT EXISTS (SELECT 1 FROM [__graphql_orm_restore_marker])";
+     WHERE NOT EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker])";
 
 fn restore_marker_from_row(row: &MssqlRow) -> crate::Result<(String, i64)> {
     Ok((row.try_get("restore_id")?, row.try_get("started_at")?))
@@ -907,9 +988,13 @@ fn restore_gate(owner: &str, undo: &str) -> String {
         "EXEC sp_getapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockMode = 'Shared', @LockOwner = '{owner}', @LockTimeout = {RESTORE_LOCK_WAIT_MS}; \
          IF APPLOCK_MODE('public', N'{RESTORE_LOCK_RESOURCE}', '{owner}') = 'NoLock' BEGIN {undo} \
          RAISERROR(N'{RESTORE_REFUSAL}: the restore lock is held', 16, 1); RETURN; END; \
-         IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NOT NULL BEGIN \
-         IF EXISTS (SELECT 1 FROM [__graphql_orm_restore_marker]) BEGIN {release} {undo} \
-         RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END; END;"
+         DECLARE @gorm_restore_present BIT, @gorm_restore_error INT; BEGIN TRY \
+         EXEC sp_executesql N'SELECT @present = CASE WHEN EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker]) THEN 1 ELSE 0 END', \
+         N'@present BIT OUTPUT', @present = @gorm_restore_present OUTPUT; \
+         END TRY BEGIN CATCH SET @gorm_restore_error = ERROR_NUMBER(); {release} {undo} \
+         RAISERROR(N'{RESTORE_UNAVAILABLE}: marker read failed with error %d', 16, 1, @gorm_restore_error); RETURN; END CATCH; \
+         IF @gorm_restore_present IS NULL OR @gorm_restore_present <> 0 BEGIN {release} {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END;"
     )
 }
 
@@ -964,11 +1049,78 @@ fn requires_own_batch(sql: &str) -> bool {
     )
 }
 
-/// Whether `error` is the restore gate's refusal.
-fn is_restore_refusal(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .is_some_and(|database| database.message().starts_with(RESTORE_REFUSAL))
+/// What the restore gate's refusal reports.
+enum RestoreRefusal {
+    /// The restore lock is held or a marker row is present.
+    InProgress,
+    /// The marker could not be read.
+    Unavailable(crate::graphql::orm::RestoreStateUnavailableReason),
+}
+
+/// The restore gate's refusal carried by `error`, if it is one.
+fn restore_refusal(error: &sqlx::Error) -> Option<RestoreRefusal> {
+    let message = error.as_database_error()?.message();
+    if let Some(detail) = message.strip_prefix(RESTORE_UNAVAILABLE) {
+        let number = detail
+            .rsplit("error ")
+            .next()
+            .and_then(|digits| digits.trim().parse::<u32>().ok());
+        return Some(RestoreRefusal::Unavailable(marker_error_reason(number)));
+    }
+    message
+        .starts_with(RESTORE_REFUSAL)
+        .then_some(RestoreRefusal::InProgress)
+}
+
+/// Category of the server error number raised while reading the marker.
+fn marker_error_reason(number: Option<u32>) -> crate::graphql::orm::RestoreStateUnavailableReason {
+    use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+    match number {
+        // Invalid object name.
+        Some(208) => Reason::MarkerNotInstalled,
+        // SELECT, column and object permission denied, and the like.
+        Some(229 | 230 | 262 | 297 | 300) => Reason::PermissionDenied,
+        _ => Reason::Other,
+    }
+}
+
+/// Category of a failure to read the marker through the pool.
+fn classify_marker_error(
+    error: &sqlx::Error,
+) -> crate::graphql::orm::RestoreStateUnavailableReason {
+    use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+    match error {
+        sqlx::Error::Database(database) => {
+            marker_error_reason(database.code().and_then(|code| code.parse().ok()))
+        }
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed => Reason::ConnectionFailed,
+        _ => Reason::Other,
+    }
+}
+
+/// The typed refusal for restore state that cannot be read, with the cause
+/// kept as its source. Its message never includes the cause.
+fn restore_state_unavailable(
+    reason: crate::graphql::orm::RestoreStateUnavailableReason,
+    cause: sqlx::Error,
+) -> sqlx::Error {
+    crate::graphql::orm::RestoreStateUnavailable::new(reason, Some(Box::new(cause))).into_error()
+}
+
+/// A failure while claiming the marker: a missing table or a denied
+/// permission is reported as unavailable restore state, anything else as is.
+fn marker_access_error(error: sqlx::Error) -> sqlx::Error {
+    use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+    match classify_marker_error(&error) {
+        reason @ (Reason::MarkerNotInstalled | Reason::PermissionDenied) => {
+            restore_state_unavailable(reason, error)
+        }
+        _ => error,
+    }
 }
 
 /// A host-run restore of a SQL Server database, in progress.
@@ -1054,7 +1206,7 @@ impl MssqlRestore {
             .bounded(execute_with_client(
                 &mut lease.client,
                 "IF @@TRANCOUNT > 0 BEGIN RAISERROR(N'the restore connection has an open transaction; commit or roll it back before finishing the restore', 16, 1); RETURN; END; \
-                 DELETE FROM [__graphql_orm_restore_marker] WHERE restore_id = @P1",
+                 DELETE FROM [dbo].[__graphql_orm_restore_marker] WHERE restore_id = @P1",
                 &id,
             ))
             .await;
@@ -1834,6 +1986,102 @@ mod tests {
             map_tiberius_error(tiberius::error::Error::Protocol("bad token".into())),
             sqlx::Error::Protocol(_)
         ));
+    }
+
+    fn refusal(message: &str) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(MssqlServerError::new(50000, 1, 16, message)))
+    }
+
+    #[test]
+    fn the_gate_refusal_tells_unavailable_state_from_a_restore() {
+        use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+        let unavailable = |number: u32| {
+            restore_refusal(&refusal(&format!(
+                "{RESTORE_UNAVAILABLE}: marker read failed with error {number}"
+            )))
+        };
+        assert!(matches!(
+            unavailable(208),
+            Some(RestoreRefusal::Unavailable(Reason::MarkerNotInstalled))
+        ));
+        for number in [229, 230, 262, 297, 300] {
+            assert!(matches!(
+                unavailable(number),
+                Some(RestoreRefusal::Unavailable(Reason::PermissionDenied))
+            ));
+        }
+        assert!(matches!(
+            unavailable(207),
+            Some(RestoreRefusal::Unavailable(Reason::Other))
+        ));
+        for message in [
+            "the restore lock is held",
+            "a restore marker is present",
+            "open transactions or another restore hold the restore lock",
+        ] {
+            assert!(
+                matches!(
+                    restore_refusal(&refusal(&format!("{RESTORE_REFUSAL}: {message}"))),
+                    Some(RestoreRefusal::InProgress)
+                ),
+                "{message}"
+            );
+        }
+        assert!(restore_refusal(&refusal("something else")).is_none());
+        assert!(restore_refusal(&sqlx::Error::PoolTimedOut).is_none());
+    }
+
+    #[test]
+    fn marker_read_failures_are_classified_without_claiming_a_restore() {
+        use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+        let server = |number| {
+            sqlx::Error::Database(Box::new(MssqlServerError::new(number, 1, 16, "denied")))
+        };
+        assert_eq!(
+            classify_marker_error(&server(208)),
+            Reason::MarkerNotInstalled
+        );
+        assert_eq!(
+            classify_marker_error(&server(229)),
+            Reason::PermissionDenied
+        );
+        assert_eq!(classify_marker_error(&server(4060)), Reason::Other);
+        for error in [
+            timed_out("SQL Server statement exceeded the configured query timeout"),
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Tls("handshake".into()),
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert_eq!(classify_marker_error(&error), Reason::ConnectionFailed);
+        }
+        // The server's text is kept as the source, never put in the message.
+        let wrapped = restore_state_unavailable(
+            Reason::PermissionDenied,
+            sqlx::Error::Database(Box::new(MssqlServerError::new(
+                229,
+                1,
+                14,
+                "SELECT permission was denied on the object 'x'",
+            ))),
+        );
+        let message = wrapped.to_string();
+        assert!(!message.contains("was denied on the object"), "{message}");
+        assert!(message.contains("grant SELECT"), "{message}");
+        let unavailable =
+            crate::graphql::orm::RestoreStateUnavailable::from_error(&wrapped).expect("typed");
+        assert!(std::error::Error::source(unavailable).is_some());
+        assert!(crate::graphql::orm::RestoreInProgress::from_error(&wrapped).is_none());
+        // A claim failure other than a missing table or a denial stays as it was.
+        assert!(matches!(
+            marker_access_error(sqlx::Error::PoolTimedOut),
+            sqlx::Error::PoolTimedOut
+        ));
+        assert!(
+            crate::graphql::orm::RestoreStateUnavailable::from_error(&marker_access_error(server(
+                208
+            )))
+            .is_some()
+        );
     }
 
     #[test]

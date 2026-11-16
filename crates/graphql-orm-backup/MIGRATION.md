@@ -10,35 +10,10 @@ supersedes: []
 
 # Migration Guide
 
-## To 0.25.0: result and error types, target clear on journaled databases
+## To 0.26.0: host-held snapshot records
 
-Upgrade backup and, for the optional ORM adapter, ORM/macros to 0.163.0 on
-the same reviewed revision.
-
-- **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
-  `#[non_exhaustive]`. Action needed** for code that builds one of the result
-  structs with a struct literal or destructures it without `..`, and for a
-  `match` on `BackupError` without a wildcard arm: read fields by name, and
-  add a `_` arm.
-- **`deleted_snapshot_ids` on both results. No action.** It lists the
-  snapshots whose deletion completed. Keep recording ids through the
-  `SnapshotDeletionObserver`: a call that fails returns no result.
-- **`BackupError::SnapshotNotAdmitted`. Action needed** only for code that
-  matched the refusal of a revoked or unlisted snapshot as
-  `ManifestAuthenticationFailed`: match the new variant, or call
-  `is_snapshot_not_admitted()`, which is unchanged.
-- **Target clear. No action.** ORM 0.163.0 makes journaled PostgreSQL tables
-  refuse `TRUNCATE`; `OrmBackupAdapter::clear_restore_target` now turns the
-  journal setting off in its own transaction, which the guard admits. Hosts
-  that clear a restore target with their own `TRUNCATE` must do the same, or
-  delete the rows; see the
-  [workspace migration guide](../../MIGRATION.md#breaking-release-unreleased).
-  Take a full backup after a restore to start a new incremental chain.
-
-## To 0.24.0: host-held snapshot records
-
-Upgrade backup to 0.24.0 and, when using the optional ORM adapter, ORM/macros
-to 0.160.0 on the same reviewed revision. Existing manifests, keys and
+Upgrade backup to 0.26.0 and, when using the optional ORM adapter, ORM/macros
+to 0.165.0 on the same reviewed revision. Existing manifests, keys and
 repository identities need no conversion.
 
 - **Source compatible. No action** to keep compiling: no existing type,
@@ -74,7 +49,32 @@ repository identities need no conversion.
   `restore_full` on PostgreSQL or SQLite now leaves the target empty. Hosts
   that restore the tables of searchable runtime collections must backfill
   their search indexes afterwards; see the
-  [workspace migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+  [workspace migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+## To 0.25.0: result and error types, target clear on journaled databases
+
+Upgrade backup and, for the optional ORM adapter, ORM/macros to 0.163.0 on
+the same reviewed revision.
+
+- **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
+  `#[non_exhaustive]`. Action needed** for code that builds one of the result
+  structs with a struct literal or destructures it without `..`, and for a
+  `match` on `BackupError` without a wildcard arm: read fields by name, and
+  add a `_` arm.
+- **`deleted_snapshot_ids` on both results. No action.** It lists the
+  snapshots whose deletion completed. Keep recording ids through the
+  `SnapshotDeletionObserver`: a call that fails returns no result.
+- **`BackupError::SnapshotNotAdmitted`. Action needed** only for code that
+  matched the refusal of a revoked or unlisted snapshot as
+  `ManifestAuthenticationFailed`: match the new variant, or call
+  `is_snapshot_not_admitted()`, which is unchanged.
+- **Target clear. No action.** ORM 0.163.0 makes journaled PostgreSQL tables
+  refuse `TRUNCATE`; `OrmBackupAdapter::clear_restore_target` now turns the
+  journal setting off in its own transaction, which the guard admits. Hosts
+  that clear a restore target with their own `TRUNCATE` must do the same, or
+  delete the rows; see the
+  [workspace migration guide](../../MIGRATION.md#breaking-release-unreleased).
+  Take a full backup after a restore to start a new incremental chain.
 
 ## To 0.25.0: storage 0.16.0
 

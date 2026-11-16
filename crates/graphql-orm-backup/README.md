@@ -10,18 +10,18 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.26.0 adds host-held snapshot records: a known-snapshot list or a
+revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is
+put back into the repository, and `prune_observed` and
+`delete_snapshot_observed` report each snapshot id before deleting it. With ORM 0.165.0 the ORM adapter restores all
+tables in one transaction. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.25.0 (breaking batch) reports deleted snapshot ids in `PruneResult`
 and `DeleteSnapshotResult`, refuses an unadmitted snapshot with the dedicated
 `BackupError::SnapshotNotAdmitted`, and marks those three types
 `#[non_exhaustive]`. `OrmBackupAdapter::clear_restore_target` keeps working on
 PostgreSQL databases whose change journal refuses `TRUNCATE`. Requires ORM
 0.163.0 for the optional ORM adapter. See [MIGRATION.md](MIGRATION.md).
-
-Version 0.24.0 adds host-held snapshot records: a known-snapshot list or a
-revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is
-put back into the repository, and `prune_observed` and
-`delete_snapshot_observed` report each snapshot id before deleting it. With ORM 0.160.0 the ORM adapter restores all tables
-in one transaction. See [MIGRATION.md](MIGRATION.md).
 
 Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
 construction for a host-protected tree; `new` does not exist on Windows; `LocalBackupRepository::new_trusted_windows_root`
