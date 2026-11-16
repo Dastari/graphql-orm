@@ -80,6 +80,7 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 
 - **No action** — ORM/macros 0.163.0: hand-emitted wrapper objects reduce compile cost; generated SDL, catalogues and fingerprints are unchanged [migration](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
 - **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)
+
 #### Breaking integration release (version provisional)
 
 - **Action needed** — ORM/macros 0.160.0: declare the schema page maximum and migrate oversized internal reads to exact-or-refused paging (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
@@ -88,7 +89,7 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 - **Action needed** — ORM/macros 0.160.0: review key-existence disclosure before adopting key-only deletes; only exact-key subscribers qualify and primary-key read policies are refused (#666). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: replace policy-free relation preload methods with authorized queries (#445). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: assign public codes to deliberate callback refusals, or explicitly opt in to uncoded text exposure (#682). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **No action** — ORM/macros 0.163.0, PR #733: #485 corrects the nested router directive claim; enforcement remains separately tracked in #729. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
+- **Action needed** — ORM/macros 0.160.0: verify subgraph guards if relying on the old router nested-directive claim corrected in PR #733 (#485); router enforcement remains in #729. [Migration](../../MIGRATION.md#breaking-release-unreleased) · [Correction](../../CHANGELOG.md#unreleased---ormmacros-01640)
 
 ### workspace-2026.11.15.6
 

@@ -107,6 +107,13 @@ Upgrade runtime and macros together.
   attribute is a compile error when a primary-key field declares a
   `read_policy` ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
 
+- **Nested router directives still require subgraph enforcement. Action needed**
+  if a deployment relied on the old changelog claim that the router enforces
+  SDL `@authenticated` or `@requiresScopes` on nested fields. Verify the
+  owning subgraph's resolver guards and policies before relying on that
+  protection. PR #733 corrects the claim for #485; implementing router-side
+  nested enforcement remains separately tracked in #729. This batch adds no
+  router enforcement.
 
 ## 0.163.0 to 0.164.0: page limits, 64-bit identities, cursor keys and subscription lag
 
