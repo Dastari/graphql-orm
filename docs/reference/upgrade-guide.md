@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.146.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 Breaking batch, collected on `next/breaking` (ORM/macros 0.168.0, backup 0.27.0, AI 0.149.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.16.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
 
@@ -100,6 +100,12 @@ Breaking batch, collected on `next/breaking` (ORM/macros 0.168.0, backup 0.27.0,
 - **Action needed** — ORM/macros 0.167.0: keep subgraph guards and policies on nested fields; released routers never enforced nested `@authenticated`/`@requiresScopes` (#485 correction, PR #733), and router 0.16.0 in this batch now does (#729). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **No action** — Tool profiles 0.25.0 and AI 0.148.0: runtime live key inputs compile under default string identities. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-runtime-live-keys-under-default-identities)
 - **No action** — AI 0.148.0: the runtime's own keyset windows (message and list windows, bootstraps, retention and cleanup scans) larger than a host's page maximum are read completely in pages instead of being refused. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01470-to-01480-runtime-live-keys-under-default-identities)
+
+### workspace-2026.11.16.4
+
+Commit `9674f5c71677` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.4)
+
+Packages (changed in bold): **`graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 - **No action** — ORM/macros 0.166.0: opt-in dependent-delete effect verification and transaction-bound row limits; unsupported plans refuse [migration](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes)
 - **No action** — AI 0.146.0: delivery selection stays unchanged unless the host opts into `prefer_fixed_broker_for_large_surfaces`; opting in requires a retained-session rebind [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
