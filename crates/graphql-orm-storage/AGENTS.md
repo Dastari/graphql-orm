@@ -3,7 +3,7 @@ title: "graphql-orm-storage Agent Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -95,6 +95,14 @@ This crate is a reusable storage companion for applications that use `graphql-or
   UTF-8/UTF-16, or refused by `validate_blob_key`) is not a partial listing;
   a directory that enumeration reported but cannot be opened still fails it.
   Run `tests/support/listing_contract.rs` against every provider.
+- Local storage reaches every file through `local_fs`: open the root, then
+  resolve one component at a time relative to held directory handles without
+  following links, and act on leaves through the held parent (`*at` calls on
+  Unix, held `FILE_FLAG_OPEN_REPARSE_POINT` handles without delete sharing on
+  Windows). Never open, create, rename or remove anything below the root by a
+  full path, and never read a regular file with more than one hard link.
+  Writes publish by renaming a unique temporary file; conditional creates use
+  `Dir::rename_noreplace`, so the store never leaves a second hard link.
 - `validate_blob_key` reserves the internal `.graphql-orm-storage` namespace
   as a key's first component and as a bucket. Internal code addresses it by
   path, never through a caller key. On local roots the reservation is by file

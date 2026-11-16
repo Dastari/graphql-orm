@@ -22,8 +22,11 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
-Version 0.16.0 makes local storage refuse every read, write, copy and delete
-through a filesystem link below its root, and skip links in listings. Local
+Version 0.16.0 resolves every local storage operation relative to held
+directory handles without following links, so local storage refuses every
+read, write, copy and delete through a filesystem link below its root, even
+one swapped in while the operation runs, skips links in listings, and refuses
+to read files with more than one hard link. Local
 listing pages resume with bounded work and memory and can hold fewer keys
 than their limit. An opt-in canonical key mode for SMB and local targets
 that ignore case or normalisation (`validate_canonical_blob_key`,

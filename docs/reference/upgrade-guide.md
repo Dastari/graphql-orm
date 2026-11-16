@@ -70,9 +70,12 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; **`graphql-orm-storage` 0.16.0**; **`graphql-orm-backup` 0.25.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-No unreleased entries yet. Add new entries here.
+- **Action needed** — Storage 0.16.0: local storage refuses filesystem links and hard-linked files below its root, resolving every operation relative to held directory handles; only for roots that contain links or hard links [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
+- **Action needed** — Storage 0.16.0: a local listing page can hold fewer keys than its limit while it returns a continuation; only for code that calls `list_blobs_page` directly and stops at a short page [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
+- **No action** — Storage 0.16.0: opt-in canonical keys for SMB and local targets (`validate_canonical_blob_key`, `with_canonical_keys`); `content_type` is ignored on local and SMB, now documented [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
+- **Action needed** — Backup 0.25.0: storage 0.16.0; only for local repositories whose root contains links or hard links [migration](../../crates/graphql-orm-backup/MIGRATION.md#to-0250-storage-0160) · [changelog](../../crates/graphql-orm-backup/CHANGELOG.md#0250-unreleased)
 
 ### workspace-2026.11.15.6
 

@@ -1850,7 +1850,7 @@ async fn write_object_metadata(temp: &TempFile, object: &ObjectInfo) -> Result<(
 /// Whether `path` names a temporary upload file this backend writes. Only the
 /// exact `.<uuid>.uploading` form qualifies; any other name, including one
 /// that merely ends in `.uploading`, is a caller's object.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -1893,7 +1893,8 @@ pub(crate) fn sync_dir(dir: &Dir) -> Result<(), StorageError> {
         }
     }
     #[cfg(not(unix))]
-    let _ = dir;
+    dir.sync()
+        .map_err(|source| StorageError::io(dir.path(), source))?;
     Ok(())
 }
 
@@ -1966,6 +1967,8 @@ fn entry_dir(path: &Path) -> Result<&Path, StorageError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DurabilityStep {
     FileSynced,
+    /// Directory syncs run on Unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     DirSynced,
     /// The file that the next `Published` step renamed or linked into place.
     PublishedFrom,
@@ -1989,7 +1992,10 @@ pub(crate) fn trace(step: DurabilityStep, path: &Path) {
 }
 
 /// Test-only record of the sync and publication order of local writes.
+/// Its injection and inspection helpers are used by the Unix durability
+/// tests only.
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 mod durability_log {
     use std::{
         path::{Path, PathBuf},
@@ -2578,6 +2584,7 @@ pub(crate) mod race_hook {
     static HOOKS: Mutex<Vec<(PathBuf, Hook)>> = Mutex::new(Vec::new());
 
     /// Runs `hook` the next time an operation under `root` resolves a key.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set(root: &Path, hook: impl FnOnce() + Send + 'static) {
         HOOKS
             .lock()
