@@ -436,15 +436,7 @@ impl<'a> Arena<'a> {
                 Value::Object(
                     object
                         .iter()
-                        .map(|(key, child)| {
-                            let child = match (key.as_str(), child) {
-                                ("properties" | "patternProperties", Value::Object(members)) => Value::Object(members.iter().map(|(name, member)| (name.clone(), self.emit_shape(member, names))).collect()),
-                                ("items" | "additionalProperties" | "propertyNames" | "not" | "contains", Value::Object(_))
-                                | ("anyOf" | "oneOf" | "allOf" | "prefixItems", Value::Array(_)) => self.emit_shape(child, names),
-                                _ => child.clone(),
-                            };
-                            (key.clone(), child)
-                        })
+                        .map(|(key, child)| (key.clone(), self.emit_keyword(key, child, names)))
                         .collect(),
                 )
             }
@@ -455,6 +447,32 @@ impl<'a> Arena<'a> {
                     .collect(),
             ),
             scalar => scalar.clone(),
+        }
+    }
+
+    /// Emits one schema keyword's value, descending only into keywords whose
+    /// value is itself a schema or a map or list of schemas.
+    fn emit_keyword(&self, key: &str, child: &Value, names: &BTreeMap<usize, String>) -> Value {
+        const MEMBER_MAPS: [&str; 2] = ["properties", "patternProperties"];
+        const SUBSCHEMAS: [&str; 5] = [
+            "items",
+            "additionalProperties",
+            "propertyNames",
+            "not",
+            "contains",
+        ];
+        const SUBSCHEMA_LISTS: [&str; 4] = ["anyOf", "oneOf", "allOf", "prefixItems"];
+        match child {
+            Value::Object(members) if MEMBER_MAPS.contains(&key) => {
+                let emitted = members
+                    .iter()
+                    .map(|(name, member)| (name.clone(), self.emit_shape(member, names)))
+                    .collect();
+                Value::Object(emitted)
+            }
+            Value::Object(_) if SUBSCHEMAS.contains(&key) => self.emit_shape(child, names),
+            Value::Array(_) if SUBSCHEMA_LISTS.contains(&key) => self.emit_shape(child, names),
+            _ => child.clone(),
         }
     }
 }

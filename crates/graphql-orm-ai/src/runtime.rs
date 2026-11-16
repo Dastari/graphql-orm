@@ -897,7 +897,7 @@ impl AiRuntime {
         if prepared.execution_policy != AiMutationExecutionPolicy::Automatic {
             return Err(AiError::Forbidden);
         }
-        let effect_guard = self.mutation_effect_guard(&prepared);
+        let effect_guard = self.mutation_effect_guard(&prepared)?;
         let (response, authorization) = self
             .tool_bridge
             .execute_generated_mutation(
@@ -936,6 +936,7 @@ impl AiRuntime {
         if !approved_prepared_mutation_matches(principal_reference, &prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
+        let effect_guard = self.mutation_effect_guard(&prepared)?;
         approval.claim_execution()?;
         let registered = AiRegisteredToolExecutionBinding::generated_mutation(
             &prepared.descriptor.id,
@@ -944,7 +945,6 @@ impl AiRuntime {
             &prepared.request,
         )
         .map_err(|_| AiError::Forbidden)?;
-        let effect_guard = self.mutation_effect_guard(&prepared);
         let (response, authorization) = self
             .tool_bridge
             .execute_registered_bound(
@@ -966,24 +966,53 @@ impl AiRuntime {
         )
     }
 
+    /// Builds the ORM effect guard for one prepared generated delete.
+    ///
+    /// Returns `None` when no dependent-effect policy is installed or the
+    /// mutation is not a generated delete. With a policy installed, a delete
+    /// whose capability, root entity or declaration cannot be found fails
+    /// closed rather than executing unguarded.
     fn mutation_effect_guard(
         &self,
         prepared: &AiPreparedGraphqlMutation,
-    ) -> Option<graphql_orm::graphql::orm::DependentDeleteGuard> {
-        self.dependent_effect_policy.as_ref().and_then(|policy| {
-            let capability = self.tool_catalog.mutation_capability(&prepared.descriptor.id)?;
-            if !matches!(capability.generated_category(), Some(graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory::Delete | graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory::DeleteMany)) { return None; }
-            let root = capability.generated_entity_name()?;
-            let effects = policy.declared_effects(capability.target_id(), root)?;
-            Some(graphql_orm::graphql::orm::DependentDeleteGuard::new(root.to_owned(), effects.iter().map(|effect| {
-                use graphql_orm::graphql::orm::DependentDeleteEffect;
+    ) -> Result<Option<graphql_orm::graphql::orm::DependentDeleteGuard>, AiError> {
+        use graphql_orm::graphql::orm::{DependentDeleteEffect, DependentDeleteGuard};
+        use graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory as Category;
+
+        let Some(policy) = self.dependent_effect_policy.as_ref() else {
+            return Ok(None);
+        };
+        let capability = self
+            .tool_catalog
+            .mutation_capability(&prepared.descriptor.id)
+            .ok_or(AiError::Forbidden)?;
+        let is_delete = matches!(
+            capability.generated_category(),
+            Some(Category::Delete | Category::DeleteMany)
+        );
+        if !is_delete {
+            return Ok(None);
+        }
+        let root = capability
+            .generated_entity_name()
+            .ok_or(AiError::Forbidden)?;
+        let declared = policy
+            .declared_effects(capability.target_id(), root)
+            .ok_or(AiError::Forbidden)?;
+        let effects = declared
+            .iter()
+            .map(|effect| {
+                let entity = effect.entity().to_owned();
                 let kind = match effect.effect() {
-                    crate::AiDependentEffectKind::Delete => DependentDeleteEffect::Delete(effect.entity().to_owned()),
-                    crate::AiDependentEffectKind::SetNull { field } => DependentDeleteEffect::SetNull(effect.entity().to_owned(), field.clone()),
+                    crate::AiDependentEffectKind::Delete => DependentDeleteEffect::Delete(entity),
+                    crate::AiDependentEffectKind::SetNull { field } => {
+                        DependentDeleteEffect::SetNull(entity, field.clone())
+                    }
                 };
                 (kind, effect.maximum_rows())
-            }).collect()))
-        })
+            })
+            .collect();
+        Ok(Some(DependentDeleteGuard::new(root.to_owned(), effects)))
     }
 
     fn validate_prepared_mutation(
