@@ -27,8 +27,8 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::local::{
-    DurabilityStep, INTERNAL_STORAGE_DIR, LocalStorageBackend, sync_dir_blocking as sync_dir,
-    temp_path_for, trace, trace_published,
+    DurabilityStep, INTERNAL_STORAGE_DIR, LocalStorageBackend, refuse_links_below,
+    sync_dir_blocking as sync_dir, temp_path_for, trace, trace_published,
 };
 use crate::multipart::{check_handle, check_part_number, multipart_error, verify_receipts};
 use crate::{
@@ -241,9 +241,11 @@ impl MultipartBlobStore for LocalStorageBackend {
     ) -> Result<MultipartUploadHandle, StorageError> {
         // Refuse a key the completed upload could not be written to.
         self.ensure_internal_dir();
-        temp_path_for(&self.path_for(key)?, key)?;
+        self.check_write_key(key)?;
+        temp_path_for(&self.resolve(key).await?, key)?;
         let id = Uuid::new_v4().hyphenated().to_string();
         let uploads = self.uploads_dir();
+        self.refuse_links(&uploads, key).await?;
         let dir = uploads.join(&id);
         let manifest = Manifest {
             format_version: MANIFEST_FORMAT,
@@ -277,6 +279,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         body: StorageByteStream,
     ) -> Result<PartReceipt, StorageError> {
         let (dir, lock) = self.upload_paths(handle)?;
+        self.refuse_links(&dir, &handle.key).await?;
         check_part_number(&handle.key, part_number, self.multipart_limits())?;
         let unknown = || multipart_error(&handle.key, MultipartErrorKind::UnknownUpload);
         let manifest_dir = dir.clone();
@@ -344,6 +347,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         handle: &MultipartUploadHandle,
     ) -> Result<Vec<PartReceipt>, StorageError> {
         let (dir, _) = self.upload_paths(handle)?;
+        self.refuse_links(&dir, &handle.key).await?;
         let key = handle.key.clone();
         tokio::task::spawn_blocking(move || {
             if read_manifest(&dir)?.is_none_or(|manifest| manifest.key != key) {
@@ -364,7 +368,8 @@ impl MultipartBlobStore for LocalStorageBackend {
         parts: &[PartReceipt],
     ) -> Result<MultipartCompleteOutcome, StorageError> {
         let (dir, lock) = self.upload_paths(handle)?;
-        let target = self.path_for(&handle.key)?;
+        self.refuse_links(&dir, &handle.key).await?;
+        let target = self.resolve(&handle.key).await?;
         // Refuse a temporary-shaped key before taking the lock or creating any
         // directory.
         let temp = temp_path_for(&target, &handle.key)?;
@@ -388,6 +393,9 @@ impl MultipartBlobStore for LocalStorageBackend {
             let parent = target.parent().ok_or_else(|| StorageError::MissingParent {
                 path: target.clone(),
             })?;
+            // Checked again under the lock, just before the target's
+            // directories are created and the object is published.
+            refuse_links_below(backend.root(), &target, &key)?;
             backend.create_dir_durably(parent)?;
             let assembled = (|| {
                 let mut output = File::create(&temp).map_err(io(&temp))?;
@@ -481,6 +489,7 @@ impl MultipartBlobStore for LocalStorageBackend {
             }) => return Ok(()),
             Err(error) => return Err(error),
         };
+        self.refuse_links(&dir, &handle.key).await?;
         if !tokio::fs::try_exists(&dir).await.map_err(io(&dir))? {
             let _ = tokio::fs::remove_file(&lock).await;
             return Ok(());
@@ -515,6 +524,7 @@ impl MultipartBlobStore for LocalStorageBackend {
             })
             .transpose()?;
         let uploads = self.uploads_dir();
+        self.refuse_links(&uploads, prefix).await?;
         let prefix = prefix.to_string();
         let mut found = tokio::task::spawn_blocking(move || {
             let mut found = Vec::new();

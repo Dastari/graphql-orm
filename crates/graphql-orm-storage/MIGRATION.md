@@ -10,6 +10,42 @@ supersedes: []
 
 # Migration Guide
 
+## 0.15.0 to 0.16.0: local links, listing pages and canonical keys
+
+Update the storage requirement to 0.16.0 and refresh the consumer lockfile.
+
+1. **Local storage refuses links below its root. Action needed** only if a
+   local root contains symbolic links, junctions or mount points below it.
+   Every operation on a key whose path names or passes through one now fails
+   with `StorageError::InvalidStorageKey`, wherever the link points, and
+   listings skip such entries. Replace each link with the real directory or
+   file, or point `LocalStorageBackend::new` at the real tree; the root itself
+   may stay a link. A FIFO, socket or device file at a key is refused too.
+   Hosts with no links below the root need no change. The trust boundary is
+   unchanged otherwise: a concurrent replacement of a directory by a local
+   writer can still race the checks, so keep the root exclusively managed.
+   See [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary).
+2. **Local listing pages. Action needed** only for code that calls
+   `list_blobs_page` directly and stops at a page shorter than its limit. A
+   local page now ends after `2 * limit + 64` directory reads, as when many
+   directories hold no keys, and can then hold fewer keys than the limit,
+   even none, with a continuation. Keep paging until `next_continuation` is
+   `None`, as `list_blobs` does and S3 already required. Continuation tokens
+   issued by 0.15.0 stay valid.
+3. **Canonical keys. No action.** `with_canonical_keys` on the SMB and local
+   backends, and `validate_canonical_blob_key`, are opt-in and off by
+   default. Enable the mode for a target that ignores case or Unicode
+   normalisation only after checking that the keys you write are lowercase
+   ASCII; existing objects stay readable, listed and deletable. See
+   [key safety](docs/blob-store.md#key-safety).
+4. **Single-attempt local deletes. No action** unless code matched
+   `SingleAttemptFailed` from `LocalStorageBackend::delete_blob_once` to
+   detect an invalid key: a refused key is now reported as
+   `InvalidStorageKey`, unwrapped, because nothing was attempted.
+5. **Content type. No action.** Local and SMB storage
+   ignore `BlobPutOptions::content_type`, as before; this is now documented
+   as accepted behaviour. See [content type](docs/blob-store.md#content-type).
+
 ## 0.14.0 to 0.15.0: bounded SMB destructor cleanup
 
 Update the storage requirement to 0.15.0 and refresh the consumer lockfile. No

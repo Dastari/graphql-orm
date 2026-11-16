@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.25.0 requires storage 0.16.0, whose local backend refuses keys
+through filesystem links below its root. It documents that a full restore
+reads each object from the repository three times and each payload twice,
+and that objects restored to local or SMB storage keep no content type. See
+[MIGRATION.md](MIGRATION.md).
+
 Version 0.23.0 fixes PostgreSQL ORM restore for mixed-case entity table names.
 The optional ORM adapter uses ORM 0.159.0's shared table rendering for target
 clear and emptiness checks. Existing manifests and tables need no conversion.

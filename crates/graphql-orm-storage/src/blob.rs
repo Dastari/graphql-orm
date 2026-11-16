@@ -114,15 +114,21 @@ pub struct BlobWriteOutcome {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlobPutOptions {
     /// MIME content type to pass through to providers that support it.
+    ///
+    /// S3 stores it as the object's `Content-Type`. Local and SMB storage
+    /// ignore it: they keep no metadata beside a blob's bytes, and
+    /// [`BlobMetadata`] never reports it.
     pub content_type: Option<String>,
 }
 
 /// One page of blob listing results.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlobListPage {
-    /// Blob keys in this page.
+    /// Blob keys in this page. A page can hold fewer keys than its limit,
+    /// even none, while [`Self::next_continuation`] is set.
     pub keys: Vec<String>,
-    /// Opaque continuation token for the next page.
+    /// Opaque continuation token for the next page, or `None` when the
+    /// listing is complete. Only the provider that issued it can use it.
     pub next_continuation: Option<String>,
 }
 
@@ -249,6 +255,10 @@ pub trait BlobStore: Send + Sync {
     /// A listing returns only keys the provider accepts: a stored name that
     /// is not a valid key, for example one that is not valid Unicode or lies
     /// in the reserved internal namespace, is skipped.
+    ///
+    /// A page holds at most `limit` keys and can hold fewer, even none, while
+    /// it still returns a continuation; keep paging until
+    /// [`BlobListPage::next_continuation`] is `None`.
     ///
     /// # Errors
     ///
@@ -492,6 +502,46 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
 pub fn validate_portable_blob_key(key: &str) -> Result<(), StorageError> {
     validate_blob_key(key)?;
     if key.split('/').all(is_portable_component) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidStorageKey {
+            key: key.to_string(),
+        })
+    }
+}
+
+/// Validates a blob key in canonical form: portable and lowercase ASCII.
+///
+/// Applies [`validate_portable_blob_key`], and also refuses a key with any
+/// character outside ASCII or any uppercase ASCII letter `A`-`Z`.
+///
+/// Use it for targets that compare names without regard to case or Unicode
+/// normalisation, such as SMB shares, NTFS and APFS. There two keys that
+/// differ only in case (`Report` and `report`) or normalisation (`é` as one
+/// code point or as `e` and a combining accent) name the same file, so one
+/// write silently replaces the other. No two distinct canonical keys can
+/// alias on such a target: every ASCII string is its own normal form under
+/// NFC, NFD, NFKC and NFKD, and a lowercase ASCII string has no other case
+/// spelling in ASCII. NFC with a Unicode case fold would admit more keys but
+/// would not give this guarantee, because targets compare case with their
+/// own tables rather than Unicode case folding: a table built from simple
+/// uppercase mappings, as Windows uses, maps both `i` and the dotless `ı` to
+/// `I`, which the case fold keeps apart. It would also need Unicode tables
+/// that change between Unicode versions.
+///
+/// Keys that are valid here are valid everywhere
+/// [`validate_portable_blob_key`] keys are.
+///
+/// # Errors
+///
+/// Returns [`StorageError::InvalidStorageKey`] when the key fails
+/// [`validate_portable_blob_key`] or holds a non-ASCII or uppercase character.
+pub fn validate_canonical_blob_key(key: &str) -> Result<(), StorageError> {
+    validate_portable_blob_key(key)?;
+    if key
+        .bytes()
+        .all(|byte| byte.is_ascii() && !byte.is_ascii_uppercase())
+    {
         Ok(())
     } else {
         Err(StorageError::InvalidStorageKey {

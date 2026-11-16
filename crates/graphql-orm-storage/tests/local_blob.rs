@@ -1212,3 +1212,109 @@ async fn local_object_writes_abandoned_mid_stream_leave_no_temp_files() {
         "dropped multipart writer"
     );
 }
+
+/// With canonical keys, new writes of keys that are not lowercase ASCII and
+/// portable are refused before any filesystem change, while objects stored
+/// earlier stay readable, listed and deletable. The default is unchanged
+/// (#482).
+#[tokio::test]
+async fn local_canonical_keys_refuse_non_canonical_writes_only() {
+    use graphql_orm_storage::{
+        MultipartBlobStore, MultipartStartOptions, ObjectMetadata, StreamingObjectStore,
+    };
+
+    let temp = TempDir::new().expect("temp dir");
+    let body = || StorageByteStream::from_bytes(Bytes::from_static(b"canonical"));
+    let ordinary = LocalStorageBackend::new(temp.path());
+    for key in ["names/Report.pdf", "names/caf\u{e9}.txt"] {
+        ordinary
+            .put_blob(key, body(), BlobPutOptions::default())
+            .await
+            .unwrap_or_else(|error| panic!("the default accepts {key}: {error:?}"));
+    }
+
+    let canonical = LocalStorageBackend::new(temp.path()).with_canonical_keys(true);
+    for key in [
+        "names/Report.pdf",
+        "names/NEW.pdf",
+        "names/caf\u{e9}.txt",
+        "names/cafe\u{301}.txt",
+        "names/con.txt",
+        "names/report.",
+    ] {
+        assert_refused_key(
+            canonical
+                .put_blob(key, body(), BlobPutOptions::default())
+                .await,
+            key,
+        );
+        assert_refused_key(
+            canonical
+                .put_blob_if_not_exists(key, body(), BlobPutOptions::default())
+                .await,
+            key,
+        );
+        assert_refused_key(canonical.copy_blob("names/Report.pdf", key).await, key);
+        assert_refused_key(
+            canonical
+                .start_multipart(key, MultipartStartOptions::default())
+                .await,
+            key,
+        );
+    }
+    for (bucket, key) in [("bucket", "Upper"), ("Bucket", "lower")] {
+        assert_refused_key(
+            canonical
+                .put_object_stream(bucket, key, None, ObjectMetadata::default(), body())
+                .await,
+            key,
+        );
+    }
+    assert!(!temp.path().join("names/NEW.pdf").exists());
+    assert!(!temp.path().join("bucket").exists());
+
+    canonical
+        .put_blob("names/report.pdf", body(), BlobPutOptions::default())
+        .await
+        .expect("a canonical key is written");
+    canonical
+        .copy_blob("names/Report.pdf", "names/copy.pdf")
+        .await
+        .expect("a canonical destination is written from any source");
+    canonical
+        .put_object_stream("bucket", "lower", None, ObjectMetadata::default(), body())
+        .await
+        .expect("a canonical object is written");
+
+    // Existing non-canonical objects stay listed, readable and deletable.
+    let listed = canonical.list_blobs("names/").await.expect("list");
+    assert!(
+        listed.contains(&"names/Report.pdf".to_string()),
+        "{listed:?}"
+    );
+    assert!(
+        listed.contains(&"names/caf\u{e9}.txt".to_string()),
+        "{listed:?}"
+    );
+    assert!(
+        canonical
+            .blob_exists("names/caf\u{e9}.txt")
+            .await
+            .expect("exists")
+    );
+    let read = canonical.get_blob("names/Report.pdf").await.expect("read");
+    assert_eq!(
+        collect_storage_stream(read.body).await.expect("body"),
+        Bytes::from_static(b"canonical")
+    );
+    canonical
+        .delete_blob("names/Report.pdf")
+        .await
+        .expect("an existing object deletes");
+    assert!(
+        !ordinary
+            .blob_exists("names/Report.pdf")
+            .await
+            .expect("exists")
+    );
+}

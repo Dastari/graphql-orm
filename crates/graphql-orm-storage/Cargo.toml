@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-storage"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -77,6 +77,11 @@ required-features = ["local"]
 [[test]]
 name = "local_blob"
 path = "tests/local_blob.rs"
+required-features = ["local"]
+
+[[test]]
+name = "local_links"
+path = "tests/local_links.rs"
 required-features = ["local"]
 
 [[test]]

@@ -3,7 +3,7 @@ title: "BlobStore"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -123,6 +123,19 @@ versions before 0.9.1, named `<name>.<uuid>.uploading`, are indistinguishable
 from stored objects and are neither hidden nor swept; see the
 [migration guide](../MIGRATION.md).
 
+## Content type
+
+`BlobPutOptions::content_type`, including the `content_type` of a multipart
+upload's `MultipartStartOptions::put`, is passed to providers that store
+object metadata. S3 stores it as the object's `Content-Type`. Local and SMB
+storage ignore it: a file system or share has no per-file content type, and
+the blob providers do not keep metadata beside the bytes. This is accepted
+behaviour, not a defect, and `BlobMetadata` never reports a content type.
+Hosts that need it on local or SMB storage keep it in their own records, as
+backup manifests do for objects (`mime_type`). `StreamingObjectStore` keeps
+its `content_type` on every provider, because it writes an object metadata
+record.
+
 ## Listing prefixes, order and durability
 
 A listing prefix is a plain string prefix of the key on every provider:
@@ -140,6 +153,33 @@ names, so a prefix costs no more than walking that directory. The shared
 provider test in `tests/support/listing_contract.rs` runs the same prefix
 cases against the local, S3 and SMB backends.
 
+A page can hold fewer keys than its limit, even none, while
+`next_continuation` is set, as S3 pages can. Keep paging until
+`next_continuation` is `None`; `list_blobs` does. The continuation token is
+opaque and belongs to the provider that issued it.
+
+Local listing pages do bounded work and hold bounded memory:
+
+- A page resumes at its continuation without revisiting what earlier pages
+  covered. A subtree that sorts entirely before the position is skipped from
+  its parent's entry without being read; only the directories on the path to
+  the position are read again.
+- Each directory read keeps only the smallest entries the page still needs,
+  at least the rest of the page plus one and at least 32, and reads the
+  directory again if the page needs later ones. A page therefore holds about
+  that many entries per directory on its path, however large a directory is.
+  A read still reads every entry of the directory, because file systems do
+  not return entries in key order, so a single directory with very many
+  entries costs a read of all of them on each page that passes through it.
+  Backup content keys are sharded two levels deep (`objects/sha256/ab/cd/…`)
+  for this reason.
+- Entry types come from the directory read: no entry is inspected
+  separately.
+- After `2 × limit + 64` directory reads, as when many directories hold no
+  keys, a page ends with the keys it found and a continuation. Such a token
+  names the last directory finished, followed by `/`; other tokens are the
+  last key returned. Every page makes progress.
+
 Listings return only keys the provider accepts: a stored name that is not a
 valid key is skipped, with everything below it. That covers names that are not
 valid UTF-8 (local) or UTF-16 (SMB), names `validate_blob_key` refuses, such
@@ -148,7 +188,8 @@ the reserved internal namespace. A listed key therefore always opens the
 object it names.
 
 Listings return keys in ascending lexicographic order of their UTF-8 bytes,
-and a continuation resumes after the last key returned in that order. Every
+and a continuation resumes after the position the previous page reached in
+that order. Every
 provider meets this contract: S3 lists in key order, SMB sorts its full
 listing, and the local backend walks each directory with subdirectories
 ordered as `<name>/`, so `a-b` and `a.b` list before `a/x`. Custom providers
@@ -256,6 +297,35 @@ listings of existing keys. It does not resolve case-folding or Unicode
 normalisation, so keys that differ only in case or normalisation still alias
 on such a target.
 
+`validate_canonical_blob_key` is the strict form for such targets. It applies
+`validate_portable_blob_key` and also refuses every character outside ASCII
+and every uppercase letter `A`-`Z`, so keys are lowercase ASCII. No two
+distinct canonical keys can alias on a target that ignores case or Unicode
+normalisation: an ASCII string is its own normal form under NFC, NFD, NFKC
+and NFKD, and a lowercase ASCII string has no other ASCII case spelling.
+NFC with a Unicode case fold was considered and not chosen. It admits more
+keys, but targets compare case with their own tables rather than Unicode case
+folding (a table built from simple uppercase mappings, as Windows uses, maps
+both `i` and the dotless `ı` to `I`, which the case fold keeps apart), so it
+would not rule out aliasing, and it would need Unicode tables that change
+between Unicode versions.
+
+The mode is opt-in and the default is unchanged: by default keys are
+case-sensitive and not normalised, and on a target that ignores case or
+normalisation two such keys name one file, so a write to one silently
+replaces the other. Enable `SmbStorageBackend::with_canonical_keys(true)` or
+`LocalStorageBackend::with_canonical_keys(true)` (for a local root on NTFS,
+APFS or an OS-mounted share) to refuse non-canonical keys on new writes with
+`InvalidStorageKey` before anything is written. Reads, deletes and listings
+keep the ordinary validation, so objects stored earlier stay readable, listed
+and deletable. The mode does not detect collisions among keys written before
+it was enabled; a per-write check that lists the parent directory and
+compares folded names was rejected, because it races concurrent writers and
+costs a listing per write. Canonical mode refuses keys that contain uppercase
+or non-ASCII characters, for example a backup table export of a table whose
+name has uppercase letters, so check a repository's key shapes before
+enabling it.
+
 `StorageError::InvalidStorageKey` displays the fixed message `invalid storage
 key` and never the key, which can reveal a repository path or root prefix.
 The `key` field and `Debug` output hold it for host diagnostics only.
@@ -270,23 +340,37 @@ cannot create or replace storage entries. Protect ancestor path components again
 replacement too. This applies equally to
 local backups and OS-mounted shares using this backend.
 
-Key validation is lexical. Ordinary local reads/writes follow existing links;
-the configured root is not a confinement boundary against a hostile local
-writer. Keep links that could resolve outside the intended tree out of the
-storage hierarchy. The temporary-file sweep skips symbolic links, including
-linked directories, broken links and cycles; it also skips non-file/non-directory
-entries. A root that is itself a symbolic link is skipped by the sweep.
-Deployments intentionally using links must arrange cleanup of their real target
-roots explicitly.
+The local backend never follows a filesystem link below its root. Every read,
+write, copy and delete, for blobs, streaming objects and multipart uploads,
+inspects each existing component of its path below the root without following
+it, and refuses the operation with `StorageError::InvalidStorageKey` when one is
+a link, wherever the link points, before it touches the link's target. Writes
+check before they create any directory, so a link never makes them create
+directories outside the root. A read also checks that the file it opened is the
+entry it inspected, so a file swapped for a link between the two is refused.
+Links count as:
 
-The sweep inspects paths before operating on them. A concurrent replacement can
-still race that inspection. Race-resistant confinement would require directory
-handle relative resolution and no-follow operations at every path component,
-with platform-specific handling of reparse points and all read/write/delete
-paths. That is not implemented here. Canonicalizing a path before opening it
-would still leave a check/use race. Do not use this backend as a sandbox for
-untrusted local filesystem writers; isolate them through host permissions or a
-separate storage provider.
+| Platform | Refused |
+| --- | --- |
+| Unix | Symbolic links. A FIFO, socket or device file at a key is refused too, as reading one can block. |
+| Windows | Symbolic links, junctions, volume mount points and every other name-surrogate reparse point, which the standard library reports as symbolic links. A file is opened as its reparse point first; a name surrogate is refused, and any other reparse point, such as a deduplicated or cloud file, is reopened through its file system filter and must be the same file. |
+
+Listings never list or enter a link, and a listing whose prefix directory is
+reached through a link is refused. The temporary-file sweep skips symbolic
+links, including linked directories, broken links and cycles; it also skips
+non-file/non-directory entries. The configured root itself may be a link: the
+host chose it, and only links below it are refused. The sweep skips a root that
+is itself a symbolic link. Hard links are ordinary files to the file system and
+cannot be told apart; keep them out of the tree.
+
+The checks inspect paths before operating on them. A concurrent replacement of
+a directory under the root by a link can still race that inspection. Closing
+that race would require directory-handle-relative resolution with no-follow
+operations at every path component on every read, write and delete path, which
+is not implemented here. Canonicalizing a path before opening it would still
+leave a check/use race. Do not use this backend as a sandbox for untrusted
+local filesystem writers; isolate them through host permissions or a separate
+storage provider.
 
 ## Error Taxonomy
 

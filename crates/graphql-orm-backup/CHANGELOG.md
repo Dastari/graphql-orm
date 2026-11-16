@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.25.0 (unreleased)
+
+Requires `graphql-orm-storage` 0.16.0, whose local backend refuses keys
+through filesystem links and pages listings with bounded work. No backup API
+or behavior changes.
+
+- Documented: a full restore reads each object blob from the repository three
+  times and each table or change payload twice, by design; restored objects
+  keep no content type on local or SMB storage.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+
 ## 0.23.0 (unreleased)
 
 - PostgreSQL ORM restores resolve bare mixed-case entity table names with the

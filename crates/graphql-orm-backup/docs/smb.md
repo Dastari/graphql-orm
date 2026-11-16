@@ -3,7 +3,7 @@ title: "Native and Mounted SMB Repositories"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -62,6 +62,20 @@ table payloads remain buffered convenience values.
 Credentials are runtime inputs. Neither reusable crate persists them or writes
 them to manifests, locks, diagnostics, logs, or configuration exports.
 Application authorization remains a host responsibility.
+
+## Key case
+
+Repository keys are lowercase ASCII (`snapshots/<uuid>/…`, `objects/sha256/…`,
+`locks/repository.lock`, `repository-id`) except the table name in each
+snapshot's table and change export keys, which is used as declared. Two
+tables whose names differ only in case would share one export file on a
+server that ignores case, as Samba and Windows do by default. To refuse such
+writes, connect with `SmbStorageBackend::with_canonical_keys(true)`; a backup
+of a table whose name is not lowercase ASCII then fails with
+`InvalidStorageKey` before writing it. See the storage
+[native SMB guide](../../graphql-orm-storage/docs/native-smb.md). The mode is
+off by default. Objects restored to a native SMB store keep no content type,
+since SMB files have none; see [object restore](restore-semantics.md#object-restore).
 
 ## Mounted SMB legacy mode
 

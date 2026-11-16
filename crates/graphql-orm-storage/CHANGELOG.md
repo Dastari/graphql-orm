@@ -10,6 +10,48 @@ supersedes: []
 
 # Changelog
 
+## 0.16.0 (unreleased)
+
+- Local storage never follows a filesystem link below its root. Every read,
+  write, copy and delete of a blob, streaming object or multipart upload whose
+  path below the root names or passes through a symbolic link (on Windows,
+  also a junction, mount point or other name-surrogate reparse point) fails
+  with `StorageError::InvalidStorageKey` before it touches the link's target,
+  wherever the link points. Writes check before creating any directory, and
+  reads check that the file they opened is the entry they inspected.
+  Listings neither list nor enter links, and a listing whose prefix directory
+  is reached through a link is refused; a link cycle no longer fails a
+  listing with a filesystem-loop error. A FIFO, socket or device file at a
+  key is refused instead of being opened. The configured root may still be a
+  link. A concurrent replacement of a directory by a link can still race the
+  checks; see the trust boundary in `docs/blob-store.md`.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- Local listing pages resume at their continuation with bounded work and
+  memory: a page reads only the directories on the path to its position and
+  the subtrees it lists, reads no entry metadata beyond the directory read,
+  keeps at most the entries the page still needs (at least 32) from each
+  directory instead of the whole directory, and ends after
+  `2 * limit + 64` directory reads with the keys it found and a
+  continuation. Such a page can hold fewer keys than its limit, even none;
+  its token is the last directory finished, followed by `/`. Tokens from
+  earlier versions stay valid.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- `validate_canonical_blob_key` accepts only portable, lowercase ASCII keys,
+  so no two keys it accepts alias on a target that ignores case or Unicode
+  normalisation. `SmbStorageBackend::with_canonical_keys` and
+  `LocalStorageBackend::with_canonical_keys` apply it to new writes only,
+  refusing a non-canonical key with `InvalidStorageKey` before any request or
+  filesystem change; reads, deletes and listings are unchanged. Both default
+  to off, and the default behaviour is unchanged and now documented.
+  ([#482](https://github.com/Dastari/graphql-orm/issues/482))
+- `LocalStorageBackend::delete_blob_once` reports a refused key as
+  `InvalidStorageKey` instead of wrapping it in `SingleAttemptFailed`:
+  nothing was attempted.
+- Documented: `BlobPutOptions::content_type` is ignored by local and SMB
+  storage; a listing page can hold fewer keys than its limit while it still
+  returns a continuation.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+
 ## 0.15.0 (unreleased)
 
 No public API changes.

@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## To 0.25.0: storage 0.16.0
+
+Move `graphql-orm-backup` and `graphql-orm-storage` together to one reviewed
+revision and refresh the lockfile. Storage 0.16.0 is required.
+
+- **Local repositories and links. Action needed** only if a local
+  repository root contains symbolic links, junctions or mount points below
+  it: storage now refuses every key through one, so such a repository fails
+  verification and restore with `InvalidStorageKey` until the links are
+  replaced with the real directories. See the storage
+  [migration guide](../graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys).
+- **Restore reads and content type. No action.** The documented three reads
+  per object and two per payload, and the content type local and SMB stores
+  do not keep, are existing behaviour. See
+  [repository reads](docs/restore-semantics.md#repository-reads).
+
 ## To 0.23.0: PostgreSQL mixed-case table restore
 
 When using the optional PostgreSQL ORM adapter, upgrade ORM/macros to 0.159.0
