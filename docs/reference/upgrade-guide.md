@@ -22,37 +22,6 @@ each change requires (see
 This guide is an index into them. Each summary is a short extract from the
 linked section. Read the linked section before you act on an entry.
 
-## Breaking release (unreleased): ORM and macros 0.160.0
-
-Upgrade runtime and macros together. The integration release number will be
-assigned when the breaking batch reaches main. See the authoritative
-[breaking migration steps](../../MIGRATION.md#breaking-release-unreleased).
-
-- **Action needed — #667 / #674:** Declare `schema_roots!(max_page_limit: N)`
-  when the database maximum differs from 100. Schema construction refuses a
-  mismatched or unbounded database. Internal repository, transaction and keyset
-  reads above their maximum fail with `PAGE_LIMIT_EXCEEDED`; page with cursors
-  or raise the maximum for one trusted read with `with_max_limit(n)`.
-- **Action needed — #580:** Add `CursorKeyTooLarge` to exhaustive matches on
-  `RuntimeQueryErrorCode` and `RuntimeRelationErrorCode`. The enum additions
-  are part of this breaking release.
-- **Action needed — #528 (4):** Runtime `RecordVersion` and integer live keys
-  use decimal strings and `RuntimeInt64` by default. Update clients and regenerate
-  descriptors and approvals. `with_legacy_int_identities()` allows transition.
-- **Action needed — #666 (A):** To adopt key-only delete notifications, add
-  `#[graphql_entity(key_only_deletes)]`. Only exact `Key` / `Keys` subscribers
-  receive them; primary-key read policies make this attribute a compile error.
-  Review the key-existence disclosure described in the migration steps.
-- **Action needed — #445:** Replace the removed policy-free
-  `graphql::orm::RelationLoader` preload methods with generated relation
-  resolvers or authorized repository / transaction queries.
-- **Action needed — #682 (A):** Give deliberate callback refusals public codes.
-  Uncoded text now becomes `INTERNAL_ERROR` with the default message. Hosts
-  may explicitly opt in through `expose_uncoded_callback_messages(true)`.
-
-The #485 changelog correction is included in PR #733; nested router directive
-enforcement remains tracked separately in #729.
-
 ## How to upgrade across many releases
 
 Choose the target workspace release, then work in this order.
@@ -103,7 +72,15 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-No unreleased entries yet. Add new entries here.
+#### Breaking integration release (version provisional)
+
+- **Action needed** — ORM/macros 0.160.0: declare the schema page maximum and migrate oversized internal reads to exact-or-refused paging (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: review key-existence disclosure before adopting key-only deletes; only exact-key subscribers qualify and primary-key read policies are refused (#666). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: replace policy-free relation preload methods with authorized queries (#445). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: assign public codes to deliberate callback refusals, or explicitly opt in to uncoded text exposure (#682). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **No action** — ORM/macros 0.161.0, PR #733: #485 corrects the nested router directive claim; enforcement remains separately tracked in #729. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01610)
 
 ### workspace-2026.11.15.6
 
