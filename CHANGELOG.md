@@ -14,6 +14,10 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - AI 0.146.0, tool profiles 0.24.0
+
+- AI capability scale (part of #551): reviewed static read tools can sit behind the fixed broker instead of the provider surface, fixed-broker `describe` defines each repeated input type once, capability search no longer re-tokenises the catalogue, one oversized generated root no longer fails its target, large surfaces select the fixed broker over native deferred loading, and a startup benchmark is published from CI. Also adds an opt-in host-held epoch anchor that keeps a file-level database restore closed (#572), an opt-in dependent-effect policy for generated deletes (#389), and opt-in strict query roots (#463). No schema change, and no fingerprint changes for a host that changes nothing. One selection change can rebind a retained session once; see the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460) and [migration guidance](MIGRATION.md#ai-01450-to-01460-and-tool-profiles-0230-to-0240-capability-scale).
+
 ## Unreleased - ORM/macros 0.159.0
 
 - Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).

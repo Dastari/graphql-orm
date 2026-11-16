@@ -13,10 +13,11 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    AiCapabilityIndex, AiCapabilityIndexEntry, AiCapabilityIndexSet,
+    AiApprovalRule, AiCapabilityIndex, AiCapabilityIndexEntry, AiCapabilityIndexSet,
     AiCapabilityIndexSetSearchResult, AiCapabilityKind, AiCapabilityRankedMatch,
-    AiCapabilitySearchQuery, AiError, AiRunId, AiSessionId, AiToolId, ModelReasoningEffort,
-    ModelToolDefinition, ProviderCapabilities, ProviderKind,
+    AiCapabilitySearchQuery, AiError, AiRunId, AiSessionId, AiSharedTypePlanSchema, AiToolId,
+    AiToolRisk, DataClassification, ModelReasoningEffort, ModelToolDefinition,
+    ProviderCapabilities, ProviderKind,
 };
 
 /// Frozen broker tool identifier for bounded capability discovery.
@@ -28,6 +29,13 @@ pub const AI_CAPABILITY_EXECUTE_TOOL_ID: &str = "graphql.capabilities.execute";
 
 /// Current broker request/response envelope version.
 pub const AI_CAPABILITY_BROKER_VERSION: u16 = 1;
+
+/// Maximum reviewed static tools one run may reach through the fixed broker.
+///
+/// Brokered static tools are not provider definitions, so this bound is
+/// independent of the 128 exact static bootstrap fingerprints a retained
+/// provider session admits.
+pub const AI_CAPABILITY_MAXIMUM_BROKERED_STATIC_TOOLS: usize = 8_192;
 
 /// Capability-definition delivery strategy selected by the coordinator.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -488,6 +496,13 @@ fn broker_definition(
 /// Selects the safest admissible delivery mode from provider declarations and
 /// exact definition size. Prompt text cannot influence this decision.
 ///
+/// `ProviderDeferred` still sends every definition in every request, so its
+/// request bytes grow with the catalogue. A surface above the eager count or
+/// byte limit therefore selects `FixedBroker` instead whenever the provider
+/// declares it, and `ProviderDeferred` only when the provider declares no
+/// fixed broker. A provider that must keep native deferred loading for a
+/// large surface omits `FixedBroker` from its declared modes.
+///
 /// # Errors
 ///
 /// Returns a configuration error when no provider-declared mode can represent
@@ -510,7 +525,13 @@ pub fn select_capability_delivery_mode(
     } else if eager_fits && supported.contains(&AiCapabilityDeliveryMode::EagerExact) {
         Some(AiCapabilityDeliveryMode::EagerExact)
     } else if supported.contains(&AiCapabilityDeliveryMode::ProviderDeferred) {
-        Some(AiCapabilityDeliveryMode::ProviderDeferred)
+        if !eager_fits && supported.contains(&AiCapabilityDeliveryMode::FixedBroker) {
+            // Never choose a mode whose request size grows with the
+            // catalogue while a constant-size one is available.
+            Some(AiCapabilityDeliveryMode::FixedBroker)
+        } else {
+            Some(AiCapabilityDeliveryMode::ProviderDeferred)
+        }
     } else if !retained_definitions_frozen
         && supported.contains(&AiCapabilityDeliveryMode::ClientDeferred)
     {
@@ -1086,9 +1107,24 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
+        self.search_admitted(principal_reference, run, query, |_| true)
+            .await
+    }
+
+    /// [`Self::search`] over the entries `admit` accepts. An entry `admit`
+    /// refuses is removed before the authorization bound and before host
+    /// policy, exactly as if the index did not hold it.
+    async fn search_admitted(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        query: &AiCapabilitySearchQuery,
+        admit: impl Fn(&AiCapabilityIndexEntry) -> bool,
+    ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        let ranked = indexes.ranked_matches(query)?;
+        let mut ranked = indexes.ranked_matches(query)?;
+        ranked.retain(|candidate| admit(candidate.entry()));
         if self
             .maximum_discovery_authorizations
             .is_some_and(|maximum| ranked.len() > maximum)
@@ -1471,6 +1507,8 @@ struct BrokerSessionState {
 pub struct AiCapabilityBrokerSession {
     inner: Arc<Mutex<BrokerSessionState>>,
     limits: AiCapabilityDeliveryLimits,
+    brokered_static_tools: Arc<BTreeSet<String>>,
+    inline_describe_schema: bool,
 }
 
 impl AiCapabilityBrokerSession {
@@ -1484,7 +1522,91 @@ impl AiCapabilityBrokerSession {
         Ok(Self {
             inner: Arc::new(Mutex::new(BrokerSessionState::default())),
             limits,
+            brokered_static_tools: Arc::new(BTreeSet::new()),
+            inline_describe_schema: false,
         })
+    }
+
+    /// Admits the listed reviewed static read tools to this run's fixed
+    /// broker, by exact descriptor fingerprint.
+    ///
+    /// A brokered static tool is found with discover, loaded with describe
+    /// and run with execute, like a generated query. It is not a provider
+    /// definition, so it does not count against the 128 exact static
+    /// bootstrap fingerprints of a retained provider session, and changing
+    /// this list never changes the session binding. Offer a tool either as a
+    /// bootstrap definition or through the broker, not both.
+    ///
+    /// The list is run configuration, not authority. Each brokered call still
+    /// rehydrates the principal, applies host capability policy to the exact
+    /// index entry at discover, describe and execute, and then runs through
+    /// ordinary tool authorization and the tool's static disclosure schema.
+    /// The exact-definition review contract is kept: the fingerprint must
+    /// equal the indexed and the registered descriptor fingerprint at every
+    /// step, or the call fails closed.
+    ///
+    /// Only an approval-free, read-only, idempotent application query whose
+    /// maximum classification is below `Restricted` and which declares no
+    /// result media can be brokered. A listed tool that is anything else is
+    /// never discoverable and never executable through the broker; keep it a
+    /// bootstrap definition. A brokered call carries no
+    /// [`crate::AiToolExecutionProvenance`], so a host executor that requires
+    /// provenance refuses it.
+    ///
+    /// Build the list from the same current hierarchical rules as the turn:
+    /// the coordinator refuses a turn whose rules do not admit every listed
+    /// fingerprint as an approval-free read tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] for a malformed fingerprint
+    /// or more than [`AI_CAPABILITY_MAXIMUM_BROKERED_STATIC_TOOLS`] entries.
+    pub fn with_brokered_static_tools(
+        mut self,
+        descriptor_fingerprints: BTreeSet<String>,
+    ) -> Result<Self, AiError> {
+        if descriptor_fingerprints.len() > AI_CAPABILITY_MAXIMUM_BROKERED_STATIC_TOOLS
+            || descriptor_fingerprints
+                .iter()
+                .any(|fingerprint| !crate::valid_sha256(fingerprint))
+        {
+            return Err(AiError::InvalidConfiguration(
+                "brokered static tool binding is invalid".to_owned(),
+            ));
+        }
+        self.brokered_static_tools = Arc::new(descriptor_fingerprints);
+        Ok(self)
+    }
+
+    /// Exact descriptor fingerprints of the reviewed static tools this run
+    /// may reach through the fixed broker.
+    pub fn brokered_static_tool_fingerprints(&self) -> &BTreeSet<String> {
+        &self.brokered_static_tools
+    }
+
+    /// Makes describe return the complete inline compact plan schema instead
+    /// of the default shared-type rendering.
+    ///
+    /// By default describe defines each repeated input type once under
+    /// `planSchema.types` and references it by name, which is the same
+    /// contract in far fewer bytes. Use the inline form only for a model that
+    /// cannot follow a schema reference.
+    #[must_use]
+    pub const fn with_inline_describe_schema(mut self) -> Self {
+        self.inline_describe_schema = true;
+        self
+    }
+
+    /// Whether describe returns the inline compact plan schema.
+    pub const fn uses_inline_describe_schema(&self) -> bool {
+        self.inline_describe_schema
+    }
+
+    fn brokers_static_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
+        brokerable_static_entry(entry)
+            && self
+                .brokered_static_tools
+                .contains(&entry.capability_fingerprint)
     }
 
     /// Exact bounds applied to retained searches, loaded bindings, and one
@@ -1765,6 +1887,15 @@ fn insert_broker_argument_segments(
     }
 }
 
+/// Whether index metadata admits a reviewed static tool to the fixed broker.
+/// The registered descriptor is checked again before describe and execute.
+fn brokerable_static_entry(entry: &AiCapabilityIndexEntry) -> bool {
+    entry.kind == AiCapabilityKind::ReviewedStatic
+        && entry.risk == AiToolRisk::ReadOnly
+        && entry.approval == AiApprovalRule::None
+        && entry.result_classification < DataClassification::Restricted
+}
+
 fn stale_selection() -> AiError {
     AiError::InvalidInput("broker capability selection is stale".to_owned())
 }
@@ -1861,6 +1992,36 @@ impl AiCapabilityDescription {
         Ok(self)
     }
 
+    /// Attaches the plan schema of the loaded capability with each repeated
+    /// input type defined once under `planSchema.types`.
+    ///
+    /// The contract is the one [`Self::with_plan_schema`] would attach, in
+    /// fewer bytes: a `{"$ref": "#/types/<Name>"}` stands for the named
+    /// definition, and the execute arguments are unchanged. The same size
+    /// bound and omission rule apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] when the contract can no
+    /// longer be canonically serialized.
+    pub fn with_shared_type_plan_schema(
+        mut self,
+        plan_schema: &AiSharedTypePlanSchema,
+        maximum_bytes: u32,
+    ) -> Result<Self, AiError> {
+        if !plan_schema.types().is_empty()
+            && let Some(contract) = self.contract.as_object_mut()
+        {
+            contract.insert(
+                "planSchemaTypeReferences".to_owned(),
+                json!(
+                    "A {\"$ref\": \"#/types/<Name>\"} in planSchema stands for planSchema.types.<Name>."
+                ),
+            );
+        }
+        self.with_plan_schema(plan_schema.to_model_schema(), maximum_bytes)
+    }
+
     /// Consumes the description and returns the one bounded model result.
     pub fn into_model_result(self) -> serde_json::Value {
         self.contract
@@ -1876,6 +2037,7 @@ impl AiCapabilityDescription {
 #[derive(Clone, Debug)]
 pub struct AiCapabilityExecution {
     capability_id: AiToolId,
+    capability_kind: AiCapabilityKind,
     capability_fingerprint: String,
     audit_reference: String,
     plan: serde_json::Value,
@@ -1885,6 +2047,12 @@ impl AiCapabilityExecution {
     /// Exact capability to execute.
     pub const fn capability_id(&self) -> &AiToolId {
         &self.capability_id
+    }
+
+    /// Capability family to execute: a generated query, or a reviewed static
+    /// tool the run admitted to the broker.
+    pub const fn capability_kind(&self) -> AiCapabilityKind {
+        self.capability_kind
     }
 
     /// Exact capability fingerprint proven at load and re-proven at execution.
@@ -1898,11 +2066,15 @@ impl AiCapabilityExecution {
     }
 
     /// Closed compact plan handed to the authoritative capability compiler.
+    ///
+    /// For a reviewed static tool this is the tool's argument object, which
+    /// the registered argument schema validates before the resolver runs.
     pub const fn plan(&self) -> &serde_json::Value {
         &self.plan
     }
 
-    /// Consumes the execution and returns the closed compact plan.
+    /// Consumes the execution and returns the closed compact plan, or the
+    /// argument object of a reviewed static tool.
     pub fn into_plan(self) -> serde_json::Value {
         self.plan
     }
@@ -1975,20 +2147,31 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<serde_json::Value, AiError> {
         let parsed: BrokerDiscoverArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
-        if parsed
-            .kind
-            .is_some_and(|kind| kind != AiCapabilityKind::GeneratedQuery)
-        {
-            return Err(malformed_broker_arguments());
-        }
+        let brokers_static = !session.brokered_static_tools.is_empty();
+        // Without brokered static tools the search stays generated-only. With
+        // them, an unfiltered search covers both families.
+        let kind = match parsed.kind {
+            Some(AiCapabilityKind::GeneratedQuery) => Some(AiCapabilityKind::GeneratedQuery),
+            Some(AiCapabilityKind::ReviewedStatic) if brokers_static => {
+                Some(AiCapabilityKind::ReviewedStatic)
+            }
+            Some(_) => return Err(malformed_broker_arguments()),
+            None if brokers_static => None,
+            None => Some(AiCapabilityKind::GeneratedQuery),
+        };
         let query = AiCapabilitySearchQuery {
             text: parsed.text,
             namespace: parsed.namespace,
-            kind: Some(AiCapabilityKind::GeneratedQuery),
+            kind,
             entity_or_operation: parsed.entity_or_class,
             maximum_results: parsed.maximum_results,
         };
-        let result = self.search(principal_reference, run, &query).await?;
+        let result = self
+            .search_admitted(principal_reference, run, &query, |entry| {
+                entry.kind == AiCapabilityKind::GeneratedQuery
+                    || session.brokers_static_entry(entry)
+            })
+            .await?;
         let value = json!({
             "version": AI_CAPABILITY_BROKER_VERSION,
             "indexFingerprint": result.index_set_fingerprint,
@@ -2101,10 +2284,16 @@ impl AiCapabilityDiscoveryBroker {
             .ok_or_else(stale_selection)?;
         let indexes = self.current_indexes.current_index_set(run)?;
         verify_search_binding(&indexes, &search).map_err(|_| stale_selection())?;
+        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_selection)?;
+        // A static tool is loadable only while this run brokers its exact
+        // fingerprint. A cached discovery from a run that did, or any other
+        // capability family, is the same stale selection as an unknown ID.
+        if entry.kind != AiCapabilityKind::GeneratedQuery && !session.brokers_static_entry(entry) {
+            return Err(stale_selection());
+        }
         let loaded = self
             .load(principal_reference, run, &search, &capability_id)
             .await?;
-        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_selection)?;
         let loaded_reference = loaded.audit_reference();
         let expires_in_seconds = (loaded.expires_at - self.clock.now())
             .whole_seconds()
@@ -2153,11 +2342,28 @@ impl AiCapabilityDiscoveryBroker {
         if self.clock.now() > loaded.expires_at {
             return Err(stale_selection());
         }
-        if loaded.capability_kind != AiCapabilityKind::GeneratedQuery {
-            return Err(AiError::Forbidden);
-        }
+        let static_tool = match loaded.capability_kind {
+            AiCapabilityKind::GeneratedQuery => false,
+            AiCapabilityKind::ReviewedStatic
+                if session
+                    .brokered_static_tools
+                    .contains(&loaded.capability_fingerprint) =>
+            {
+                true
+            }
+            _ => return Err(AiError::Forbidden),
+        };
         self.authorize_execution(principal_reference, run, &loaded)
             .await?;
+        if static_tool {
+            let indexes = self.current_indexes.current_index_set(run)?;
+            if !indexes
+                .entry(&loaded.capability_id)
+                .is_some_and(|(_, entry)| session.brokers_static_entry(entry))
+            {
+                return Err(AiError::Forbidden);
+            }
+        }
         if parsed.arguments.len() > 64
             || parsed.selections.len() > 256
             || parsed
@@ -2213,6 +2419,25 @@ impl AiCapabilityDiscoveryBroker {
                 return Err(malformed_broker_arguments());
             }
         }
+        if static_tool {
+            // A static tool has a fixed server-authored document: it takes
+            // arguments only.
+            if !selections.is_empty()
+                || !relationship_arguments.is_empty()
+                || !relationship_maximum_items.is_empty()
+                || parsed.maximum_items.is_some()
+            {
+                return Err(malformed_broker_arguments());
+            }
+            session.record_execute();
+            return Ok(AiCapabilityExecution {
+                capability_id: loaded.capability_id.clone(),
+                capability_kind: loaded.capability_kind,
+                capability_fingerprint: loaded.capability_fingerprint.clone(),
+                audit_reference: loaded.audit_reference(),
+                plan: plan_arguments,
+            });
+        }
         let mut plan = serde_json::Map::from_iter([
             ("arguments".to_owned(), plan_arguments),
             ("selections".to_owned(), json!(selections)),
@@ -2231,6 +2456,7 @@ impl AiCapabilityDiscoveryBroker {
         session.record_execute();
         Ok(AiCapabilityExecution {
             capability_id: loaded.capability_id.clone(),
+            capability_kind: loaded.capability_kind,
             capability_fingerprint: loaded.capability_fingerprint.clone(),
             audit_reference: loaded.audit_reference(),
             plan: serde_json::Value::Object(plan),
@@ -2319,6 +2545,18 @@ impl AiCapabilityDeliveryTurn {
                 "capability session binding does not match the selected surface".to_owned(),
             ));
         }
+        // Only the fixed broker has the describe and execute operations a
+        // static tool needs, and a tool is offered one way, never both.
+        if !session.brokered_static_tools.is_empty()
+            && (surface.mode() != AiCapabilityDeliveryMode::FixedBroker
+                || !session
+                    .brokered_static_tools
+                    .is_disjoint(session_binding.static_bootstrap_tool_fingerprints()))
+        {
+            return Err(AiError::InvalidConfiguration(
+                "brokered static tools do not match the selected surface".to_owned(),
+            ));
+        }
         let mut tools = surface.tools().to_vec();
         if matches!(
             surface.mode(),
@@ -2375,6 +2613,17 @@ impl AiCapabilityDeliveryTurn {
     /// Bounded process-local broker state for this run.
     pub const fn session(&self) -> &AiCapabilityBrokerSession {
         &self.session
+    }
+
+    /// Whether `admits` accepts every reviewed static tool this run may reach
+    /// through the fixed broker. The coordinator uses it to hold brokered
+    /// static tools to the same hierarchical rules as offered ones.
+    #[cfg_attr(feature = "mssql", allow(dead_code))]
+    pub(crate) fn brokered_static_tools_admitted(&self, admits: impl Fn(&str) -> bool) -> bool {
+        self.session
+            .brokered_static_tools
+            .iter()
+            .all(|fingerprint| admits(fingerprint))
     }
 
     /// Exact definitions a host must install in the next provider request.
@@ -2887,9 +3136,47 @@ mod tests {
                 .mode(),
             AiCapabilityDeliveryMode::EagerExact
         );
+        // A surface above the eager limits never selects the mode that sends
+        // every definition while the provider also offers the fixed broker.
         assert_eq!(
             select_capability_delivery_mode(&capabilities, 55, 4_917_706, false, limits)
                 .expect("large surface should select")
+                .mode(),
+            AiCapabilityDeliveryMode::FixedBroker
+        );
+        assert_eq!(
+            select_capability_delivery_mode(
+                &capabilities,
+                usize::from(limits.maximum_eager_definitions) + 1,
+                1_024,
+                false,
+                limits
+            )
+            .expect("count above the eager limit should select")
+            .mode(),
+            AiCapabilityDeliveryMode::FixedBroker
+        );
+        // Without a declared fixed broker, native deferred loading remains
+        // the only admissible mode for the same surface.
+        let mut native_only = capabilities.clone();
+        native_only
+            .capability_delivery_modes
+            .remove(&AiCapabilityDeliveryMode::FixedBroker);
+        assert_eq!(
+            select_capability_delivery_mode(&native_only, 55, 4_917_706, false, limits)
+                .expect("native-only surface should select")
+                .mode(),
+            AiCapabilityDeliveryMode::ProviderDeferred
+        );
+        // A surface within the eager limits keeps native deferred loading
+        // when the provider declares no eager mode.
+        let mut no_eager = capabilities.clone();
+        no_eager
+            .capability_delivery_modes
+            .remove(&AiCapabilityDeliveryMode::EagerExact);
+        assert_eq!(
+            select_capability_delivery_mode(&no_eager, 2, 1_024, false, limits)
+                .expect("small deferred surface should select")
                 .mode(),
             AiCapabilityDeliveryMode::ProviderDeferred
         );
@@ -4523,5 +4810,484 @@ mod tests {
             oversized_metadata.with_plan_schema(json!({"type": "object"}), 1_024),
             Err(AiError::InvalidConfiguration(_))
         ));
+    }
+
+    fn static_broker_fixture() -> (
+        AiCapabilityDiscoveryBroker,
+        PrincipalReference,
+        AiCapabilityRunBinding,
+        AiCapabilityIndexEntry,
+    ) {
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let indexes = AiCapabilityIndexSet::compile([
+            index("target-policy-v1"),
+            generated_index("target-policy-v1"),
+        ])
+        .expect("index set");
+        let static_entry = indexes
+            .indexes()
+            .flat_map(|index| index.entries())
+            .find(|entry| entry.kind == AiCapabilityKind::ReviewedStatic)
+            .expect("reviewed static entry")
+            .clone();
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            Arc::new(CurrentIndexes(RwLock::new(Arc::new(indexes)))),
+            Arc::new(Authority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            }),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        (broker, principal_reference, run_binding(), static_entry)
+    }
+
+    fn brokering<S: AsRef<str>>(fingerprints: &[S]) -> AiCapabilityBrokerSession {
+        AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("broker session")
+            .with_brokered_static_tools(
+                fingerprints
+                    .iter()
+                    .map(|fingerprint| fingerprint.as_ref().to_owned())
+                    .collect(),
+            )
+            .expect("brokered static tools")
+    }
+
+    fn candidate_kinds(discovery: &serde_json::Value) -> BTreeSet<String> {
+        discovery["candidates"]
+            .as_array()
+            .expect("candidates")
+            .iter()
+            .map(|candidate| candidate["kind"].as_str().expect("kind").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_static_tool_reaches_the_broker_only_in_a_run_that_admits_its_fingerprint() {
+        let (broker, principal, run, static_entry) = static_broker_fixture();
+        let search = json!({"text": "list the latest jobs", "maximumResults": 8});
+
+        // Default run: the static tool is in the index and never surfaces.
+        let default = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("broker session");
+        let discovery = broker
+            .dispatch_discover(&principal, &run, &default, &search)
+            .await
+            .expect("default discovery");
+        assert!(!candidate_kinds(&discovery).contains("reviewed_static"));
+        assert!(matches!(
+            broker
+                .dispatch_discover(
+                    &principal,
+                    &run,
+                    &default,
+                    &json!({"text": "jobs", "kind": "reviewed_static", "maximumResults": 8}),
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        // A run that brokers some other fingerprint does not admit this one.
+        let other = brokering(&[&"e".repeat(64)]);
+        let discovery = broker
+            .dispatch_discover(&principal, &run, &other, &search)
+            .await
+            .expect("other discovery");
+        assert!(!candidate_kinds(&discovery).contains("reviewed_static"));
+
+        let session = brokering(&[&static_entry.capability_fingerprint]);
+        let discovery = broker
+            .dispatch_discover(
+                &principal,
+                &run,
+                &session,
+                &json!({"text": "list the latest jobs", "kind": "reviewed_static", "maximumResults": 8}),
+            )
+            .await
+            .expect("brokered discovery");
+        let candidate = &discovery["candidates"][0];
+        assert_eq!(candidate["capabilityId"], static_entry.id.as_str());
+        assert_eq!(candidate["kind"], "reviewed_static");
+        // An unfiltered search still returns generated queries.
+        let mixed = broker
+            .dispatch_discover(
+                &principal,
+                &run,
+                &session,
+                &json!({"text": "reviewed application record jobs", "maximumResults": 8}),
+            )
+            .await
+            .expect("mixed discovery");
+        assert_eq!(
+            candidate_kinds(&mixed),
+            BTreeSet::from(["generated_query".to_owned(), "reviewed_static".to_owned()])
+        );
+        // Mutations and subscriptions stay outside the broker.
+        for kind in ["generated_mutation", "generated_subscription"] {
+            assert!(matches!(
+                broker
+                    .dispatch_discover(
+                        &principal,
+                        &run,
+                        &session,
+                        &json!({"text": "jobs", "kind": kind, "maximumResults": 8}),
+                    )
+                    .await,
+                Err(AiError::InvalidInput(_))
+            ));
+        }
+
+        let describe = json!({
+            "capabilityId": candidate["capabilityId"],
+            "candidateFingerprint": candidate["candidateFingerprint"],
+        });
+        // A candidate this run did not broker is a stale selection, even when
+        // its search result is at hand.
+        default.record_search(
+            session
+                .candidate_search(&static_entry.id, &static_entry.fingerprint)
+                .expect("recorded search"),
+        );
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal, &run, &default, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message.contains("stale")
+        ));
+
+        let description = broker
+            .dispatch_describe(&principal, &run, &session, &describe)
+            .await
+            .expect("brokered description");
+        assert_eq!(
+            description.capability_kind(),
+            AiCapabilityKind::ReviewedStatic
+        );
+        assert_eq!(
+            description.capability_fingerprint(),
+            static_entry.capability_fingerprint
+        );
+        assert_eq!(description.contract()["risk"], json!(static_entry.risk));
+        assert_eq!(
+            description.contract()["approval"],
+            json!(static_entry.approval)
+        );
+        let loaded_reference = description.loaded_reference().to_owned();
+
+        let execution = broker
+            .authorize_broker_execution(
+                &principal,
+                &run,
+                &session,
+                &json!({
+                    "loadedReference": loaded_reference,
+                    "arguments": [
+                        {"name": "limit", "value": 5},
+                        {"name": "filter.status", "value": "open"}
+                    ],
+                    "selections": []
+                }),
+            )
+            .await
+            .expect("brokered execution");
+        assert_eq!(
+            execution.capability_kind(),
+            AiCapabilityKind::ReviewedStatic
+        );
+        assert_eq!(execution.capability_id(), &static_entry.id);
+        assert_eq!(
+            execution.capability_fingerprint(),
+            static_entry.capability_fingerprint
+        );
+        // The plan of a static tool is its argument object and nothing else.
+        assert_eq!(
+            execution.plan(),
+            &json!({"limit": 5, "filter": {"status": "open"}})
+        );
+
+        // A static tool has a fixed document: it takes no selection or bound.
+        for arguments in [
+            json!({"loadedReference": loaded_reference, "selections": ["id"]}),
+            json!({"loadedReference": loaded_reference, "selections": [], "maximumItems": 5}),
+            json!({
+                "loadedReference": loaded_reference,
+                "selections": [],
+                "relationshipMaximumItems": [{"path": "items", "maximumItems": 5}]
+            }),
+        ] {
+            assert!(matches!(
+                broker
+                    .authorize_broker_execution(&principal, &run, &session, &arguments)
+                    .await,
+                Err(AiError::InvalidInput(_))
+            ));
+        }
+
+        // The same loaded binding in run state that no longer brokers the
+        // tool does not execute.
+        let revoked = AiCapabilityBrokerSession {
+            inner: Arc::clone(&session.inner),
+            limits: session.limits,
+            brokered_static_tools: Arc::new(BTreeSet::new()),
+            inline_describe_schema: false,
+        };
+        assert!(matches!(
+            broker
+                .authorize_broker_execution(
+                    &principal,
+                    &run,
+                    &revoked,
+                    &json!({"loadedReference": loaded_reference, "selections": []}),
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_static_tool_that_is_not_an_approval_free_low_classification_read_is_never_brokered()
+    {
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let semantics = GraphqlSemanticCatalog::compose(
+            Vec::new(),
+            &GraphqlOperationCatalog::compose(Vec::<(
+                &'static [GeneratedGraphqlOperationDescriptor],
+                bool,
+                bool,
+            )>::new()),
+        )
+        .expect("semantic catalogue");
+        let descriptor = |id: &str| {
+            crate::AiToolDescriptor::new(
+                id,
+                "List reviewed warehouse records.",
+                crate::AiToolOperationKind::Query,
+                "query Reviewed { records }",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            )
+            .expect("descriptor")
+        };
+        let plain = descriptor("warehouse.plain")
+            .with_maximum_classification(crate::DataClassification::Confidential);
+        let restricted = descriptor("warehouse.restricted")
+            .with_maximum_classification(crate::DataClassification::Restricted);
+        let supervised = descriptor("warehouse.supervised")
+            .with_maximum_classification(crate::DataClassification::Public)
+            .with_risk(crate::AiToolRisk::ReadOnly, crate::AiApprovalRule::OneShot);
+        let fingerprints =
+            [&plain, &restricted, &supervised].map(|descriptor| descriptor.fingerprint.clone());
+        let index = Arc::new(
+            AiCapabilityIndex::compile(
+                crate::GraphqlExecutionTargetId::parse("warehouse").expect("target"),
+                "schema-v1",
+                &semantics,
+                None,
+                None,
+                None,
+                [plain, restricted, supervised],
+                "target-policy-v1",
+                crate::AiCapabilityIndexLimits::default(),
+            )
+            .expect("capability index"),
+        );
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            Arc::new(CurrentIndex(RwLock::new(index))),
+            Arc::new(Authority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            }),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        let session = brokering(&fingerprints.each_ref().map(String::as_str));
+        let discovery = broker
+            .dispatch_discover(
+                &principal_reference,
+                &run_binding(),
+                &session,
+                &json!({"text": "reviewed warehouse records", "maximumResults": 8}),
+            )
+            .await
+            .expect("discovery");
+        assert_eq!(
+            discovery["candidates"]
+                .as_array()
+                .expect("candidates")
+                .iter()
+                .map(|candidate| candidate["capabilityId"].as_str().expect("id"))
+                .collect::<Vec<_>>(),
+            ["warehouse.plain"]
+        );
+    }
+
+    #[test]
+    fn brokered_static_tools_need_the_fixed_broker_and_are_never_also_bootstrap_tools() {
+        let (broker, _, _, static_entry) = static_broker_fixture();
+        let broker = Arc::new(broker);
+        let index_fingerprint = "a".repeat(64);
+        let bootstrap = definition("records.lookup");
+        let select = |modes: &[AiCapabilityDeliveryMode],
+                      mode: AiCapabilityDeliveryMode,
+                      bootstrap_fingerprints: BTreeSet<String>,
+                      session: AiCapabilityBrokerSession| {
+            AiCapabilityDeliveryTurn::select(
+                &ProviderCapabilities {
+                    custom_tools: true,
+                    capability_delivery_modes: modes.iter().copied().collect(),
+                    ..ProviderCapabilities::default()
+                },
+                &index_fingerprint,
+                vec![bootstrap.clone()],
+                mode == AiCapabilityDeliveryMode::FixedBroker,
+                AiProviderCapabilitySessionBinding::new(
+                    mode,
+                    index_fingerprint.clone(),
+                    bootstrap_fingerprints,
+                    "provider-projection-v1",
+                    "gpt-test",
+                    ModelReasoningEffort::Unspecified,
+                    "f".repeat(64),
+                )
+                .expect("session binding"),
+                Arc::clone(&broker),
+                session,
+            )
+        };
+        let brokered = || brokering(&[&static_entry.capability_fingerprint]);
+
+        let delivery = select(
+            &[AiCapabilityDeliveryMode::FixedBroker],
+            AiCapabilityDeliveryMode::FixedBroker,
+            BTreeSet::from([bootstrap.fingerprint.clone()]),
+            brokered(),
+        )
+        .expect("fixed broker with a brokered static tool");
+        // The brokered tool adds no provider definition.
+        assert_eq!(delivery.current_tools().len(), 4);
+        assert_eq!(
+            delivery.session().brokered_static_tool_fingerprints(),
+            &BTreeSet::from([static_entry.capability_fingerprint.clone()])
+        );
+
+        assert!(matches!(
+            select(
+                &[AiCapabilityDeliveryMode::EagerExact],
+                AiCapabilityDeliveryMode::EagerExact,
+                BTreeSet::new(),
+                brokered(),
+            ),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        assert!(matches!(
+            select(
+                &[AiCapabilityDeliveryMode::FixedBroker],
+                AiCapabilityDeliveryMode::FixedBroker,
+                BTreeSet::from([bootstrap.fingerprint.clone()]),
+                brokering(&[&bootstrap.fingerprint]),
+            ),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        assert!(
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+                .expect("broker session")
+                .with_brokered_static_tools(BTreeSet::from(["not-a-fingerprint".to_owned()]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn describe_attaches_the_shared_type_plan_schema_within_the_same_bound() {
+        let filter = json!({
+            "type": "object",
+            "properties": {
+                "eq": {"type": ["string", "null"], "maxLength": 4096},
+                "ne": {"type": ["string", "null"], "maxLength": 4096},
+                "contains": {"type": ["string", "null"], "maxLength": 4096},
+            },
+            "required": [],
+            "additionalProperties": false,
+        });
+        let inline = json!({
+            "type": "object",
+            "properties": {
+                "arguments": {
+                    "type": "object",
+                    "properties": {
+                        "name": filter, "code": filter, "notes": filter, "owner": filter,
+                    },
+                    "required": [],
+                    "additionalProperties": false,
+                },
+            },
+            "required": ["arguments"],
+            "additionalProperties": false,
+        });
+        let shared = AiSharedTypePlanSchema::compile(&inline, &std::collections::BTreeMap::new())
+            .expect("shared types");
+        assert_eq!(shared.types().len(), 1);
+        let description = || AiCapabilityDescription {
+            loaded_reference: "a".repeat(64),
+            capability_id: AiToolId::parse("records.lookup").expect("id"),
+            capability_kind: AiCapabilityKind::GeneratedQuery,
+            capability_fingerprint: "b".repeat(64),
+            contract: json!({"version": AI_CAPABILITY_BROKER_VERSION}),
+        };
+
+        let attached = description()
+            .with_shared_type_plan_schema(&shared, 64 * 1_024)
+            .expect("shared plan schema")
+            .into_model_result();
+        assert_eq!(attached["planSchemaAvailable"], true);
+        assert_eq!(attached["planSchema"], shared.to_model_schema());
+        assert!(
+            attached["planSchemaTypeReferences"]
+                .as_str()
+                .expect("reference note")
+                .contains("planSchema.types")
+        );
+        let shared_bytes = serde_json::to_vec(&attached).expect("shared").len();
+        let inline_bytes = serde_json::to_vec(
+            &description()
+                .with_plan_schema(inline.clone(), 64 * 1_024)
+                .expect("inline plan schema")
+                .into_model_result(),
+        )
+        .expect("inline")
+        .len();
+        assert!(shared_bytes < inline_bytes);
+
+        // A bound the inline schema exceeds can still admit the shared one.
+        let bound = u32::try_from((shared_bytes + inline_bytes) / 2).expect("bound");
+        assert_eq!(
+            description()
+                .with_plan_schema(inline, bound)
+                .expect("oversized inline schema")
+                .into_model_result()["planSchemaAvailable"],
+            false
+        );
+        assert_eq!(
+            description()
+                .with_shared_type_plan_schema(&shared, bound)
+                .expect("shared schema within the bound")
+                .into_model_result()["planSchemaAvailable"],
+            true
+        );
+
+        // A schema with nothing to share is attached unchanged, without a note.
+        let plain = json!({"type": "object", "properties": {}, "additionalProperties": false});
+        let unshared = AiSharedTypePlanSchema::compile(&plain, &std::collections::BTreeMap::new())
+            .expect("no shared types");
+        let attached = description()
+            .with_shared_type_plan_schema(&unshared, 64 * 1_024)
+            .expect("plain plan schema")
+            .into_model_result();
+        assert_eq!(attached["planSchema"], plain);
+        assert!(attached.get("planSchemaTypeReferences").is_none());
     }
 }

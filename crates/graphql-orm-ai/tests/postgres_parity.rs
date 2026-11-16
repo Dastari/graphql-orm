@@ -1782,3 +1782,102 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
     drop(database);
     drop(container);
 }
+
+/// Host anchor storage for the epoch-anchor parity test.
+#[derive(Default)]
+struct ParityEpochAnchor(std::sync::Mutex<Option<AiRuntimeEpochAnchor>>);
+
+#[async_trait]
+impl AiRuntimeEpochAnchorStore for ParityEpochAnchor {
+    async fn load(&self) -> Result<Option<AiRuntimeEpochAnchor>, AiError> {
+        Ok(self.0.lock().expect("anchor").clone())
+    }
+
+    async fn store(&self, anchor: &AiRuntimeEpochAnchor) -> Result<(), AiError> {
+        *self.0.lock().expect("anchor") = Some(anchor.clone());
+        Ok(())
+    }
+}
+
+/// The host-held epoch anchor rotates in the live epoch's JSON value on
+/// PostgreSQL exactly as on SQLite: an ordinary restart keeps its epoch, and
+/// a store whose generation the host does not hold stays closed until an
+/// operator reconciles and acknowledges.
+#[tokio::test]
+async fn owned_postgres_epoch_anchor_rotates_and_refuses_a_generation_it_does_not_hold() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-epoch-anchor-v1",
+            "graphql-orm-ai epoch anchor parity",
+            module.entities(),
+        )
+        .await
+        .expect("AI schema should plan");
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("AI schema should apply");
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
+    let anchor = Arc::new(ParityEpochAnchor::default());
+    let recovery = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
+        .with_epoch_anchor(anchor.clone());
+
+    let first = recovery.readiness_proof().await.expect("first open");
+    let image_anchor = anchor.0.lock().expect("anchor").clone().expect("anchor");
+    let second = recovery.readiness_proof().await.expect("ordinary restart");
+    assert_eq!(second.epoch_id(), first.epoch_id());
+    let current_anchor = anchor.0.lock().expect("anchor").clone().expect("anchor");
+    assert_ne!(current_anchor.generation(), image_anchor.generation());
+    assert_eq!(current_anchor.pending_generation(), None);
+
+    // The store and the host anchor disagree by one rotation, as they do
+    // after a physical restore of an earlier image.
+    let stale = Arc::new(ParityEpochAnchor(std::sync::Mutex::new(Some(image_anchor))));
+    let mismatched = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
+        .with_epoch_anchor(stale.clone());
+    assert!(matches!(
+        mismatched.readiness_proof().await,
+        Err(AiError::RuntimeNotReady)
+    ));
+    // The refusal wrote nothing: the matching anchor still opens the store.
+    assert_eq!(
+        recovery
+            .readiness_proof()
+            .await
+            .expect("the matching anchor still opens")
+            .epoch_id(),
+        first.epoch_id()
+    );
+
+    // Reconcile and acknowledge re-establish the anchor on a new epoch.
+    let applied = mismatched
+        .reconcile_restore(
+            &OrmAiRestoreFactCollector::new(database.clone()),
+            "epoch-anchor-parity",
+            Some("restore-operator".to_owned()),
+        )
+        .await
+        .expect("closure should apply");
+    let acknowledged = mismatched
+        .acknowledge_reviewed_restore(applied.epoch_id(), "restore-operator", "reviewed")
+        .await
+        .expect("acknowledged restore");
+    assert_ne!(acknowledged.epoch_id(), first.epoch_id());
+    assert_eq!(
+        mismatched
+            .readiness_proof()
+            .await
+            .expect("the acknowledged store reopens")
+            .epoch_id(),
+        acknowledged.epoch_id()
+    );
+}

@@ -3,7 +3,7 @@ title: "Security Model"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -75,6 +75,65 @@ every application resolver, around checkpoint protection, and at adoption.
 Changed rules fail before an external effect where possible; after transport,
 stale rule or actual-usage evidence requires recovery and cannot be replayed.
 Legacy/unbound checkpoints are not adoption authority.
+
+## Dependent effects of generated deletes
+
+A generated delete root carries its own AI execution policy. Deleting a row
+can also delete or rewrite rows of other entities, through declared dependent
+deletes or physical foreign-key actions, and the root's policy says nothing
+about those entities.
+
+`AiRuntimeBuilder::dependent_effect_policy` installs an
+`AiDependentEffectPolicy` that decides those effects before execution. It is
+opt-in: without it a generated delete is decided by its own classification,
+as before. With it, every generated `Delete` or `DeleteMany` capability is
+checked when it is prepared (before any approval is requested) and again
+immediately before it executes:
+
+- The host declares, per logical target and root entity, the complete set of
+  dependent effects the delete can cause: a cascade delete of a dependent
+  entity, or a set-null of a named field of a dependent entity. An empty set
+  declares that the delete touches nothing else.
+- A root with no declaration is unproven and is refused.
+- A cascade needs the dependent entity's own generated `Delete` capability,
+  and a set-null its own generated `Update` capability, registered and
+  admitted by the generated target policy. The dependent's execution policy
+  must be no stricter than the root's: an automatic root needs automatic
+  dependents, and an approval-required root accepts automatic or
+  approval-required dependents. A dependent entity whose own operation is
+  prohibited or absent refuses the root. Nothing is inherited from the root.
+- `with_maximum_dependent_rows` additionally refuses an effect that declares
+  no row bound or one above the ceiling.
+
+```rust,ignore
+let policy = AiDependentEffectPolicy::new()
+    .declare_delete(target.clone(), "Folder", [
+        AiDependentEffect::delete("Document")?.with_maximum_rows(500),
+        AiDependentEffect::set_null("Bookmark", "folderId")?.with_maximum_rows(500),
+    ])?
+    .declare_delete(target, "Document", [])?
+    .with_maximum_dependent_rows(1_000);
+```
+
+The decision is as complete as the declaration. The crate cannot see the
+database, so it trusts a declared root to cause exactly the declared effects:
+
+- **Physical cascades.** A foreign-key action the host did not declare is not
+  detected. Generate the declaration from the relation metadata that defines
+  the cascades, and declare every transitive effect.
+- **ORM dependent deletes.** For entities that opt in to
+  `#[graphql_entity(dependent_deletes)]`, the ORM plans the dependent writes
+  inside the delete transaction, authorizes each one, and refuses unknown
+  physical dependents. Declare the same graph here.
+- **Authorization is separate.** This is an AI decision made before
+  execution. The ORM still applies GraphQL entity, row and field
+  authorization to the root and to every dependent write, and rolls the
+  whole delete back when any of them is refused. Passing this policy never
+  substitutes for that, and approval never substitutes for either.
+
+Reviewed static mutation tools are host-authored documents and are not
+covered. The ORM does not yet export its planned dependent effect set, so the
+declaration is host-supplied.
 
 ## Content protection scope
 

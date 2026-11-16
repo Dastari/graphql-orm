@@ -162,6 +162,7 @@ pub struct AiRuntime {
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: ToolMaturity,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
+    dependent_effect_policy: Option<crate::AiDependentEffectPolicy>,
     tool_catalog: AiToolCatalog,
     proposal_catalog: AiProposalCatalog,
     secret_store: Arc<dyn AiSecretStore>,
@@ -347,6 +348,29 @@ impl AiRuntime {
     /// scope policy and the deployment maturity cap.
     pub fn tool_catalog(&self) -> &AiToolCatalog {
         &self.tool_catalog
+    }
+
+    /// Returns the installed dependent-effect policy for generated deletes,
+    /// when the host installed one.
+    pub fn dependent_effect_policy(&self) -> Option<&crate::AiDependentEffectPolicy> {
+        self.dependent_effect_policy.as_ref()
+    }
+
+    /// Applies the installed dependent-effect policy to one registered
+    /// generated mutation. Without an installed policy every mutation passes,
+    /// as before the policy existed.
+    fn permit_dependent_effects(
+        &self,
+        capability_id: &AiToolId,
+        execution_policy: AiMutationExecutionPolicy,
+    ) -> Result<(), AiError> {
+        crate::dependent_effects::permit_generated_mutation(
+            self.dependent_effect_policy.as_ref(),
+            &self.tool_catalog,
+            &self.generated_graphql_target_policy,
+            capability_id,
+            execution_policy,
+        )
     }
 
     /// Returns registered proposal contracts.
@@ -715,6 +739,9 @@ impl AiRuntime {
         {
             return Err(AiError::Forbidden);
         }
+        // Refuse a delete with a prohibited or unproven dependent effect
+        // before any approval is requested for it.
+        self.permit_dependent_effects(capability_id, execution_policy)?;
         let contract = descriptor
             .graphql_contract
             .clone()
@@ -947,7 +974,9 @@ impl AiRuntime {
         {
             return Err(AiError::Forbidden);
         }
-        Ok(())
+        // Checked again immediately before execution, so an approval granted
+        // earlier cannot carry a delete past the current policy.
+        self.permit_dependent_effects(&prepared.descriptor.id, prepared.execution_policy)
     }
 
     /// Rehydrates and evaluates current host tool policy for an exact
@@ -1989,6 +2018,7 @@ pub struct AiRuntimeBuilder {
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: Option<ToolMaturity>,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
+    dependent_effect_policy: Option<crate::AiDependentEffectPolicy>,
     tool_catalog: AiToolCatalog,
     proposal_catalog: AiProposalCatalog,
     secret_store: Option<Arc<dyn AiSecretStore>>,
@@ -2120,6 +2150,18 @@ impl AiRuntimeBuilder {
         policy: AiGeneratedGraphqlTargetPolicySet,
     ) -> Self {
         self.generated_graphql_target_policy = policy;
+        self
+    }
+
+    /// Installs the effect-aware AI policy for generated delete roots.
+    ///
+    /// Without one, a generated delete is decided by its own classification
+    /// alone, as before. With one, every generated `Delete` or `DeleteMany`
+    /// capability is refused unless the policy declares its dependent effects
+    /// and each dependent entity's own AI policy allows them. See
+    /// [`crate::AiDependentEffectPolicy`].
+    pub fn dependent_effect_policy(mut self, policy: crate::AiDependentEffectPolicy) -> Self {
+        self.dependent_effect_policy = Some(policy);
         self
     }
 
@@ -2271,6 +2313,7 @@ impl AiRuntimeBuilder {
             tool_result_media_resolvers: self.tool_result_media_resolvers,
             maximum_tool_maturity,
             generated_graphql_target_policy: self.generated_graphql_target_policy,
+            dependent_effect_policy: self.dependent_effect_policy,
             tool_catalog: self.tool_catalog,
             proposal_catalog: self.proposal_catalog,
             secret_store,

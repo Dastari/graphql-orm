@@ -10,6 +10,28 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.145.0 to 0.146.0 and tool profiles 0.23.0 to 0.24.0: capability scale
+
+Upgrade AI and tool profiles together. No SDL, schema or data migration, and
+no ORM change. Details are in the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale)
+and the
+[tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale).
+
+- **Delivery-mode selection. Action needed** only when a provider declares
+  both `ProviderDeferred` and `FixedBroker` and is given a non-frozen surface
+  above the eager limits: it now selects `FixedBroker`, and a retained session
+  for it rebinds once. Remove `FixedBroker` from the provider's declared
+  modes to keep native deferred loading.
+- **Describe output. No action.** Fixed-broker `describe` returns repeated
+  input types once under `planSchema.types`. Execute arguments and all
+  fingerprints are unchanged.
+- **Oversized generated roots. No action.** One oversized root is excluded
+  and reported instead of failing its target; check
+  `excluded_capabilities()` at startup.
+- **Static tools behind the broker, epoch anchor, dependent-effect policy,
+  strict query roots. No action.** All four are opt-in.
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree

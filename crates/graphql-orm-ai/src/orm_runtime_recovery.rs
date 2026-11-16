@@ -3,7 +3,9 @@
 //! The epoch ledger decides whether this deployment may open the runtime,
 //! grant or use run leases, or consume approvals. Its deployment-local marker
 //! is excluded from portable backups, so a store restored from a portable
-//! backup is closed until this service records a new epoch.
+//! backup is closed until this service records a new epoch. A file-level
+//! restore carries that marker with the rows; a host-held
+//! [`AiRuntimeEpochAnchor`] detects it.
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
@@ -11,6 +13,7 @@ use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::Clock;
+use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
@@ -29,7 +32,7 @@ use crate::persistence::{
     AiEgressConsentRecordOrderByInput, AiRunRecord, AiRuntimeRecoveryRecord,
     AiRuntimeRecoveryRecordOrderByInput, CreateAiAuditEventRecordInput,
     CreateAiRuntimeRecoveryRecordInput, UpdateAiApprovalRecordInput,
-    UpdateAiEgressConsentRecordInput, UpdateAiRunRecordInput,
+    UpdateAiEgressConsentRecordInput, UpdateAiRunRecordInput, UpdateAiRuntimeRecoveryRecordInput,
 };
 use crate::runtime::ai_schema_module_fingerprint;
 use crate::{
@@ -50,6 +53,12 @@ const RECOVERY_ACTOR_SUBJECT: &str = "runtime-recovery";
 const MAXIMUM_OPERATOR_SUBJECT_BYTES: usize = 256;
 const MAXIMUM_ACKNOWLEDGEMENT_REASON_BYTES: usize = 1_024;
 const MAXIMUM_TRANSACTION_ATTEMPTS: usize = 8;
+/// Times one open re-reads the host anchor before it treats a mismatch as a
+/// restore. A second instance opening at the same moment rotates the anchor
+/// between this instance's read and its transaction.
+const MAXIMUM_ANCHOR_ATTEMPTS: usize = 3;
+/// Key of the anchor generation inside a live epoch's `action_counts`.
+const ANCHOR_GENERATION_KEY: &str = "anchorGeneration";
 
 /// Approval states that still carry reusable authority.
 const REUSABLE_APPROVAL_STATES: [&str; 3] = ["pending", "approved", "resume_claimed"];
@@ -97,6 +106,140 @@ impl AiRuntimeClosureCounts {
             && self.egress_consents_revoked == 0
             && self.runs_recovery_required == 0
     }
+}
+
+/// Host-held anchor of the recovery epoch ledger, kept outside the database.
+///
+/// Every successful [`OrmAiRuntimeRecoveryService::readiness_proof`] of a
+/// service built [`OrmAiRuntimeRecoveryService::with_epoch_anchor`] writes a
+/// new random generation to the store's live epoch and to this anchor. A
+/// database file or base backup restored from an earlier moment carries an
+/// earlier generation, which no longer matches the anchor, so the restored
+/// store stays closed without an operator having to remember to close it.
+///
+/// The value is not a secret and grants nothing: it is two random
+/// identifiers. What matters is where it is kept. It must not live in the
+/// database it anchors or in anything restored together with that database.
+///
+/// What the anchor does not detect: a restore of an image taken since the
+/// last rotation. Nothing outside the database has changed in that window.
+/// Call `readiness_proof` on a timer to bound it; each call rotates.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AiRuntimeEpochAnchor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_generation: Option<String>,
+}
+
+impl AiRuntimeEpochAnchor {
+    /// Generation the store's live epoch carried after the last completed
+    /// open.
+    pub fn generation(&self) -> Option<&str> {
+        self.generation.as_deref()
+    }
+
+    /// Generation an open staged before its transaction. It is the live
+    /// epoch's generation when that open committed and then failed before
+    /// updating the anchor.
+    pub fn pending_generation(&self) -> Option<&str> {
+        self.pending_generation.as_deref()
+    }
+
+    fn held(&self) -> Vec<String> {
+        self.generation
+            .iter()
+            .chain(self.pending_generation.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Host storage for one [`AiRuntimeEpochAnchor`], outside the database.
+///
+/// One anchor belongs to one store. Every instance that opens that store
+/// must share the same anchor storage: a per-instance anchor makes every
+/// other instance's rotation look like a restore. `store` must be durable
+/// before it returns, and must replace the whole value.
+///
+/// A file on a volume that is not part of the database backup, a secret or
+/// configuration store entry, or a row in a different database are all
+/// suitable. Losing the anchor closes the runtime: the store's live epoch
+/// carries a generation the host can no longer present. Recover with
+/// [`OrmAiRuntimeRecoveryService::reconcile_restore`] and
+/// [`OrmAiRuntimeRecoveryService::acknowledge_reviewed_restore`], which
+/// re-establish the anchor.
+#[async_trait]
+pub trait AiRuntimeEpochAnchorStore: Send + Sync {
+    /// Returns the stored anchor, or `None` when none was ever stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the anchor cannot be read. The runtime then
+    /// stays closed; an unreadable anchor is never treated as absent.
+    async fn load(&self) -> Result<Option<AiRuntimeEpochAnchor>, AiError>;
+
+    /// Durably replaces the stored anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the anchor cannot be stored. The runtime then
+    /// stays closed.
+    async fn store(&self, anchor: &AiRuntimeEpochAnchor) -> Result<(), AiError>;
+}
+
+/// The anchor state one open presents to its transaction.
+#[derive(Clone, Debug)]
+struct AnchorRotation {
+    /// Generations the host held before this open staged its own.
+    held: Vec<String>,
+    /// Generation this open writes to the live epoch.
+    next: String,
+}
+
+impl AnchorRotation {
+    /// Whether a live epoch's recorded generation is one the host holds. An
+    /// epoch that was never anchored matches only a host that holds nothing,
+    /// which is the first open after the anchor was enabled.
+    fn admits(&self, epoch: &AiRuntimeRecoveryRecord) -> bool {
+        match anchor_generation(epoch) {
+            Some(recorded) => self.held.iter().any(|held| held == recorded),
+            None => self.held.is_empty(),
+        }
+    }
+}
+
+fn anchor_generation(epoch: &AiRuntimeRecoveryRecord) -> Option<&str> {
+    epoch
+        .action_counts
+        .get(ANCHOR_GENERATION_KEY)
+        .and_then(serde_json::Value::as_str)
+}
+
+fn new_anchor_generation() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn with_anchor_generation(
+    mut action_counts: serde_json::Value,
+    anchor: Option<&AnchorRotation>,
+) -> serde_json::Value {
+    if let (Some(anchor), Some(counts)) = (anchor, action_counts.as_object_mut()) {
+        counts.insert(
+            ANCHOR_GENERATION_KEY.to_owned(),
+            serde_json::Value::String(anchor.next.clone()),
+        );
+    }
+    action_counts
+}
+
+/// Outcome of one readiness transaction.
+enum Readiness {
+    Proof(AiRuntimeReadinessProof),
+    Refused(AiError),
+    /// The live epoch does not carry a generation the host anchor holds.
+    AnchorMismatch,
 }
 
 /// Result of applying runtime closure to a restored store.
@@ -150,6 +293,7 @@ pub struct OrmAiRuntimeRecoveryService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiRestoreCollectorLimits,
+    epoch_anchor: Option<Arc<dyn AiRuntimeEpochAnchorStore>>,
 }
 
 impl OrmAiRuntimeRecoveryService {
@@ -160,7 +304,37 @@ impl OrmAiRuntimeRecoveryService {
             database: database.with_pagination_config(PaginationConfig::unbounded()),
             clock,
             limits: AiRestoreCollectorLimits::default(),
+            epoch_anchor: None,
         }
+    }
+
+    /// Anchors this store's recovery ledger to a value the host keeps
+    /// outside the database, so a file-level or physical database restore
+    /// starts closed.
+    ///
+    /// Without an anchor, a copied SQLite file or a PostgreSQL base backup
+    /// restores the deployment-local marker with the rows and reopens as an
+    /// ordinary restart. With one, [`Self::readiness_proof`] refuses unless
+    /// the live epoch carries a generation the anchor holds, and rotates the
+    /// generation on every successful open. See [`AiRuntimeEpochAnchor`] for
+    /// what this does and does not detect.
+    ///
+    /// The first open after enabling the anchor adopts a live epoch that was
+    /// never anchored. From then on:
+    ///
+    /// - an epoch whose generation the anchor does not hold refuses;
+    /// - an anchored epoch with an empty or missing anchor refuses;
+    /// - an empty ledger refuses while the anchor holds a generation, because
+    ///   the host has opened some other store with it.
+    ///
+    /// A refused store reopens through [`Self::reconcile_restore`] and
+    /// [`Self::acknowledge_reviewed_restore`], which record a new live epoch
+    /// and re-establish the anchor. Give every service that mints proofs or
+    /// acknowledges restores for this store the same anchor storage.
+    #[must_use]
+    pub fn with_epoch_anchor(mut self, anchor: Arc<dyn AiRuntimeEpochAnchorStore>) -> Self {
+        self.epoch_anchor = Some(anchor);
+        self
     }
 
     /// Overrides the deployment-owned bounds on rows one closure pass may
@@ -191,26 +365,116 @@ impl OrmAiRuntimeRecoveryService {
     ///   restored from a portable backup and every restore-closure epoch; run
     ///   [`Self::reconcile_restore`] and
     ///   [`Self::acknowledge_reviewed_restore`].
+    /// - With [`Self::with_epoch_anchor`], a live epoch whose anchor
+    ///   generation the host does not hold refuses: the store was restored
+    ///   at file level, or the anchor was lost. A successful call rotates the
+    ///   generation, so calling this on a timer bounds how recent a restored
+    ///   image can be and still go undetected.
     ///
     /// # Errors
     ///
     /// Returns [`AiError::RuntimeNotReady`] when the current epoch is not
-    /// live or an empty ledger sits on existing AI state, and
-    /// [`AiError::PersistenceFailed`] or [`AiError::Conflict`] for
-    /// persistence failure.
+    /// live, an empty ledger sits on existing AI state, or the host anchor
+    /// does not match the store; the anchor store's own error when the
+    /// anchor cannot be read or written; and [`AiError::PersistenceFailed`]
+    /// or [`AiError::Conflict`] for persistence failure.
     pub async fn readiness_proof(&self) -> Result<AiRuntimeReadinessProof, AiError> {
         let module_fingerprint = ai_schema_module_fingerprint()?;
+        let Some(anchor_store) = &self.epoch_anchor else {
+            return match self.readiness_retrying(module_fingerprint, None).await? {
+                Readiness::Proof(proof) => Ok(proof),
+                Readiness::Refused(error) => Err(error),
+                Readiness::AnchorMismatch => Err(AiError::RuntimeNotReady),
+            };
+        };
+        for _ in 0..MAXIMUM_ANCHOR_ATTEMPTS {
+            let held = anchor_store.load().await?.unwrap_or_default();
+            let rotation = AnchorRotation {
+                held: held.held(),
+                next: new_anchor_generation(),
+            };
+            // Stage the new generation before the transaction can commit it,
+            // so a crash between the commit and the final anchor write still
+            // leaves the host holding the generation the store carries.
+            anchor_store
+                .store(&AiRuntimeEpochAnchor {
+                    generation: held.generation.clone(),
+                    pending_generation: Some(rotation.next.clone()),
+                })
+                .await?;
+            match self
+                .readiness_retrying(module_fingerprint.clone(), Some(rotation.clone()))
+                .await?
+            {
+                Readiness::Proof(proof) => {
+                    anchor_store
+                        .store(&AiRuntimeEpochAnchor {
+                            generation: Some(rotation.next),
+                            pending_generation: None,
+                        })
+                        .await?;
+                    return Ok(proof);
+                }
+                Readiness::Refused(error) => return Err(error),
+                Readiness::AnchorMismatch => tokio::task::yield_now().await,
+            }
+        }
+        Err(AiError::RuntimeNotReady)
+    }
+
+    async fn readiness_retrying(
+        &self,
+        module_fingerprint: String,
+        anchor: Option<AnchorRotation>,
+    ) -> Result<Readiness, AiError> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match self.readiness_once(module_fingerprint.clone()).await {
-                Ok(result) => return result,
+            match self
+                .readiness_once(module_fingerprint.clone(), anchor.clone())
+                .await
+            {
+                Ok(result) => return Ok(result),
                 Err(error) if attempt < MAXIMUM_TRANSACTION_ATTEMPTS && retryable(&error) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => return Err(map_transaction(error)),
             }
         }
+    }
+
+    /// Stages a generation for an epoch an acknowledgement is about to
+    /// record, keeping the generation the host already holds.
+    async fn stage_anchor(&self) -> Result<Option<AnchorRotation>, AiError> {
+        let Some(anchor_store) = &self.epoch_anchor else {
+            return Ok(None);
+        };
+        let held = anchor_store.load().await?.unwrap_or_default();
+        let rotation = AnchorRotation {
+            held: held.held(),
+            next: new_anchor_generation(),
+        };
+        anchor_store
+            .store(&AiRuntimeEpochAnchor {
+                generation: held.generation,
+                pending_generation: Some(rotation.next.clone()),
+            })
+            .await?;
+        Ok(Some(rotation))
+    }
+
+    /// Makes the staged generation the anchor's only generation once the
+    /// acknowledged epoch is recorded.
+    async fn commit_anchor(&self, rotation: Option<AnchorRotation>) -> Result<(), AiError> {
+        if let (Some(anchor_store), Some(rotation)) = (&self.epoch_anchor, rotation) {
+            anchor_store
+                .store(&AiRuntimeEpochAnchor {
+                    generation: Some(rotation.next),
+                    pending_generation: None,
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     /// Mints a proof for this store and opens `gate` with it.
@@ -335,6 +599,9 @@ impl OrmAiRuntimeRecoveryService {
             ));
         }
         let module_fingerprint = ai_schema_module_fingerprint()?;
+        // The operator's acknowledgement is what re-establishes the anchor
+        // after a restore or a lost anchor, so it does not require a match.
+        let anchor = self.stage_anchor().await?;
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -344,9 +611,14 @@ impl OrmAiRuntimeRecoveryService {
                     reconciled_epoch_id,
                     operator_subject.clone(),
                     reason.clone(),
+                    anchor.clone(),
                 )
                 .await
             {
+                Ok(Ok(proof)) => {
+                    self.commit_anchor(anchor).await?;
+                    return Ok(proof);
+                }
                 Ok(result) => return result,
                 Err(error) if attempt < MAXIMUM_TRANSACTION_ATTEMPTS && retryable(&error) => {
                     tokio::task::yield_now().await;
@@ -397,6 +669,7 @@ impl OrmAiRuntimeRecoveryService {
             ));
         }
         let module_fingerprint = ai_schema_module_fingerprint()?;
+        let anchor = self.stage_anchor().await?;
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -405,9 +678,14 @@ impl OrmAiRuntimeRecoveryService {
                     module_fingerprint.clone(),
                     operator_subject.clone(),
                     reason.clone(),
+                    anchor.clone(),
                 )
                 .await
             {
+                Ok(Ok(proof)) => {
+                    self.commit_anchor(anchor).await?;
+                    return Ok(proof);
+                }
                 Ok(result) => return result,
                 Err(error) if attempt < MAXIMUM_TRANSACTION_ATTEMPTS && retryable(&error) => {
                     tokio::task::yield_now().await;
@@ -420,7 +698,8 @@ impl OrmAiRuntimeRecoveryService {
     async fn readiness_once(
         &self,
         module_fingerprint: String,
-    ) -> Result<Result<AiRuntimeReadinessProof, AiError>, TransactionError> {
+        anchor: Option<AnchorRotation>,
+    ) -> Result<Readiness, TransactionError> {
         let now = canonical_second(self.clock.now()).unix_timestamp();
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -428,10 +707,35 @@ impl OrmAiRuntimeRecoveryService {
                     let current = current_epoch(tx).await?;
                     let (sequence, action_counts) = match current {
                         Some(epoch) if !epoch_is_live(&epoch) => {
-                            return Ok(Err(AiError::RuntimeNotReady));
+                            return Ok(Readiness::Refused(AiError::RuntimeNotReady));
+                        }
+                        Some(epoch)
+                            if anchor.as_ref().is_some_and(|anchor| !anchor.admits(&epoch)) =>
+                        {
+                            return Ok(Readiness::AnchorMismatch);
                         }
                         Some(epoch) if epoch.module_fingerprint == module_fingerprint => {
-                            return Ok(Ok(AiRuntimeReadinessProof::new(
+                            if let Some(anchor) = &anchor {
+                                let outcome = tx
+                                    .compare_and_swap::<AiRuntimeRecoveryRecord>(
+                                        &epoch.id,
+                                        epoch.row_version,
+                                        Default::default(),
+                                        UpdateAiRuntimeRecoveryRecordInput {
+                                            action_counts: Some(with_anchor_generation(
+                                                epoch.action_counts.clone(),
+                                                Some(anchor),
+                                            )),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                            }
+                            return Ok(Readiness::Proof(AiRuntimeReadinessProof::new(
                                 module_fingerprint,
                                 epoch.id,
                             )));
@@ -449,7 +753,15 @@ impl OrmAiRuntimeRecoveryService {
                             // store with no runs, approvals or consents opens
                             // without reconcile and acknowledgement.
                             if holds_prior_ai_state(tx).await? {
-                                return Ok(Err(AiError::RuntimeNotReady));
+                                return Ok(Readiness::Refused(AiError::RuntimeNotReady));
+                            }
+                            // A host that already holds a generation anchored
+                            // some other store with it. This one is not it.
+                            if anchor
+                                .as_ref()
+                                .is_some_and(|anchor| !anchor.held.is_empty())
+                            {
+                                return Ok(Readiness::AnchorMismatch);
                             }
                             (1, serde_json::json!({"transition": "first_epoch"}))
                         }
@@ -464,13 +776,13 @@ impl OrmAiRuntimeRecoveryService {
                             state: EPOCH_STATE_LIVE,
                             fatal_issue_count: 0,
                             warning_count: 0,
-                            action_counts,
+                            action_counts: with_anchor_generation(action_counts, anchor.as_ref()),
                             operator_subject: None,
                             now,
                         },
                     )
                     .await?;
-                    Ok(Ok(AiRuntimeReadinessProof::new(
+                    Ok(Readiness::Proof(AiRuntimeReadinessProof::new(
                         module_fingerprint,
                         epoch_id,
                     )))
@@ -559,6 +871,7 @@ impl OrmAiRuntimeRecoveryService {
         module_fingerprint: String,
         operator_subject: String,
         reason: String,
+        anchor: Option<AnchorRotation>,
     ) -> Result<Result<AiRuntimeReadinessProof, AiError>, TransactionError> {
         let now = canonical_second(self.clock.now()).unix_timestamp();
         let limits = self.limits;
@@ -580,11 +893,14 @@ impl OrmAiRuntimeRecoveryService {
                             state: EPOCH_STATE_LIVE,
                             fatal_issue_count: 0,
                             warning_count: 0,
-                            action_counts: serde_json::json!({
-                                "transition": "in_place_upgrade_acknowledged",
-                                "leasesFenced": leases_fenced,
-                                "reason": reason,
-                            }),
+                            action_counts: with_anchor_generation(
+                                serde_json::json!({
+                                    "transition": "in_place_upgrade_acknowledged",
+                                    "leasesFenced": leases_fenced,
+                                    "reason": reason,
+                                }),
+                                anchor.as_ref(),
+                            ),
                             operator_subject: Some(operator_subject.clone()),
                             now,
                         },
@@ -619,6 +935,7 @@ impl OrmAiRuntimeRecoveryService {
         reconciled_epoch_id: Uuid,
         operator_subject: String,
         reason: String,
+        anchor: Option<AnchorRotation>,
     ) -> Result<Result<AiRuntimeReadinessProof, AiError>, TransactionError> {
         let now = canonical_second(self.clock.now()).unix_timestamp();
         let limits = self.limits;
@@ -645,12 +962,15 @@ impl OrmAiRuntimeRecoveryService {
                             state: EPOCH_STATE_LIVE,
                             fatal_issue_count: 0,
                             warning_count: 0,
-                            action_counts: serde_json::json!({
-                                "transition": "restore_acknowledged",
-                                "reconciledEpochId": current.id,
-                                "reconciledFatalIssueCount": current.fatal_issue_count,
-                                "reason": reason,
-                            }),
+                            action_counts: with_anchor_generation(
+                                serde_json::json!({
+                                    "transition": "restore_acknowledged",
+                                    "reconciledEpochId": current.id,
+                                    "reconciledFatalIssueCount": current.fatal_issue_count,
+                                    "reason": reason,
+                                }),
+                                anchor.as_ref(),
+                            ),
                             operator_subject: Some(operator_subject.clone()),
                             now,
                         },
@@ -2304,6 +2624,318 @@ mod tests {
                 .readiness_proof()
                 .await
                 .expect("restart reopens the successor")
+                .epoch_id(),
+            proof.epoch_id()
+        );
+    }
+
+    /// Host anchor storage outside the database, with a switch that fails
+    /// the write after a readiness transaction commits.
+    #[derive(Default)]
+    struct MemoryAnchor {
+        value: std::sync::Mutex<Option<AiRuntimeEpochAnchor>>,
+        fail_committed_write: std::sync::atomic::AtomicBool,
+    }
+
+    impl MemoryAnchor {
+        fn held(&self) -> AiRuntimeEpochAnchor {
+            self.value
+                .lock()
+                .expect("anchor")
+                .clone()
+                .expect("an anchor should be stored")
+        }
+    }
+
+    #[async_trait]
+    impl AiRuntimeEpochAnchorStore for MemoryAnchor {
+        async fn load(&self) -> Result<Option<AiRuntimeEpochAnchor>, AiError> {
+            Ok(self.value.lock().expect("anchor").clone())
+        }
+
+        async fn store(&self, anchor: &AiRuntimeEpochAnchor) -> Result<(), AiError> {
+            if anchor.pending_generation().is_none()
+                && self
+                    .fail_committed_write
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(AiError::PersistenceFailed);
+            }
+            *self.value.lock().expect("anchor") = Some(anchor.clone());
+            Ok(())
+        }
+    }
+
+    async fn epoch_row(database: &Database<SqliteBackend>, id: Uuid) -> AiRuntimeRecoveryRecord {
+        AiRuntimeRecoveryRecord::find_by_id(database, &id)
+            .await
+            .expect("ledger read")
+            .expect("ledger row")
+    }
+
+    fn anchored(
+        database: &Database<SqliteBackend>,
+        anchor: &Arc<MemoryAnchor>,
+    ) -> OrmAiRuntimeRecoveryService {
+        OrmAiRuntimeRecoveryService::new(database.clone(), Arc::new(FixedClock::new(now())))
+            .with_epoch_anchor(anchor.clone())
+    }
+
+    async fn file_database(path: &std::path::Path, migrate: bool) -> Database<SqliteBackend> {
+        let database = Database::<SqliteBackend>::connect_sqlite(&format!(
+            "sqlite://{}?mode=rwc",
+            path.display()
+        ))
+        .await
+        .expect("file-backed SQLite should open");
+        if migrate {
+            let plan = database
+                .schema()
+                .plan_migration_to_entities(
+                    "ai-runtime-recovery-test-v1",
+                    "AI runtime recovery test",
+                    crate::AiSchemaModule.entities(),
+                )
+                .await
+                .expect("AI schema should plan");
+            database
+                .schema()
+                .apply_migration(&plan, ApplyOptions::default())
+                .await
+                .expect("AI schema should apply");
+        }
+        database
+    }
+
+    #[tokio::test]
+    async fn a_file_level_restore_of_an_anchored_store_starts_closed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let live_path = directory.path().join("live.sqlite");
+        let image_path = directory.path().join("image.sqlite");
+        let anchor = Arc::new(MemoryAnchor::default());
+
+        let live = file_database(&live_path, true).await;
+        let recovery = anchored(&live, &anchor);
+        let first = recovery.readiness_proof().await.expect("first open");
+        let approval_id = seed_approval(&live).await;
+
+        // A file-level backup: a copy of the database file, taken while no
+        // write is in flight, with the live epoch and its deployment-local
+        // marker inside it.
+        let sidecar = |path: &std::path::Path, suffix: &str| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        std::fs::copy(&live_path, &image_path).expect("database image");
+        for suffix in ["-wal", "-shm"] {
+            if sidecar(&live_path, suffix).exists() {
+                std::fs::copy(sidecar(&live_path, suffix), sidecar(&image_path, suffix))
+                    .expect("database image sidecar");
+            }
+        }
+
+        // The deployment keeps running: an ordinary restart reopens the same
+        // epoch and moves the anchor on.
+        assert_eq!(
+            recovery
+                .readiness_proof()
+                .await
+                .expect("ordinary restart")
+                .epoch_id(),
+            first.epoch_id()
+        );
+
+        // The image is restored and the runtime starts against it.
+        let restored = file_database(&image_path, false).await;
+        // Without the anchor the restored store is an ordinary restart: the
+        // live epoch came back with the rows.
+        assert_eq!(
+            OrmAiRuntimeRecoveryService::new(restored.clone(), Arc::new(FixedClock::new(now())))
+                .readiness_proof()
+                .await
+                .expect("an unanchored restore reopens")
+                .epoch_id(),
+            first.epoch_id()
+        );
+        // With it, the store starts closed and no operator step was needed
+        // to keep it closed.
+        let restored_recovery = anchored(&restored, &anchor);
+        let gate = AiRuntimeStartGate::new(ai_schema_module_fingerprint().expect("fingerprint"));
+        assert!(matches!(
+            restored_recovery.open_start_gate(&gate).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(!gate.is_ready());
+        // The refusal changed nothing in the restored store.
+        assert_eq!(
+            AiApprovalRecord::find_by_id(&restored, &approval_id)
+                .await
+                .expect("approval")
+                .expect("restored approval")
+                .state,
+            "approved"
+        );
+
+        // The operator reconciles and acknowledges; that closes the restored
+        // work and re-establishes the anchor.
+        let applied = reconcile(&restored_recovery).await;
+        assert_eq!(applied.closure().approvals_expired(), 1);
+        let acknowledged = restored_recovery
+            .acknowledge_reviewed_restore(applied.epoch_id(), "restore-operator", "reviewed")
+            .await
+            .expect("acknowledged restore");
+        assert_ne!(acknowledged.epoch_id(), first.epoch_id());
+        assert_eq!(
+            restored_recovery
+                .readiness_proof()
+                .await
+                .expect("the acknowledged store reopens")
+                .epoch_id(),
+            acknowledged.epoch_id()
+        );
+        // The anchor now belongs to the restored store only.
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_restart_rotates_the_anchor_and_keeps_the_epoch() {
+        let database = database().await;
+        let anchor = Arc::new(MemoryAnchor::default());
+        let recovery = anchored(&database, &anchor);
+
+        let first = recovery.readiness_proof().await.expect("first open");
+        let first_anchor = anchor.held();
+        assert!(first_anchor.generation().is_some());
+        assert_eq!(first_anchor.pending_generation(), None);
+
+        let second = recovery.readiness_proof().await.expect("restart");
+        let second_anchor = anchor.held();
+        // Leases are bound to the epoch, so a restart must not replace it.
+        assert_eq!(second.epoch_id(), first.epoch_id());
+        assert_ne!(second_anchor.generation(), first_anchor.generation());
+        assert_eq!(second_anchor.pending_generation(), None);
+        assert_eq!(
+            anchor_generation(&epoch_row(&database, first.epoch_id()).await),
+            second_anchor.generation()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_anchor_write_after_commit_does_not_close_the_store() {
+        let database = database().await;
+        let anchor = Arc::new(MemoryAnchor::default());
+        let recovery = anchored(&database, &anchor);
+        let first = recovery.readiness_proof().await.expect("first open");
+
+        anchor
+            .fail_committed_write
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::PersistenceFailed)
+        ));
+        // The store now carries the staged generation, which the host still
+        // holds as pending.
+        let staged = anchor.held();
+        assert_eq!(
+            anchor_generation(&epoch_row(&database, first.epoch_id()).await),
+            staged.pending_generation()
+        );
+
+        anchor
+            .fail_committed_write
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            recovery
+                .readiness_proof()
+                .await
+                .expect("the next start reopens")
+                .epoch_id(),
+            first.epoch_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_anchor_or_another_store_starts_closed() {
+        let database = database().await;
+        let anchor = Arc::new(MemoryAnchor::default());
+        anchored(&database, &anchor)
+            .readiness_proof()
+            .await
+            .expect("first open");
+
+        // The store is anchored and the host presents nothing.
+        assert!(matches!(
+            anchored(&database, &Arc::new(MemoryAnchor::default()))
+                .readiness_proof()
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        // The host holds a generation and the store has an empty ledger.
+        let other = self::database().await;
+        assert!(matches!(
+            anchored(&other, &anchor).readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        // Neither refusal disturbed the anchored store.
+        anchored(&database, &anchor)
+            .readiness_proof()
+            .await
+            .expect("the anchored store still opens");
+    }
+
+    #[tokio::test]
+    async fn enabling_the_anchor_adopts_a_live_epoch_and_acknowledgements_anchor_theirs() {
+        let database = database().await;
+        let (unanchored, _, _) = services(&database);
+        let first = unanchored.readiness_proof().await.expect("first epoch");
+        assert_eq!(
+            anchor_generation(&epoch_row(&database, first.epoch_id()).await),
+            None
+        );
+
+        let anchor = Arc::new(MemoryAnchor::default());
+        let recovery = anchored(&database, &anchor);
+        assert_eq!(
+            recovery
+                .readiness_proof()
+                .await
+                .expect("the anchor adopts the live epoch")
+                .epoch_id(),
+            first.epoch_id()
+        );
+        assert_eq!(
+            anchor_generation(&epoch_row(&database, first.epoch_id()).await),
+            anchor.held().generation()
+        );
+
+        // An existing store upgraded in place records its first epoch
+        // already anchored.
+        let upgraded = self::database().await;
+        seed_run(&upgraded, "queued").await;
+        let upgraded_anchor = Arc::new(MemoryAnchor::default());
+        let upgraded_recovery = anchored(&upgraded, &upgraded_anchor);
+        assert!(matches!(
+            upgraded_recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let proof = upgraded_recovery
+            .acknowledge_in_place_upgrade("upgrade-operator", "upgraded in place")
+            .await
+            .expect("acknowledged upgrade");
+        assert_eq!(
+            anchor_generation(&epoch_row(&upgraded, proof.epoch_id()).await),
+            upgraded_anchor.held().generation()
+        );
+        assert_eq!(
+            upgraded_recovery
+                .readiness_proof()
+                .await
+                .expect("the upgraded store reopens")
                 .epoch_id(),
             proof.epoch_id()
         );
