@@ -987,10 +987,11 @@ where
     }
 
     fn check_explicit_limit(&self) -> crate::Result<()> {
-        // The opt-in refusal of an oversized client page; see
-        // `ClientPaginationConfig::with_oversized_limit_refusal`.
+        // The opt-in refusals of an oversized client page; see
+        // `ClientPaginationConfig::with_oversized_limit_refusal` and
+        // `ClientPaginationConfig::with_max_offset`.
         self.pagination_config
-            .admit_client_limit(self.query.page.as_ref().and_then(|page| page.limit))
+            .admit_client_page(self.query.page.as_ref())
             .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if let Some(limit) = self.explicit_limit {
             self.pagination_config

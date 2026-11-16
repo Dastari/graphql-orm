@@ -304,14 +304,22 @@ impl MssqlQueryNotificationConnection {
             client: &mut self.client,
             completed: false,
         };
-        let rows = session
-            .client()?
-            .simple_query_with_notification(sql, notification)
-            .await
-            .map_err(map_tiberius_error)?
-            .into_first_result()
-            .await
-            .map_err(map_tiberius_error)?;
+        // A panic in the driver's row decode leaves `completed` false, so the
+        // session is disposed of.
+        let client = session.client()?;
+        let rows = super::catch_driver_panic(
+            async {
+                client
+                    .simple_query_with_notification(sql, notification)
+                    .await
+                    .map_err(map_tiberius_error)?
+                    .into_first_result()
+                    .await
+                    .map_err(map_tiberius_error)
+            },
+            std::convert::identity,
+        )
+        .await?;
         session.completed = true;
         Ok(rows.into_iter().map(|inner| MssqlRow { inner }).collect())
     }

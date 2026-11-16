@@ -10,6 +10,52 @@ supersedes: []
 
 # Migration Guide
 
+## 0.165.0 to 0.168.0: SQL Server correctness and a client offset bound
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Client page offsets. No action.** `DatabaseBuilder::max_page_offset(Some(n))`
+  (or `Database::with_max_page_offset`) refuses a client page offset above `n`
+  with `PAGE_LIMIT_EXCEEDED` on every backend, for generated list roots,
+  to-many relation pages, search pages and custom resolvers that use
+  `ClientPaginationConfig::resolve_client_page`. Without it offsets stay
+  unbounded. Each backend scans the rows an offset skips, so public services
+  should set a bound, for example `PaginationConfig::RECOMMENDED_MAX_OFFSET`
+  (10,000), and page deeper with keyset cursors.
+- **SQL Server `DECIMAL(38,38)`. No action.** A non-NULL value in a column
+  declared with scale 38 used to panic inside the driver while the row was
+  read. The statement now fails with `sqlx::Error::Decode` and its connection
+  is closed. The panic hook still reports the driver's assertion; cast such a
+  column in a view to read it.
+- **SQL Server introspection. Action needed** only for hosts that read
+  `introspect_mssql_schema` or diff it against a model. Tables now carry their
+  ordinary and unique indexes, so a model without them plans `DropIndex`. A
+  table without a primary key has an empty `primary_key`, `primary_keys` and
+  `default_sort` instead of `[id]`.
+- **SQL Server key strings. Action needed** only for hosts that compare
+  `ColumnDef::sql_type` of SQL Server entities or render DDL from them. A
+  `String` field that is a primary key, unique, a declared index or composite
+  unique member, or a foreign-key source is now `NVARCHAR(450)` (indexable)
+  instead of `NVARCHAR(MAX)`, and a Rust type with no mapping is
+  `NVARCHAR(MAX)` instead of `TEXT`. Recompile entities. Reads and writes are
+  unchanged.
+- **SQL Server `ALTER COLUMN`. No action.** A rendered alteration to a
+  character type is now an `EXEC sys.sp_executesql` batch that keeps the
+  column's live collation, instead of a plain `ALTER COLUMN` that reset it to
+  the database default. Review rendered plans with that in mind.
+- **SQL Server restore marker. Action needed** only for hosts that created
+  `dbo.__graphql_orm_restore_marker` by hand in a different shape:
+  `install_restore_marker` now also requires the primary key to be exactly
+  `marker_key` and the `CHECK (marker_key = 1)` constraint, as in the
+  documented DDL. Recreate such a table (while no restore is in progress). A
+  statement refused while a restore holds the lock now reports
+  `RestoreInProgress` with an empty `restore_id` when the marker cannot then
+  be read, where it used to report `RestoreStateUnavailable`.
+- **SQL Server routing. No action.** A second routing redirect is refused with
+  `sqlx::Error::Protocol` saying only one redirect is followed; the message
+  used to be the driver's.
+
 ## 0.164.0 to 0.165.0: atomic restore, search reset and kept values on ignored denials
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and

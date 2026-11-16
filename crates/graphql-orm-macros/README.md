@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.168.0 maps a SQL Server `String` field that is a key, unique, an
+index member or a foreign-key source to `NVARCHAR(450)`, which SQL Server can
+index, and an unmapped Rust type to `NVARCHAR(MAX)` instead of `TEXT`.
+Recompile entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01650-to-01680-sql-server-correctness-and-a-client-offset-bound).
+
 Version 0.165.0 preserves the stored value of an optional field when its
 write policy denies an upsert update and the host opts to ignore that denial.
 Recompile entities with aligned ORM/macros versions. See the

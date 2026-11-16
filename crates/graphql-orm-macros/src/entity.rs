@@ -4222,6 +4222,8 @@ fn generate_entity_tokens(
         struct_name.span(),
     );
 
+    let mssql_key_fields = mssql_indexed_fields(&parsed_fields, &entity_meta);
+
     for parsed_field in &parsed_fields {
         let field = &parsed_field.field;
         let field_name = field.ident.as_ref().unwrap();
@@ -5337,7 +5339,15 @@ fn generate_entity_tokens(
         let backup_policy =
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
-        let sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        let mut sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        if backend == BackendKind::Mssql
+            && sql_type == "NVARCHAR(MAX)"
+            && is_plain_string_type(field_type)
+            && !field_meta.is_json_field
+            && mssql_key_fields.contains(&rust_name)
+        {
+            sql_type = MSSQL_INDEXABLE_STRING.to_string();
+        }
         let decimal_tokens = field_meta
             .decimal
             .map(|_| {
@@ -8596,6 +8606,62 @@ pub(crate) fn is_serde_json_value_or_option(ty: &syn::Type) -> bool {
     is_serde_json_value_type(ty) || option_inner_type(ty).is_some_and(is_serde_json_value_type)
 }
 
+/// SQL Server type of a `String` column that an index must cover: a primary
+/// key, a unique column, a declared index or unique member, or a foreign-key
+/// source. SQL Server cannot index `NVARCHAR(MAX)`; 450 characters is the
+/// 900-byte key limit of a clustered index, the default for a primary key.
+const MSSQL_INDEXABLE_STRING: &str = "NVARCHAR(450)";
+
+/// Rust names of the persisted fields SQL Server must be able to index.
+fn mssql_indexed_fields(
+    parsed_fields: &[ParsedField],
+    entity_meta: &EntityMetadata,
+) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for parsed in parsed_fields {
+        let meta = &parsed.meta;
+        let Some(ident) = parsed.field.ident.as_ref() else {
+            continue;
+        };
+        if meta.is_primary_key || meta.unique {
+            names.insert(ident.to_string());
+        }
+        if meta.is_relation
+            && meta
+                .relation_emit_foreign_key
+                .unwrap_or(!meta.relation_multiple)
+        {
+            names.extend(meta.relation_from.iter().cloned());
+            names.extend(meta.relation_from_fields.iter().flatten().cloned());
+        }
+    }
+    for index in &entity_meta.indexes {
+        names.extend(index.columns.iter().cloned());
+    }
+    // Composite unique members may name a field or its column.
+    for member in entity_meta.unique_composite.iter().flatten() {
+        if let Some(parsed) = parsed_fields.iter().find(|parsed| {
+            parsed
+                .field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == member)
+                || parsed.meta.db_column.as_deref() == Some(member.as_str())
+        }) && let Some(ident) = parsed.field.ident.as_ref()
+        {
+            names.insert(ident.to_string());
+        }
+    }
+    names
+}
+
+/// Whether `ty` is `String` or `Option<String>`.
+fn is_plain_string_type(ty: &syn::Type) -> bool {
+    let ty = option_inner_type(ty).unwrap_or(ty);
+    matches!(ty, syn::Type::Path(path)
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
+}
+
 /// Convert Rust type to the configured backend SQL type string
 pub(crate) fn rust_type_to_sql_type(
     backend: BackendKind,
@@ -8739,12 +8805,20 @@ pub(crate) fn rust_type_to_sql_type(
                     }
                     .to_string();
                 }
+                // `TEXT` is a deprecated SQL Server type that cannot be
+                // compared or sorted.
+                _ if backend == BackendKind::Mssql => return "NVARCHAR(MAX)".to_string(),
                 _ => return "TEXT".to_string(),
             }
         }
     }
 
-    "TEXT".to_string()
+    if backend == BackendKind::Mssql {
+        "NVARCHAR(MAX)"
+    } else {
+        "TEXT"
+    }
+    .to_string()
 }
 
 fn decimal_default_sql(

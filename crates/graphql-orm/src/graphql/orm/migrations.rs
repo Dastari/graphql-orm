@@ -3019,6 +3019,27 @@ fn render_search_metadata_upsert(
         DatabaseBackend::Mysql => "UNIX_TIMESTAMP()",
         DatabaseBackend::Mssql => "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
     };
+    let config = search_index_config_json(index);
+    if backend == DatabaseBackend::Mssql {
+        // T-SQL has neither `CREATE TABLE IF NOT EXISTS` nor `INSERT OR
+        // REPLACE`, and cannot index `NVARCHAR(MAX)`.
+        let text = |value: &str| format!("N{}", sql_string_literal(value));
+        let (entity, table, strategy, config) = (
+            text(&index.entity_name),
+            text(&index.table_name),
+            text(index.strategy.as_str()),
+            text(&config),
+        );
+        return vec![
+            format!(
+                "IF OBJECT_ID(N'{metadata_table}', N'U') IS NULL CREATE TABLE {metadata_table} (entity_name NVARCHAR(450) NOT NULL PRIMARY KEY, table_name NVARCHAR(MAX) NOT NULL, strategy NVARCHAR(100) NOT NULL, config_json NVARCHAR(MAX) NOT NULL, updated_at BIGINT NOT NULL)"
+            ),
+            format!(
+                "UPDATE {metadata_table} WITH (UPDLOCK, SERIALIZABLE) SET table_name = {table}, strategy = {strategy}, config_json = {config}, updated_at = {now_expr} WHERE entity_name = {entity}; \
+                 IF @@ROWCOUNT = 0 INSERT INTO {metadata_table} (entity_name, table_name, strategy, config_json, updated_at) VALUES ({entity}, {table}, {strategy}, {config}, {now_expr})"
+            ),
+        ];
+    }
     let create = match backend {
         DatabaseBackend::Postgres => format!(
             "CREATE TABLE IF NOT EXISTS {metadata_table} (entity_name TEXT PRIMARY KEY, table_name TEXT NOT NULL, strategy TEXT NOT NULL, config_json JSONB NOT NULL, updated_at BIGINT NOT NULL)"
@@ -3027,7 +3048,6 @@ fn render_search_metadata_upsert(
             "CREATE TABLE IF NOT EXISTS {metadata_table} (entity_name TEXT PRIMARY KEY, table_name TEXT NOT NULL, strategy TEXT NOT NULL, config_json TEXT NOT NULL, updated_at INTEGER NOT NULL)"
         ),
     };
-    let config = search_index_config_json(index);
     let insert = match backend {
         DatabaseBackend::Postgres => format!(
             "INSERT INTO {metadata_table} (entity_name, table_name, strategy, config_json, updated_at) VALUES ({}, {}, {}, {}::jsonb, {now_expr}) ON CONFLICT (entity_name) DO UPDATE SET table_name = EXCLUDED.table_name, strategy = EXCLUDED.strategy, config_json = EXCLUDED.config_json, updated_at = EXCLUDED.updated_at",
@@ -3513,16 +3533,7 @@ pub(super) fn render_migration_step_view(
                 backend.render_identifier(&after.name),
                 after.sql_type
             )],
-            // Without an explicit `NULL` or `NOT NULL`, SQL Server takes the
-            // nullability from session settings instead of keeping the
-            // column's own.
-            DatabaseBackend::Mssql => vec![format!(
-                "ALTER TABLE {} ALTER COLUMN {} {} {}",
-                backend.render_identifier_path(table_name),
-                backend.render_identifier(&after.name),
-                after.sql_type,
-                if after.nullable { "NULL" } else { "NOT NULL" }
-            )],
+            DatabaseBackend::Mssql => vec![render_mssql_alter_column(table_name, before, after)],
         },
         StepRef::CreateIndex { table_name, index } => {
             vec![render_create_index_statement(backend, table_name, index)]
@@ -3685,6 +3696,71 @@ pub(super) fn render_migration_step_view(
             )],
         },
     }
+}
+
+/// SQL Server `ALTER COLUMN` that keeps the column's nullability and collation.
+///
+/// Without an explicit `NULL` or `NOT NULL`, SQL Server takes the nullability
+/// from session settings instead of keeping the column's own. Without
+/// `COLLATE`, it resets a character column to the database default collation,
+/// which for a non-Unicode column can change its code page and the stored
+/// characters (#742). The model does not record collations, so a character
+/// target type reads the column's live collation when the statement runs and
+/// names it when it differs from the database default. A target type that
+/// holds no characters takes no collation.
+fn render_mssql_alter_column(
+    table_name: &str,
+    before: &ColumnModel,
+    after: &ColumnModel,
+) -> String {
+    let backend = DatabaseBackend::Mssql;
+    let table = backend.render_identifier_path(table_name);
+    let head = format!(
+        "ALTER TABLE {table} ALTER COLUMN {} {}",
+        backend.render_identifier(&after.name),
+        after.sql_type
+    );
+    let nullability = if after.nullable { "NULL" } else { "NOT NULL" };
+    if !mssql_character_type(&after.sql_type) {
+        return format!("{head} {nullability}");
+    }
+    // `sp_executesql` gives the variables their own scope, so a plan that runs
+    // as one batch can repeat the statement.
+    let batch = format!(
+        "DECLARE @gorm_collation sysname = (SELECT c.collation_name FROM sys.columns AS c \
+         WHERE c.object_id = OBJECT_ID(N{}) AND c.name = N{}); \
+         DECLARE @gorm_alter nvarchar(max) = N{} + CASE WHEN @gorm_collation IS NOT NULL \
+         AND @gorm_collation <> CONVERT(sysname, DATABASEPROPERTYEX(DB_NAME(), 'Collation')) \
+         THEN N' COLLATE ' + @gorm_collation ELSE N'' END + N' {nullability}'; \
+         EXEC sys.sp_executesql @gorm_alter;",
+        sql_string_literal(&table),
+        sql_string_literal(&mssql_unquoted_identifier(&before.name)),
+        sql_string_literal(&head),
+    );
+    format!("EXEC sys.sp_executesql N{}", sql_string_literal(&batch))
+}
+
+/// Whether a SQL Server type holds character data, and so has a collation.
+fn mssql_character_type(sql_type: &str) -> bool {
+    let base = sql_type
+        .split('(')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    matches!(
+        base.as_str(),
+        "CHAR" | "VARCHAR" | "NCHAR" | "NVARCHAR" | "TEXT" | "NTEXT" | "SYSNAME"
+    )
+}
+
+/// The name inside one bracket-quoted SQL Server identifier, or the name as
+/// given when it is not quoted.
+fn mssql_unquoted_identifier(name: &str) -> String {
+    name.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .map(|inner| inner.replace("]]", "]"))
+        .unwrap_or_else(|| name.to_string())
 }
 
 pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
@@ -5975,10 +6051,8 @@ pub async fn introspect_mssql_schema(
                     .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let primary_key = primary_keys
-            .first()
-            .cloned()
-            .unwrap_or_else(|| DatabaseBackend::Mssql.quote_identifier("id"));
+        // A table without a primary key reports none, not an invented `[id]`.
+        let primary_key = primary_keys.first().cloned().unwrap_or_default();
 
         let unique_rows = super::MssqlBackend::fetch_rows(
             pool,
@@ -6090,14 +6164,23 @@ pub async fn introspect_mssql_schema(
             })
             .collect::<crate::Result<Vec<_>>>()?;
 
+        let indexes = introspect_mssql_indexes(pool, &table_path).await?;
+
         tables.push(TableModel {
             entity_name: raw_table_name.clone(),
             table_name: table_path,
-            primary_key: primary_key.clone(),
+            default_sort: if primary_key.is_empty() {
+                String::new()
+            } else {
+                format!("{primary_key} ASC")
+            },
+            primary_key,
             primary_keys,
-            default_sort: format!("{primary_key} ASC"),
             columns,
-            indexes: Vec::new(),
+            indexes: indexes
+                .into_iter()
+                .map(super::owned_schema::IndexModel::into_legacy)
+                .collect(),
             composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
@@ -6111,6 +6194,229 @@ pub async fn introspect_mssql_schema(
         extensions: Vec::new(),
         tables,
     })
+}
+
+/// The ordinary and unique indexes of one table, excluding those that back
+/// its primary key and unique constraints (reported as key and unique
+/// columns). Only row-store key columns are read: included columns and
+/// spatial, XML and columnstore indexes are not part of the model.
+#[cfg(feature = "mssql")]
+async fn introspect_mssql_indexes(
+    pool: &<super::MssqlBackend as OrmBackend>::Pool,
+    table_path: &str,
+) -> crate::Result<Vec<super::owned_schema::IndexModel>> {
+    let rows = super::MssqlBackend::fetch_rows(
+        pool,
+        "SELECT i.name AS index_name, CAST(i.is_unique AS bigint) AS is_unique,
+                i.filter_definition AS filter_definition, c.name AS column_name,
+                CAST(ic.is_descending_key AS bigint) AS is_descending
+         FROM sys.indexes AS i
+         JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+         JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+         WHERE i.object_id = OBJECT_ID(@P1)
+           AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+           AND i.is_hypothetical = 0 AND i.type IN (1, 2) AND ic.key_ordinal > 0
+         ORDER BY i.name, ic.key_ordinal",
+        &[SqlValue::String(table_path.to_string())],
+    )
+    .await?;
+    let mut indexes: Vec<(super::owned_schema::IndexModel, bool)> = Vec::new();
+    for row in rows {
+        let name = super::MssqlBackend::try_get_string(&row, "index_name")?;
+        let column = super::MssqlBackend::try_get_string(&row, "column_name")?;
+        let descending = row.try_get::<i64, _>("is_descending")? != 0;
+        if indexes.last().is_none_or(|(index, _)| index.name != name) {
+            let mut index = super::owned_schema::IndexModel::new(name, Vec::new());
+            index.is_unique = row.try_get::<i64, _>("is_unique")? != 0;
+            index.predicate = row
+                .try_get::<Option<String>, _>("filter_definition")?
+                .map(|filter| mssql_index_predicate(&filter));
+            indexes.push((index, false));
+        }
+        let (index, any_descending) = indexes.last_mut().expect("pushed above");
+        index.columns.push(column);
+        index.column_directions.push(if descending {
+            super::core::IndexDirection::Desc
+        } else {
+            super::core::IndexDirection::Asc
+        });
+        *any_descending |= descending;
+    }
+    Ok(indexes
+        .into_iter()
+        .map(|(mut index, any_descending)| {
+            // All ascending is the model's empty direction list.
+            if !any_descending {
+                index.column_directions.clear();
+            }
+            index
+        })
+        .collect())
+}
+
+/// The closed-set predicate of a filtered index, read from the text SQL Server
+/// keeps for `WHERE [column] IN ('a', 'b')`: `([column] IN ('a', 'b'))`, or
+/// `([column]='a' OR [column]='b')` as older versions and hand-written
+/// filters spell it.
+///
+/// A filter of any other form cannot be expressed in the model. It is kept as
+/// a predicate without a column, holding the filter text, which never equals
+/// a declared predicate, so a plan replaces the index rather than treating it
+/// as unfiltered.
+#[cfg(feature = "mssql")]
+fn mssql_index_predicate(filter: &str) -> super::owned_schema::IndexPredicateModel {
+    parse_mssql_in_filter(filter).unwrap_or_else(|| super::owned_schema::IndexPredicateModel {
+        column: String::new(),
+        values: vec![filter.to_string()],
+    })
+}
+
+#[cfg(feature = "mssql")]
+fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredicateModel> {
+    /// Remove parentheses that enclose all of `text`.
+    fn unwrap(mut text: &str) -> &str {
+        loop {
+            text = text.trim();
+            let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) else {
+                return text;
+            };
+            // `(a) OR (b)` starts and ends with parentheses that are not a pair.
+            let mut depth = 0usize;
+            let mut quoted = false;
+            for character in inner.chars() {
+                match character {
+                    '\'' => quoted = !quoted,
+                    '(' if !quoted => depth += 1,
+                    ')' if !quoted => match depth.checked_sub(1) {
+                        Some(next) => depth = next,
+                        None => return text,
+                    },
+                    _ => {}
+                }
+            }
+            text = inner;
+        }
+    }
+    /// The text of one string literal, `'it''s'` or `N'it''s'`.
+    fn literal(text: &str) -> Option<String> {
+        let text = text.trim();
+        let text = text.strip_prefix('N').unwrap_or(text);
+        let value = text.strip_prefix('\'')?.strip_suffix('\'')?;
+        if value.replace("''", "").contains('\'') {
+            return None;
+        }
+        Some(value.replace("''", "'"))
+    }
+    /// The name inside one bracket-quoted identifier, `[a]]b]` for `a]b`.
+    fn bracketed(text: &str) -> Option<String> {
+        let inner = text.trim().strip_prefix('[')?.strip_suffix(']')?;
+        if inner.replace("]]", "").contains(']') {
+            return None;
+        }
+        Some(inner.replace("]]", "]"))
+    }
+    let filter = unwrap(filter);
+    // `[column] IN ('a', 'b')`.
+    if let [name, list] = split_outside_quotes(filter, " IN ")?.as_slice() {
+        let list = list.trim().strip_prefix('(')?.strip_suffix(')')?;
+        let values = split_outside_quotes(list, ",")?
+            .into_iter()
+            .map(literal)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(super::owned_schema::IndexPredicateModel {
+            column: bracketed(name)?,
+            values,
+        });
+    }
+    // `[column]='a' OR [column]='b'`.
+    let mut column: Option<String> = None;
+    let mut values = Vec::new();
+    for term in split_outside_quotes(filter, " OR ")? {
+        let (name, value) = unwrap(term).split_once('=')?;
+        let name = bracketed(name)?;
+        match &column {
+            Some(existing) if *existing != name => return None,
+            Some(_) => {}
+            None => column = Some(name),
+        }
+        values.push(literal(value)?);
+    }
+    Some(super::owned_schema::IndexPredicateModel {
+        column: column?,
+        values,
+    })
+}
+
+/// Split `text` on `separator` where it is outside string literals.
+#[cfg(feature = "mssql")]
+fn split_outside_quotes<'a>(text: &'a str, separator: &str) -> Option<Vec<&'a str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut index = 0;
+    let bytes = text.as_bytes();
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            quoted = !quoted;
+        } else if !quoted && text[index..].starts_with(separator) {
+            parts.push(&text[start..index]);
+            index += separator.len();
+            start = index;
+            continue;
+        }
+        index += 1;
+    }
+    if quoted {
+        return None;
+    }
+    parts.push(&text[start..]);
+    Some(parts)
+}
+
+#[cfg(all(test, feature = "mssql"))]
+mod mssql_index_predicate_tests {
+    use super::mssql_index_predicate;
+
+    #[test]
+    fn closed_set_filters_read_back_as_predicates() {
+        for (filter, column, values) in [
+            ("([State]='new')", "State", vec!["new"]),
+            (
+                "([State]=N'new' OR [State]=N'it''s open')",
+                "State",
+                vec!["new", "it's open"],
+            ),
+            ("(([State]='a') OR ([State]='b'))", "State", vec!["a", "b"]),
+            ("([odd]]name]='x OR y')", "odd]name", vec!["x OR y"]),
+            (
+                "([State] IN ('new', 'it''s open'))",
+                "State",
+                vec!["new", "it's open"],
+            ),
+            ("([State] IN (N'a,b',N'c'))", "State", vec!["a,b", "c"]),
+        ] {
+            let predicate = mssql_index_predicate(filter);
+            assert_eq!(predicate.column, column, "{filter}");
+            assert_eq!(predicate.values, values, "{filter}");
+        }
+    }
+
+    #[test]
+    fn other_filters_never_read_as_a_declared_predicate() {
+        for filter in [
+            "([Ref] IS NOT NULL)",
+            "([A]='x' OR [B]='y')",
+            "([A]='x' AND [A]='y')",
+            "([A]>(1))",
+            "([A]='unterminated)",
+            "([A] IN ('x', [B]))",
+            "([A] NOT IN ('x'))",
+        ] {
+            let predicate = mssql_index_predicate(filter);
+            assert_eq!(predicate.column, "", "{filter}");
+            assert_eq!(predicate.values, [filter], "{filter}");
+        }
+    }
 }
 
 #[cfg(feature = "mssql")]

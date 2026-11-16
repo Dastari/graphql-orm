@@ -99,6 +99,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     schema_policy: SchemaPolicy,
     pagination_config: PaginationConfig,
     refuse_oversized_limit: bool,
+    max_page_offset: Option<i64>,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
@@ -125,6 +126,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
+            max_page_offset: self.max_page_offset,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
             scan_config: self.scan_config.clone(),
@@ -202,6 +204,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy,
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -234,6 +237,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -263,6 +267,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -292,6 +297,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -321,6 +327,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -353,6 +360,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -392,6 +400,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -430,11 +439,19 @@ impl<B: OrmBackend> Database<B> {
     pub fn client_pagination_config(&self) -> crate::graphql::orm::ClientPaginationConfig {
         self.pagination_config
             .into_client_policy(self.refuse_oversized_limit)
+            .with_max_offset(self.max_page_offset)
     }
 
     /// Set whether oversized GraphQL page limits are refused instead of reduced.
     pub fn with_oversized_page_limit_refusal(mut self, refuse: bool) -> Self {
         self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Set the largest client page offset served; see
+    /// [`DatabaseBuilder::max_page_offset`].
+    pub fn with_max_page_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.max_page_offset = max_offset;
         self
     }
 
@@ -2238,6 +2255,25 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// [`Self::refuse_oversized_page_limit`].
     pub fn refuse_oversized_page_limit(mut self, refuse: bool) -> Self {
         self.database.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Refuse a client page offset above `max_offset` with
+    /// `PAGE_LIMIT_EXCEEDED`, on every backend.
+    ///
+    /// `None`, the default, leaves client offsets unbounded. Every backend
+    /// reads and discards the rows an offset skips, so one large offset costs
+    /// a scan of that many rows; set a maximum such as
+    /// [`PaginationConfig::RECOMMENDED_MAX_OFFSET`] and page deeper with
+    /// keyset cursors. The bound applies to generated list roots, to-many
+    /// relation pages and search pages, to custom resolvers that resolve
+    /// their page through
+    /// [`ClientPaginationConfig::resolve_client_page`](crate::graphql::orm::ClientPaginationConfig::resolve_client_page),
+    /// and to Rust reads that take a `PageInput` (`EntityQuery::paginate`,
+    /// `EntitySearchQuery::paginate`). The repository builders' own
+    /// `offset(n)` is trusted code and is not bounded.
+    pub fn max_page_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.database.max_page_offset = max_offset;
         self
     }
 

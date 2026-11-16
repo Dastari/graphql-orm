@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.168.0 adds an opt-in client page offset bound on every backend
+(`DatabaseBuilder::max_page_offset`, refused with `PAGE_LIMIT_EXCEEDED`) and
+fixes SQL Server details: a `DECIMAL(38,38)` value is a decode error instead
+of a driver panic, introspection reads indexes, key `String` columns are
+indexable `NVARCHAR(450)`, rendered `ALTER COLUMN` keeps the column's
+collation, and the restore marker checks its key and constraint. See the
+[migration guide](../../MIGRATION.md#01650-to-01680-sql-server-correctness-and-a-client-offset-bound).
+
 Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with

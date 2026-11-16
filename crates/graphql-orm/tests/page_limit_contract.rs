@@ -311,6 +311,85 @@ async fn oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(
     Ok(())
 }
 
+/// The offset pages a client can ask for, with the path of each page's edges.
+const OFFSET_PAGES: [(&str, &str, &[&str]); 2] = [
+    (
+        "list root",
+        "{ limitCards(page: { limit: 2, offset: OFFSET }) { edges { node { id } } } }",
+        &["limitCards"],
+    ),
+    (
+        "to-many relation",
+        "{ limitBoard(id: \"board\") { cards(page: { limit: 2, offset: OFFSET }) { edges { node { id } } } } }",
+        &["limitBoard", "cards"],
+    ),
+];
+
+/// #456: a client page offset above a configured maximum is refused with
+/// `PAGE_LIMIT_EXCEEDED`, the code an oversized limit is refused with, and
+/// never reaches the database. An offset at the maximum is served. Without a
+/// maximum, which is the default, offsets stay unbounded.
+async fn client_offsets_above_a_configured_maximum_are_refused(db: &Database) -> TestResult {
+    let capped = db.clone().with_max_page_offset(Some(3));
+    assert_eq!(db.client_pagination_config().max_offset(), None);
+    assert_eq!(capped.client_pagination_config().max_offset(), Some(3));
+    for (name, query, path) in OFFSET_PAGES {
+        let over = query.replace("OFFSET", "4");
+        let at_maximum = query.replace("OFFSET", "3");
+        let deep = query.replace("OFFSET", "1000000000");
+
+        // Default: any offset is served; past the last row the page is empty.
+        let served = execute(db, &over).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 1, "{name}");
+        let served = execute(db, &deep).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 0, "{name}");
+
+        // With a maximum: refused with the stable code, naming both numbers.
+        for query in [&over, &deep] {
+            let refused = execute(&capped, query).await;
+            assert_eq!(refused.errors.len(), 1, "{name}: {:?}", refused.errors);
+            let error = &refused.errors[0];
+            assert_eq!(
+                error.extensions.as_ref().and_then(|ext| ext.get("code")),
+                Some(&async_graphql::Value::from("PAGE_LIMIT_EXCEEDED")),
+                "{name}: {error:?}"
+            );
+            assert!(
+                error.message.starts_with("requested offset ")
+                    && error
+                        .message
+                        .ends_with(" exceeds the maximum page offset 3"),
+                "{name}: {}",
+                error.message
+            );
+        }
+        let served = execute(&capped, &at_maximum).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 2, "{name}");
+    }
+    // The page builder that custom resolvers use applies the same bound.
+    let page = graphql_orm::graphql::orm::PageInput {
+        limit: Some(1),
+        offset: Some(4),
+    };
+    assert_eq!(
+        capped
+            .client_pagination_config()
+            .resolve_client_page(Some(&page), true)
+            .map_err(|error| error.code)
+            .err(),
+        Some(graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded)
+    );
+    assert!(
+        db.client_pagination_config()
+            .resolve_client_page(Some(&page), true)
+            .is_ok()
+    );
+    Ok(())
+}
+
 /// Trusted Rust code pages a keyset with its own per-read maximum, so a
 /// `bound + 1` look-ahead above the GraphQL maximum sees its extra row.
 async fn host_keyset_reads_take_a_per_read_maximum(db: &Database) -> TestResult {
@@ -490,6 +569,7 @@ async fn run() -> TestResult {
     schema_complexity_bounds_are_isolated(&fixture.db).await?;
     declared_maximum_is_published_and_a_mismatched_database_is_refused(&fixture.db);
     oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(&fixture.db).await?;
+    client_offsets_above_a_configured_maximum_are_refused(&fixture.db).await?;
     host_keyset_reads_take_a_per_read_maximum(&fixture.db).await?;
     fixture.finish()
 }
