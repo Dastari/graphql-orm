@@ -1244,13 +1244,21 @@ enum ValueDomain {
     /// Exact decimal with `(precision, scale)`, or unconstrained.
     Numeric(Option<(u32, u32)>),
     /// Variable-length text with a length limit, or unlimited.
-    Text(Option<u32>),
+    Text {
+        limit: Option<u32>,
+        /// Whether the type stores every Unicode character. PostgreSQL and
+        /// SQLite text is Unicode for the whole database; SQL Server stores
+        /// Unicode only in its `n`-prefixed types, and its other text types
+        /// keep only the characters of the collation's code page.
+        unicode: bool,
+    },
 }
 
 /// The domain of the closed set of types whose widenings are known to keep
 /// every stored value. Spellings of PostgreSQL, SQLite and SQL Server are
 /// recognised; anything else has no known domain.
 fn value_domain(backend: DatabaseBackend, sql_type: &str) -> Option<ValueDomain> {
+    let mssql = backend == DatabaseBackend::Mssql;
     if let Some(name) = postgres_type_name(sql_type) {
         if name.array {
             return None;
@@ -1277,8 +1285,16 @@ fn value_domain(backend: DatabaseBackend, sql_type: &str) -> Option<ValueDomain>
             ("numeric", [precision, scale]) => {
                 Some(ValueDomain::Numeric(Some((*precision, *scale))))
             }
-            ("character varying", []) => Some(ValueDomain::Text(None)),
-            ("character varying", [length]) => Some(ValueDomain::Text(Some(*length))),
+            // SQL Server reads a length-less `varchar` column as `varchar(1)`.
+            ("character varying", []) if mssql => None,
+            ("character varying", []) => Some(ValueDomain::Text {
+                limit: None,
+                unicode: true,
+            }),
+            ("character varying", [length]) => Some(ValueDomain::Text {
+                limit: Some(*length),
+                unicode: !mssql,
+            }),
             _ => None,
         };
     }
@@ -1286,14 +1302,26 @@ fn value_domain(backend: DatabaseBackend, sql_type: &str) -> Option<ValueDomain>
         .split_ascii_whitespace()
         .collect::<String>()
         .to_ascii_lowercase();
+    // A length-less `nvarchar`, `char` or `nchar` has no domain: SQL Server
+    // reads each as a one-character column.
     match name.as_str() {
-        "text" | "varchar(max)" | "nvarchar(max)" => Some(ValueDomain::Text(None)),
+        "text" | "varchar(max)" => Some(ValueDomain::Text {
+            limit: None,
+            unicode: !mssql,
+        }),
+        "nvarchar(max)" => Some(ValueDomain::Text {
+            limit: None,
+            unicode: true,
+        }),
         "tinyint" => Some(ValueDomain::Integer(8)),
         _ => name
             .strip_prefix("nvarchar(")
             .and_then(|rest| rest.strip_suffix(')'))
             .and_then(|length| length.parse().ok())
-            .map(|length| ValueDomain::Text(Some(length))),
+            .map(|length| ValueDomain::Text {
+                limit: Some(length),
+                unicode: true,
+            }),
     }
 }
 
@@ -1302,15 +1330,10 @@ fn value_domain(backend: DatabaseBackend, sql_type: &str) -> Option<ValueDomain>
 /// larger integer, an integer into a wide enough exact numeric or a float
 /// that represents it exactly, single into double precision, a numeric with
 /// at least the same integer digits and scale, and a longer or unlimited
-/// text. Everything else, including every type this function does not
-/// recognise, may round, truncate or reject stored values.
+/// text that stores at least the same characters. Everything else, including
+/// every type this function does not recognise, may round, truncate or reject
+/// stored values.
 fn lossless_type_widening(backend: DatabaseBackend, before: &str, after: &str) -> bool {
-    if backend == DatabaseBackend::Mssql
-        && before.trim().to_ascii_lowercase().starts_with("nvarchar")
-        && after.trim().to_ascii_lowercase().starts_with("varchar")
-    {
-        return false;
-    }
     use ValueDomain::{Double, Integer, Numeric, Real, Text};
     let (Some(before), Some(after)) = (value_domain(backend, before), value_domain(backend, after))
     else {
@@ -1338,8 +1361,18 @@ fn lossless_type_widening(backend: DatabaseBackend, before: &str, after: &str) -
             scale >= before_scale
                 && precision.saturating_sub(scale) >= before_precision.saturating_sub(before_scale)
         }
-        (Text(_), Text(None)) => true,
-        (Text(Some(before)), Text(Some(after))) => after >= before,
+        // Unicode text into a code-page type may replace characters.
+        (Text { unicode: true, .. }, Text { unicode: false, .. }) => false,
+        (Text { .. }, Text { limit: None, .. }) => true,
+        (
+            Text {
+                limit: Some(before),
+                ..
+            },
+            Text {
+                limit: Some(after), ..
+            },
+        ) => after >= before,
         _ => false,
     }
 }
@@ -3799,9 +3832,14 @@ pub(super) fn render_migration_step_view(
     }
 }
 
-/// Classify without a backend or source schema. A widening must preserve
-/// values on every supported backend; append-only changes without prior state
-/// are destructive. Database planners use their backend and source state.
+/// Classify without a backend or source schema.
+///
+/// A type widening must preserve values on every supported backend. Enabling
+/// append-only enforcement without retention purge is additive; enabling
+/// retention purge is destructive because the prior enforcement state is
+/// unknown, and disabling append-only enforcement is always destructive.
+/// Database planners and [`PlannedSchemaStage::steps`](super::PlannedSchemaStage::steps)
+/// classify with their backend and source schema instead.
 pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
     let (risk, reason) = classify_migration_step_view(&StepRef::from(step));
     PlannedMigrationStep {
@@ -3921,21 +3959,34 @@ pub(super) fn classify_migration_step_context(
             MigrationRisk::Destructive,
             "drops an existing referential constraint",
         ),
+        // Enforcement without the retention-purge exception is the strictest
+        // append-only state, so reaching it never relaxes anything.
         StepRef::SetAppendOnly {
             enabled: true,
-            retention_purge,
+            retention_purge: false,
             ..
-        } if prior_append_only
-            .is_some_and(|(enabled, purge)| !enabled || purge || !retention_purge) =>
-        {
-            (
-                MigrationRisk::Additive,
-                "adds database enforcement that prevents row mutation",
-            )
-        }
-        StepRef::SetAppendOnly { .. } => (
+        } => (
+            MigrationRisk::Additive,
+            "adds append-only database enforcement that prevents row mutation",
+        ),
+        // Purge-enabled enforcement adds protection to an unprotected table
+        // but relaxes a table that already rejects every delete. Without a
+        // known prior state the step fails closed.
+        StepRef::SetAppendOnly {
+            enabled: true,
+            retention_purge: true,
+            ..
+        } if prior_append_only.is_some_and(|(enabled, purge)| !enabled || purge) => (
+            MigrationRisk::Additive,
+            "adds append-only database enforcement that admits bounded retention purge",
+        ),
+        StepRef::SetAppendOnly { enabled: true, .. } => (
             MigrationRisk::Destructive,
-            "relaxes append-only enforcement or has no known prior enforcement state",
+            "enables retention purge on append-only enforcement, or has no known prior enforcement state",
+        ),
+        StepRef::SetAppendOnly { enabled: false, .. } => (
+            MigrationRisk::Destructive,
+            "removes append-only database enforcement",
         ),
         StepRef::SetCompositeUniques { before, after, .. }
             if before.iter().any(|unique| !after.contains(unique)) =>
@@ -6548,6 +6599,24 @@ mod backend_risk_regressions {
         for (backend, before, after) in [
             (DatabaseBackend::Mssql, "NVARCHAR(20)", "VARCHAR(50)"),
             (DatabaseBackend::Mssql, "NVARCHAR(MAX)", "VARCHAR(MAX)"),
+            // SQL Server `TEXT` and the standard `varchar` spellings are
+            // code-page types, not Unicode ones.
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "TEXT"),
+            (DatabaseBackend::Mssql, "NVARCHAR(MAX)", "TEXT"),
+            (
+                DatabaseBackend::Mssql,
+                "NVARCHAR(20)",
+                "CHARACTER VARYING(50)",
+            ),
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "char varying(50)"),
+            (DatabaseBackend::Mssql, "nvarchar(20)", "varchar(50)"),
+            // A length-less type is one character wide on SQL Server.
+            (DatabaseBackend::Mssql, "VARCHAR(20)", "VARCHAR"),
+            (DatabaseBackend::Mssql, "VARCHAR(20)", "CHARACTER VARYING"),
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "NVARCHAR"),
+            (DatabaseBackend::Mssql, "VARCHAR(20)", "CHAR"),
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "NCHAR"),
+            (DatabaseBackend::Mssql, "VARCHAR", "NVARCHAR(MAX)"),
             (DatabaseBackend::Mssql, "DECIMAL(20,4)", "DECIMAL"),
             (DatabaseBackend::Mssql, "BIGINT", "NUMERIC"),
             (DatabaseBackend::Sqlite, "INTEGER", "DOUBLE PRECISION"),
@@ -6571,6 +6640,34 @@ mod backend_risk_regressions {
                 MigrationRisk::Destructive,
                 "{backend:?}: {before} -> {after}"
             );
+        }
+        // Code-page text into Unicode or a longer code-page type keeps every
+        // value on SQL Server.
+        for (before, after) in [
+            ("VARCHAR(20)", "NVARCHAR(20)"),
+            ("VARCHAR(20)", "NVARCHAR(MAX)"),
+            ("VARCHAR(20)", "TEXT"),
+            ("VARCHAR(20)", "CHARACTER VARYING(50)"),
+            ("NVARCHAR(20)", "NVARCHAR(MAX)"),
+        ] {
+            assert!(
+                lossless_type_widening(DatabaseBackend::Mssql, before, after),
+                "{before} -> {after}"
+            );
+        }
+        // PostgreSQL and SQLite text is Unicode, and a length-less varchar is
+        // unlimited.
+        for backend in [DatabaseBackend::Postgres, DatabaseBackend::Sqlite] {
+            for (before, after) in [
+                ("VARCHAR(20)", "VARCHAR"),
+                ("VARCHAR(20)", "TEXT"),
+                ("CHARACTER VARYING(20)", "VARCHAR(50)"),
+            ] {
+                assert!(
+                    lossless_type_widening(backend, before, after),
+                    "{backend:?}: {before} -> {after}"
+                );
+            }
         }
         assert!(lossless_type_widening(
             DatabaseBackend::Postgres,

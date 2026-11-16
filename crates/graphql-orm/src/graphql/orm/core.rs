@@ -4996,21 +4996,24 @@ pub struct PlannedSchemaStage {
     pub description: String,
     pub target_schema_hash: String,
     pub plan: MigrationPlan,
+    /// The schema this stage is planned against: the introspected live schema,
+    /// restricted to stage-declared tables, for the first pending stage, and
+    /// the previous stage's target for each later one.
+    pub source_schema: SchemaModel,
 }
 
 impl PlannedSchemaStage {
-    /// The stage's steps classified with the same rules as
-    /// [`SchemaManager::plan_migration_to_entities`](super::SchemaManager::plan_migration_to_entities).
+    /// The stage's steps classified for [`MigrationPlan::backend`] against
+    /// [`source_schema`](Self::source_schema), as
+    /// [`SchemaManager::plan_migration_to_entities`](super::SchemaManager::plan_migration_to_entities)
+    /// classifies against the live schema.
     ///
     /// Stage application refuses these steps according to [`ApplyOptions`].
     pub fn steps(&self) -> Vec<PlannedMigrationStep> {
         super::migrations::classify_migration_steps_for_backend(
             self.plan.backend,
             &self.plan.steps,
-            &SchemaModel {
-                extensions: Vec::new(),
-                tables: Vec::new(),
-            },
+            &self.source_schema,
         )
     }
 

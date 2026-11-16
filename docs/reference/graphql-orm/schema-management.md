@@ -104,10 +104,10 @@ to `Risky` and refuses `Destructive` steps until `allow_destructive` is set.
 
 | Step | Risk |
 | --- | --- |
-| `CreateTable`, `CreateIndex`, `CreateSearchIndex`, `EnableExtension`, `SetAppendOnly { enabled: true }`, `AddColumn` (nullable or defaulted) | `Additive` |
+| `CreateTable`, `CreateIndex`, `CreateSearchIndex`, `EnableExtension`, `SetAppendOnly { enabled: true, retention_purge: false }`, `SetAppendOnly { enabled: true, retention_purge: true }` on a table without append-only enforcement, `AddColumn` (nullable or defaulted) | `Additive` |
 | `AlterColumn` without a type change (other than tightening nullability) | `Compatible` |
 | `AddColumn` (required, no default), `AlterColumn` that tightens nullability, `AlterColumn` with a lossless type widening, `AddForeignKey`, `DropSearchIndex`, `AlterSearchIndex`, `SetCompositeUniques` or `SetCheckConstraints` that only adds constraints | `Risky` |
-| `DropTable`, `DropColumn`, `AlterColumn` with any other type change, `DropIndex`, `DropForeignKey`, `SetAppendOnly { enabled: false }`, `SetCompositeUniques` or `SetCheckConstraints` that removes or changes a constraint | `Destructive` |
+| `DropTable`, `DropColumn`, `AlterColumn` with any other type change, `DropIndex`, `DropForeignKey`, `SetAppendOnly { enabled: false }`, `SetAppendOnly { enabled: true, retention_purge: true }` on an append-only table or without a known prior state, `SetCompositeUniques` or `SetCheckConstraints` that removes or changes a constraint | `Destructive` |
 
 - **Type changes.** PostgreSQL renders `ALTER COLUMN ... TYPE` without a `USING` clause, so a
   narrowing conversion rounds or truncates stored values. Only a closed set of widenings keeps
@@ -115,8 +115,17 @@ to `Risky` and refuses `Destructive` steps until `allow_destructive` is set.
   enough integer digits, or into a float that represents it exactly (`SMALLINT` into `REAL`, up to
   `INTEGER` into `DOUBLE PRECISION`); `REAL` into `DOUBLE PRECISION`; a numeric with at least the
   same integer digits and scale; and a longer or unlimited `VARCHAR`, `NVARCHAR` or `TEXT`. The
-  classifier recognises the PostgreSQL, SQLite and SQL Server spellings of those types. Every other
+  classifier recognises the PostgreSQL, SQLite and SQL Server spellings of those types and reads
+  them as the plan's backend does: on SQL Server, `VARCHAR`, `CHARACTER VARYING` and `TEXT` keep
+  only the collation's code page, so `NVARCHAR` into any of them is not a widening, and a
+  length-less `VARCHAR`, `NVARCHAR`, `CHAR` or `NCHAR` is one character wide; bare
+  `DECIMAL`/`NUMERIC` is `(18,0)` on SQL Server and SQLite; SQLite `INTEGER` is 64-bit. Every other
   change, including one between types it does not know, is `Destructive`.
+- **Append-only steps.** Turning enforcement on without retention purge, or turning purge off, is
+  `Additive`. Enabling purge-admitting enforcement is `Additive` only when the source schema shows
+  the table without append-only enforcement; on a table that already rejects every delete, or
+  without a known prior state (`classify_migration_step`), it is `Destructive`. Planners and
+  `PlannedSchemaStage::steps()` classify against their source schema.
 - **Integrity-removing steps.** Dropping an index (the step does not say whether it is unique), a
   foreign key, append-only enforcement, or an existing composite-unique or check constraint
   removes a guarantee that later writes depended on, so it needs the same explicit opt-in as a
@@ -329,7 +338,9 @@ database
 - `record_history: false` is refused, because stage progress is tracked in
   history. `require_clean_schema` applies to ABI upgrades only.
 - `PlannedSchemaStage::steps()` and `highest_risk()` expose the classified steps
-  for review.
+  for review. Each stage classifies against `PlannedSchemaStage::source_schema`:
+  the introspected live schema of the stage-declared tables for the first
+  pending stage, and the previous stage's target for each later one.
 
 ## Append-only retention capability changes
 
@@ -340,7 +351,8 @@ PostgreSQL trigger function and managed RLS policy. It is included in stable
 table, module, and backup fingerprints.
 
 Enabling, disabling, or repairing the capability produces an explicit
-`SetAppendOnly` step. Apply it only under a fresh host/module migration version;
+`SetAppendOnly` step. Enabling purge on a table that is already append-only
+relaxes its enforcement and needs `allow_destructive`. Apply it only under a fresh host/module migration version;
 if a previously recorded version still has such work, application fails closed.
 No row data is rewritten, but operators must validate foreign-key behavior and
 existing data before enabling physical purge. See

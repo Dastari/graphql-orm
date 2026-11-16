@@ -105,6 +105,11 @@ fn lossy_type_changes_are_destructive_and_lossless_widenings_are_not() {
         ("DATETIME2", "DATE"),
         ("DECIMAL(12,4)", "DECIMAL(12,2)"),
         ("BIGINT", "TINYINT"),
+        // SQL Server `TEXT` and `varchar` hold only the code page's characters.
+        ("NVARCHAR(20)", "TEXT"),
+        ("NVARCHAR(20)", "character varying(50)"),
+        // SQL Server reads a length-less `varchar` as one character.
+        ("VARCHAR(20)", "VARCHAR"),
         // SQLite.
         ("REAL", "INTEGER"),
         ("INTEGER", "REAL"),
@@ -222,15 +227,22 @@ fn integrity_removing_steps_are_destructive() {
         let planned = classify_migration_step(step);
         assert_eq!(planned.risk, MigrationRisk::Destructive, "{step:?}");
     }
+    // Without a prior state, enforcement that admits no purge is the
+    // strictest append-only state; enabling purge or removing enforcement
+    // may relax an existing guarantee and fails closed.
+    for (enabled, retention_purge, risk) in [
+        (true, false, MigrationRisk::Additive),
+        (true, true, MigrationRisk::Destructive),
+        (false, false, MigrationRisk::Destructive),
+    ] {
+        let step = MigrationStep::SetAppendOnly {
+            table_name: table_name(),
+            enabled,
+            retention_purge,
+        };
+        assert_eq!(classify_migration_step(&step).risk, risk, "{step:?}");
+    }
     let additive_or_risky = [
-        (
-            MigrationStep::SetAppendOnly {
-                table_name: table_name(),
-                enabled: true,
-                retention_purge: false,
-            },
-            MigrationRisk::Destructive,
-        ),
         (
             MigrationStep::AddForeignKey {
                 table_name: table_name(),
@@ -648,6 +660,91 @@ async fn enabling_retention_purge_is_destructive() -> Result<(), Box<dyn std::er
         )
         .await
         .expect_err("additive-only refuses purge relaxation even with destructive admission");
+    #[cfg(feature = "postgres")]
+    server.cleanup()?;
+    Ok(())
+}
+
+/// Schema stages classify append-only changes against the schema they are
+/// planned from: enabling enforcement is additive, enabling purge on a
+/// table that is already append-only is destructive, and enabling
+/// purge-admitting enforcement on an unprotected table is additive.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn schema_stages_classify_append_only_against_the_current_schema()
+-> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    #[cfg(feature = "postgres")]
+    let mut server = owned_postgres::OwnedPostgres::start("migration-safety-stage-append")?;
+    #[cfg(feature = "postgres")]
+    let db = Database::<PostgresBackend>::connect_postgres(&server.url).await?;
+    let schema = |append_only: bool, retention_purge: bool| {
+        let mut schema = SchemaModel::from_entities(&[SafetyRecord::metadata()]);
+        schema.tables[0].append_only = append_only;
+        schema.tables[0].retention_purge = retention_purge;
+        schema
+    };
+    let plain = SchemaStage::from_schema_model("stage_append_01", "plain", schema(false, false));
+    let enforced =
+        SchemaStage::from_schema_model("stage_append_02", "enforce", schema(true, false));
+    let purge = SchemaStage::from_schema_model("stage_append_03", "purge", schema(true, true));
+    let direct_purge = SchemaStage::from_schema_model(
+        "stage_append_02_alt",
+        "enforce with purge",
+        schema(true, true),
+    );
+    let additive_only = ApplyOptions {
+        additive_only: true,
+        ..ApplyOptions::default()
+    };
+
+    db.apply_schema_stages_with_options(std::slice::from_ref(&plain), ApplyOptions::default())
+        .await?;
+
+    // Purge-admitting enforcement on an unprotected table adds protection.
+    let planned = db
+        .plan_schema_stages(&[plain.clone(), direct_purge])
+        .await?;
+    assert_eq!(planned.len(), 1);
+    assert_eq!(
+        planned[0].highest_risk(),
+        Some(MigrationRisk::Additive),
+        "{:?}",
+        planned[0].steps()
+    );
+
+    // Enabling enforcement on an existing table is admitted as additive.
+    let stages = [plain.clone(), enforced.clone()];
+    let planned = db.plan_schema_stages(&stages).await?;
+    assert_eq!(planned[0].highest_risk(), Some(MigrationRisk::Additive));
+    db.apply_schema_stages_with_options(&stages, additive_only.clone())
+        .await?;
+
+    // Enabling purge on an append-only table relaxes its enforcement.
+    let stages = [plain, enforced, purge];
+    let planned = db.plan_schema_stages(&stages).await?;
+    assert_eq!(planned.len(), 1);
+    assert!(planned[0].source_schema.tables[0].append_only);
+    assert_eq!(planned[0].highest_risk(), Some(MigrationRisk::Destructive));
+    let error = db
+        .apply_schema_stages_with_options(&stages, ApplyOptions::default())
+        .await
+        .expect_err("purge relaxation needs destructive admission");
+    assert!(error.to_string().contains("destructive"), "{error}");
+    db.apply_schema_stages_with_options(
+        &stages,
+        ApplyOptions {
+            allow_destructive: true,
+            ..ApplyOptions::default()
+        },
+    )
+    .await?;
+    assert!(db.plan_schema_stages(&stages).await?.is_empty());
     #[cfg(feature = "postgres")]
     server.cleanup()?;
     Ok(())

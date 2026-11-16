@@ -18,13 +18,33 @@ branch. Version numbers are assigned when the batch is released.
 ### Migration safety and live journal validation
 
 - **Action needed:** replan pending migrations. Removing column-level UNIQUE or
-  primary-key enforcement, or enabling retention purge on an already append-only
-  table, is `Destructive` and requires `allow_destructive`. Append-only steps
-  without known prior state fail closed. These changes are refused by `additive_only`.
-- **Action needed:** review type conversions using the actual backend. SQL Server
-  NVARCHAR to VARCHAR may lose Unicode, and bare DECIMAL/NUMERIC means (18,0),
-  not PostgreSQL's unconstrained numeric. SQLite INTEGER is 64-bit; conversion
-  to DOUBLE PRECISION can lose precision. These lossy conversions are destructive.
+  primary-key enforcement is `Destructive` and requires `allow_destructive`.
+  Of the append-only steps, only enabling retention purge can need it:
+  `SetAppendOnly { enabled: true, retention_purge: true }` is `Destructive` on
+  a table that is already append-only without purge, and when the prior state
+  is unknown (the public `classify_migration_step`). It is `Additive` on a
+  table without append-only enforcement. Enabling enforcement without purge,
+  or turning purge off, stays `Additive`, and disabling append-only
+  enforcement stays `Destructive`. `additive_only` refuses every
+  `Destructive` step.
+- **Action needed** for hosts that apply schema stages with `additive_only`
+  or inspect `PlannedSchemaStage::steps()`: stages now classify against the
+  schema they are planned from, exposed as the new public field
+  `PlannedSchemaStage::source_schema`, instead of an empty schema. Enabling
+  append-only enforcement in a stage is `Additive` again, and enabling purge
+  on an append-only table needs `allow_destructive`. Code that builds a
+  `PlannedSchemaStage` with a struct literal must set `source_schema`.
+- **Action needed:** review type conversions using the actual backend. The
+  classifier treats these as lossy, so they are `Destructive`: on SQL Server,
+  `NVARCHAR` into `VARCHAR`, `CHARACTER VARYING` or `TEXT` (code-page types
+  that may replace Unicode characters), any change into a length-less
+  `VARCHAR`, `NVARCHAR`, `CHAR` or `NCHAR` (one character wide), and a
+  numeric or integer into bare `DECIMAL`/`NUMERIC` that `(18,0)` cannot hold;
+  on SQLite, bare `NUMERIC` is also read as `(18,0)`, and `INTEGER` is 64-bit,
+  so `INTEGER` into `DOUBLE PRECISION` is lossy. PostgreSQL reads bare
+  `NUMERIC` as unconstrained and a length-less `VARCHAR` as unlimited, as
+  before. Without a backend, `classify_migration_step` admits a widening only
+  when it is lossless on every backend.
 - **Action needed:** PostgreSQL `validate_target` now reports cascading foreign
   keys into unjournaled live tables, including constraints added outside the ORM
   after recorder installation. Journal those tables or use restrictive FK actions.

@@ -256,8 +256,8 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
             description: stage.description.clone(),
             target_schema_hash: stage.target_schema_hash.clone(),
             plan,
+            source_schema: std::mem::replace(&mut current_schema, stage.target_schema.clone()),
         });
-        current_schema = stage.target_schema.clone();
     }
 
     Ok((live_schema_hash, planned))
