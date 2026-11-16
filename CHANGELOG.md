@@ -14,6 +14,10 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.167.0
+
+- Test-only: the macros unit tests for update assignments and write-transform rejection name no backend, so `cargo test -p graphql-orm-macros --no-default-features --features postgres` and `--features mssql` pass as well as the default SQLite run (#735). Generated code and runtime behavior do not change; the version moves because the macros package archive carries its unit tests. See the [migration guide](MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests).
+
 ## Unreleased - ORM/macros 0.166.0
 
 - Add request-local `DependentDeleteGuard`: compare admitted effects with the
