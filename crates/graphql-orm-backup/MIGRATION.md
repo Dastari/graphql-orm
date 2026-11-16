@@ -13,7 +13,7 @@ supersedes: []
 ## To 0.24.0: host-held snapshot records
 
 Upgrade backup to 0.24.0 and, when using the optional ORM adapter, ORM/macros
-to 0.163.0 on the same reviewed revision. Existing manifests, keys and
+to 0.164.0 on the same reviewed revision. Existing manifests, keys and
 repository identities need no conversion.
 
 - **Source compatible. No action** to keep compiling: no existing type,
@@ -49,7 +49,7 @@ repository identities need no conversion.
   `restore_full` on PostgreSQL or SQLite now leaves the target empty. Hosts
   that restore the tables of searchable runtime collections must backfill
   their search indexes afterwards; see the
-  [workspace migration guide](../../MIGRATION.md#01620-to-01630-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+  [workspace migration guide](../../MIGRATION.md#01630-to-01640-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 ## To 0.23.0: PostgreSQL mixed-case table restore
 

@@ -10,13 +10,20 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.163.0 makes snapshot restore atomic on SQLite and PostgreSQL,
+Version 0.164.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
 `MssqlPool::install_restore_marker()` and grant runtime roles SELECT before
 serving ORM work. Missing or unreadable restore state fails closed with
 `RestoreStateUnavailable`, whose reason names the fix. See the
-[migration guide](../../MIGRATION.md#01620-to-01630-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+[migration guide](../../MIGRATION.md#01630-to-01640-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
+per-entity wrapper objects (edges, connections, mutation results, change
+events, bulk results and authorized scan pages) carry hand-emitted output
+impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
+fingerprints are byte-identical; no action is needed. See the
+[migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
 
 Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
 resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its

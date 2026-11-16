@@ -5538,13 +5538,16 @@ fn generate_graphql_operations_unfiltered(
         } else {
             quote! {}
         };
+        let scan_page_object = crate::wrapper_object::wrapper_object(quote! {
+            #[derive(Clone, Debug)]
+            #[graphql(rename_fields = #field_case_rule)]
+            pub struct #scan_connection_type {
+                pub nodes: Vec<#struct_name>,
+                pub page_info: ::graphql_orm::graphql::orm::ScanPageInfo,
+            }
+        });
         let definitions = quote! {
-                #[derive(::graphql_orm::async_graphql::SimpleObject, Clone, Debug)]
-                #[graphql(rename_fields = #field_case_rule)]
-                pub struct #scan_connection_type {
-                    pub nodes: Vec<#struct_name>,
-                    pub page_info: ::graphql_orm::graphql::orm::ScanPageInfo,
-                }
+                #scan_page_object
 
                 #runtime_order_definitions
 
@@ -6431,13 +6434,8 @@ fn generate_graphql_operations_unfiltered(
         } else {
             quote! {}
         };
-        quote! {
-            #[derive(Clone, Debug)]
-            pub struct #create_input { #(#create_input_fields)* }
-
-            #graphql_create_input_definition
-
-            #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
+        let result_object = crate::wrapper_object::wrapper_object(quote! {
+            #[derive(Debug, Clone)]
             #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
             pub struct #result_type {
                 pub success: bool,
@@ -6445,8 +6443,9 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #entity_result_field_name)]
                 pub entity: Option<#struct_name>,
             }
-
-            #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
+        });
+        let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
             #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
             pub struct #changed_event {
                 pub action: ::graphql_orm::graphql::orm::ChangeAction,
@@ -6462,6 +6461,16 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #entity_result_field_name)]
                 pub entity: Option<#struct_name>,
             }
+        });
+        quote! {
+            #[derive(Clone, Debug)]
+            pub struct #create_input { #(#create_input_fields)* }
+
+            #graphql_create_input_definition
+
+            #result_object
+
+            #changed_event_object
 
             #[derive(Default)]
             pub struct #mutations_struct;
@@ -8643,44 +8652,63 @@ fn generate_graphql_operations_unfiltered(
             }
 
     };
-    let readonly_composite_changed = if (has_composite_primary_key
-        || schema_policy_read_only
-        || !backend_writable)
-        && !entity_meta.append_only
-    {
-        quote! {
-            #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
-            #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
-            pub struct #changed_event {
-                pub action: ::graphql_orm::graphql::orm::ChangeAction,
-                #[graphql(name = #change_kind_field_name)]
-                pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
-                pub id: #subscription_identity_type,
-                #subscription_extra_key_field
-                #[graphql(name = #source_entity_field_name)]
-                pub source_entity: Option<String>,
-                #[graphql(name = #source_id_field_name)]
-                pub source_id: Option<String>,
-                pub path: Vec<String>,
-                #[graphql(name = #entity_result_field_name)]
-                pub entity: Option<#struct_name>,
+    let readonly_composite_changed =
+        if (has_composite_primary_key || schema_policy_read_only || !backend_writable)
+            && !entity_meta.append_only
+        {
+            let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
+                #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+                #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+                pub struct #changed_event {
+                    pub action: ::graphql_orm::graphql::orm::ChangeAction,
+                    #[graphql(name = #change_kind_field_name)]
+                    pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+                    pub id: #subscription_identity_type,
+                    #subscription_extra_key_field
+                    #[graphql(name = #source_entity_field_name)]
+                    pub source_entity: Option<String>,
+                    #[graphql(name = #source_id_field_name)]
+                    pub source_id: Option<String>,
+                    pub path: Vec<String>,
+                    #[graphql(name = #entity_result_field_name)]
+                    pub entity: Option<#struct_name>,
+                }
+            });
+            quote! {
+                #changed_event_object
+                #generated_subscription_surface
+                impl #struct_name {
+                    #subscription_key_method
+                    #propagated_subscription_emitter
+                    #generated_propagation_driver
+                }
             }
-            #generated_subscription_surface
-            impl #struct_name {
-                #subscription_key_method
-                #propagated_subscription_emitter
-                #generated_propagation_driver
-            }
-        }
-    } else {
-        quote! {}
-    };
+        } else {
+            quote! {}
+        };
 
     if !backend_writable
         || schema_policy_read_only
         || has_composite_primary_key
         || entity_meta.append_only
     {
+        let edge_object = crate::wrapper_object::wrapper_object(quote! {
+            #[derive(Debug, Clone)]
+            #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
+            pub struct #edge_type {
+                pub node: #struct_name,
+                pub cursor: String,
+            }
+        });
+        let connection_object = crate::wrapper_object::wrapper_object(quote! {
+            #[derive(Debug, Clone)]
+            #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
+            pub struct #connection_type {
+                pub edges: Vec<#edge_type>,
+                #[graphql(name = #page_info_field_name)]
+                pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
+            }
+        });
         return Ok(quote! {
             #operation_metadata_impl
 
@@ -8694,20 +8722,9 @@ fn generate_graphql_operations_unfiltered(
 
             #key_type_definition
 
-            #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-            #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
-            pub struct #edge_type {
-                pub node: #struct_name,
-                pub cursor: String,
-            }
+            #edge_object
 
-            #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-            #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
-            pub struct #connection_type {
-                pub edges: Vec<#edge_type>,
-                #[graphql(name = #page_info_field_name)]
-                pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
-            }
+            #connection_object
 
             impl #connection_type {
                 pub fn from_generic(conn: ::graphql_orm::graphql::pagination::Connection<#struct_name>) -> Self {
@@ -9217,6 +9234,88 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
 
+    let edge_object = crate::wrapper_object::wrapper_object(quote! {
+        /// Edge containing a node and cursor
+        #[derive(Debug, Clone)]
+        #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
+        pub struct #edge_type {
+            /// The item at the end of the edge
+            pub node: #struct_name,
+            /// A cursor for pagination
+            pub cursor: String,
+        }
+    });
+    let connection_object = crate::wrapper_object::wrapper_object(quote! {
+        /// Connection containing edges and page info
+        #[derive(Debug, Clone)]
+        #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
+        pub struct #connection_type {
+            /// The edges in this connection
+            pub edges: Vec<#edge_type>,
+            /// Pagination information
+            #[graphql(name = #page_info_field_name)]
+            pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
+        }
+    });
+    let result_object = crate::wrapper_object::wrapper_object(quote! {
+        /// Mutation result for this entity.
+        #[derive(Debug, Clone)]
+        #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
+        pub struct #result_type {
+            pub success: bool,
+            pub error: Option<String>,
+            #[graphql(name = #entity_result_field_name)]
+            pub entity: Option<#struct_name>,
+        }
+    });
+    let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
+        /// Subscription change event for this entity.
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+        #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+        pub struct #changed_event {
+            pub action: ::graphql_orm::graphql::orm::ChangeAction,
+            #[graphql(name = #change_kind_field_name)]
+            pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+            pub id: #pk_type,
+            #[graphql(name = #source_entity_field_name)]
+            pub source_entity: Option<String>,
+            #[graphql(name = #source_id_field_name)]
+            pub source_id: Option<String>,
+            pub path: Vec<String>,
+            #[graphql(name = #entity_result_field_name)]
+            pub entity: Option<#struct_name>,
+        }
+    });
+    let delete_many_result_object = crate::wrapper_object::wrapper_object(quote! {
+        /// Result of bulk delete by Where filter
+        #[derive(Debug, Clone)]
+        #[graphql(name = #delete_many_result_type_str, rename_fields = #field_case_rule)]
+        pub struct #delete_many_result_type {
+            pub success: bool,
+            /// Failures after commit; success and count still describe the committed write.
+            pub notification_errors: Option<Vec<::graphql_orm::graphql::orm::NotificationError>>,
+            pub error: Option<String>,
+            /// Application refusal code, or the safe database error category.
+            pub error_code: Option<String>,
+            #[graphql(name = #deleted_count_field_name)]
+            pub deleted_count: i64,
+        }
+    });
+    let update_many_result_object = crate::wrapper_object::wrapper_object(quote! {
+        /// Result of bulk update by Where filter
+        #[derive(Debug, Clone)]
+        #[graphql(name = #update_many_result_type_str, rename_fields = #field_case_rule)]
+        pub struct #update_many_result_type {
+            pub success: bool,
+            /// Failures after commit; success and count still describe the committed write.
+            pub notification_errors: Option<Vec<::graphql_orm::graphql::orm::NotificationError>>,
+            pub error: Option<String>,
+            /// Application refusal code, or the safe database error category.
+            pub error_code: Option<String>,
+            #[graphql(name = #affected_count_field_name)]
+            pub affected_count: i64,
+        }
+    });
     Ok(quote! {
         #operation_metadata_impl
 
@@ -9226,26 +9325,9 @@ fn generate_graphql_operations_unfiltered(
 
         #key_type_definition
 
-        /// Edge containing a node and cursor
-        #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-        #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
-        pub struct #edge_type {
-            /// The item at the end of the edge
-            pub node: #struct_name,
-            /// A cursor for pagination
-            pub cursor: String,
-        }
+        #edge_object
 
-        /// Connection containing edges and page info
-        #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-        #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
-        pub struct #connection_type {
-            /// The edges in this connection
-            pub edges: Vec<#edge_type>,
-            /// Pagination information
-            #[graphql(name = #page_info_field_name)]
-            pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
-        }
+        #connection_object
 
         impl #connection_type {
             /// Create from a generic Connection
@@ -9292,15 +9374,7 @@ fn generate_graphql_operations_unfiltered(
 
         #graphql_update_input_definition
 
-        /// Mutation result for this entity.
-        #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-        #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
-        pub struct #result_type {
-            pub success: bool,
-            pub error: Option<String>,
-            #[graphql(name = #entity_result_field_name)]
-            pub entity: Option<#struct_name>,
-        }
+        #result_object
 
         impl #result_type {
             /// Create a successful result with the entity
@@ -9315,36 +9389,9 @@ fn generate_graphql_operations_unfiltered(
 
         #upsert_result_definition
 
-        /// Subscription change event for this entity.
-        #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
-        #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
-        pub struct #changed_event {
-            pub action: ::graphql_orm::graphql::orm::ChangeAction,
-            #[graphql(name = #change_kind_field_name)]
-            pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
-            pub id: #pk_type,
-            #[graphql(name = #source_entity_field_name)]
-            pub source_entity: Option<String>,
-            #[graphql(name = #source_id_field_name)]
-            pub source_id: Option<String>,
-            pub path: Vec<String>,
-            #[graphql(name = #entity_result_field_name)]
-            pub entity: Option<#struct_name>,
-        }
+        #changed_event_object
 
-        /// Result of bulk delete by Where filter
-        #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-        #[graphql(name = #delete_many_result_type_str, rename_fields = #field_case_rule)]
-        pub struct #delete_many_result_type {
-            pub success: bool,
-            /// Failures after commit; success and count still describe the committed write.
-            pub notification_errors: Option<Vec<::graphql_orm::graphql::orm::NotificationError>>,
-            pub error: Option<String>,
-            /// Application refusal code, or the safe database error category.
-            pub error_code: Option<String>,
-            #[graphql(name = #deleted_count_field_name)]
-            pub deleted_count: i64,
-        }
+        #delete_many_result_object
 
         impl #delete_many_result_type {
             pub fn ok(deleted_count: i64) -> Self {
@@ -9364,19 +9411,7 @@ fn generate_graphql_operations_unfiltered(
 
         }
 
-        /// Result of bulk update by Where filter
-        #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-        #[graphql(name = #update_many_result_type_str, rename_fields = #field_case_rule)]
-        pub struct #update_many_result_type {
-            pub success: bool,
-            /// Failures after commit; success and count still describe the committed write.
-            pub notification_errors: Option<Vec<::graphql_orm::graphql::orm::NotificationError>>,
-            pub error: Option<String>,
-            /// Application refusal code, or the safe database error category.
-            pub error_code: Option<String>,
-            #[graphql(name = #affected_count_field_name)]
-            pub affected_count: i64,
-        }
+        #update_many_result_object
 
         impl #update_many_result_type {
             pub fn ok(affected_count: i64) -> Self {

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.162.0 to 0.163.0: atomic restore, search reset and kept values on ignored denials
+## 0.164.0 to 0.164.0: atomic restore, search reset and kept values on ignored denials
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and
 fingerprints are unchanged.
@@ -83,6 +83,17 @@ fingerprints are unchanged.
   do not clear a stale marker until its partial restore has been recovered.
 - Backup users also upgrade to
   [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).
+
+## 0.159.0 to 0.163.0: wrapper object compile cost
+
+- **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
+  together. The generated edge, connection, mutation result, change event,
+  bulk delete and bulk update result, and authorized scan page types no longer
+  derive `async_graphql::SimpleObject`; the macros emit the equivalent output
+  impls. Generated SDL, operation and semantic catalogues and fingerprints are
+  byte-identical, and the types keep their fields, derives other than
+  `SimpleObject`, and `async fn` field getters. The new hidden
+  `graphql_orm::graphql::wrapper_object` module is for generated code only.
 
 ## 0.162.0: context-bound authorized pages
 
