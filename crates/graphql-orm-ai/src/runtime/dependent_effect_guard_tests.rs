@@ -42,6 +42,7 @@ use crate::{
 
 /// The ORM side: the dependent-delete fixture graph with a generated schema.
 mod orm {
+    use graphql_orm::graphql::orm::{ApplyOptions, Entity};
     use graphql_orm::prelude::*;
 
     #[derive(
@@ -55,6 +56,7 @@ mod orm {
     )]
     pub struct DeleteParent {
         #[primary_key]
+        #[graphql_orm(auto_generated = false)]
         pub id: String,
         #[sortable]
         #[filterable(type = "string")]
@@ -72,6 +74,7 @@ mod orm {
     )]
     pub struct DeleteChild {
         #[primary_key]
+        #[graphql_orm(auto_generated = false)]
         pub id: String,
         #[sortable]
         #[filterable(type = "string")]
@@ -96,6 +99,7 @@ mod orm {
     )]
     pub struct DeleteLeaf {
         #[primary_key]
+        #[graphql_orm(auto_generated = false)]
         pub id: String,
         #[sortable]
         #[filterable(type = "string")]
@@ -120,6 +124,7 @@ mod orm {
     )]
     pub struct DeleteNull {
         #[primary_key]
+        #[graphql_orm(auto_generated = false)]
         pub id: String,
         #[sortable]
         #[filterable(type = "string")]
@@ -140,28 +145,68 @@ mod orm {
     pub type Schema = async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
     /// One parent with a cascading child, a cascading grandchild and a
-    /// set-null dependent, exactly as in the ORM fixture.
-    pub async fn fixture() -> (graphql_orm::sqlx::SqlitePool, Schema) {
-        let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+    /// set-null dependent, the graph of the ORM's dependent-delete fixture.
+    /// The schema comes from the entities' own migration, so the physical
+    /// foreign keys are the ones the relations declare.
+    pub async fn fixture() -> (Database, Schema) {
+        let database = Database::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
-        for sql in [
-            "CREATE TABLE delete_parents(id TEXT PRIMARY KEY,name TEXT NOT NULL)",
-            "CREATE TABLE delete_children(id TEXT PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES delete_parents(id) ON DELETE CASCADE)",
-            "CREATE TABLE delete_leaves(id TEXT PRIMARY KEY,child_id TEXT NOT NULL REFERENCES delete_children(id) ON DELETE CASCADE)",
-            "CREATE TABLE delete_nulls(id TEXT PRIMARY KEY,parent_id TEXT REFERENCES delete_parents(id) ON DELETE SET NULL)",
-            "INSERT INTO delete_parents VALUES('parent','parent')",
-            "INSERT INTO delete_children VALUES('child','parent')",
-            "INSERT INTO delete_leaves VALUES('leaf','child')",
-            "INSERT INTO delete_nulls VALUES('null','parent')",
-        ] {
-            graphql_orm::sqlx::query(sql)
-                .execute(&pool)
-                .await
-                .expect("fixture statement");
-        }
+        let plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-dependent-effect-guard-orm-v1",
+                "AI dependent effect guard fixture",
+                &[
+                    DeleteParent::metadata(),
+                    DeleteChild::metadata(),
+                    DeleteLeaf::metadata(),
+                    DeleteNull::metadata(),
+                ],
+            )
+            .await
+            .expect("fixture schema plans");
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .expect("fixture schema applies");
+        DeleteParent::insert(
+            &database,
+            CreateDeleteParentInput {
+                id: "parent".to_owned(),
+                name: "parent".to_owned(),
+            },
+        )
+        .await
+        .expect("parent row");
+        DeleteChild::insert(
+            &database,
+            CreateDeleteChildInput {
+                id: "child".to_owned(),
+                parent_id: "parent".to_owned(),
+            },
+        )
+        .await
+        .expect("child row");
+        DeleteLeaf::insert(
+            &database,
+            CreateDeleteLeafInput {
+                id: "leaf".to_owned(),
+                child_id: "child".to_owned(),
+            },
+        )
+        .await
+        .expect("leaf row");
+        DeleteNull::insert(
+            &database,
+            CreateDeleteNullInput {
+                id: "null".to_owned(),
+                parent_id: Some("parent".to_owned()),
+            },
+        )
+        .await
+        .expect("set-null row");
         let registry = StaticDependentDeletes::<DefaultBackend>::new(
             RuntimeDependentLimits::new(10, 10).expect("limits"),
         )
@@ -173,35 +218,28 @@ mod orm {
         .expect("leaf")
         .register::<DeleteNull>()
         .expect("set-null dependent");
-        let schema = schema_builder(Database::new(pool.clone()))
+        let schema = schema_builder(database.clone())
             .data(AuthSubject::new("test-principal"))
             .data(registry)
             .finish();
-        (pool, schema)
+        (database, schema)
     }
 
     /// Rows left in each fixture table, and whether the set-null dependent
     /// still references the parent.
-    pub async fn remaining(pool: &graphql_orm::sqlx::SqlitePool) -> ([i64; 4], bool) {
-        let mut counts = [0; 4];
-        for (count, table) in counts.iter_mut().zip([
-            "delete_parents",
-            "delete_children",
-            "delete_leaves",
-            "delete_nulls",
-        ]) {
-            *count = graphql_orm::sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(pool)
-                .await
-                .expect("count");
-        }
-        let referenced: i64 = graphql_orm::sqlx::query_scalar(
-            "SELECT COUNT(*) FROM delete_nulls WHERE parent_id = 'parent'",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("set-null reference");
-        (counts, referenced == 1)
+    pub async fn remaining(database: &Database) -> ([i64; 4], bool) {
+        let count = |result: graphql_orm::Result<i64>| result.expect("count");
+        let counts = [
+            count(DeleteParent::query(database.pool()).count().await),
+            count(DeleteChild::query(database.pool()).count().await),
+            count(DeleteLeaf::query(database.pool()).count().await),
+            count(DeleteNull::query(database.pool()).count().await),
+        ];
+        let referenced = DeleteNull::find_by_id(database, &"null".to_owned())
+            .await
+            .expect("set-null read")
+            .is_some_and(|row| row.parent_id.as_deref() == Some("parent"));
+        (counts, referenced)
     }
 }
 
@@ -467,7 +505,7 @@ fn mutations(
 
 struct Fixture {
     runtime: AiRuntime,
-    pool: graphql_orm::sqlx::SqlitePool,
+    orm_database: Database<SqliteBackend>,
     dispatched: Arc<AtomicUsize>,
     capability_id: AiToolId,
     capability_fingerprint: String,
@@ -526,7 +564,7 @@ async fn fixture(
         })
         .expect("target registers");
 
-    let (pool, schema) = orm::fixture().await;
+    let (orm_database, schema) = orm::fixture().await;
     let dispatched = Arc::new(AtomicUsize::new(0));
     let executor: Arc<dyn AuthenticatedGraphqlExecutor> = match executor {
         Executor::Orm(host) => Arc::new(OrmExecutor {
@@ -588,7 +626,7 @@ async fn fixture(
         .expect("runtime opens");
     Fixture {
         runtime,
-        pool,
+        orm_database,
         dispatched,
         capability_id,
         capability_fingerprint,
@@ -683,7 +721,7 @@ impl Fixture {
     }
 
     async fn remaining(&self) -> ([i64; 4], bool) {
-        orm::remaining(&self.pool).await
+        orm::remaining(&self.orm_database).await
     }
 
     fn dispatched(&self) -> usize {
