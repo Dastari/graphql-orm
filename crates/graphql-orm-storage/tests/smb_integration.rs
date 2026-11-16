@@ -997,13 +997,16 @@ async fn samba_listing_follows_the_provider_prefix_contract() {
 
 /// With `portable_keys`, a new write of a key a Windows target cannot store
 /// as written is refused before any request, while objects stored earlier
-/// under such names stay listed, readable and deletable (#482).
+/// under such names stay listed, readable and deletable (#482). With
+/// canonical keys, so is a key that is not lowercase ASCII, which would
+/// alias another key on a server that ignores case.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the managed Samba container harness"]
 async fn samba_portable_keys_refuse_windows_unsafe_names() {
     use graphql_orm_storage::StorageError;
 
     let root = format!("graphql-orm-storage-portable/{}", Uuid::new_v4());
+    let canonical_root = root.clone();
     let posix = SmbStorageBackend::connect(test_config(root.clone()))
         .await
         .expect("connect");
@@ -1080,6 +1083,89 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
         .put_blob("names/portable.bin", body(), BlobPutOptions::default())
         .await
         .expect("a portable key is written");
+
+    // Samba compares names without regard to case, so keys that differ only
+    // in case alias by default: both writes land on one file.
+    posix
+        .put_blob(
+            "case/Report.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"first")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("first spelling");
+    posix
+        .put_blob(
+            "case/report.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"second")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("second spelling");
+    let aliased = posix.list_blobs("case/").await.expect("list");
+    assert_eq!(aliased.len(), 1, "case aliases name one file: {aliased:?}");
+    let read = posix.get_blob("case/Report.bin").await.expect("read");
+    assert_eq!(
+        collect_storage_stream(read.body).await.expect("body"),
+        Bytes::from_static(b"second"),
+        "the second write replaced the first"
+    );
+
+    // Canonical keys refuse every key that is not lowercase ASCII and
+    // portable, so no two keys can alias; existing objects stay readable,
+    // listed and deletable.
+    let canonical = SmbStorageBackend::connect(test_config(canonical_root))
+        .await
+        .expect("connect")
+        .with_canonical_keys(true);
+    for key in [
+        "case/Report.bin",
+        "case/NEW.bin",
+        "case/caf\u{e9}.bin",
+        "case/cafe\u{301}.bin",
+        "case/con.txt",
+        "case/report.",
+    ] {
+        let refused = |result: Result<(), StorageError>| {
+            assert!(
+                matches!(result, Err(StorageError::InvalidStorageKey { .. })),
+                "{key}: {result:?}"
+            );
+        };
+        refused(
+            canonical
+                .put_blob(key, body(), BlobPutOptions::default())
+                .await
+                .map(drop),
+        );
+        refused(
+            canonical
+                .put_blob_if_not_exists(key, body(), BlobPutOptions::default())
+                .await
+                .map(drop),
+        );
+        refused(canonical.copy_blob(&aliased[0], key).await);
+    }
+    assert_eq!(
+        canonical.list_blobs("case/").await.expect("list"),
+        aliased,
+        "refused writes created nothing"
+    );
+    canonical
+        .put_blob("case/lower.bin", body(), BlobPutOptions::default())
+        .await
+        .expect("a canonical key is written");
+    assert!(canonical.blob_exists(&aliased[0]).await.expect("exists"));
+    for key in [aliased[0].as_str(), "case/lower.bin"] {
+        canonical.delete_blob(key).await.expect("delete");
+    }
+    assert!(
+        canonical
+            .list_blobs("case/")
+            .await
+            .expect("list")
+            .is_empty()
+    );
 
     // Existing non-portable objects can still be deleted.
     portable

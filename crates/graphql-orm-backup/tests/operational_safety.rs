@@ -1,3 +1,7 @@
+// `LocalBackupRepository::new` does not exist on Windows; see
+// `new_trusted_windows_root`.
+#![cfg(not(windows))]
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_backup::{
