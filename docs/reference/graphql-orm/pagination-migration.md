@@ -243,6 +243,11 @@ maximum and an omitted limit are served as before. The setting is off by
 default, so existing responses do not change. A custom resolver that takes a
 client `PageInput` should resolve it with
 `Database::client_pagination_config().resolve_client_page` so the setting covers it too.
+The setting also covers Rust reads that take a `PageInput`: with refusal on,
+an `EntityQuery::paginate(page)` read through `fetch_connection`,
+`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and an
+`EntitySearchQuery::paginate(page)` read, fail with `PAGE_LIMIT_EXCEEDED` when
+`page.limit` is above the maximum instead of being reduced.
 
 `schema_roots!(max_page_limit: N, ...)` declares the maximum at compile time.
 The generated module then exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the

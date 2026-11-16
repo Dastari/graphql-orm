@@ -407,6 +407,12 @@ pub(crate) fn strip_operations_graphql_surface(
             true
         }
         Item::Impl(item_impl) if has_async_graphql_impl_attribute(&item_impl.attrs) => false,
+        // Hand-emitted wrapper object output (the retained ChangedEvent's).
+        Item::Impl(item_impl)
+            if is_async_graphql_output_impl(item_impl) || is_graphql_getter_impl(item_impl) =>
+        {
+            false
+        }
         Item::Impl(item_impl)
             if token_stream_mentions_any(&item_impl.to_token_stream(), &removed) =>
         {
@@ -611,6 +617,41 @@ fn has_async_graphql_impl_attribute(attributes: &[syn::Attribute]) -> bool {
     })
 }
 
+/// An `async_graphql` output trait impl, as the wrapper objects hand-emit.
+fn is_async_graphql_output_impl(item: &syn::ItemImpl) -> bool {
+    item.trait_.as_ref().is_some_and(|(_, path, _)| {
+        path.segments
+            .iter()
+            .any(|segment| segment.ident == "async_graphql")
+            && path.segments.last().is_some_and(|segment| {
+                matches!(
+                    segment.ident.to_string().as_str(),
+                    "OutputType" | "ContainerType" | "ObjectType"
+                )
+            })
+    })
+}
+
+/// An inherent impl of GraphQL field getters only: every item is an
+/// `async fn` that takes an `async_graphql` context.
+fn is_graphql_getter_impl(item: &syn::ItemImpl) -> bool {
+    item.trait_.is_none()
+        && !item.items.is_empty()
+        && item.items.iter().all(|item| {
+            let syn::ImplItem::Fn(function) = item else {
+                return false;
+            };
+            function.sig.asyncness.is_some()
+                && function.sig.inputs.iter().any(|input| {
+                    let syn::FnArg::Typed(argument) = input else {
+                        return false;
+                    };
+                    let rendered = argument.ty.to_token_stream().to_string();
+                    rendered.contains("async_graphql") && rendered.contains("Context")
+                })
+        })
+}
+
 fn token_stream_mentions_any(tokens: &TokenStream, names: &HashSet<String>) -> bool {
     tokens.clone().into_iter().any(|token| match token {
         proc_macro2::TokenTree::Ident(ident) => names.contains(&ident.to_string()),
@@ -627,6 +668,10 @@ fn contains_generated_graphql_impl(tokens: &TokenStream) -> bool {
         "async_graphql :: SimpleObject",
         "async_graphql :: Subscription",
         "async_graphql :: Enum",
+        "async_graphql :: OutputType for",
+        "async_graphql :: resolver_utils :: ContainerType for",
+        "async_graphql :: ObjectType for",
+        "wrapper_object ::",
     ]
     .iter()
     .any(|needle| rendered.contains(needle))
