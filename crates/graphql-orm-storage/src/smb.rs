@@ -31,7 +31,7 @@ use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind,
     key::{TEMP_SUFFIX, is_canonical_uuid, is_temp_file_name, temp_file_name},
-    validate_blob_key, validate_portable_blob_key,
+    validate_blob_key, validate_canonical_blob_key, validate_portable_blob_key,
 };
 
 const DEFAULT_PORT: u16 = 445;
@@ -630,6 +630,9 @@ struct SmbStorageBackendInner {
 #[derive(Clone)]
 pub struct SmbStorageBackend {
     inner: Arc<SmbStorageBackendInner>,
+    /// Whether new writes must use canonical keys; see
+    /// [`SmbStorageBackend::with_canonical_keys`].
+    canonical_keys: bool,
 }
 
 impl fmt::Debug for SmbStorageBackend {
@@ -637,6 +640,7 @@ impl fmt::Debug for SmbStorageBackend {
         formatter
             .debug_struct("SmbStorageBackend")
             .field("config", &self.inner.config)
+            .field("canonical_keys", &self.canonical_keys)
             .finish_non_exhaustive()
     }
 }
@@ -679,7 +683,36 @@ impl SmbStorageBackend {
                 ),
                 diagnostics: SmbDiagnosticCounters::default(),
             }),
+            canonical_keys: false,
         })
+    }
+
+    /// Refuses new writes whose key [`validate_canonical_blob_key`] refuses;
+    /// off by default.
+    ///
+    /// SMB servers usually compare names without regard to case, and some
+    /// also without regard to Unicode normalisation, so two keys that differ
+    /// only in case or normalisation name the same file and one write
+    /// silently replaces the other. Canonical keys are lowercase ASCII and
+    /// portable, so no two distinct canonical keys can alias. The mode also
+    /// applies [`SmbStorageConfig::portable_keys`] to the written path, root
+    /// prefix included; the root prefix itself need not be canonical, since
+    /// every key shares it.
+    ///
+    /// It applies to new writes only, [`BlobStore::put_blob`] and
+    /// [`BlobStore::put_blob_if_not_exists`] (and so the destination of
+    /// [`BlobStore::copy_blob`]), which fail with
+    /// [`StorageError::InvalidStorageKey`] before any request. Reads, deletes
+    /// and listings keep the ordinary validation, so objects written before
+    /// the mode was enabled stay listed, readable and deletable. Every clone
+    /// of the returned backend keeps the mode; clones made before this call
+    /// do not.
+    ///
+    /// [`validate_canonical_blob_key`]: crate::validate_canonical_blob_key
+    #[must_use]
+    pub fn with_canonical_keys(mut self, enabled: bool) -> Self {
+        self.canonical_keys = enabled;
+        self
     }
 
     /// Returns redaction-safe counters for transfer progress and provider health.
@@ -1674,10 +1707,16 @@ impl SmbStorageBackend {
     }
 
     /// Applies [`SmbStorageConfig::portable_keys`] to the path a new write
-    /// creates for a caller's key, root prefix included. Reads, deletes and
-    /// listings never apply it, so existing objects stay addressable.
+    /// creates for a caller's key, root prefix included, and
+    /// [`SmbStorageBackend::with_canonical_keys`] to the key. Reads, deletes
+    /// and listings never apply them, so existing objects stay addressable.
     fn check_write_policy(&self, key: &str) -> Result<(), StorageError> {
-        if self.inner.config.portable_keys
+        if self.canonical_keys && validate_canonical_blob_key(key).is_err() {
+            return Err(StorageError::InvalidStorageKey {
+                key: key.to_string(),
+            });
+        }
+        if (self.inner.config.portable_keys || self.canonical_keys)
             && validate_portable_blob_key(&self.mapped_key(key)?).is_err()
         {
             return Err(StorageError::InvalidStorageKey {
