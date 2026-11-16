@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.162.0, `graphql-orm-macros` 0.162.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.163.0, `graphql-orm-macros` 0.163.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 Breaking batch (ORM/macros 0.164.0, backup 0.25.0):
 
@@ -80,6 +80,8 @@ Breaking batch (ORM/macros 0.164.0, backup 0.25.0):
 - **Action needed — ORM/macros 0.164.0:** lossy type conversions and integrity-removing migration steps require the existing destructive gate. Re-plan and review pending migrations. [Risk classification](../../MIGRATION.md#migration-plans-undeclared-tables-lossy-type-changes-and-integrity-removal).
 - **Action needed — ORM 0.164.0:** re-install PostgreSQL journal recorders; TRUNCATE and cascades into tables without recorders fail closed. [Journal upgrade](../../MIGRATION.md#postgresql-change-journal-truncate-and-unjournaled-cascades-are-refused).
 - **Action needed — backup 0.25.0:** deletion results expose snapshot ids, and result/error types are non-exhaustive with a dedicated snapshot admission error. Update literals and exhaustive matches. [Backup API](../../MIGRATION.md#backup-result-and-error-types).
+
+- **No action** — ORM/macros 0.163.0: hand-emitted wrapper objects reduce compile cost; generated SDL, catalogues and fingerprints are unchanged [migration](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
 - **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)
 
 ### workspace-2026.11.15.6

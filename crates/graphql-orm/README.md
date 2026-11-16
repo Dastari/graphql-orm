@@ -16,6 +16,13 @@ changes and integrity-removing steps need `allow_destructive`, and the
 PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
+per-entity wrapper objects (edges, connections, mutation results, change
+events, bulk results and authorized scan pages) carry hand-emitted output
+impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
+fingerprints are byte-identical; no action is needed. See the
+[migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
+
 Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
 resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its
 continuation with a service-owned key under a server-authored
