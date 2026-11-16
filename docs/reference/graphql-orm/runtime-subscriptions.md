@@ -3,7 +3,7 @@ title: Runtime collection identities and live subscriptions
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -39,7 +39,13 @@ operation's admission and response budgets.
 JSON clients that parse numbers as doubles, such as browsers, lose precision
 above 2^53: an event for such a key cannot be matched to the record by an
 id the client encodes itself. Ordinary `RuntimeInt64` fields are strings and
-are unaffected. Where a client needs exact identity for such keys, select the
+are unaffected. `RuntimeGraphqlOptions::with_int64_identity_strings()` serves
+these values exactly: `RecordVersion`, the `…Changed` `keys` argument, the
+members of `…KeyInput` and the event `id` and `key` members are then typed
+`RuntimeInt64`, sent as decimal strings and accepted only as strings. It
+changes the SDL, the semantic catalogue and their fingerprints, so it is
+opt-in; the next breaking release makes it the default. Without it, where a
+client needs exact identity for such keys, select the
 record's `NodeId` in the event payload.
 
 Runtime creates initialize the declared version to 1; every runtime update,
@@ -226,9 +232,22 @@ even when a callback would allow it. This is an explicit limitation, not an RLS 
 
 ## Continuity and generated clients
 
-On overflow, auxiliary preparation-buffer exhaustion, an inconsistent reload,
-or a schema-revision mismatch, the next frame contains only a sanitized error
-with uppercase `SUBSCRIPTION_CONTINUITY_LOST`, then `complete`. Intentional source
+On an inconsistent reload or a schema-revision mismatch, the next frame
+contains only a sanitized error with uppercase `SUBSCRIPTION_CONTINUITY_LOST`,
+then `complete`.
+
+Receiver overflow and preparation-buffer exhaustion (lag) are detected before
+key filtering, so writes to keys a subscriber did not ask for, or may not see,
+can cause them. Since 0.164.0 a lagging stream does not end when the lag is
+detected. It delivers nothing more and ends on its next tick of an
+independent, jittered period fixed at registration
+(`Database::with_subscription_authority_recheck_interval`, 30 seconds by
+default, clamped to 1 to 300 seconds, plus up to 10% jitter). At the tick the
+subscriber's authority is checked once: a denied subscriber ends with
+`authorization_denied`, any other with `SUBSCRIPTION_CONTINUITY_LOST`, then
+`complete`. Lag during registration, before any delivery, is still reported at
+once. This is the only authority tick of a runtime live stream; an idle
+stream is not rechecked. Intentional source
 closure uses `SUBSCRIPTION_SOURCE_CLOSED` in the same framing. The host can send
 `RuntimeLiveEvent::ContinuityLost` or `SourceClosed`, including before a graceful
 restart, a missed batch, restore/reconciliation or a schema revision it alone

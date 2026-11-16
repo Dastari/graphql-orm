@@ -3,7 +3,7 @@ title: "PostgreSQL RLS"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -413,6 +413,25 @@ privilege on the journal and no `EXECUTE` on the recorder. It does need `USAGE` 
 `PUBLIC`. This holds even when no entity uses `#[graphql_rls]`. If you revoke the grant from
 `PUBLIC`, grant `USAGE` to each runtime role instead. Without it, or before the plan creates the
 registry, journaled writes fail with an error that says so.
+
+### JSON numbers of 2^64 or more lose precision
+
+JSON columns are decoded with `serde_json`, which keeps an integer token
+exactly only when it fits `i64` or `u64`, and reads every other number as an
+`f64`. PostgreSQL `jsonb` stores numbers as `numeric` and prints them in full
+digits, without an exponent. A number of 2^64 or more, or one with more than
+about 17 significant digits, therefore comes back as the nearest value
+`serde_json` produces, which can differ in the last place: `1e42` is returned
+by `jsonb` as 43 digits and read back as `9.999999999999999e41`. Nothing
+reports the change. This applies to static `serde_json::Value` fields and to
+runtime `Json` fields; runtime GraphQL input validation is described under
+[scalars](runtime-graphql.md).
+
+`serde_json`'s `float_roundtrip` feature is deliberately not enabled. Cargo
+unifies features across the build, so it would change number parsing for every
+crate in the host's dependency graph, and `serde_json` documents it as roughly
+doubling the cost of parsing floats. Store values that must be exact beyond
+`u64` or 15 significant digits as strings or in a `Decimal` column.
 
 ### Search performance
 

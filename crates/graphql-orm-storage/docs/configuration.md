@@ -3,12 +3,17 @@ title: "Storage configuration and limits"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Storage configuration and limits
+
+Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
+construction for a host-protected tree; `new` does not exist on Windows. This mode does
+not enforce links as a security boundary. Unix keeps its no-follow boundary.
+See the storage [trust boundary documentation](blob-store.md#local-filesystem-trust-boundary).
 
 This is the complete public configuration and request-type index for this
 crate. The linked Rust source is canonical for a field's exact type and error
@@ -34,7 +39,7 @@ process construction; do not serialize, log, or place secrets in source.
 | [`SmbStorageConfig`](../src/smb.rs) | `server`, `port`, `share`, optional `root_prefix`/`domain`, `username`, secret `password`, dialect, signing/encryption, timeouts, transfer concurrency, optional `expected_server_guid`, listing limits (`max_listing_depth`, `max_listing_entries`, `max_listing_bytes`, `listing_timeout`). | `new` defaults: port 445, SMB 3.1.1 minimum (lower it explicitly only for servers that cannot negotiate 3.1.1; see [dialect](native-smb.md#dialect)), signing on, encryption off, 10 s connect, 60 s operation, 8 transfers, server GUID pinned on first connection, listing depth 64, 1,000,000 listing entries, 256 MiB of listed names, 15 min listing deadline including its retry. Port, timeouts, concurrency and listing limits must be positive; a pinned GUID must not be nil; encryption requires SMB 3.0+. See [server identity](native-smb.md#server-identity) and [resource bounds](native-smb.md#resource-bounds). |
 | [`SmbProbeOptions`](../src/smb.rs) | `create_prefix` controls whether a probe creates a missing root prefix. | Defaults false. Use only a test-owned or operator-approved share. |
 | [`AzureBlobStorageConfig`](../src/azure.rs) | Future Azure declaration fields. | Not operational; all backend operations return `UnsupportedBackend`. |
-| [`BlobPutOptions`](../src/blob.rs) | Optional `content_type`. | Defaults to `None`; conditional create is `put_blob_if_not_exists`, not an option flag. |
+| [`BlobPutOptions`](../src/blob.rs) | Optional `content_type`. | Defaults to `None`; conditional create is `put_blob_if_not_exists`, not an option flag. S3 stores the content type; local and SMB storage ignore it (see [content type](blob-store.md#content-type)). |
 | [`StoragePutRequest`](../src/object.rs) | Buffered `namespace`, optional `file_name`/`mime_type`, and `bytes`. | No defaults; ID, safe key, checksum, size, and timestamp are generated. |
 | [`StoragePutStreamRequest`](../src/object.rs) | Streaming `namespace`, optional `file_name`/`mime_type`, and `body`. | No defaults; same generated metadata as buffered writes. |
 

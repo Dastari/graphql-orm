@@ -1,4 +1,4 @@
-#![cfg(feature = "orm-sqlite")]
+#![cfg(all(feature = "orm-sqlite", not(windows)))]
 
 use async_trait::async_trait;
 use bytes::Bytes;

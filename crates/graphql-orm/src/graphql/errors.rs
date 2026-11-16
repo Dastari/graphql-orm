@@ -22,7 +22,8 @@ pub enum OrmErrorCode {
     Conflict,
     /// A database constraint was violated without leaking schema names.
     ConstraintViolation,
-    /// A pagination cursor was invalid, tampered, or version-mismatched.
+    /// A pagination cursor was malformed, corrupted, bound to another query,
+    /// or version-mismatched. Static cursors are not authenticated.
     CursorInvalid,
     /// A requested page size exceeded the configured maximum.
     PageLimitExceeded,

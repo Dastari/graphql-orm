@@ -67,7 +67,7 @@ together.
   unadmitted snapshot is refused with `BackupError::SnapshotNotAdmitted`.
   Action needed** for struct literals, exhaustive destructuring and
   wildcard-free matches on those types; see the
-  [backup migration guide](crates/graphql-orm-backup/MIGRATION.md#to-0250-result-and-error-types-target-clear-on-journaled-databases).
+  [backup migration guide](crates/graphql-orm-backup/MIGRATION.md#to-0270-result-and-error-types-target-clear-on-journaled-databases).
 
 ### Migration plans: undeclared tables, lossy type changes and integrity removal
 
@@ -338,6 +338,143 @@ The AI tables are a trusted store. Their integrity hashes are unkeyed and
 detect accidental divergence only; see
 [the AI security guide](crates/graphql-orm-ai/docs/security.md#database-trust-boundary).
 
+## 0.164.0 to 0.165.0: atomic restore, search reset and kept values on ignored denials
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Upsert with an ignored field-write denial. Action needed** only for hosts
+  that return `true` from `FieldPolicy::ignore_denied_field_write` and relied
+  on a denied optional field being cleared. A GraphQL upsert that resolves to
+  an existing row now leaves the denied column out of the conflict update, so
+  its stored value is kept; it used to be written as `NULL`. This applies to
+  fields with a declared `write_policy` and to key-less optional fields, on
+  SQLite, PostgreSQL and SQL Server. An upsert that inserts, updates, bulk
+  updates and required fields are unchanged. To clear such a field, allow the
+  write in `can_write_field`. `MutationEvent::changes` of that upsert no
+  longer lists the column. Recompile entities to pick up the generated code.
+- **Snapshot restore is one transaction. No action.** On PostgreSQL and SQLite
+  `restore_backup_rows` (and the backup adapter's `restore_full`) now commits
+  all tables together or not at all. A failed restore no longer needs the
+  target cleared before a retry. Row-hash validation runs before the commit; a
+  mismatch used to be reported after the table was already committed. Very
+  large restores hold one transaction for their whole duration: size the
+  PostgreSQL `statement_timeout` and `idle_in_transaction_session_timeout` of
+  the restoring role accordingly.
+- **Restore resets runtime search. Action needed** only for hosts that restore
+  the tables of searchable runtime collections with `restore_backup_rows`:
+  the restore leaves each such index `building`, so run
+  `backfill_runtime_search` for those collections before serving search.
+  Hosts that import runtime rows another way should call the new
+  `SchemaManager::reset_runtime_search` afterwards.
+- **SQL Server infrastructure. Action needed** for every MSSQL host.
+  As schema owner, run `MssqlPool::install_restore_marker()` during schema
+  installation, before runtime work. It creates the fixed
+  `dbo.__graphql_orm_restore_marker` table without clearing existing rows.
+  Grant the runtime role `SELECT` on that table; the restore role also needs
+  `INSERT` and `DELETE`. `install_restore_marker` needs an external-writable
+  pool, is idempotent, and is safe to run from several replicas at once. A
+  missing or unreadable table means restore state unavailable and fails
+  closed, refusing every statement with an error carrying the new
+  `RestoreStateUnavailable` (`RestoreStateUnavailable::from_error`), not
+  `RestoreInProgress`. Its `reason` is `MarkerNotInstalled` (call
+  `MssqlPool::install_restore_marker()` or run the DDL below),
+  `PermissionDenied` (grant the runtime role `SELECT`), `ConnectionFailed`
+  (the database could not be reached; retry, no marker fix needed) or `Other`
+  (for example a table of the wrong shape). The message names the fix and never
+  holds SQL text; the cause is its `source()`. Only a real restore in progress,
+  or a stale marker row, reports `RestoreInProgress`. Every SQL Server ORM
+  transaction and autocommit statement now takes a shared application lock
+  (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
+  it, and checks for a restore marker. Transactions and autocommit reads pay
+  no extra round trip; an autocommit write (a raw statement outside a
+  transaction) pays one short batch to release the lock. `sp_getapplock` is
+  granted to `public`. Raw
+  statements sent through the ORM run inside that wrapper batch; a statement
+  that must be alone in its batch (`CREATE VIEW`, `CREATE PROCEDURE`,
+  `CREATE TRIGGER` and similar) is sent unwrapped.
+- **Restoring a SQL Server database. Action needed** to get the exclusion:
+  call `Database::begin_restore(restore_id, wait)`, run the restore's
+  statements through the returned `MssqlRestore` guard (`execute`,
+  `fetch_rows`), then `finish()`. Statements a host runs on its own
+  connections are not covered by the lock. While the restore runs, and after
+  a restore whose process died, ORM work fails with an error carrying
+  `RestoreInProgress` (`RestoreInProgress::from_error`); after a crash, call
+  `Database::resume_restore(restore_id, wait)`, complete the restore or
+  remove its partial rows through the guard, and `finish()`. The marker must
+  exist before runtime work begins; it is never
+  created lazily by a restore. For SQL-only schema installation use:
+  `CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
+  Then `GRANT SELECT ON OBJECT::dbo.__graphql_orm_restore_marker TO [runtime_role]`.
+  If upgrading an unreleased build with an unqualified marker, quiesce all
+  access and reconcile any old marker into the canonical table before restarting;
+  do not clear a stale marker until its partial restore has been recovered.
+- Backup users also upgrade to
+  [backup 0.26.0](crates/graphql-orm-backup/MIGRATION.md#to-0260-host-held-snapshot-records).
+
+## 0.163.0 to 0.164.0: page limits, 64-bit identities, cursor keys and subscription lag
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged unless you
+turn on one of the new settings.
+
+- **Subscription lag ends on the authority tick. Action needed** only if a
+  client or test expects the end at once. A generated `Changed` stream or a
+  runtime live stream whose receiver fell behind used to end immediately with
+  `SUBSCRIPTION_CONTINUITY_LOST`. It now stops delivering and ends on its next
+  jittered authority tick, up to one recheck period later (30 to 33 seconds by
+  default; `Database::with_subscription_authority_recheck_interval`, 1 to 300
+  seconds). At the tick a subscriber whose authority is gone ends with
+  `FORBIDDEN` (generated) or `authorization_denied` (runtime); any other ends
+  with `SUBSCRIPTION_CONTINUITY_LOST` as before. Clients still resubscribe and
+  refetch. A runtime live client must now treat `authorization_denied` as a
+  terminal frame. Source closure, host continuity signals and schema-revision
+  changes still end at once.
+- **Runtime cursor keys that are too long. Action needed** only if you match
+  those codes. A runtime page whose row has order values too long for a cursor
+  used to fail through runtime GraphQL with `invalid_request` (above
+  `max_cursor_bytes`) or `invalid_cursor` (above the cursor protection bounds),
+  and a host `RuntimeRelationError::code()` returned `InvalidRequest`. Runtime
+  GraphQL now returns `cursor_key_too_large`. Host `RuntimeQueryError` and
+  `RuntimeRelationError` both return `ResourceLimit` with
+  `detail() == Some("cursor_key_too_large")`; match that pair instead of
+  `invalid_request`, `invalid_cursor` or `InvalidRequest`. The public enums
+  and existing `PaginationConfig` struct literals remain source-compatible.
+  Dedicated enum variants (and any `#[non_exhaustive]` change) belong to
+  `next/breaking`, in `breaking/orm-contract`.
+- **Refusing oversized page limits. No action.** Off by default. To let a
+  client tell a reduced page from a last page, set
+  `DatabaseBuilder::refuse_oversized_page_limit(true)`: an explicit GraphQL
+  page limit above the maximum then fails with `PAGE_LIMIT_EXCEEDED`. So does
+  a Rust `EntityQuery::paginate(page)` connection read (`fetch_connection`,
+  `fetch_connection_with_auth`, `fetch_connection_selected_with_auth`), which
+  is no longer reduced.
+- **Declared maximum page limit. No action.** Optional
+  `schema_roots!(max_page_limit: N)` publishes `N` in the semantic catalogue
+  and the complexity estimate and refuses a `Database` configured differently.
+  Declaring a maximum other than 100 changes the semantic catalogue and so its
+  fingerprint.
+- **Host-side reads above the page maximum. No action.** Repository and
+  transaction builders have been exact or refused since 0.128.0;
+  `with_max_limit(n)` gives one read its own maximum. The keyset helpers still
+  reduce an oversized limit; `EntityQuery::with_max_limit(n)` now applies to
+  them, and a handle with a raised maximum works as before. See
+  [page size](docs/reference/graphql-orm/pagination-migration.md#page-size-reduced-by-default-refused-on-request).
+  The next breaking release turns the remaining silent reduction into an error.
+- **64-bit identities as strings. No action.** Off by default.
+  `RuntimeGraphqlOptions::with_int64_identity_strings()` types runtime
+  `RecordVersion` and integer live keys as `RuntimeInt64` strings. It changes
+  the SDL and fingerprints. The next breaking release makes it the default.
+- **Router nested directives (changelog correction). No action** in code. The
+  router has never enforced SDL `@authenticated` or `@requiresScopes` on
+  nested fields, contrary to how the 0.18.0 changelog read. Keep
+  `auth = "required"` and policies on every entity a join can reach; do not
+  rely on a router rule on the parent query. Enforcement is tracked in
+  [#729](https://github.com/Dastari/graphql-orm/issues/729).
+- **Keyset cursor documentation. No action.** Static keyset cursors were never
+  tamper-evident; the documentation now says so. Do not treat a cursor as
+  proof of anything: authorization is applied to every page.
+
 ## 0.159.0 to 0.163.0: wrapper object compile cost
 
 - **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
@@ -369,63 +506,6 @@ To adopt the new API in a handwritten resolver, a host:
 
 See [context-bound authorized pages](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620)
 for the binding, bounds, errors and key rotation.
-
-## 0.159.0 to 0.160.0: atomic restore, search reset and kept values on ignored denials
-
-Upgrade ORM and macros together. Generated SDL, operation catalogues and
-fingerprints are unchanged.
-
-- **Upsert with an ignored field-write denial. Action needed** only for hosts
-  that return `true` from `FieldPolicy::ignore_denied_field_write` and relied
-  on a denied optional field being cleared. A GraphQL upsert that resolves to
-  an existing row now leaves the denied column out of the conflict update, so
-  its stored value is kept; it used to be written as `NULL`. This applies to
-  fields with a declared `write_policy` and to key-less optional fields, on
-  SQLite, PostgreSQL and SQL Server. An upsert that inserts, updates, bulk
-  updates and required fields are unchanged. To clear such a field, allow the
-  write in `can_write_field`. `MutationEvent::changes` of that upsert no
-  longer lists the column. Recompile entities to pick up the generated code.
-- **Snapshot restore is one transaction. No action.** On PostgreSQL and SQLite
-  `restore_backup_rows` (and the backup adapter's `restore_full`) now commits
-  all tables together or not at all. A failed restore no longer needs the
-  target cleared before a retry. Row-hash validation runs before the commit; a
-  mismatch used to be reported after the table was already committed. Very
-  large restores hold one transaction for their whole duration: size the
-  PostgreSQL `statement_timeout` and `idle_in_transaction_session_timeout` of
-  the restoring role accordingly.
-- **Restore resets runtime search. Action needed** only for hosts that restore
-  the tables of searchable runtime collections with `restore_backup_rows`:
-  the restore leaves each such index `building`, so run
-  `backfill_runtime_search` for those collections before serving search.
-  Hosts that import runtime rows another way should call the new
-  `SchemaManager::reset_runtime_search` afterwards.
-- **SQL Server restore lock. No action** for hosts that do not restore SQL
-  Server databases with their own statements. Every SQL Server ORM
-  transaction and autocommit statement now takes a shared application lock
-  (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
-  it, and checks for a restore marker. Transactions and autocommit reads pay
-  no extra round trip; an autocommit write (a raw statement outside a
-  transaction) pays one short batch to release the lock. The login
-  needs no new permission: `sp_getapplock` is granted to `public`. Raw
-  statements sent through the ORM run inside that wrapper batch; a statement
-  that must be alone in its batch (`CREATE VIEW`, `CREATE PROCEDURE`,
-  `CREATE TRIGGER` and similar) is sent unwrapped.
-- **Restoring a SQL Server database. Action needed** to get the exclusion:
-  call `Database::begin_restore(restore_id, wait)`, run the restore's
-  statements through the returned `MssqlRestore` guard (`execute`,
-  `fetch_rows`), then `finish()`. Statements a host runs on its own
-  connections are not covered by the lock. While the restore runs, and after
-  a restore whose process died, ORM work fails with an error carrying
-  `RestoreInProgress` (`RestoreInProgress::from_error`); after a crash, call
-  `Database::resume_restore(restore_id, wait)`, complete the restore or
-  remove its partial rows through the guard, and `finish()`. The first
-  `begin_restore` creates `__graphql_orm_restore_marker` in the login's
-  default schema; create it beforehand as the schema owner when the runtime
-  login may not run DDL:
-  `CREATE TABLE __graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
-- Backup users also upgrade to
-  [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).
-
 
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 

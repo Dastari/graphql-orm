@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## 0.25.0 (unreleased, breaking batch)
+## 0.27.0 (unreleased, breaking batch)
 
 - **Breaking:** `PruneResult` and `DeleteSnapshotResult` gain
   `deleted_snapshot_ids`, the ids whose deletion completed, in ascending
@@ -23,13 +23,13 @@ supersedes: []
   reason }` instead of `ManifestAuthenticationFailed`.
   `BackupError::is_snapshot_not_admitted()` keeps working.
 - `OrmBackupAdapter::clear_restore_target` clears a PostgreSQL target in a
-  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.163.0
+  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.166.0
   installs a `TRUNCATE` guard on journaled tables (#592) that admits only
   such a transaction; without this the clear would be refused on a journaled
-  database. The clear is not journaled, as before. Requires ORM 0.163.0 for
+  database. The clear is not journaled, as before. Requires ORM 0.166.0 for
   the optional ORM adapter. SQLite is unchanged.
 
-## 0.24.0 (unreleased)
+## 0.26.0 (unreleased)
 
 - Host-held snapshot records (#610). A seal proves the host once wrote a
   manifest, not that the snapshot is still wanted: a pruned snapshot that a
@@ -51,10 +51,37 @@ supersedes: []
 - `prune` refuses to run while a snapshot the records do not admit is listed.
   `delete_snapshot` removes such a snapshot by id without reading its
   manifest; every other manifest must still verify.
-- With ORM 0.160.0 the ORM adapter's `restore_full` restores all tables in one
+- With ORM 0.165.0 the ORM adapter's `restore_full` restores all tables in one
   transaction on PostgreSQL and SQLite and resets the runtime search index of
-  every restored table (#574, #280). Requires ORM 0.160.0 for the optional
+  every restored table (#574, #280). Requires ORM 0.165.0 for the optional
   ORM adapter.
+
+## 0.25.0 (unreleased)
+
+**Windows local roots — Action needed (Windows hosts):**
+`LocalBackupRepository::new` and `LocalBackupRepository::open_existing` no
+longer exist on Windows, so a Windows build that calls them fails to compile.
+Call `LocalBackupRepository::new_trusted_windows_root` or
+`LocalBackupRepository::open_existing_trusted_windows_root` instead, and only
+when the host protects the repository root, its ancestors and descendants from
+concurrent mutation. Links are not enforced as a security boundary in this
+mode. Hosts that build `LocalStorageBackend` themselves call
+`LocalStorageBackend::new_trusted_windows_root`. The no-follow guarantees below
+apply to Unix; Unix hosts need no change. Windows conditional creation uses
+atomic no-replace rename.
+
+Unix conditional-create fallback retries the temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links. A
+failed rollback is a single-attempt error that must not be replayed.
+
+Requires `graphql-orm-storage` 0.16.0, whose Unix local backend refuses keys
+through filesystem links and pages listings with bounded work. No backup API
+or behavior changes.
+
+- Documented: a full restore reads each object blob from the repository three
+  times and each table or change payload twice, by design; restored objects
+  keep no content type on local or SMB storage.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
 
 ## 0.23.0 (unreleased)
 

@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -752,6 +752,13 @@ with the fields the type really exposes, and panic, naming the root and the fiel
 missing. An empty or incomplete manual list therefore cannot hide a collision, although it is found
 at start-up rather than at compile time. A schema assembled by hand with `Schema::build` gets neither
 check.
+
+`max_page_limit: N` declares the maximum page limit of the `Database` the schema serves. The module
+then exposes `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the semantic catalogue publishes `N` as the ceiling of
+pageable relationship lists, the relation complexity estimate caps pages at `N`, and the schema
+builders panic for a `Database` whose `PaginationConfig::max_limit` is not `Some(N)`. It is optional;
+without it the catalogue and the estimate use the compile-time default of 100. See
+[page size](pagination-migration.md#page-size-reduced-by-default-refused-on-request).
 
 `require_policies: true` is an opt-in review gate. Every entity in `entities` must then record a
 policy decision in its declaration: an entity `read_policy` or `write_policy`, an
