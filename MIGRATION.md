@@ -44,6 +44,17 @@ and the
 - **Static tools behind the broker, epoch anchor, dependent-effect policy,
   strict query roots. No action.** All four are opt-in.
 
+## 0.159.0 to 0.163.0: wrapper object compile cost
+
+- **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
+  together. The generated edge, connection, mutation result, change event,
+  bulk delete and bulk update result, and authorized scan page types no longer
+  derive `async_graphql::SimpleObject`; the macros emit the equivalent output
+  impls. Generated SDL, operation and semantic catalogues and fingerprints are
+  byte-identical, and the types keep their fields, derives other than
+  `SimpleObject`, and `async fn` field getters. The new hidden
+  `graphql_orm::graphql::wrapper_object` module is for generated code only.
+
 ## 0.162.0: context-bound authorized pages
 
 **No action.** Upgrade ORM and macros together. This release only adds API:

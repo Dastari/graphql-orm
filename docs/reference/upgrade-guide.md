@@ -80,6 +80,7 @@ and the [generated workspace inventory](workspace-packages.md).
 - **No action** — AI 0.146.0: opt-in reviewed static read tools behind the fixed broker, host-held epoch anchor for file-level restores, and dependent-effect policy for generated deletes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **No action** — Tool profiles 0.24.0: one oversized generated root is excluded and reported instead of failing its target; opt-in strict query roots; shared type dictionary rendering; precomputed search terms [migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale) · [changelog](../../crates/graphql-orm-ai-tool-profiles/CHANGELOG.md#unreleased---0240)
 
+- **No action** — ORM/macros 0.163.0: hand-emitted wrapper objects reduce compile cost; generated SDL, catalogues and fingerprints are unchanged [migration](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
 - **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)
 
 ### workspace-2026.11.15.6
