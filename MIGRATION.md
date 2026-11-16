@@ -10,6 +10,27 @@ supersedes: []
 
 # Migration Guide
 
+## 0.162.0: context-bound authorized pages
+
+**No action.** Upgrade ORM and macros together. This release only adds API:
+generated pagination, `EntityQuery::fetch_authorized_scan`,
+`AuthorizedScanConfig` and every existing cursor are unchanged, and no schema,
+data or generated SDL changes.
+
+To adopt the new API in a handwritten resolver, a host:
+
+1. generates a random 32-byte secret owned by the service, stores it in the
+   service's encrypted settings, and installs it with
+   `Database::with_authorized_page_config(AuthorizedPageConfig::new(AuthorizedPageKeys::new(key_id, key)?, batch_size, max_scanned_rows)?)`
+   on every replica. Never derive the key from a provider credential or a
+   client value;
+2. builds an `AuthorizedPageBinding` from server state on every request and
+   calls `EntityQuery::fetch_authorized_page` with
+   `AuthorizedPageRequest::new(binding).after(after).limit(limit)`.
+
+See [context-bound authorized pages](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620)
+for the binding, bounds, errors and key rotation.
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree
