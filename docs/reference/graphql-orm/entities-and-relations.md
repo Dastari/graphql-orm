@@ -477,7 +477,7 @@ wall-clock guarantee or a claim of constant-time execution. Source closure
 ends the stream at once with `SUBSCRIPTION_SOURCE_CLOSED`.
 
 Lag is detected before event filtering, so writes hidden from a subscriber can
-cause it. Since 0.161.0 lag no longer ends the stream when it is detected. The
+cause it. Since 0.163.0 lag no longer ends the stream when it is detected. The
 stream stops delivering and waits for its next authority tick. At the tick, a
 subscriber whose authority is gone ends with `FORBIDDEN`, and any other ends
 with `SUBSCRIPTION_CONTINUITY_LOST`, which still carries no key, payload or
