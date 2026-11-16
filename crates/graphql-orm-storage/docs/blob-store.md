@@ -167,14 +167,18 @@ Local listing pages do bounded work and hold bounded memory:
 - Each directory read keeps only the smallest entries the page still needs,
   at least the rest of the page plus one and at least 32, and reads the
   directory again if the page needs later ones. A page therefore holds about
-  that many entries per directory on its path, however large a directory is.
-  A read still reads every entry of the directory, because file systems do
-  not return entries in key order, so a single directory with very many
-  entries costs a read of all of them on each page that passes through it.
-  Backup content keys are sharded two levels deep (`objects/sha256/ab/cd/…`)
-  for this reason.
+  that many entries per directory on its path, however large a directory is:
+  memory per page is bounded by the page size and the depth of the tree.
+- Work per page is not bounded by the page size alone. A read still reads
+  every entry of the directory, because file systems return entries in no
+  particular order, so a page's work grows with the size of the largest
+  directory it reads: a directory with `n` entries costs all `n` entries on
+  every page that passes through it, and listing all of a flat directory of
+  `n` keys in pages of `limit` reads about `n² / limit` entries. This is an
+  accepted, documented limit. Backup content keys are sharded two levels
+  deep (`objects/sha256/ab/cd/…`) so that no single directory grows large.
 - Entry types come from the directory read: no entry is inspected
-  separately.
+  separately, except on a file system that does not report entry types.
 - After `2 × limit + 64` directory reads, as when many directories hold no
   keys, a page ends with the keys it found and a continuation. Such a token
   names the last directory finished, followed by `/`; other tokens are the
@@ -334,43 +338,61 @@ The `key` field and `Debug` output hold it for host diagnostics only.
 
 ## Local filesystem trust boundary
 
-Use a root managed exclusively by the trusted storage deployment. Restrict
-permissions on the root and its descendants so untrusted local users/applications
-cannot create or replace storage entries. Protect ancestor path components against
-replacement too. This applies equally to
-local backups and OS-mounted shares using this backend.
+Use a root managed by the trusted storage deployment, and restrict
+permissions on the root and its descendants so untrusted local users and
+applications cannot create or replace storage entries. This applies equally
+to local backups and OS-mounted shares using this backend. The backend
+enforces the boundary below the root itself; it does not rely on the tree
+being free of links.
 
-The local backend never follows a filesystem link below its root. Every read,
-write, copy and delete, for blobs, streaming objects and multipart uploads,
-inspects each existing component of its path below the root without following
-it, and refuses the operation with `StorageError::InvalidStorageKey` when one is
-a link, wherever the link points, before it touches the link's target. Writes
-check before they create any directory, so a link never makes them create
-directories outside the root. A read also checks that the file it opened is the
-entry it inspected, so a file swapped for a link between the two is refused.
-Links count as:
+**Root-relative, no-follow resolution.** Every local operation (reads,
+writes and publication, renames, deletes, listings, metadata, streaming
+objects, multipart staging and completion, and the temporary-file sweep)
+opens the configured root and reaches its target one component at a time,
+relative to the directory handle it already holds, without following links.
+Leaf operations act on the held parent directory, never on a full path:
 
-| Platform | Refused |
+| Platform | Resolution |
 | --- | --- |
-| Unix | Symbolic links. A FIFO, socket or device file at a key is refused too, as reading one can block. |
-| Windows | Symbolic links, junctions, volume mount points and every other name-surrogate reparse point, which the standard library reports as symbolic links. A file is opened as its reparse point first; a name surrogate is refused, and any other reparse point, such as a deduplicated or cloud file, is reopened through its file system filter and must be the same file. |
+| Linux and Android | A directory chain is opened in one `openat2` call with `RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS \| RESOLVE_NO_MAGICLINKS`. Where the kernel lacks `openat2` or a sandbox refuses it, each component is opened with `openat(O_DIRECTORY \| O_NOFOLLOW)` relative to its parent's descriptor. |
+| Other Unix | Each component is opened with `openat(O_DIRECTORY \| O_NOFOLLOW)` relative to its parent's descriptor. |
+| All Unix | Files are opened with `openat(O_NOFOLLOW)`, created with `O_CREAT \| O_EXCL \| O_NOFOLLOW`, published with `renameat` (conditional creates with `renameat2(RENAME_NOREPLACE)` on Linux and `RENAME_EXCL` on Apple platforms), removed with `unlinkat`, created with `mkdirat` and inspected with `fstatat(AT_SYMLINK_NOFOLLOW)`, all on the held parent descriptor. Directory syncs use the held descriptors. |
+| Windows | Each directory from the root down is opened as itself (`FILE_FLAG_OPEN_REPARSE_POINT`), refused when it is a reparse point, and held without `FILE_SHARE_DELETE` for the whole operation, so no directory on the chain can be renamed, removed or replaced while the operation runs. Files are opened as their reparse point first; a name surrogate (symbolic link, junction, mount point) is refused, and any other reparse point, such as a deduplicated or cloud file, is reopened through its file system filter and must be the same file. After a file is created or opened, or a directory created, the held parent is checked again, so an empty directory turned into a junction in between is refused. |
 
-Listings never list or enter a link, and a listing whose prefix directory is
-reached through a link is refused. The temporary-file sweep skips symbolic
-links, including linked directories, broken links and cycles; it also skips
-non-file/non-directory entries. The configured root itself may be a link: the
-host chose it, and only links below it are refused. The sweep skips a root that
-is itself a symbolic link. Hard links are ordinary files to the file system and
-cannot be told apart; keep them out of the tree.
+A directory replaced by a link after an operation resolved it never
+redirects that operation: it keeps using the handle it holds, and the next
+operation is refused.
 
-The checks inspect paths before operating on them. A concurrent replacement of
-a directory under the root by a link can still race that inspection. Closing
-that race would require directory-handle-relative resolution with no-follow
-operations at every path component on every read, write and delete path, which
-is not implemented here. Canonicalizing a path before opening it would still
-leave a check/use race. Do not use this backend as a sandbox for untrusted
-local filesystem writers; isolate them through host permissions or a separate
-storage provider.
+**What is refused.** A key whose path below the root names or passes through
+a symbolic link (on Windows, also a junction, mount point, other name-surrogate
+reparse point, or reparse-point directory), wherever it points, fails with
+`StorageError::InvalidStorageKey` before the link's target is touched. Writes
+are refused before they create any directory. A FIFO, socket or device file at
+a key is refused too, as opening one can block. Listings never list or enter a
+link, and a listing whose prefix directory is reached through a link is
+refused. The temporary-file sweep skips links and non-file entries. The
+configured root itself may be a link: the host chose it, and only links below
+it are refused. The sweep skips a root that is itself a symbolic link.
+
+**Hard links.** Every read (`get_blob`, `get_blob_range`, `head_blob`,
+`blob_exists`, the source of `copy_blob`, streaming object data and metadata,
+and multipart manifests, receipts and part data) refuses a regular file with
+more than one hard link with `InvalidStorageKey`, because such a file may share
+its data with a file outside the root. Neither storage nor backup leaves a
+second hard link on a file it wrote: writes publish by renaming a unique
+temporary file, and conditional creates rename without replacing. Only where
+the platform or file system has no non-replacing rename (Unix other than Linux
+and Apple platforms, a Linux file system that refuses `RENAME_NOREPLACE`, and
+Windows) does a conditional create link the temporary file at the key and then
+unlink it, and a read of that key in the moment between can be refused. A
+delete of a hard-linked key removes only the link inside the root.
+
+**What is not covered.** The root itself, and anything that can change the
+files the root's own directories hold, such as a process with the storage
+account's permissions writing file contents directly, are the deployment's to
+protect. On Windows, local storage holds directory handles that deny delete
+sharing while an operation runs, so another process that removes or renames a
+storage directory at that moment fails with a sharing violation.
 
 ## Error Taxonomy
 

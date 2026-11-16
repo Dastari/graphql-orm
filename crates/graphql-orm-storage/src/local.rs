@@ -22,6 +22,7 @@ use crate::{
     ObjectRangeBody, ObjectStorage, StorageBackend, StorageByteStream, StorageError,
     StorageObjectBody, StoredObject, StreamingObjectStore, collect_storage_stream,
     key::{is_temp_file_name, temp_file_name},
+    local_fs::{self, Dir, Kind},
     validate_blob_key, validate_object_bucket,
 };
 
@@ -35,20 +36,24 @@ const MAX_DURABLE_DIRS: usize = 4_096;
 
 /// Local filesystem object storage backend.
 ///
-/// The root tree must be exclusively managed by the trusted storage deployment.
-/// Filesystem permissions must protect its entries and ancestor path components
-/// against replacement by untrusted local actors.
+/// The root tree must be managed by the trusted storage deployment, and
+/// filesystem permissions should keep untrusted local actors from writing to
+/// it.
 ///
-/// The backend never follows a filesystem link below the root: a read, write,
-/// copy or delete whose path below the root names or passes through a
-/// symbolic link (on Windows, also a junction, mount point or other
-/// name-surrogate reparse point) fails with [`StorageError::InvalidStorageKey`]
-/// before it touches the link's target, and listings neither list nor enter
-/// links. The configured root itself may be a link; the host chose it. The
-/// checks inspect each path component before the operation uses the path, so
-/// they refuse every link already present, but a local actor that can replace
-/// a directory under the root while an operation runs can still race them, as
-/// the local filesystem trust boundary in the storage reference describes.
+/// The backend never follows a filesystem link below the root, and never
+/// reads a file with more than one hard link. Every operation opens the
+/// root and reaches its target one component at a time relative to the
+/// directory handle it holds, without following links (`openat2` with
+/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` or `openat(O_NOFOLLOW)` walks on
+/// Unix, held `FILE_FLAG_OPEN_REPARSE_POINT` handles on Windows), and leaf
+/// operations act on the held parent directory, never on a full path. A
+/// key whose path below the root names or passes through a symbolic link
+/// (on Windows, also a junction, mount point or other name-surrogate
+/// reparse point), or a read of a file another hard link shares, fails with
+/// [`StorageError::InvalidStorageKey`] without touching the link's target,
+/// including when the link replaces a directory while the operation runs.
+/// Listings neither list nor enter links. The configured root itself may be
+/// a link; the host chose it.
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,
@@ -62,10 +67,6 @@ pub struct LocalStorageBackend {
 }
 
 impl LocalStorageBackend {
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Creates a local storage backend rooted at the given directory.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -84,9 +85,11 @@ impl LocalStorageBackend {
     /// such as NTFS, APFS or an OS-mounted SMB share, where two keys that
     /// differ only in case or Unicode normalisation would name the same file.
     /// Canonical keys are lowercase ASCII and portable, so no two distinct
-    /// canonical keys can alias. It applies to the keys of new writes only:
-    /// [`BlobStore::put_blob`], [`BlobStore::put_blob_if_not_exists`], the
-    /// destination of [`BlobStore::copy_blob`], multipart uploads and the
+    /// canonical keys can alias. It applies to the keys of new writes and
+    /// every publication: [`BlobStore::put_blob`],
+    /// [`BlobStore::put_blob_if_not_exists`], the destination of
+    /// [`BlobStore::copy_blob`], multipart starts and completions, including
+    /// completion of an upload started before the mode was enabled, and the
     /// `bucket/key` of streaming objects. A refused write fails with
     /// [`StorageError::InvalidStorageKey`] before any filesystem change.
     /// Reads, deletes and listings keep the ordinary validation, so objects
@@ -128,10 +131,10 @@ impl LocalStorageBackend {
     /// left by versions before 0.9.1, named `<name>.<uuid>.uploading`, cannot
     /// be told apart from stored objects and are not removed either; see the
     /// migration guide. Callers should schedule this periodically if the process
-    /// may be interrupted during writes. Symbolic links (including directory
-    /// links and cycles) are skipped. This does not protect against a concurrent
-    /// local actor replacing a path after inspection; the trusted-root contract
-    /// on [`LocalStorageBackend`] still applies.
+    /// may be interrupted during writes. The sweep walks the tree relative to
+    /// held directory handles and never follows a link: symbolic links
+    /// (including directory links and cycles) and other non-file entries are
+    /// skipped, and a root that is itself a symbolic link is not swept.
     ///
     /// # Errors
     ///
@@ -139,67 +142,87 @@ impl LocalStorageBackend {
     /// stale temp file cannot be removed.
     pub async fn sweep_temp_files(&self, older_than: Duration) -> Result<usize, StorageError> {
         let now = SystemTime::now();
-        let mut removed = 0;
-        let mut stack = vec![self.root.clone()];
-
-        while let Some(path) = stack.pop() {
-            let metadata = match tokio::fs::symlink_metadata(&path).await {
-                Ok(metadata) => metadata,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => return Err(StorageError::io(&path, source)),
-            };
-
-            if metadata.is_file() {
-                if is_uploading_temp_file(&path) && is_older_than(&metadata, now, older_than) {
-                    tokio::fs::remove_file(&path)
-                        .await
-                        .map_err(|source| StorageError::io(&path, source))?;
-                    removed += 1;
-                }
-                continue;
-            }
-
-            if metadata.is_dir() {
-                let entries = sorted_child_paths(&path).await?;
-                stack.extend(entries);
-            }
+        match tokio::fs::symlink_metadata(&self.root).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(0),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => return Err(StorageError::io(&self.root, source)),
         }
-
-        Ok(removed)
+        self.blocking(move |backend| {
+            let Some(root) = backend.open_root()? else {
+                return Ok(0);
+            };
+            let mut removed = 0;
+            let mut stack = vec![root];
+            while let Some(dir) = stack.pop() {
+                let entries = match dir.entries() {
+                    Ok(entries) => entries,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(source) => return Err(StorageError::io(dir.path(), source)),
+                };
+                for entry in entries {
+                    let Some(name) = entry.name.to_str() else {
+                        continue;
+                    };
+                    match entry.kind {
+                        Kind::File if is_temp_file_name(name) => {
+                            let path = dir.child_path(name);
+                            let info = match dir.info(name) {
+                                Ok(Some(info)) => info,
+                                Ok(None) => continue,
+                                Err(source) => return Err(StorageError::io(&path, source)),
+                            };
+                            if info.kind == Kind::File
+                                && is_older_than(info.modified, now, older_than)
+                            {
+                                match dir.remove_file(name) {
+                                    Ok(()) => removed += 1,
+                                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(source) => return Err(StorageError::io(&path, source)),
+                                }
+                            }
+                        }
+                        Kind::Dir => match dir.child_dir(name) {
+                            Ok(Some(child)) => stack.push(child),
+                            Ok(None) => {}
+                            // Replaced by a link since it was listed.
+                            Err(err) if local_fs::is_refusal(&err) => {}
+                            Err(source) => {
+                                return Err(StorageError::io(dir.child_path(name), source));
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            Ok(removed)
+        })
+        .await
     }
 
-    pub(crate) fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
+    /// The root-relative path of a caller's key.
+    pub(crate) fn rel_for(&self, key: &str) -> Result<String, StorageError> {
         validate_blob_key(key)?;
         self.check_root_name(key)?;
-        Ok(self.root.join(Path::new(key)))
+        Ok(key.to_string())
     }
 
-    fn object_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
+    fn object_rel_for(&self, bucket: &str, key: &str) -> Result<String, StorageError> {
         validate_object_bucket(bucket)?;
         validate_blob_key(key)?;
         self.check_root_name(bucket)?;
         refuse_colon(key)?;
-        Ok(self.root.join(bucket).join(Path::new(key)))
+        Ok(format!("{bucket}/{key}"))
     }
 
-    fn object_metadata_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
+    fn object_metadata_rel_for(&self, bucket: &str, key: &str) -> Result<String, StorageError> {
         validate_object_bucket(bucket)?;
         validate_blob_key(key)?;
         self.check_root_name(bucket)?;
         refuse_colon(key)?;
-        let path = self
-            .root
-            .join(INTERNAL_STORAGE_DIR)
-            .join(OBJECT_METADATA_DIR)
-            .join(bucket)
-            .join(Path::new(key));
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| StorageError::InvalidStorageKey {
-                key: key.to_string(),
-            })?;
-        Ok(path.with_file_name(format!("{file_name}.metadata.json")))
+        Ok(format!(
+            "{INTERNAL_STORAGE_DIR}/{OBJECT_METADATA_DIR}/{bucket}/{key}.metadata.json"
+        ))
     }
 }
 
@@ -214,13 +237,16 @@ impl LocalStorageBackend {
     /// it resolves to the existing directory and [`Self::check_root_name`]
     /// refuses it. Best effort; a write that cannot create it fails on its own.
     pub(crate) fn ensure_internal_dir(&self) {
-        let _ = std::fs::create_dir_all(self.internal_dir());
+        let _ = std::fs::create_dir_all(&self.root);
+        if let Ok(Some(root)) = Dir::open_root(&self.root) {
+            let _ = root.create_dir(INTERNAL_STORAGE_DIR);
+        }
     }
 
     /// Whether `path` resolves to the internal directory, whatever its
-    /// spelling: another case, a Unicode case fold, a Windows short name or a
-    /// link. A path that does not exist or cannot be opened is not an alias;
-    /// the operation on it fails or creates an ordinary entry.
+    /// spelling: another case, a Unicode case fold or a Windows short name.
+    /// A path that does not exist or cannot be opened is not an alias; the
+    /// operation on it fails or creates an ordinary entry.
     fn aliases_internal_dir(&self, path: &Path) -> bool {
         same_file::is_same_file(path, self.internal_dir()).unwrap_or(false)
     }
@@ -253,188 +279,215 @@ fn refuse_colon(name: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-impl LocalStorageBackend {
-    /// The path for a caller's key, refused when it names or passes through a
-    /// link below the root.
-    pub(crate) async fn resolve(&self, key: &str) -> Result<PathBuf, StorageError> {
-        let path = self.path_for(key)?;
-        self.refuse_links(&path, key).await?;
-        Ok(path)
-    }
-
-    /// Refuses `path`, below the root, when any existing component of it
-    /// below the root is a link; see [`refuse_links_below`].
-    pub(crate) async fn refuse_links(&self, path: &Path, key: &str) -> Result<(), StorageError> {
-        let root = self.root.clone();
-        let path = path.to_path_buf();
-        let key = key.to_string();
-        tokio::task::spawn_blocking(move || refuse_links_below(&root, &path, &key))
-            .await
-            .map_err(crate::local_multipart::join_error)?
-    }
-
-    /// Opens a caller's key for reading without following a link, with the
-    /// opened file's metadata, or `None` when nothing is stored there.
-    async fn open_key(
-        &self,
-        path: PathBuf,
-        key: &str,
-    ) -> Result<Option<(tokio::fs::File, std::fs::Metadata)>, StorageError> {
-        let key = key.to_string();
-        let opened = tokio::task::spawn_blocking(move || -> Result<_, StorageError> {
-            let Some(file) = open_unlinked(&path, &key)? else {
-                return Ok(None);
-            };
-            let metadata = file
-                .metadata()
-                .map_err(|source| StorageError::io(&path, source))?;
-            Ok(Some((file, metadata)))
-        })
-        .await
-        .map_err(crate::local_multipart::join_error)??;
-        Ok(opened.map(|(file, metadata)| (tokio::fs::File::from_std(file), metadata)))
-    }
-
-    /// The metadata of the entry at a caller's key, refused when it is a
-    /// link, or `None` when nothing is stored there.
-    async fn unlinked_metadata(
-        &self,
-        path: &Path,
-        key: &str,
-    ) -> Result<Option<std::fs::Metadata>, StorageError> {
-        match tokio::fs::symlink_metadata(path).await {
-            Ok(metadata) if is_link(&metadata.file_type()) => Err(link_refused(key)),
-            Ok(metadata) => Ok(Some(metadata)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(StorageError::io(path, source)),
-        }
+/// The directory components and the leaf name of a root-relative path.
+pub(crate) fn split_rel(rel: &str) -> (Vec<&str>, &str) {
+    match rel.rsplit_once('/') {
+        Some((dirs, leaf)) => (dirs.split('/').collect(), leaf),
+        None => (Vec::new(), rel),
     }
 }
 
-/// Whether an entry of `file_type` is a link this backend never follows: a
-/// symbolic link and, on Windows, any name-surrogate reparse point, such as
-/// a junction or a volume mount point, which the standard library reports as
-/// a symbolic link too.
-fn is_link(file_type: &std::fs::FileType) -> bool {
-    file_type.is_symlink()
-}
-
-/// The refusal for a key whose path names or passes through a link.
-fn link_refused(key: &str) -> StorageError {
-    StorageError::InvalidStorageKey {
-        key: key.to_string(),
-    }
-}
-
-/// Refuses `path` when any existing component of it below `root` is a link,
-/// wherever the link points. Components are inspected without following
-/// them, from the root down, until one is missing or is not a directory:
-/// nothing below such a component resolves, so the operation on `path`
-/// creates it or fails on its own. The root itself is not inspected; the
-/// host chose it. A path outside `root` is refused.
-pub(crate) fn refuse_links_below(root: &Path, path: &Path, key: &str) -> Result<(), StorageError> {
-    let Ok(relative) = path.strip_prefix(root) else {
-        return Err(link_refused(key));
-    };
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if is_link(&metadata.file_type()) => return Err(link_refused(key)),
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => return Ok(()),
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(source) => return Err(StorageError::io(&current, source)),
-        }
+/// Refuses a key whose leaf is itself a temporary name, so that listing and
+/// [`LocalStorageBackend::sweep_temp_files`] never mistake a caller's object
+/// for an interrupted upload.
+pub(crate) fn check_leaf(rel: &str, key: &str) -> Result<(), StorageError> {
+    if is_temp_file_name(split_rel(rel).1) {
+        return Err(StorageError::InvalidStorageKey {
+            key: key.to_string(),
+        });
     }
     Ok(())
 }
 
-/// Opens `path` for reading without following a link at its last
-/// component, or returns `None` when it does not exist. The caller has
-/// refused links above it with [`refuse_links_below`].
-///
-/// On Unix the entry is inspected without following it, opened, and the
-/// opened file must be the inspected entry, so a link swapped in between is
-/// refused rather than read. On Windows it is opened as the reparse point
-/// itself: a name surrogate such as a symbolic link or junction is refused,
-/// and another kind, such as a deduplicated or cloud file, is reopened
-/// through its file system filter and must be the same file. A FIFO, socket
-/// or device is refused, since opening one can block or read a device.
-pub(crate) fn open_unlinked(path: &Path, key: &str) -> Result<Option<std::fs::File>, StorageError> {
-    let io = |source| StorageError::io(path, source);
-    let not_found = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+/// Maps a filesystem error for `key`: a refused link or hard link becomes
+/// [`StorageError::InvalidStorageKey`], anything else an I/O error at `path`.
+pub(crate) fn fs_error(error: std::io::Error, key: &str, path: &Path) -> StorageError {
+    if local_fs::is_refusal(&error) {
+        StorageError::InvalidStorageKey {
+            key: key.to_string(),
+        }
+    } else {
+        StorageError::io(path, error)
+    }
+}
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+/// A key's parent directory, held open, and the key's leaf name in it.
+pub(crate) struct Located {
+    pub(crate) dir: Arc<Dir>,
+    pub(crate) leaf: String,
+}
 
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-        {
-            Ok(file) => file,
-            Err(err) if not_found(&err) => return Ok(None),
-            Err(source) => return Err(io(source)),
-        };
-        let metadata = file.metadata().map_err(io)?;
-        if is_link(&metadata.file_type()) {
-            return Err(link_refused(key));
-        }
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-            return Ok(Some(file));
-        }
-        let reopened = match std::fs::File::open(path) {
-            Ok(reopened) => reopened,
-            Err(err) if not_found(&err) => return Ok(None),
-            Err(source) => return Err(io(source)),
-        };
-        let identity = reopened.try_clone().map_err(io)?;
-        if same_file::Handle::from_file(file).map_err(io)?
-            != same_file::Handle::from_file(identity).map_err(io)?
-        {
-            return Err(link_refused(key));
-        }
-        Ok(Some(reopened))
+impl Located {
+    pub(crate) fn path(&self) -> PathBuf {
+        self.dir.child_path(&self.leaf)
     }
 
-    #[cfg(not(windows))]
-    {
-        let before = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(err) if not_found(&err) => return Ok(None),
-            Err(source) => return Err(io(source)),
-        };
-        if is_link(&before.file_type()) {
-            return Err(link_refused(key));
+    /// Refuses when the leaf is a link. Replacing or removing a link would
+    /// not follow it, but a key that names a link is refused everywhere.
+    pub(crate) fn refuse_link_leaf(&self, key: &str) -> Result<(), StorageError> {
+        match self.dir.info(&self.leaf) {
+            Ok(Some(info)) if info.kind == Kind::Link => Err(StorageError::InvalidStorageKey {
+                key: key.to_string(),
+            }),
+            Ok(_) => Ok(()),
+            Err(error) => Err(fs_error(error, key, &self.path())),
         }
-        if !before.is_file() && !before.is_dir() {
-            return Err(io(std::io::Error::from(std::io::ErrorKind::InvalidInput)));
-        }
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            Err(err) if not_found(&err) => return Ok(None),
-            Err(source) => return Err(io(source)),
+    }
+
+    /// Opens the leaf for reading without following a link, with its
+    /// metadata, or `None` when it does not exist.
+    pub(crate) fn open_read(
+        &self,
+        key: &str,
+    ) -> Result<Option<(std::fs::File, std::fs::Metadata)>, StorageError> {
+        let Some(file) = self
+            .dir
+            .open_read(&self.leaf)
+            .map_err(|error| fs_error(error, key, &self.path()))?
+        else {
+            return Ok(None);
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let after = file.metadata().map_err(io)?;
-            if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
-                return Err(link_refused(key));
+        let metadata = file
+            .metadata()
+            .map_err(|source| StorageError::io(self.path(), source))?;
+        Ok(Some((file, metadata)))
+    }
+}
+
+impl LocalStorageBackend {
+    /// Runs `operation` on the blocking pool with a clone of this backend.
+    pub(crate) async fn blocking<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(Self) -> Result<T, StorageError> + Send + 'static,
+    ) -> Result<T, StorageError> {
+        let backend = self.clone();
+        tokio::task::spawn_blocking(move || operation(backend))
+            .await
+            .map_err(crate::local_multipart::join_error)?
+    }
+
+    /// Opens the root, or `None` when it does not exist.
+    pub(crate) fn open_root(&self) -> Result<Option<Dir>, StorageError> {
+        Dir::open_root(&self.root).map_err(|source| StorageError::io(&self.root, source))
+    }
+
+    /// Opens the directory `components` below the root without creating
+    /// anything, or `None` when it does not exist.
+    pub(crate) fn open_dir_blocking(
+        &self,
+        components: &[&str],
+        key: &str,
+    ) -> Result<Option<Dir>, StorageError> {
+        let Some(root) = self.open_root()? else {
+            return Ok(None);
+        };
+        let path = components
+            .iter()
+            .fold(self.root.clone(), |path, name| path.join(name));
+        root.descend(components)
+            .map_err(|error| fs_error(error, key, &path))
+    }
+
+    /// Finds the directory holding `rel` without creating anything, or
+    /// `None` when it does not exist.
+    pub(crate) fn locate_blocking(
+        &self,
+        rel: &str,
+        key: &str,
+    ) -> Result<Option<Located>, StorageError> {
+        let (dirs, leaf) = split_rel(rel);
+        let located = self.open_dir_blocking(&dirs, key)?.map(|dir| Located {
+            dir: Arc::new(dir),
+            leaf: leaf.to_string(),
+        });
+        #[cfg(test)]
+        race_hook::fire(&self.root);
+        Ok(located)
+    }
+
+    /// Creates the directory holding `rel` durably (see
+    /// [`Self::prepare_dir_blocking`]) and refuses a leaf that is a link.
+    pub(crate) fn prepare_blocking(&self, rel: &str, key: &str) -> Result<Located, StorageError> {
+        let (dirs, leaf) = split_rel(rel);
+        let located = Located {
+            dir: self.prepare_dir_blocking(&dirs, key)?,
+            leaf: leaf.to_string(),
+        };
+        located.refuse_link_leaf(key)?;
+        #[cfg(test)]
+        race_hook::fire(&self.root);
+        Ok(located)
+    }
+
+    /// [`Self::prepare_blocking`] on the blocking pool.
+    pub(crate) async fn prepare(&self, rel: String, key: &str) -> Result<Located, StorageError> {
+        let key = key.to_string();
+        self.blocking(move |backend| backend.prepare_blocking(&rel, &key))
+            .await
+    }
+
+    /// Opens a caller's key for reading, or `None` when nothing is stored
+    /// there.
+    async fn open_key(
+        &self,
+        rel: String,
+        key: &str,
+    ) -> Result<Option<(tokio::fs::File, std::fs::Metadata, PathBuf)>, StorageError> {
+        let key = key.to_string();
+        let opened = self
+            .blocking(move |backend| {
+                let Some(located) = backend.locate_blocking(&rel, &key)? else {
+                    return Ok(None);
+                };
+                let path = located.path();
+                Ok(located
+                    .open_read(&key)?
+                    .map(|(file, metadata)| (file, metadata, path)))
+            })
+            .await?;
+        Ok(opened.map(|(file, metadata, path)| (tokio::fs::File::from_std(file), metadata, path)))
+    }
+
+    /// What is stored at a caller's key, inspected without following it, or
+    /// `None` when nothing is. A link is refused, and so is a file with more
+    /// than one hard link.
+    async fn key_info(
+        &self,
+        rel: String,
+        key: &str,
+    ) -> Result<Option<local_fs::Info>, StorageError> {
+        let key = key.to_string();
+        self.blocking(move |backend| {
+            let Some(located) = backend.locate_blocking(&rel, &key)? else {
+                return Ok(None);
+            };
+            let refused = || StorageError::InvalidStorageKey { key: key.clone() };
+            match located.dir.info(&located.leaf) {
+                Ok(Some(info)) if info.kind == Kind::Link => Err(refused()),
+                Ok(Some(info)) if info.kind == Kind::File && info.links > 1 => Err(refused()),
+                Ok(info) => Ok(info),
+                Err(error) => Err(fs_error(error, &key, &located.path())),
             }
+        })
+        .await
+    }
+
+    /// Removes the key at `rel` and makes the removal durable. A missing
+    /// file is success, and its directory is still synced when it exists,
+    /// so repeating a deletion whose sync failed completes it. A link is
+    /// refused; a file with other hard links loses only this one.
+    fn delete_blocking(&self, rel: &str, key: &str) -> Result<(), StorageError> {
+        let Some(located) = self.locate_blocking(rel, key)? else {
+            return Ok(());
+        };
+        located.refuse_link_leaf(key)?;
+        let path = located.path();
+        match located.dir.remove_file(&located.leaf) {
+            Ok(()) => trace_published(None, &path),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(fs_error(source, key, &path)),
         }
-        Ok(Some(file))
+        sync_dir(&located.dir)
     }
 }
 
@@ -444,10 +497,17 @@ impl BlobStore for LocalStorageBackend {
         // A refused key changes nothing, so it is not a single-attempt
         // failure. One filesystem removal, with no retry or background path
         // replay.
-        let path = self.resolve(key).await?;
-        remove_durably(&path)
-            .await
-            .map_err(StorageError::single_attempt)
+        let rel = self.rel_for(key)?;
+        let key = key.to_string();
+        self.blocking(move |backend| {
+            backend
+                .delete_blocking(&rel, &key)
+                .map_err(|error| match error {
+                    refused @ StorageError::InvalidStorageKey { .. } => refused,
+                    other => StorageError::single_attempt(other),
+                })
+        })
+        .await
     }
 
     fn backend(&self) -> StorageBackend {
@@ -466,18 +526,35 @@ impl BlobStore for LocalStorageBackend {
     ) -> Result<BlobWriteOutcome, StorageError> {
         self.ensure_internal_dir();
         self.check_write_key(key)?;
-        let path = self.resolve(key).await?;
-        let temp = TempFile::new(temp_path_for(&path, key)?);
-        self.create_parent_dir(&path).await?;
-
+        let rel = self.rel_for(key)?;
+        check_leaf(&rel, key)?;
+        let located = self.prepare(rel, key).await?;
+        let temp = TempFile::new(Arc::clone(&located.dir));
         let outcome = write_stream_to_temp(&temp, body).await?;
-        if let Err(source) = tokio::fs::rename(temp.path(), &path).await {
-            return Err(StorageError::io(&path, source));
-        }
-        trace_published(Some(temp.path()), &path);
-        temp.published();
-        sync_entry(&path).await?;
-
+        let key = key.to_string();
+        let temp_name = temp.name().to_string();
+        let temp_path = temp.path().to_path_buf();
+        let published = self
+            .blocking(move |_| {
+                located.refuse_link_leaf(&key)?;
+                let target = located.path();
+                located
+                    .dir
+                    .rename(&temp_name, &located.leaf)
+                    .map_err(|source| StorageError::io(&target, source))?;
+                trace_published(Some(&temp_path), &target);
+                Ok(located)
+            })
+            .await;
+        let located = match published {
+            Ok(located) => {
+                temp.published();
+                located
+            }
+            Err(error) => return Err(error),
+        };
+        let dir = Arc::clone(&located.dir);
+        self.blocking(move |_| sync_dir(&dir)).await?;
         Ok(outcome)
     }
 
@@ -489,47 +566,63 @@ impl BlobStore for LocalStorageBackend {
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         self.ensure_internal_dir();
         self.check_write_key(key)?;
-        let path = self.resolve(key).await?;
-        let temp = TempFile::new(temp_path_for(&path, key)?);
-        self.create_parent_dir(&path).await?;
-
+        let rel = self.rel_for(key)?;
+        check_leaf(&rel, key)?;
+        let located = self.prepare(rel, key).await?;
+        let temp = TempFile::new(Arc::clone(&located.dir));
         let outcome = write_stream_to_temp(&temp, body).await?;
-        match tokio::fs::hard_link(temp.path(), &path).await {
-            Ok(()) => {
-                trace_published(Some(temp.path()), &path);
-                temp.remove().await;
-                // One directory sync covers the new link and the temp removal.
-                // The key now exists, so a retry would find it taken: a failed
-                // sync reports a non-retryable, outcome-unknown error.
-                sync_entry(&path)
-                    .await
-                    .map_err(StorageError::single_attempt)?;
+        let key = key.to_string();
+        let temp_name = temp.name().to_string();
+        let temp_path = temp.path().to_path_buf();
+        let published = self
+            .blocking(move |_| {
+                located.refuse_link_leaf(&key)?;
+                let target = located.path();
+                match located.dir.rename_noreplace(&temp_name, &located.leaf) {
+                    Ok(()) => {
+                        trace_published(Some(&temp_path), &target);
+                        Ok(true)
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                    Err(source) => Err(StorageError::io(&target, source)),
+                }
+            })
+            .await;
+        let dir = Arc::clone(&temp.dir);
+        match published {
+            Ok(true) => {
+                temp.published();
+                // One directory sync covers the new entry and the temp
+                // removal. The key now exists, so a retry would find it
+                // taken: a failed sync reports a non-retryable,
+                // outcome-unknown error.
+                self.blocking(move |_| sync_dir(&dir).map_err(StorageError::single_attempt))
+                    .await?;
                 Ok(Some(outcome))
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(false) => {
                 temp.remove().await;
                 // Make the existing entry this call observed durable too.
-                sync_entry(&path).await?;
+                self.blocking(move |_| sync_dir(&dir)).await?;
                 Ok(None)
             }
-            Err(source) => {
+            Err(error) => {
                 temp.remove().await;
-                Err(StorageError::io(&path, source))
+                Err(error)
             }
         }
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
-        let path = self.resolve(key).await?;
-        let Some((file, metadata)) = self.open_key(path.clone(), key).await? else {
+        let rel = self.rel_for(key)?;
+        let Some((file, metadata, path)) = self.open_key(rel, key).await? else {
             return Err(StorageError::MissingBlob {
                 key: key.to_string(),
             });
         };
         let metadata = Some(blob_metadata(key, &metadata));
-        let stream_path = path.clone();
         let stream = ReaderStream::new(file)
-            .map(move |chunk| chunk.map_err(|source| StorageError::io(&stream_path, source)));
+            .map(move |chunk| chunk.map_err(|source| StorageError::io(&path, source)));
 
         Ok(BlobBody {
             key: key.to_string(),
@@ -550,8 +643,8 @@ impl BlobStore for LocalStorageBackend {
             });
         }
 
-        let path = self.resolve(key).await?;
-        let Some((mut file, metadata)) = self.open_key(path.clone(), key).await? else {
+        let rel = self.rel_for(key)?;
+        let Some((mut file, metadata, path)) = self.open_key(rel, key).await? else {
             return Err(StorageError::MissingBlob {
                 key: key.to_string(),
             });
@@ -560,9 +653,8 @@ impl BlobStore for LocalStorageBackend {
             .await
             .map_err(|source| StorageError::io(&path, source))?;
         let length = range.end - range.start;
-        let stream_path = path.clone();
         let stream = ReaderStream::new(file.take(length))
-            .map(move |chunk| chunk.map_err(|source| StorageError::io(&stream_path, source)));
+            .map(move |chunk| chunk.map_err(|source| StorageError::io(&path, source)));
 
         Ok(BlobBody {
             key: key.to_string(),
@@ -572,19 +664,22 @@ impl BlobStore for LocalStorageBackend {
     }
 
     async fn blob_exists(&self, key: &str) -> Result<bool, StorageError> {
-        let path = self.resolve(key).await?;
+        let rel = self.rel_for(key)?;
         Ok(self
-            .unlinked_metadata(&path, key)
+            .key_info(rel, key)
             .await?
-            .is_some_and(|metadata| metadata.is_file()))
+            .is_some_and(|info| info.kind == Kind::File))
     }
 
     async fn head_blob(&self, key: &str) -> Result<Option<BlobMetadata>, StorageError> {
-        let path = self.resolve(key).await?;
-        Ok(self
-            .unlinked_metadata(&path, key)
-            .await?
-            .map(|metadata| blob_metadata(key, &metadata)))
+        let rel = self.rel_for(key)?;
+        Ok(self.key_info(rel, key).await?.map(|info| BlobMetadata {
+            key: key.to_string(),
+            size_bytes: Some(info.len),
+            sha256_hex: None,
+            etag: None,
+            last_modified: info.modified.map(OffsetDateTime::from),
+        }))
     }
 
     async fn list_blobs_page(
@@ -606,46 +701,52 @@ impl BlobStore for LocalStorageBackend {
     async fn copy_blob(&self, from: &str, to: &str) -> Result<(), StorageError> {
         self.ensure_internal_dir();
         self.check_write_key(to)?;
-        let from_path = self.resolve(from).await?;
-        let to_path = self.resolve(to).await?;
-        let temp = TempFile::new(temp_path_for(&to_path, to)?);
-        self.create_parent_dir(&to_path).await?;
+        let from_rel = self.rel_for(from)?;
+        let to_rel = self.rel_for(to)?;
+        check_leaf(&to_rel, to)?;
+        // The source is opened without following a link before anything is
+        // created, so a refused or missing source leaves nothing behind.
+        let Some((source, _, source_path)) = self.open_key(from_rel, from).await? else {
+            return Err(StorageError::MissingBlob {
+                key: from.to_string(),
+            });
+        };
+        let mut source = source.into_std().await;
+        let located = self.prepare(to_rel, to).await?;
+        let temp = TempFile::new(Arc::clone(&located.dir));
+        temp.run_blocking(move |dir, name| {
+            let mut output = dir.create_new(name)?;
+            std::io::copy(&mut source, &mut output)?;
+            output.sync_all()
+        })
+        .await
+        .map_err(|source| StorageError::io(&source_path, source))?;
+        trace(DurabilityStep::FileSynced, temp.path());
 
-        let source = from_path.clone();
-        let from_key = from.to_string();
-        // The source is opened without following a link before the
-        // temporary file is created, so a refused or missing source leaves
-        // nothing behind.
-        let copied = temp
-            .run_blocking(move |temp_path| {
-                let mut input = match open_unlinked(&source, &from_key) {
-                    Ok(Some(input)) => input,
-                    Ok(None) => return Ok(Err(StorageError::MissingBlob { key: from_key })),
-                    Err(error) => return Ok(Err(error)),
-                };
-                let mut output = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(temp_path)?;
-                std::io::copy(&mut input, &mut output)?;
-                Ok(Ok(()))
+        let key = to.to_string();
+        let temp_name = temp.name().to_string();
+        let temp_path = temp.path().to_path_buf();
+        let located = self
+            .blocking(move |_| {
+                located.refuse_link_leaf(&key)?;
+                let target = located.path();
+                located
+                    .dir
+                    .rename(&temp_name, &located.leaf)
+                    .map_err(|source| StorageError::io(&target, source))?;
+                trace_published(Some(&temp_path), &target);
+                Ok(located)
             })
-            .await
-            .map_err(|source| StorageError::io(&from_path, source))?;
-        copied?;
-        sync_written_file(temp.path()).await?;
-
-        if let Err(source) = tokio::fs::rename(temp.path(), &to_path).await {
-            return Err(StorageError::io(&to_path, source));
-        }
-        trace_published(Some(temp.path()), &to_path);
+            .await?;
         temp.published();
-        sync_entry(&to_path).await
+        self.blocking(move |_| sync_dir(&located.dir)).await
     }
 
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
-        let path = self.resolve(key).await?;
-        remove_durably(&path).await
+        let rel = self.rel_for(key)?;
+        let key = key.to_string();
+        self.blocking(move |backend| backend.delete_blocking(&rel, &key))
+            .await
     }
 }
 
@@ -731,25 +832,25 @@ impl StreamingObjectStore for LocalStorageBackend {
         metadata: ObjectMetadata,
     ) -> Result<BoxedMultipartWriter, StorageError> {
         self.ensure_internal_dir();
-        let object_path = self.object_path_for(bucket, key)?;
-        let metadata_path = self.object_metadata_path_for(bucket, key)?;
-        self.check_write_key(&format!("{bucket}/{key}"))?;
-        self.refuse_links(&object_path, key).await?;
-        self.refuse_links(&metadata_path, key).await?;
-        let temp = TempFile::new(temp_path_for(&object_path, key)?);
-        let metadata_temp = TempFile::new(temp_path_for(&metadata_path, key)?);
-        self.create_parent_dir(&object_path).await?;
-        self.create_parent_dir(&metadata_path).await?;
+        let object_rel = self.object_rel_for(bucket, key)?;
+        let metadata_rel = self.object_metadata_rel_for(bucket, key)?;
+        self.check_write_key(&object_rel)?;
+        check_leaf(&object_rel, key)?;
+        let object = self.prepare(object_rel, key).await?;
+        let metadata_location = self.prepare(metadata_rel, key).await?;
+        let temp = TempFile::new(Arc::clone(&object.dir));
+        let metadata_temp = TempFile::new(Arc::clone(&metadata_location.dir));
         let file = temp.create().await?;
 
         Ok(Box::new(LocalMultipartWriter {
+            backend: self.clone(),
             bucket: bucket.to_string(),
             key: key.to_string(),
             content_type,
             metadata,
-            object_path,
+            object,
             temp,
-            metadata_path,
+            metadata_location,
             metadata_temp,
             file,
             hasher: Sha256::new(),
@@ -770,8 +871,14 @@ impl StreamingObjectStore for LocalStorageBackend {
             });
         }
 
-        let object_path = self.object_path_for(bucket, key)?;
-        self.refuse_links(&object_path, key).await?;
+        // The object file is opened, without following links, before its
+        // metadata is read, so a key through a link is refused either way.
+        let object_rel = self.object_rel_for(bucket, key)?;
+        let Some((mut file, _, object_path)) = self.open_key(object_rel, key).await? else {
+            return Err(StorageError::MissingBlob {
+                key: format!("{bucket}/{key}"),
+            });
+        };
         let object = self.get_object_metadata(bucket, key).await?;
         if range.start > object.size_bytes {
             return Err(StorageError::PreconditionFailed {
@@ -781,17 +888,11 @@ impl StreamingObjectStore for LocalStorageBackend {
         }
         let end = range.end.min(object.size_bytes);
         let length = end.saturating_sub(range.start);
-        let Some((mut file, _)) = self.open_key(object_path.clone(), key).await? else {
-            return Err(StorageError::MissingBlob {
-                key: format!("{bucket}/{key}"),
-            });
-        };
         file.seek(SeekFrom::Start(range.start))
             .await
             .map_err(|source| StorageError::io(&object_path, source))?;
-        let stream_path = object_path.clone();
         let stream = ReaderStream::new(file.take(length))
-            .map(move |chunk| chunk.map_err(|source| StorageError::io(&stream_path, source)));
+            .map(move |chunk| chunk.map_err(|source| StorageError::io(&object_path, source)));
 
         let total_size = object.size_bytes;
         Ok(ObjectRangeBody {
@@ -811,9 +912,8 @@ impl StreamingObjectStore for LocalStorageBackend {
         bucket: &str,
         key: &str,
     ) -> Result<ObjectInfo, StorageError> {
-        let metadata_path = self.object_metadata_path_for(bucket, key)?;
-        self.refuse_links(&metadata_path, key).await?;
-        let Some((mut file, _)) = self.open_key(metadata_path.clone(), key).await? else {
+        let metadata_rel = self.object_metadata_rel_for(bucket, key)?;
+        let Some((mut file, _, metadata_path)) = self.open_key(metadata_rel, key).await? else {
             return Err(StorageError::MissingBlob {
                 key: format!("{bucket}/{key}"),
             });
@@ -838,65 +938,108 @@ impl StreamingObjectStore for LocalStorageBackend {
         crate::blob::validate_blob_prefix(prefix)?;
         self.check_root_name(bucket)?;
         refuse_colon(prefix)?;
-        let base = self.root.join(bucket);
-        let start = listing_start(&base, prefix);
-        self.refuse_links(&start, prefix).await?;
+        let start_key = listing_start_key(prefix).to_string();
+        let mut start: Vec<String> = vec![bucket.to_string()];
+        start.extend(
+            start_key
+                .split('/')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+        );
+        let prefix_owned = prefix.to_string();
+        let keys = self
+            .blocking(move |backend| {
+                let components: Vec<&str> = start.iter().map(String::as_str).collect();
+                let Some(start_dir) = backend.open_dir_blocking(&components, &prefix_owned)? else {
+                    return Ok(Vec::new());
+                };
+                let mut keys = Vec::new();
+                let mut stack = vec![(start_dir, start_key)];
+                while let Some((dir, dir_key)) = stack.pop() {
+                    let entries = match dir.entries() {
+                        Ok(entries) => entries,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(source) => return Err(StorageError::io(dir.path(), source)),
+                    };
+                    for entry in entries {
+                        let Some(name) = entry.name.to_str() else {
+                            continue;
+                        };
+                        if cfg!(windows) && name.contains(':') {
+                            continue;
+                        }
+                        let key = if dir_key.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{dir_key}/{name}")
+                        };
+                        if validate_blob_key(&key).is_err() {
+                            continue;
+                        }
+                        match entry.kind {
+                            Kind::File => {
+                                if !is_temp_file_name(name) && key.starts_with(&prefix_owned) {
+                                    keys.push(key);
+                                }
+                            }
+                            Kind::Dir if directory_may_match(&key, &prefix_owned) => {
+                                match dir.child_dir(name) {
+                                    Ok(Some(child)) => stack.push((child, key)),
+                                    Ok(None) => {}
+                                    Err(err) if local_fs::is_refusal(&err) => {}
+                                    Err(source) => {
+                                        return Err(StorageError::io(dir.child_path(name), source));
+                                    }
+                                }
+                            }
+                            // Links are neither listed nor entered.
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(keys)
+            })
+            .await?;
+
         let mut objects = Vec::new();
-        let mut stack = vec![start];
-
-        while let Some(path) = stack.pop() {
-            let Some(key) = listed_key(&base, &path) else {
-                continue;
-            };
-            // Links are neither listed nor entered.
-            let metadata = match tokio::fs::symlink_metadata(&path).await {
-                Ok(metadata) if is_link(&metadata.file_type()) => continue,
-                Ok(metadata) => metadata,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => return Err(StorageError::io(&path, source)),
-            };
-
-            if metadata.is_file() {
-                if is_uploading_temp_file(&path) || !key.starts_with(prefix) {
-                    continue;
-                }
-                if let Ok(info) = self.get_object_metadata(bucket, &key).await {
-                    objects.push(info);
-                }
-                continue;
+        for key in keys {
+            if let Ok(info) = self.get_object_metadata(bucket, &key).await {
+                objects.push(info);
             }
-            if !metadata.is_dir() || !directory_may_match(&key, prefix) {
-                continue;
-            }
-
-            let entries = sorted_child_paths(&path).await?;
-            stack.extend(entries.into_iter().rev());
         }
-
         objects.sort_by(|left, right| left.key.cmp(&right.key));
         Ok(objects)
     }
 
     async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
-        let object_path = self.object_path_for(bucket, key)?;
-        let metadata_path = self.object_metadata_path_for(bucket, key)?;
-        self.refuse_links(&object_path, key).await?;
-        self.refuse_links(&metadata_path, key).await?;
-
-        remove_durably(&object_path).await?;
-        remove_durably(&metadata_path).await
+        let object_rel = self.object_rel_for(bucket, key)?;
+        let metadata_rel = self.object_metadata_rel_for(bucket, key)?;
+        let key = key.to_string();
+        self.blocking(move |backend| {
+            // Both are checked before either is removed.
+            if let Some(located) = backend.locate_blocking(&object_rel, &key)? {
+                located.refuse_link_leaf(&key)?;
+            }
+            if let Some(located) = backend.locate_blocking(&metadata_rel, &key)? {
+                located.refuse_link_leaf(&key)?;
+            }
+            backend.delete_blocking(&object_rel, &key)?;
+            backend.delete_blocking(&metadata_rel, &key)
+        })
+        .await
     }
 }
 
 struct LocalMultipartWriter {
+    backend: LocalStorageBackend,
     bucket: String,
     key: String,
     content_type: Option<String>,
     metadata: ObjectMetadata,
-    object_path: PathBuf,
+    object: Located,
     /// Removes the staged object if the writer is dropped unfinished.
     temp: TempFile,
-    metadata_path: PathBuf,
+    metadata_location: Located,
     /// Removes the staged metadata if the writer is dropped unfinished.
     metadata_temp: TempFile,
     file: tokio::fs::File,
@@ -948,19 +1091,37 @@ impl MultipartWriter for LocalMultipartWriter {
         // the key replaces, but never the object without its metadata. A
         // failure or cancellation before each rename removes the staged
         // files that remain.
-        if let Err(source) = tokio::fs::rename(self.metadata_temp.path(), &self.metadata_path).await
-        {
-            return Err(StorageError::io(&self.metadata_path, source));
-        }
+        let metadata_location = Located {
+            dir: Arc::clone(&self.metadata_location.dir),
+            leaf: self.metadata_location.leaf.clone(),
+        };
+        let key = self.key.clone();
+        let from = self.metadata_temp.name().to_string();
+        let from_path = self.metadata_temp.path().to_path_buf();
+        self.backend
+            .blocking(move |_| publish_renamed(&metadata_location, &from, &from_path, &key))
+            .await?;
         self.metadata_temp.mark_published();
-        trace_published(Some(self.metadata_temp.path()), &self.metadata_path);
-        sync_entry(&self.metadata_path).await?;
-        if let Err(source) = tokio::fs::rename(self.temp.path(), &self.object_path).await {
-            return Err(StorageError::io(&self.object_path, source));
-        }
+        let metadata_dir = Arc::clone(&self.metadata_location.dir);
+        self.backend
+            .blocking(move |_| sync_dir(&metadata_dir))
+            .await?;
+
+        let object_location = Located {
+            dir: Arc::clone(&self.object.dir),
+            leaf: self.object.leaf.clone(),
+        };
+        let key = self.key.clone();
+        let from = self.temp.name().to_string();
+        let from_path = self.temp.path().to_path_buf();
+        self.backend
+            .blocking(move |_| publish_renamed(&object_location, &from, &from_path, &key))
+            .await?;
         self.temp.mark_published();
-        trace_published(Some(self.temp.path()), &self.object_path);
-        sync_entry(&self.object_path).await?;
+        let object_dir = Arc::clone(&self.object.dir);
+        self.backend
+            .blocking(move |_| sync_dir(&object_dir))
+            .await?;
 
         Ok(object)
     }
@@ -968,20 +1129,43 @@ impl MultipartWriter for LocalMultipartWriter {
     async fn abort(self: Box<Self>) -> Result<(), StorageError> {
         let writer = *self;
         drop(writer.file);
-        let temp_result = tokio::fs::remove_file(writer.temp.path()).await;
-        let metadata_result = tokio::fs::remove_file(writer.metadata_temp.path()).await;
-
-        match temp_result {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(StorageError::io(writer.temp.path(), source)),
-        }
-        match metadata_result {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StorageError::io(writer.metadata_temp.path(), source)),
-        }
+        let temp = writer.temp;
+        let metadata_temp = writer.metadata_temp;
+        writer
+            .backend
+            .blocking(move |_| {
+                for staged in [&temp, &metadata_temp] {
+                    match staged.dir().remove_file(staged.name()) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(source) => return Err(StorageError::io(staged.path(), source)),
+                    }
+                }
+                let (mut temp, mut metadata_temp) = (temp, metadata_temp);
+                temp.mark_published();
+                metadata_temp.mark_published();
+                Ok(())
+            })
+            .await
     }
+}
+
+/// Renames the staged file `from` over `location`'s leaf, refusing a leaf
+/// that is a link.
+fn publish_renamed(
+    location: &Located,
+    from: &str,
+    from_path: &Path,
+    key: &str,
+) -> Result<(), StorageError> {
+    location.refuse_link_leaf(key)?;
+    let target = location.path();
+    location
+        .dir
+        .rename(from, &location.leaf)
+        .map_err(|source| StorageError::io(&target, source))?;
+    trace_published(Some(from_path), &target);
+    Ok(())
 }
 
 impl LocalStorageBackend {
@@ -994,25 +1178,34 @@ impl LocalStorageBackend {
     ) -> Result<BlobListPage, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
         self.check_root_name(prefix)?;
-        let start = listing_start(&self.root, prefix);
-        self.refuse_links(&start, prefix).await?;
-        let root = self.root.clone();
-        let internal = self.internal_dir();
         let prefix = prefix.to_string();
-        let (page, work) = tokio::task::spawn_blocking(move || {
-            let internal = same_file::Handle::from_path(internal).ok();
-            ListingWalk {
-                root: &root,
-                internal: internal.as_ref(),
-                prefix: &prefix,
-                resume: Resume::parse(continuation.as_deref()),
-                limit,
-                work: ListingWork::default(),
-            }
-            .run(start)
-        })
-        .await
-        .map_err(crate::local_multipart::join_error)??;
+        let (page, work) = self
+            .blocking(move |backend| {
+                let start_key = listing_start_key(&prefix).to_string();
+                let components: Vec<&str> = start_key
+                    .split('/')
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                let Some(start) = backend.open_dir_blocking(&components, &prefix)? else {
+                    return Ok((BlobListPage::default(), ListingWork::default()));
+                };
+                let internal = match backend.open_root()? {
+                    Some(root) => match root.info(INTERNAL_STORAGE_DIR) {
+                        Ok(Some(info)) if info.kind == Kind::Dir => Some(info.identity),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                ListingWalk {
+                    internal,
+                    prefix: &prefix,
+                    resume: Resume::parse(continuation.as_deref()),
+                    limit,
+                    work: ListingWork::default(),
+                }
+                .run(start, start_key.clone())
+            })
+            .await?;
         #[cfg(test)]
         listing_log::record(&self.root, work);
         #[cfg(not(test))]
@@ -1121,7 +1314,7 @@ impl Ord for ListedChild {
 
 /// A directory on the listing's current path.
 struct ListingFrame {
-    path: PathBuf,
+    dir: Dir,
     /// The directory's key; empty for the root.
     key: String,
     /// The smallest children not yet visited, largest first.
@@ -1135,9 +1328,9 @@ struct ListingFrame {
 }
 
 impl ListingFrame {
-    fn new(path: PathBuf, key: String) -> Self {
+    fn new(dir: Dir, key: String) -> Self {
         Self {
-            path,
+            dir,
             key,
             batch: Vec::new(),
             scanned: false,
@@ -1150,28 +1343,35 @@ impl ListingFrame {
 /// One page of a local listing.
 ///
 /// A depth-first walk from the prefix's directory that visits each
-/// directory's children in key order, so keys come out in byte order. It
-/// resumes at the continuation without revisiting what earlier pages
-/// covered: a subtree that sorts entirely before the position is skipped
-/// from its parent's entry, without being read, and only the directories on
-/// the path to the position are read again.
+/// directory's children in key order, so keys come out in byte order. Every
+/// directory is opened relative to its parent's held handle without
+/// following links, and links are neither listed nor entered. It resumes at
+/// the continuation without revisiting what earlier pages covered: a
+/// subtree that sorts entirely before the position is skipped from its
+/// parent's entry, without being read, and only the directories on the path
+/// to the position are read again.
 ///
-/// Work and memory are bounded by the page, not by the store:
+/// Memory is bounded by the page; work is bounded by the page and by the
+/// size of the directories it reads:
 ///
 /// - A directory read keeps only the smallest children still to visit, at
 ///   least the rest of the page plus one and at least [`LISTING_MIN_BATCH`],
 ///   and reads the directory again for later ones if the page needs them.
 ///   The walk holds at most that many entries per directory on its path,
-///   however large a directory is. Each read still reads every entry of the
-///   directory, since the file system does not return them in key order.
+///   however large a directory is.
+/// - Each read still reads every entry of the directory, since the file
+///   system returns entries in no particular order. A page's work therefore
+///   grows with the size of the largest directory it reads: a directory with
+///   `n` entries costs `n` entries per page that passes through it.
 /// - Entry types come from the directory read; no entry is inspected
-///   separately, and links are neither listed nor entered.
+///   separately except on a file system that does not report types.
 /// - After `2 * limit +` [`LISTING_SPARE_DIRECTORY_READS`] directory reads,
 ///   as when many directories hold no keys, the page ends with the keys it
 ///   found, possibly none, and a continuation. Every page makes progress.
 struct ListingWalk<'a> {
-    root: &'a Path,
-    internal: Option<&'a same_file::Handle>,
+    /// The identity of the internal directory, which is never entered under
+    /// any name.
+    internal: Option<(u64, u64)>,
     prefix: &'a str,
     resume: Resume<'a>,
     limit: usize,
@@ -1179,10 +1379,11 @@ struct ListingWalk<'a> {
 }
 
 impl ListingWalk<'_> {
-    fn run(mut self, start: PathBuf) -> Result<(BlobListPage, ListingWork), StorageError> {
-        let Some(start_key) = listed_key(self.root, &start) else {
-            return Ok((BlobListPage::default(), self.work));
-        };
+    fn run(
+        mut self,
+        start: Dir,
+        start_key: String,
+    ) -> Result<(BlobListPage, ListingWork), StorageError> {
         let budget = self
             .limit
             .saturating_mul(2)
@@ -1198,8 +1399,18 @@ impl ListingWalk<'_> {
             if let Some(child) = frame.batch.pop() {
                 frame.floor = Some(child.order);
                 if child.is_dir {
-                    let path = frame.path.join(&child.name);
-                    stack.push(ListingFrame::new(path, child.key));
+                    match frame.dir.child_dir(&child.name) {
+                        Ok(Some(dir)) => stack.push(ListingFrame::new(dir, child.key)),
+                        // Removed, or replaced by a link, since it was read.
+                        Ok(None) => {}
+                        Err(err) if local_fs::is_refusal(&err) => {}
+                        Err(source) => {
+                            return Err(StorageError::io(
+                                frame.dir.child_path(&child.name),
+                                source,
+                            ));
+                        }
+                    }
                 } else if keys.len() == self.limit {
                     // Another key exists after a full page.
                     next_continuation = keys.last().cloned();
@@ -1241,34 +1452,39 @@ impl ListingWalk<'_> {
     fn scan(&mut self, frame: &mut ListingFrame, keep: usize) -> Result<(), StorageError> {
         frame.scanned = true;
         frame.complete = true;
-        let entries = match std::fs::read_dir(&frame.path) {
-            Ok(entries) => entries,
-            // Removed since its parent was read, or not a directory: nothing
-            // below it is listed.
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(source) => return Err(StorageError::io(&frame.path, source)),
-        };
         self.work.directory_reads += 1;
         let mut smallest = std::collections::BinaryHeap::with_capacity(keep.saturating_add(1));
-        for entry in entries {
-            let entry = entry.map_err(|source| StorageError::io(&frame.path, source))?;
-            self.work.entries_read += 1;
-            let Some(child) = self.child(frame, &entry)? else {
-                continue;
-            };
-            smallest.push(child);
-            if smallest.len() > keep {
-                smallest.pop();
-                frame.complete = false;
+        let mut overflowed = false;
+        let mut failure = None;
+        let walk = &mut *self;
+        let result = frame.dir.for_each_entry(|entry| {
+            walk.work.entries_read += 1;
+            match walk.child(frame, &entry) {
+                Ok(Some(child)) => {
+                    smallest.push(child);
+                    if smallest.len() > keep {
+                        smallest.pop();
+                        overflowed = true;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    failure = Some(error);
+                    return Err(std::io::Error::other("listing stopped"));
+                }
             }
+            Ok(())
+        });
+        if let Some(error) = failure {
+            return Err(error);
         }
+        match result {
+            Ok(()) => {}
+            // Removed since its parent was read: nothing below it is listed.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StorageError::io(frame.dir.path(), source)),
+        }
+        frame.complete = !overflowed;
         let mut batch = smallest.into_sorted_vec();
         batch.reverse();
         frame.batch = batch;
@@ -1285,28 +1501,19 @@ impl ListingWalk<'_> {
     fn child(
         &self,
         frame: &ListingFrame,
-        entry: &std::fs::DirEntry,
+        entry: &local_fs::Entry,
     ) -> Result<Option<ListedChild>, StorageError> {
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
+        let Some(name) = entry.name.to_str() else {
             return Ok(None);
         };
         if cfg!(windows) && name.contains(':') {
             return Ok(None);
         }
-        // An entry removed since the directory was read is no longer listed.
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(StorageError::io(entry.path(), source)),
+        let is_dir = match entry.kind {
+            Kind::Dir => true,
+            Kind::File => false,
+            Kind::Link | Kind::Other => return Ok(None),
         };
-        if is_link(&file_type) {
-            return Ok(None);
-        }
-        let is_dir = file_type.is_dir();
-        if !is_dir && !file_type.is_file() {
-            return Ok(None);
-        }
         let mut order = name.as_bytes().to_vec();
         if is_dir {
             order.push(b'/');
@@ -1331,8 +1538,13 @@ impl ListingWalk<'_> {
             // A root entry that resolves to the internal directory under
             // another name is never entered.
             if frame.key.is_empty()
-                && self.internal.is_some()
-                && same_file::Handle::from_path(entry.path()).ok().as_ref() == self.internal
+                && let Some(internal) = self.internal
+                && frame
+                    .dir
+                    .info(name)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|info| info.identity == internal)
             {
                 return Ok(None);
             }
@@ -1351,37 +1563,13 @@ impl ListingWalk<'_> {
     }
 }
 
-/// The directory a listing for `prefix` starts from: the prefix up to its
-/// last `/`, below `base`. Every key the prefix matches lies below it.
-fn listing_start(base: &Path, prefix: &str) -> PathBuf {
+/// The key of the directory a listing for `prefix` starts from: the prefix
+/// up to its last `/`. Every key the prefix matches lies below it.
+fn listing_start_key(prefix: &str) -> &str {
     match prefix.rfind('/') {
-        Some(index) => base.join(&prefix[..index]),
-        None => base.to_path_buf(),
+        Some(index) => &prefix[..index],
+        None => "",
     }
-}
-
-/// The key `path` has below `base`, or `None` when no valid key names it: a
-/// name that is not valid UTF-8, contains `:` on Windows, or that
-/// [`validate_blob_key`] refuses, such as the reserved internal namespace. Every key below such a directory
-/// would contain the same component, so its whole subtree is skipped. `base`
-/// itself has the empty key.
-fn listed_key(base: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(base).ok()?;
-    let mut key = String::new();
-    for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            return None;
-        };
-        if !key.is_empty() {
-            key.push('/');
-        }
-        let name = name.to_str()?;
-        if cfg!(windows) && name.contains(':') {
-            return None;
-        }
-        key.push_str(name);
-    }
-    (key.is_empty() || validate_blob_key(&key).is_ok()).then_some(key)
 }
 
 /// Whether keys below the directory `key` may start with `prefix`.
@@ -1394,90 +1582,86 @@ fn directory_may_match(key: &str, prefix: &str) -> bool {
 }
 
 impl LocalStorageBackend {
-    /// Creates the directory that will hold `path` and makes it durable; see
-    /// [`Self::create_dir_durably`].
-    async fn create_parent_dir(&self, path: &Path) -> Result<(), StorageError> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| StorageError::MissingParent { path: path.into() })?
-            .to_path_buf();
-        let backend = self.clone();
-        tokio::task::spawn_blocking(move || backend.create_dir_durably(&parent))
-            .await
-            .map_err(crate::local_multipart::join_error)?
-    }
-
-    /// Creates `dir` and makes its entry, and each ancestor's entry up to the
-    /// root, durable before returning.
+    /// Opens the directory `components` below the root, creating what is
+    /// missing, and makes its entry, and each ancestor's entry up to the
+    /// root, durable before returning it.
     ///
-    /// Each directory from `dir` upward has its entry synced in its parent
-    /// until the walk reaches the root or a directory this backend remembers
-    /// as durable. A directory that existed is synced too, because another
-    /// writer may have created it and not synced it yet. A directory found
-    /// missing is forgotten before it is created, so a concurrent call cannot
-    /// trust it before this call has synced its entry. The root's own entry is
-    /// synced only when this call created the root. Directories are remembered
-    /// only after their whole chain synced, so a failed sync is retried by the
-    /// next write.
+    /// Every component is opened relative to its parent's held handle
+    /// without following links, and created there when missing, so a link
+    /// anywhere on the way is refused and nothing is ever created outside
+    /// the root. The root is created by its path when it is missing.
+    ///
+    /// Each directory from the deepest upward has its entry synced in its
+    /// parent until the walk reaches the root or a directory this backend
+    /// remembers as durable. A directory that existed is synced too, because
+    /// another writer may have created it and not synced it yet. A directory
+    /// found missing is forgotten before it is created, so a concurrent call
+    /// cannot trust it before this call has synced its entry. The root's own
+    /// entry is synced only when this call created the root. Directories are
+    /// remembered only after their whole chain synced, so a failed sync is
+    /// retried by the next write.
     ///
     /// The memory assumes nothing outside this backend removes directories
-    /// under the root while it runs, as the trusted-root contract requires: a
-    /// remembered directory removed and recreated elsewhere, and still present
-    /// when checked, remains trusted.
-    pub(crate) fn create_dir_durably(&self, dir: &Path) -> Result<(), StorageError> {
-        let mut missing = Vec::new();
-        let mut ancestor = dir;
-        loop {
-            match std::fs::metadata(ancestor) {
-                Ok(_) => break,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    missing.push(ancestor.to_path_buf());
-                    match ancestor.parent() {
-                        Some(next) if ancestor != self.root && !next.as_os_str().is_empty() => {
-                            ancestor = next;
-                        }
-                        _ => break,
-                    }
+    /// under the root while it runs: a remembered directory removed and
+    /// recreated elsewhere, and still present when checked, remains trusted.
+    pub(crate) fn prepare_dir_blocking(
+        &self,
+        components: &[&str],
+        key: &str,
+    ) -> Result<Arc<Dir>, StorageError> {
+        let mut root_created = false;
+        let root = match self.open_root()? {
+            Some(root) => root,
+            None => {
+                std::fs::create_dir_all(&self.root)
+                    .map_err(|source| StorageError::io(&self.root, source))?;
+                root_created = true;
+                self.open_root()?
+                    .ok_or_else(|| StorageError::MissingParent {
+                        path: self.root.clone(),
+                    })?
+            }
+        };
+        let mut chain: Vec<(Dir, bool)> = vec![(root, root_created)];
+        for name in components {
+            let parent = &chain.last().expect("the root").0;
+            let path = parent.child_path(name);
+            let opened = parent
+                .child_dir(name)
+                .map_err(|error| fs_error(error, key, &path))?;
+            let (child, created) = match opened {
+                Some(child) => (child, false),
+                None => {
+                    self.forget_durable(&path);
+                    let created = parent
+                        .create_dir(name)
+                        .map_err(|source| StorageError::io(&path, source))?;
+                    let child = parent
+                        .child_dir(name)
+                        .map_err(|error| fs_error(error, key, &path))?
+                        .ok_or_else(|| {
+                            StorageError::io(
+                                &path,
+                                std::io::Error::from(std::io::ErrorKind::NotADirectory),
+                            )
+                        })?;
+                    (child, created)
                 }
-                Err(source) => return Err(StorageError::io(ancestor, source)),
-            }
+            };
+            chain.push((child, created));
         }
-        if missing.is_empty() && (dir == self.root || self.is_durable_dir(dir)) {
-            return Ok(());
-        }
-        if !missing.is_empty() {
-            // Forget the missing directories before recreating them, so that a
-            // concurrent call that finds them present syncs their entries too.
-            let mut durable = self
-                .durable_dirs
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            for directory in &missing {
-                durable.remove(directory);
-            }
-        }
-
-        std::fs::create_dir_all(dir).map_err(|source| StorageError::io(dir, source))?;
 
         let mut synced = Vec::new();
-        let mut current = dir;
-        loop {
-            let created = missing.iter().any(|path| path == current);
-            if current == self.root || !current.starts_with(&self.root) {
-                if created {
-                    sync_dir_blocking(entry_dir(current)?)?;
-                }
+        for index in (1..chain.len()).rev() {
+            let (dir, created) = &chain[index];
+            if !created && self.is_durable_dir(dir.path()) {
                 break;
             }
-            if !created && self.is_durable_dir(current) {
-                break;
-            }
-            sync_dir_blocking(entry_dir(current)?)?;
-            synced.push(current.to_path_buf());
-            match current.parent() {
-                Some(parent) => current = parent,
-                None => break,
-            }
+            sync_dir(&chain[index - 1].0)?;
+            synced.push(dir.path().to_path_buf());
+        }
+        if root_created {
+            sync_dir_blocking(entry_dir(&self.root)?)?;
         }
 
         let mut durable = self
@@ -1488,7 +1672,8 @@ impl LocalStorageBackend {
             durable.clear();
         }
         durable.extend(synced);
-        Ok(())
+        drop(durable);
+        Ok(Arc::new(chain.pop().expect("the root").0))
     }
 
     fn is_durable_dir(&self, dir: &Path) -> bool {
@@ -1497,18 +1682,23 @@ impl LocalStorageBackend {
             .unwrap_or_else(|err| err.into_inner())
             .contains(dir)
     }
+
+    fn forget_durable(&self, dir: &Path) {
+        self.durable_dirs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(dir);
+    }
 }
 
-/// Derives the unique temporary path a write fills before renaming it over
-/// `path`: `.<uuid>.uploading` beside the target.
-///
-/// A target whose name is itself a temporary name is refused, so that listing
-/// and [`LocalStorageBackend::sweep_temp_files`] never mistake a caller's
-/// object for an interrupted upload.
-/// A temporary file a write owns until it publishes it. Dropping the guard
-/// before then, as a failed write or a cancelled or dropped write future does,
-/// removes the file, so an abandoned write leaves nothing behind.
+/// A temporary file a write owns until it publishes it, named
+/// `.<uuid>.uploading` in the target's held directory. Dropping the guard
+/// before then, as a failed write or a cancelled or dropped write future
+/// does, removes the file through the same directory handle, so an
+/// abandoned write leaves nothing behind.
 pub(crate) struct TempFile {
+    dir: Arc<Dir>,
+    name: String,
     path: PathBuf,
     /// Set once the file is renamed into place or removed on purpose.
     released: bool,
@@ -1518,16 +1708,29 @@ pub(crate) struct TempFile {
 }
 
 impl TempFile {
-    pub(crate) fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(dir: Arc<Dir>) -> Self {
+        let name = temp_file_name();
+        let path = dir.child_path(&name);
         Self {
+            dir,
+            name,
             path,
             released: false,
             abandoned: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// The file's path, for diagnostics and tracing only.
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn dir(&self) -> &Arc<Dir> {
+        &self.dir
     }
 
     /// Runs `operation`, which may create the file, on the blocking pool. A
@@ -1536,16 +1739,17 @@ impl TempFile {
     pub(crate) async fn run_blocking<T, F>(&self, operation: F) -> std::io::Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(&Path) -> std::io::Result<T> + Send + 'static,
+        F: FnOnce(&Dir, &str) -> std::io::Result<T> + Send + 'static,
     {
-        let path = self.path.clone();
+        let dir = Arc::clone(&self.dir);
+        let name = self.name.clone();
         let abandoned = Arc::clone(&self.abandoned);
         tokio::task::spawn_blocking(move || {
-            let result = operation(&path);
+            let result = operation(&dir, &name);
             // Pairs with the store in `Drop`: either the guard sees this
             // file and removes it, or this task sees the guard gone.
             if abandoned.load(Ordering::SeqCst) {
-                let _ = std::fs::remove_file(&path);
+                let _ = dir.remove_file(&name);
             }
             result
         })
@@ -1555,7 +1759,7 @@ impl TempFile {
 
     /// Creates the file for writing.
     pub(crate) async fn create(&self) -> Result<tokio::fs::File, StorageError> {
-        self.run_blocking(|path| std::fs::File::create(path))
+        self.run_blocking(|dir, name| dir.create_new(name))
             .await
             .map(tokio::fs::File::from_std)
             .map_err(|source| StorageError::io(&self.path, source))
@@ -1575,7 +1779,9 @@ impl TempFile {
     /// Removes the file, ignoring a failure. If this is cancelled, dropping
     /// the guard still removes it.
     pub(crate) async fn remove(mut self) {
-        let _ = tokio::fs::remove_file(&self.path).await;
+        let dir = Arc::clone(&self.dir);
+        let name = self.name.clone();
+        let _ = tokio::task::spawn_blocking(move || dir.remove_file(&name)).await;
         self.released = true;
     }
 }
@@ -1590,22 +1796,8 @@ impl Drop for TempFile {
         // may never run if the runtime is shutting down. It is one unlink of a
         // unique name; a write still in flight keeps its descriptor and
         // finishes harmlessly.
-        let _ = std::fs::remove_file(&self.path);
+        let _ = self.dir.remove_file(&self.name);
     }
-}
-
-pub(crate) fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageError> {
-    let invalid = || StorageError::InvalidStorageKey {
-        key: key.to_string(),
-    };
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(invalid)?;
-    if is_temp_file_name(file_name) {
-        return Err(invalid());
-    }
-    Ok(path.with_file_name(temp_file_name()))
 }
 
 async fn write_stream_to_temp(
@@ -1658,56 +1850,17 @@ async fn write_object_metadata(temp: &TempFile, object: &ObjectInfo) -> Result<(
 /// Whether `path` names a temporary upload file this backend writes. Only the
 /// exact `.<uuid>.uploading` form qualifies; any other name, including one
 /// that merely ends in `.uploading`, is a caller's object.
+#[cfg(test)]
 fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(is_temp_file_name)
 }
 
-fn is_older_than(metadata: &std::fs::Metadata, now: SystemTime, older_than: Duration) -> bool {
-    metadata
-        .modified()
-        .ok()
+fn is_older_than(modified: Option<SystemTime>, now: SystemTime, older_than: Duration) -> bool {
+    modified
         .and_then(|modified| now.duration_since(modified).ok())
         .is_some_and(|age| age >= older_than)
-}
-
-/// Lists the entries of the directory `path` in blob-key order.
-///
-/// Every key below a child directory `name` starts with `name/`, so a
-/// directory sorts as `name/` and a file as `name`, compared bytewise. A
-/// depth-first walk that visits children in this order yields keys in exactly
-/// the lexicographic order that listing continuations assume, including for
-/// siblings such as `a-b` or `a.b` whose bytes sort below `/`. Links sort as
-/// files: the walks never follow them.
-async fn sorted_child_paths(path: &Path) -> Result<Vec<PathBuf>, StorageError> {
-    let mut entries = tokio::fs::read_dir(path)
-        .await
-        .map_err(|source| StorageError::io(path, source))?;
-    let mut children = Vec::new();
-
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|source| StorageError::io(path, source))?
-    {
-        let child = entry.path();
-        // An entry removed since the directory was read is no longer listed.
-        let file_type = match entry.file_type().await {
-            Ok(file_type) => file_type,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(StorageError::io(&child, source)),
-        };
-        let is_dir = file_type.is_dir();
-        let mut order = entry.file_name().into_encoded_bytes();
-        if is_dir {
-            order.push(b'/');
-        }
-        children.push((order, child));
-    }
-
-    children.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    Ok(children.into_iter().map(|(_, child)| child).collect())
 }
 
 /// Flushes a written file's data and metadata to stable storage before it is
@@ -1720,15 +1873,32 @@ async fn sync_file(file: &tokio::fs::File, path: &Path) -> Result<(), StorageErr
     Ok(())
 }
 
-/// Makes a creation, rename, link or removal of an entry in `dir` durable.
-async fn sync_dir(dir: &Path) -> Result<(), StorageError> {
-    let dir = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || sync_dir_blocking(&dir))
-        .await
-        .map_err(crate::local_multipart::join_error)?
+/// Makes a creation, rename, link or removal of an entry in the held
+/// directory `dir` durable; see [`sync_dir_blocking`] for the platforms and
+/// errors.
+pub(crate) fn sync_dir(dir: &Dir) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    {
+        #[cfg(test)]
+        if durability_log::take_injected_failure(dir.path()) {
+            return Err(StorageError::io(
+                dir.path(),
+                std::io::Error::from_raw_os_error(5),
+            ));
+        }
+        match dir.sync() {
+            Ok(()) => trace(DurabilityStep::DirSynced, dir.path()),
+            Err(err) if directory_sync_unsupported(&err) => {}
+            Err(source) => return Err(StorageError::io(dir.path(), source)),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// Makes a creation, rename, link or removal of an entry in `dir` durable.
+/// Used only for the directory holding the root, which is outside it.
 ///
 /// Directory entries are synced on Unix only. Other platforms do not expose a
 /// directory sync through the standard library and rely on the file system to
@@ -1783,50 +1953,12 @@ fn directory_sync_unsupported(err: &std::io::Error) -> bool {
     KNOWN_DIRECTORY_SYNC_ERRNOS && matches!(err.raw_os_error(), Some(EBADF | EINVAL))
 }
 
-/// Opens a file that was written by another call, such as a copy, and syncs it.
-async fn sync_written_file(path: &Path) -> Result<(), StorageError> {
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .await
-        .map_err(|source| StorageError::io(path, source))?;
-    sync_file(&file, path).await
-}
-
-/// Removes `path` and makes the removal durable. A missing file is success,
-/// and its directory is still synced when it exists, so repeating a deletion
-/// whose sync failed completes it.
-async fn remove_durably(path: &Path) -> Result<(), StorageError> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => trace_published(None, path),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => return Err(StorageError::io(path, source)),
-    }
-    sync_entry_if_present(path).await
-}
-
 /// The directory whose entry names `path`.
 fn entry_dir(path: &Path) -> Result<&Path, StorageError> {
     match path.parent() {
         Some(parent) if parent.as_os_str().is_empty() => Ok(Path::new(".")),
         Some(parent) => Ok(parent),
         None => Err(StorageError::MissingParent { path: path.into() }),
-    }
-}
-
-/// Makes the entry for `path` durable after it was renamed, linked or removed.
-async fn sync_entry(path: &Path) -> Result<(), StorageError> {
-    sync_dir(entry_dir(path)?).await
-}
-
-/// Like [`sync_entry`], but succeeds when the directory itself is gone, so a
-/// repeated deletion of a missing key still makes an earlier removal durable.
-async fn sync_entry_if_present(path: &Path) -> Result<(), StorageError> {
-    match sync_entry(path).await {
-        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            Ok(())
-        }
-        result => result,
     }
 }
 
@@ -2086,12 +2218,16 @@ mod durability_tests {
             )
             .await
             .expect("put object stream");
-        let object_path = backend
-            .object_path_for(&object.bucket, &object.key)
-            .expect("object path");
-        let metadata_path = backend
-            .object_metadata_path_for(&object.bucket, &object.key)
-            .expect("metadata path");
+        let object_path = temp.path().join(
+            backend
+                .object_rel_for(&object.bucket, &object.key)
+                .expect("object path"),
+        );
+        let metadata_path = temp.path().join(
+            backend
+                .object_metadata_rel_for(&object.bucket, &object.key)
+                .expect("metadata path"),
+        );
 
         let steps = durability_log::take_under(temp.path());
         assert_durably_published(&steps, &object_path);
@@ -2425,6 +2561,154 @@ pub(crate) mod listing_log {
             .partition(|(recorded, _): &(PathBuf, PageWork)| recorded == root);
         *pages = others;
         mine.into_iter().map(|(_, work)| work).collect()
+    }
+}
+
+/// Test-only hook that runs once a key's directory is resolved and before
+/// the operation uses it, to replace directories while an operation runs.
+#[cfg(test)]
+pub(crate) mod race_hook {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    static HOOKS: Mutex<Vec<(PathBuf, Hook)>> = Mutex::new(Vec::new());
+
+    /// Runs `hook` the next time an operation under `root` resolves a key.
+    pub(crate) fn set(root: &Path, hook: impl FnOnce() + Send + 'static) {
+        HOOKS
+            .lock()
+            .expect("race hooks")
+            .push((root.to_path_buf(), Box::new(hook)));
+    }
+
+    pub(crate) fn fire(root: &Path) {
+        let hook = {
+            let mut hooks = HOOKS.lock().expect("race hooks");
+            hooks
+                .iter()
+                .position(|(hooked, _)| hooked == root)
+                .map(|index| hooks.remove(index).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+/// A directory replaced by a link to outside the root after an operation
+/// resolved it never redirects the operation: it keeps using the directory
+/// handle it holds.
+#[cfg(all(test, unix))]
+mod race_tests {
+    use std::path::{Path, PathBuf};
+
+    use bytes::Bytes;
+    use tempfile::TempDir;
+
+    use super::{LocalStorageBackend, race_hook};
+    use crate::{BlobPutOptions, BlobStore, StorageByteStream, collect_storage_stream};
+
+    struct Fixture {
+        _owned: TempDir,
+        root: PathBuf,
+        outside: PathBuf,
+        backend: LocalStorageBackend,
+    }
+
+    async fn fixture() -> Fixture {
+        let owned = TempDir::new().expect("temp dir");
+        let root = owned.path().join("root");
+        let outside = owned.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("x"), b"outside").expect("outside file");
+        let backend = LocalStorageBackend::new(&root);
+        backend
+            .put_blob(
+                "dir/x",
+                StorageByteStream::from_bytes(Bytes::from_static(b"inside")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("seed");
+        Fixture {
+            _owned: owned,
+            root,
+            outside,
+            backend,
+        }
+    }
+
+    /// Once the operation has resolved `dir`, moves it to `moved` and puts a
+    /// link to the outside directory in its place.
+    fn swap_after_resolution(root: &Path, outside: &Path) {
+        let (root, outside) = (root.to_path_buf(), outside.to_path_buf());
+        race_hook::set(&root.clone(), move || {
+            std::fs::rename(root.join("dir"), root.join("moved")).expect("move directory");
+            std::os::unix::fs::symlink(&outside, root.join("dir")).expect("link");
+        });
+    }
+
+    fn outside_untouched(fixture: &Fixture) {
+        let names: Vec<_> = std::fs::read_dir(&fixture.outside)
+            .expect("outside")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["x"], "nothing created outside the root");
+        assert_eq!(
+            std::fs::read(fixture.outside.join("x")).expect("outside file"),
+            b"outside"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_keeps_the_directory_it_resolved() {
+        let fixture = fixture().await;
+        swap_after_resolution(&fixture.root, &fixture.outside);
+        fixture
+            .backend
+            .put_blob(
+                "dir/new",
+                StorageByteStream::from_bytes(Bytes::from_static(b"written")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("the write completes in the directory it resolved");
+        outside_untouched(&fixture);
+        assert_eq!(
+            std::fs::read(fixture.root.join("moved/new")).expect("written"),
+            b"written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_keeps_the_directory_it_resolved() {
+        let fixture = fixture().await;
+        swap_after_resolution(&fixture.root, &fixture.outside);
+        let read = fixture.backend.get_blob("dir/x").await.expect("read");
+        assert_eq!(
+            collect_storage_stream(read.body).await.expect("body"),
+            Bytes::from_static(b"inside"),
+            "the read never reaches the outside file"
+        );
+        // A new operation resolves the link and is refused.
+        let again = fixture.backend.get_blob("dir/x").await.map(|_| ());
+        assert!(
+            matches!(again, Err(crate::StorageError::InvalidStorageKey { .. })),
+            "{again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_keeps_the_directory_it_resolved() {
+        let fixture = fixture().await;
+        swap_after_resolution(&fixture.root, &fixture.outside);
+        fixture.backend.delete_blob("dir/x").await.expect("delete");
+        outside_untouched(&fixture);
+        assert!(!fixture.root.join("moved/x").exists());
     }
 }
 

@@ -6,6 +6,13 @@
 //! name, fsynced and renamed into place, so a crash leaves either the previous
 //! or the new state. Staged parts survive a restart.
 //!
+//! Every staging file is reached the way the rest of local storage reaches
+//! its files: from the root, one component at a time relative to held
+//! directory handles, never following a link. A manifest, receipt or part
+//! file that is a link, or that shares its data with another hard link, is
+//! refused with `InvalidStorageKey`, so completion never assembles bytes
+//! from outside the store.
+//!
 //! Receipt commits, completion and abort hold an exclusive advisory lock on
 //! `<id>.lock` beside the directory. The operating system releases it when a
 //! process exits, so a crash never leaves an upload locked. A part upload,
@@ -13,9 +20,9 @@
 //! still exists, which gives a completion racing an abort exactly one outcome.
 
 use std::{
-    fs::File,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -26,10 +33,12 @@ use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+use crate::key::temp_file_name;
 use crate::local::{
-    DurabilityStep, INTERNAL_STORAGE_DIR, LocalStorageBackend, refuse_links_below,
-    sync_dir_blocking as sync_dir, temp_path_for, trace, trace_published,
+    DurabilityStep, INTERNAL_STORAGE_DIR, LocalStorageBackend, check_leaf, fs_error, sync_dir,
+    trace, trace_published,
 };
+use crate::local_fs::{Dir, Kind};
 use crate::multipart::{check_handle, check_part_number, multipart_error, verify_receipts};
 use crate::{
     BlobWriteOutcome, IncompleteMultipartPage, IncompleteMultipartUpload, MultipartBlobStore,
@@ -39,6 +48,8 @@ use crate::{
 };
 
 const MULTIPART_DIR: &str = "multipart";
+/// The uploads directory below the root.
+const UPLOADS: [&str; 2] = [INTERNAL_STORAGE_DIR, MULTIPART_DIR];
 const MANIFEST: &str = "manifest.json";
 const MANIFEST_FORMAT: u8 = 1;
 /// Largest local part by default; only S3 imposes a minimum part size.
@@ -61,17 +72,17 @@ struct StoredPart {
     data_file: String,
 }
 
-impl LocalStorageBackend {
-    fn uploads_dir(&self) -> PathBuf {
-        self.root().join(INTERNAL_STORAGE_DIR).join(MULTIPART_DIR)
-    }
+/// The held uploads directory and the upload's own directory in it.
+struct Upload {
+    uploads: Arc<Dir>,
+    dir: Arc<Dir>,
+}
 
-    /// The upload directory and lock path. Identifiers are v4 UUIDs, so a
-    /// handle can never name a path outside the uploads directory.
-    fn upload_paths(
-        &self,
-        handle: &MultipartUploadHandle,
-    ) -> Result<(PathBuf, PathBuf), StorageError> {
+impl LocalStorageBackend {
+    /// The upload's identifier. Identifiers are v4 UUIDs in their canonical
+    /// form, so a handle can never name a path outside the uploads
+    /// directory.
+    fn upload_id(&self, handle: &MultipartUploadHandle) -> Result<String, StorageError> {
         check_handle(handle, StorageBackend::Local)?;
         let id = Uuid::parse_str(&handle.upload_id)
             .map_err(|_| multipart_error(&handle.key, MultipartErrorKind::UnknownUpload))?;
@@ -82,9 +93,31 @@ impl LocalStorageBackend {
                 MultipartErrorKind::UnknownUpload,
             ));
         }
-        let uploads = self.uploads_dir();
-        Ok((uploads.join(&id), uploads.join(format!("{id}.lock"))))
+        Ok(id)
     }
+
+    /// The uploads directory, or `None` when no upload was ever started.
+    fn uploads_blocking(&self, key: &str) -> Result<Option<Arc<Dir>>, StorageError> {
+        Ok(self.open_dir_blocking(&UPLOADS, key)?.map(Arc::new))
+    }
+
+    /// The upload `id`, or `None` when it does not exist.
+    fn upload_blocking(&self, id: &str, key: &str) -> Result<Option<Upload>, StorageError> {
+        let Some(uploads) = self.uploads_blocking(key)? else {
+            return Ok(None);
+        };
+        let dir = uploads
+            .child_dir(id)
+            .map_err(|error| fs_error(error, key, &uploads.child_path(id)))?;
+        Ok(dir.map(|dir| Upload {
+            uploads,
+            dir: Arc::new(dir),
+        }))
+    }
+}
+
+fn lock_name(id: &str) -> String {
+    format!("{id}.lock")
 }
 
 fn part_receipt_name(part_number: u32) -> String {
@@ -93,6 +126,10 @@ fn part_receipt_name(part_number: u32) -> String {
 
 fn io(path: &Path) -> impl FnOnce(std::io::Error) -> StorageError + '_ {
     move |source| StorageError::io(path, source)
+}
+
+fn not_found(path: &Path) -> StorageError {
+    StorageError::io(path, std::io::ErrorKind::NotFound.into())
 }
 
 pub(crate) fn join_error(error: tokio::task::JoinError) -> StorageError {
@@ -111,38 +148,38 @@ fn json_error(error: serde_json::Error) -> StorageError {
     }
 }
 
-/// Write `bytes` to `path` through a fsynced temporary file and an atomic rename.
-fn write_durably(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| StorageError::MissingParent { path: path.into() })?;
-    let temp = dir.join(format!(".{}.tmp", Uuid::new_v4()));
+/// Write `bytes` to `name` in `dir` through a fsynced temporary file and an
+/// atomic rename.
+fn write_durably(dir: &Dir, name: &str, bytes: &[u8]) -> Result<(), StorageError> {
+    let temp = format!(".{}.tmp", Uuid::new_v4());
+    let temp_path = dir.child_path(&temp);
+    let path = dir.child_path(name);
     let result = (|| {
-        let mut file = File::create(&temp).map_err(io(&temp))?;
-        file.write_all(bytes).map_err(io(&temp))?;
-        file.sync_all().map_err(io(&temp))?;
-        std::fs::rename(&temp, path).map_err(io(path))?;
+        let mut file = dir.create_new(&temp).map_err(io(&temp_path))?;
+        file.write_all(bytes).map_err(io(&temp_path))?;
+        file.sync_all().map_err(io(&temp_path))?;
+        dir.rename(&temp, name).map_err(io(&path))?;
         sync_dir(dir)
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        let _ = dir.remove_file(&temp);
     }
     result
 }
 
 /// Run `operation` while holding the upload's exclusive lock.
 async fn locked<T: Send + 'static>(
-    lock: PathBuf,
+    uploads: Arc<Dir>,
+    lock: String,
+    key: String,
     operation: impl FnOnce() -> Result<T, StorageError> + Send + 'static,
 ) -> Result<T, StorageError> {
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock)
-            .map_err(io(&lock))?;
-        file.lock().map_err(io(&lock))?;
+        let path = uploads.child_path(&lock);
+        let file = uploads
+            .open_or_create(&lock)
+            .map_err(|error| fs_error(error, &key, &path))?;
+        file.lock().map_err(io(&path))?;
         let result = operation();
         drop(file);
         result
@@ -151,35 +188,46 @@ async fn locked<T: Send + 'static>(
     .map_err(join_error)?
 }
 
-fn read_manifest(dir: &Path) -> Result<Option<Manifest>, StorageError> {
-    let path = dir.join(MANIFEST);
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(json_error),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(StorageError::io(path, source)),
+/// Reads the whole regular file `name` in `dir` without following a link,
+/// or `None` when it does not exist.
+fn read_file(dir: &Dir, name: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+    let path = dir.child_path(name);
+    let Some(mut file) = dir
+        .open_read(name)
+        .map_err(|error| fs_error(error, key, &path))?
+    else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(io(&path))?;
+    Ok(Some(bytes))
+}
+
+fn read_manifest(dir: &Dir, key: &str) -> Result<Option<Manifest>, StorageError> {
+    match read_file(dir, MANIFEST, key)? {
+        Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(json_error),
+        None => Ok(None),
     }
 }
 
-fn read_stored_parts(dir: &Path) -> Result<Vec<StoredPart>, StorageError> {
+fn read_stored_parts(dir: &Dir, key: &str) -> Result<Vec<StoredPart>, StorageError> {
     let mut parts = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match dir.entries() {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(parts),
-        Err(source) => return Err(StorageError::io(dir, source)),
+        Err(source) => return Err(StorageError::io(dir.path(), source)),
     };
     for entry in entries {
-        let path = entry.map_err(io(dir))?.path();
-        let is_receipt = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("part-") && name.ends_with(".json"));
-        if !is_receipt {
+        let Some(name) = entry.name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with("part-") && name.ends_with(".json")) {
             continue;
         }
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(StorageError::io(path, source)),
+        // A receipt that is a link, or anything but a regular file, is
+        // refused by the read below rather than skipped.
+        let Some(bytes) = read_file(dir, name, key)? else {
+            continue;
         };
         parts.push(serde_json::from_slice(&bytes).map_err(json_error)?);
     }
@@ -187,14 +235,24 @@ fn read_stored_parts(dir: &Path) -> Result<Vec<StoredPart>, StorageError> {
     Ok(parts)
 }
 
+/// Opens the regular file `name` in `dir` for reading without following a
+/// link; a missing file is an error.
+fn open_existing(dir: &Dir, name: &str, key: &str) -> Result<std::fs::File, StorageError> {
+    let path = dir.child_path(name);
+    dir.open_read(name)
+        .map_err(|error| fs_error(error, key, &path))?
+        .ok_or_else(|| not_found(&path))
+}
+
 /// Size and lowercase hex SHA-256 of an existing file.
-fn file_digest(path: &Path) -> Result<(u64, String), StorageError> {
-    let mut input = File::open(path).map_err(io(path))?;
+fn file_digest(dir: &Dir, name: &str, key: &str) -> Result<(u64, String), StorageError> {
+    let path = dir.child_path(name);
+    let mut input = open_existing(dir, name, key)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut size = 0_u64;
     loop {
-        let read = input.read(&mut buffer).map_err(io(path))?;
+        let read = input.read(&mut buffer).map_err(io(&path))?;
         if read == 0 {
             break;
         }
@@ -204,14 +262,21 @@ fn file_digest(path: &Path) -> Result<(u64, String), StorageError> {
     Ok((size, format!("{:x}", hasher.finalize())))
 }
 
-/// Stream a part into `path`, hashing it and refusing it once it exceeds `max`.
+/// Stream a part into the new file `name` in `dir`, hashing it and refusing
+/// it once it exceeds `max`.
 async fn write_part(
     key: &str,
-    path: &Path,
+    dir: Arc<Dir>,
+    name: String,
     body: StorageByteStream,
     max: u64,
 ) -> Result<(u64, String), StorageError> {
-    let mut file = tokio::fs::File::create(path).await.map_err(io(path))?;
+    let path = dir.child_path(&name);
+    let file = tokio::task::spawn_blocking(move || dir.create_new(&name))
+        .await
+        .map_err(join_error)?
+        .map_err(io(&path))?;
+    let mut file = tokio::fs::File::from_std(file);
     let mut stream = body.into_inner();
     let mut hasher = Sha256::new();
     let mut size = 0_u64;
@@ -222,9 +287,9 @@ async fn write_part(
             return Err(multipart_error(key, MultipartErrorKind::PartTooLarge));
         }
         hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(io(path))?;
+        file.write_all(&chunk).await.map_err(io(&path))?;
     }
-    file.sync_all().await.map_err(io(path))?;
+    file.sync_all().await.map_err(io(&path))?;
     Ok((size, format!("{:x}", hasher.finalize())))
 }
 
@@ -242,11 +307,9 @@ impl MultipartBlobStore for LocalStorageBackend {
         // Refuse a key the completed upload could not be written to.
         self.ensure_internal_dir();
         self.check_write_key(key)?;
-        temp_path_for(&self.resolve(key).await?, key)?;
+        let rel = self.rel_for(key)?;
+        check_leaf(&rel, key)?;
         let id = Uuid::new_v4().hyphenated().to_string();
-        let uploads = self.uploads_dir();
-        self.refuse_links(&uploads, key).await?;
-        let dir = uploads.join(&id);
         let manifest = Manifest {
             format_version: MANIFEST_FORMAT,
             key: key.to_string(),
@@ -255,15 +318,28 @@ impl MultipartBlobStore for LocalStorageBackend {
             started_at_unix: OffsetDateTime::now_utc().unix_timestamp(),
         };
         let bytes = serde_json::to_vec(&manifest).map_err(json_error)?;
-        let backend = self.clone();
-        tokio::task::spawn_blocking(move || {
-            backend.create_dir_durably(&uploads)?;
-            std::fs::create_dir(&dir).map_err(io(&dir))?;
+        let owned_key = key.to_string();
+        let upload_id = id.clone();
+        self.blocking(move |backend| {
+            if let Some(target) = backend.locate_blocking(&rel, &owned_key)? {
+                target.refuse_link_leaf(&owned_key)?;
+            }
+            let uploads = backend.prepare_dir_blocking(&UPLOADS, &owned_key)?;
+            let path = uploads.child_path(&upload_id);
+            if !uploads.create_dir(&upload_id).map_err(io(&path))? {
+                return Err(StorageError::io(
+                    &path,
+                    std::io::ErrorKind::AlreadyExists.into(),
+                ));
+            }
             sync_dir(&uploads)?;
-            write_durably(&dir.join(MANIFEST), &bytes)
+            let dir = uploads
+                .child_dir(&upload_id)
+                .map_err(|error| fs_error(error, &owned_key, &path))?
+                .ok_or_else(|| not_found(&path))?;
+            write_durably(&dir, MANIFEST, &bytes)
         })
-        .await
-        .map_err(join_error)??;
+        .await?;
         Ok(MultipartUploadHandle {
             backend: StorageBackend::Local,
             key: key.to_string(),
@@ -278,25 +354,31 @@ impl MultipartBlobStore for LocalStorageBackend {
         part_number: u32,
         body: StorageByteStream,
     ) -> Result<PartReceipt, StorageError> {
-        let (dir, lock) = self.upload_paths(handle)?;
-        self.refuse_links(&dir, &handle.key).await?;
+        let id = self.upload_id(handle)?;
         check_part_number(&handle.key, part_number, self.multipart_limits())?;
         let unknown = || multipart_error(&handle.key, MultipartErrorKind::UnknownUpload);
-        let manifest_dir = dir.clone();
-        let manifest = tokio::task::spawn_blocking(move || read_manifest(&manifest_dir))
-            .await
-            .map_err(join_error)??;
-        if manifest.is_none_or(|manifest| manifest.key != handle.key) {
-            return Err(unknown());
-        }
+        let key = handle.key.clone();
+        let lookup_id = id.clone();
+        let upload = self
+            .blocking(move |backend| {
+                let Some(upload) = backend.upload_blocking(&lookup_id, &key)? else {
+                    return Ok(None);
+                };
+                let manifest = read_manifest(&upload.dir, &key)?;
+                Ok(manifest
+                    .filter(|manifest| manifest.key == key)
+                    .map(|_| upload))
+            })
+            .await?
+            .ok_or_else(unknown)?;
 
         // The data file has a unique name, so concurrent uploads of one part
         // number never write the same file; the receipt rename picks one.
         let data_file = format!("part-{part_number:05}.{}.data", Uuid::new_v4());
-        let data_path = dir.join(&data_file);
         let written = write_part(
             &handle.key,
-            &data_path,
+            Arc::clone(&upload.dir),
+            data_file.clone(),
             body,
             self.multipart_max_part_size(),
         )
@@ -304,7 +386,9 @@ impl MultipartBlobStore for LocalStorageBackend {
         let (size_bytes, sha256) = match written {
             Ok(written) => written,
             Err(error) => {
-                let _ = tokio::fs::remove_file(&data_path).await;
+                let dir = Arc::clone(&upload.dir);
+                let name = data_file.clone();
+                let _ = tokio::task::spawn_blocking(move || dir.remove_file(&name)).await;
                 return Err(error);
             }
         };
@@ -319,22 +403,24 @@ impl MultipartBlobStore for LocalStorageBackend {
             data_file,
         };
         let key = handle.key.clone();
-        locked(lock, move || {
-            if read_manifest(&dir)?.is_none() {
-                let _ = std::fs::remove_file(&data_path);
+        let dir = Arc::clone(&upload.dir);
+        locked(upload.uploads, lock_name(&id), key.clone(), move || {
+            if read_manifest(&dir, &key)?.is_none() {
+                let _ = dir.remove_file(&stored.data_file);
                 return Err(multipart_error(&key, MultipartErrorKind::UnknownUpload));
             }
-            let receipt_path = dir.join(part_receipt_name(part_number));
-            let previous = std::fs::read(&receipt_path)
+            let receipt_name = part_receipt_name(part_number);
+            let previous = read_file(&dir, &receipt_name, &key)
                 .ok()
+                .flatten()
                 .and_then(|bytes| serde_json::from_slice::<StoredPart>(&bytes).ok());
             sync_dir(&dir)?;
             let bytes = serde_json::to_vec(&stored).map_err(json_error)?;
-            write_durably(&receipt_path, &bytes)?;
+            write_durably(&dir, &receipt_name, &bytes)?;
             if let Some(previous) = previous
                 && previous.data_file != stored.data_file
             {
-                let _ = std::fs::remove_file(dir.join(previous.data_file));
+                let _ = dir.remove_file(&previous.data_file);
             }
             Ok(())
         })
@@ -346,20 +432,20 @@ impl MultipartBlobStore for LocalStorageBackend {
         &self,
         handle: &MultipartUploadHandle,
     ) -> Result<Vec<PartReceipt>, StorageError> {
-        let (dir, _) = self.upload_paths(handle)?;
-        self.refuse_links(&dir, &handle.key).await?;
+        let id = self.upload_id(handle)?;
         let key = handle.key.clone();
-        tokio::task::spawn_blocking(move || {
-            if read_manifest(&dir)?.is_none_or(|manifest| manifest.key != key) {
-                return Err(multipart_error(&key, MultipartErrorKind::UnknownUpload));
+        self.blocking(move |backend| {
+            let unknown = || multipart_error(&key, MultipartErrorKind::UnknownUpload);
+            let upload = backend.upload_blocking(&id, &key)?.ok_or_else(unknown)?;
+            if read_manifest(&upload.dir, &key)?.is_none_or(|manifest| manifest.key != key) {
+                return Err(unknown());
             }
-            Ok(read_stored_parts(&dir)?
+            Ok(read_stored_parts(&upload.dir, &key)?
                 .into_iter()
                 .map(|part| part.receipt)
                 .collect())
         })
         .await
-        .map_err(join_error)?
     }
 
     async fn complete_multipart(
@@ -367,112 +453,138 @@ impl MultipartBlobStore for LocalStorageBackend {
         handle: &MultipartUploadHandle,
         parts: &[PartReceipt],
     ) -> Result<MultipartCompleteOutcome, StorageError> {
-        let (dir, lock) = self.upload_paths(handle)?;
-        self.refuse_links(&dir, &handle.key).await?;
-        let target = self.resolve(&handle.key).await?;
+        let id = self.upload_id(handle)?;
+        // Completion publishes the object, so the key policy applies here as
+        // it does to every other write: an upload started before canonical
+        // keys were enabled cannot publish a key they refuse.
+        self.check_write_key(&handle.key)?;
+        let rel = self.rel_for(&handle.key)?;
         // Refuse a temporary-shaped key before taking the lock or creating any
         // directory.
-        let temp = temp_path_for(&target, &handle.key)?;
+        check_leaf(&rel, &handle.key)?;
         let key = handle.key.clone();
         let parts = parts.to_vec();
         let limits = self.multipart_limits();
         let handle_condition = handle.if_not_exists;
-        let lock_path = lock.clone();
+        let lookup_key = key.clone();
+        let uploads = self
+            .blocking(move |backend| backend.uploads_blocking(&lookup_key))
+            .await?
+            .ok_or_else(|| multipart_error(&handle.key, MultipartErrorKind::UnknownUpload))?;
         let backend = self.clone();
-        let outcome = locked(lock, move || {
-            let manifest = read_manifest(&dir)?
-                .filter(|manifest| manifest.key == key)
-                .ok_or_else(|| multipart_error(&key, MultipartErrorKind::UnknownUpload))?;
-            let stored = read_stored_parts(&dir)?;
-            let receipts = stored
-                .iter()
-                .map(|part| part.receipt.clone())
-                .collect::<Vec<_>>();
-            verify_receipts(&key, &receipts, &parts, limits)?;
+        let held = Arc::clone(&uploads);
+        let upload_id = id.clone();
+        let outcome = locked(
+            Arc::clone(&uploads),
+            lock_name(&id),
+            key.clone(),
+            move || {
+                let unknown = || multipart_error(&key, MultipartErrorKind::UnknownUpload);
+                let dir = held
+                    .child_dir(&upload_id)
+                    .map_err(|error| fs_error(error, &key, &held.child_path(&upload_id)))?
+                    .ok_or_else(unknown)?;
+                let manifest = read_manifest(&dir, &key)?
+                    .filter(|manifest| manifest.key == key)
+                    .ok_or_else(unknown)?;
+                let stored = read_stored_parts(&dir, &key)?;
+                let receipts = stored
+                    .iter()
+                    .map(|part| part.receipt.clone())
+                    .collect::<Vec<_>>();
+                verify_receipts(&key, &receipts, &parts, limits)?;
 
-            let parent = target.parent().ok_or_else(|| StorageError::MissingParent {
-                path: target.clone(),
-            })?;
-            // Checked again under the lock, just before the target's
-            // directories are created and the object is published.
-            refuse_links_below(backend.root(), &target, &key)?;
-            backend.create_dir_durably(parent)?;
-            let assembled = (|| {
-                let mut output = File::create(&temp).map_err(io(&temp))?;
-                let mut hasher = Sha256::new();
-                let mut size_bytes = 0_u64;
-                let mut buffer = vec![0_u8; 1024 * 1024];
-                for part in &stored {
-                    let path = dir.join(&part.data_file);
-                    let mut input = File::open(&path).map_err(io(&path))?;
-                    let mut part_size = 0_u64;
-                    let mut part_hasher = Sha256::new();
-                    loop {
-                        let read = input.read(&mut buffer).map_err(io(&path))?;
-                        if read == 0 {
-                            break;
+                let target = backend.prepare_blocking(&rel, &key)?;
+                let target_path = target.path();
+                let temp = temp_file_name();
+                let temp_path = target.dir.child_path(&temp);
+                let assembled = (|| {
+                    let mut output = target.dir.create_new(&temp).map_err(io(&temp_path))?;
+                    let mut hasher = Sha256::new();
+                    let mut size_bytes = 0_u64;
+                    let mut buffer = vec![0_u8; 1024 * 1024];
+                    for part in &stored {
+                        let path = dir.child_path(&part.data_file);
+                        // Part data is opened like any other read: never through
+                        // a link, and never a file another hard link shares.
+                        let mut input = open_existing(&dir, &part.data_file, &key)?;
+                        let mut part_size = 0_u64;
+                        let mut part_hasher = Sha256::new();
+                        loop {
+                            let read = input.read(&mut buffer).map_err(io(&path))?;
+                            if read == 0 {
+                                break;
+                            }
+                            part_hasher.update(&buffer[..read]);
+                            hasher.update(&buffer[..read]);
+                            output.write_all(&buffer[..read]).map_err(io(&temp_path))?;
+                            part_size += read as u64;
                         }
-                        part_hasher.update(&buffer[..read]);
-                        hasher.update(&buffer[..read]);
-                        output.write_all(&buffer[..read]).map_err(io(&temp))?;
-                        part_size += read as u64;
-                    }
-                    // A part file changed on disk after its receipt was written.
-                    if part_size != part.receipt.size_bytes
-                        || format!("{:x}", part_hasher.finalize()) != part.receipt.sha256
-                    {
-                        return Err(multipart_error(&key, MultipartErrorKind::ReceiptMismatch));
-                    }
-                    size_bytes += part_size;
-                }
-                output.sync_all().map_err(io(&temp))?;
-                trace(DurabilityStep::FileSynced, &temp);
-                Ok(BlobWriteOutcome {
-                    size_bytes,
-                    sha256_hex: format!("{:x}", hasher.finalize()),
-                })
-            })();
-            let outcome = match assembled {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(error);
-                }
-            };
-
-            let published = if manifest.if_not_exists || handle_condition {
-                match std::fs::hard_link(&temp, &target) {
-                    Ok(()) => Ok(()),
-                    // A completion that crashed after publishing left these
-                    // staged parts behind. Its retry finds its own object: that
-                    // is success, recognised by an identical size and digest.
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        if file_digest(&target)? == (outcome.size_bytes, outcome.sha256_hex.clone())
+                        // A part file changed on disk after its receipt was written.
+                        if part_size != part.receipt.size_bytes
+                            || format!("{:x}", part_hasher.finalize()) != part.receipt.sha256
                         {
-                            Ok(())
-                        } else {
-                            Err(StorageError::PreconditionFailed {
-                                key: key.clone(),
-                                condition: "object already exists".to_string(),
-                            })
+                            return Err(multipart_error(&key, MultipartErrorKind::ReceiptMismatch));
                         }
+                        size_bytes += part_size;
                     }
-                    Err(source) => Err(StorageError::io(&target, source)),
-                }
-            } else {
-                std::fs::rename(&temp, &target).map_err(io(&target))
-            };
-            let _ = std::fs::remove_file(&temp);
-            published?;
-            trace_published(Some(&temp), &target);
-            sync_dir(parent)?;
+                    output.sync_all().map_err(io(&temp_path))?;
+                    trace(DurabilityStep::FileSynced, &temp_path);
+                    Ok(BlobWriteOutcome {
+                        size_bytes,
+                        sha256_hex: format!("{:x}", hasher.finalize()),
+                    })
+                })();
+                let outcome = match assembled {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let _ = target.dir.remove_file(&temp);
+                        return Err(error);
+                    }
+                };
 
-            // The object is published; the staged parts are no longer needed.
-            std::fs::remove_dir_all(&dir).map_err(io(&dir))?;
-            Ok(outcome)
-        })
+                let published = if manifest.if_not_exists || handle_condition {
+                    match target.dir.rename_noreplace(&temp, &target.leaf) {
+                        Ok(()) => Ok(()),
+                        // A completion that crashed after publishing left these
+                        // staged parts behind. Its retry finds its own object: that
+                        // is success, recognised by an identical size and digest.
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            if file_digest(&target.dir, &target.leaf, &key)?
+                                == (outcome.size_bytes, outcome.sha256_hex.clone())
+                            {
+                                Ok(())
+                            } else {
+                                Err(StorageError::PreconditionFailed {
+                                    key: key.clone(),
+                                    condition: "object already exists".to_string(),
+                                })
+                            }
+                        }
+                        Err(source) => Err(StorageError::io(&target_path, source)),
+                    }
+                } else {
+                    target
+                        .dir
+                        .rename(&temp, &target.leaf)
+                        .map_err(io(&target_path))
+                };
+                // Gone after a rename; left behind after a refused create.
+                let _ = target.dir.remove_file(&temp);
+                published?;
+                trace_published(Some(&temp_path), &target_path);
+                sync_dir(&target.dir)?;
+
+                // The object is published; the staged parts are no longer needed.
+                drop(dir);
+                held.remove_tree(&upload_id)
+                    .map_err(io(&held.child_path(&upload_id)))?;
+                Ok(outcome)
+            },
+        )
         .await?;
-        let _ = tokio::fs::remove_file(&lock_path).await;
+        let lock = lock_name(&id);
+        let _ = tokio::task::spawn_blocking(move || uploads.remove_file(&lock)).await;
         Ok(MultipartCompleteOutcome {
             size_bytes: outcome.size_bytes,
             sha256_hex: Some(outcome.sha256_hex),
@@ -480,8 +592,8 @@ impl MultipartBlobStore for LocalStorageBackend {
     }
 
     async fn abort_multipart(&self, handle: &MultipartUploadHandle) -> Result<(), StorageError> {
-        let (dir, lock) = match self.upload_paths(handle) {
-            Ok(paths) => paths,
+        let id = match self.upload_id(handle) {
+            Ok(id) => id,
             // An identifier this backend never issued names no upload.
             Err(StorageError::Multipart {
                 kind: MultipartErrorKind::UnknownUpload,
@@ -489,19 +601,36 @@ impl MultipartBlobStore for LocalStorageBackend {
             }) => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.refuse_links(&dir, &handle.key).await?;
-        if !tokio::fs::try_exists(&dir).await.map_err(io(&dir))? {
-            let _ = tokio::fs::remove_file(&lock).await;
+        let key = handle.key.clone();
+        let lookup = (id.clone(), key.clone());
+        let found = self
+            .blocking(move |backend| {
+                let Some(uploads) = backend.uploads_blocking(&lookup.1)? else {
+                    return Ok(None);
+                };
+                let present = uploads
+                    .info(&lookup.0)
+                    .map_err(io(&uploads.child_path(&lookup.0)))?
+                    .is_some();
+                if !present {
+                    let _ = uploads.remove_file(&lock_name(&lookup.0));
+                    return Ok(None);
+                }
+                Ok(Some(uploads))
+            })
+            .await?;
+        let Some(uploads) = found else {
             return Ok(());
-        }
-        let lock_path = lock.clone();
-        locked(lock, move || match std::fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StorageError::io(&dir, source)),
+        };
+        let held = Arc::clone(&uploads);
+        let upload_id = id.clone();
+        locked(Arc::clone(&uploads), lock_name(&id), key, move || {
+            held.remove_tree(&upload_id)
+                .map_err(io(&held.child_path(&upload_id)))
         })
         .await?;
-        let _ = tokio::fs::remove_file(&lock_path).await;
+        let lock = lock_name(&id);
+        let _ = tokio::task::spawn_blocking(move || uploads.remove_file(&lock)).await;
         Ok(())
     }
 
@@ -523,43 +652,58 @@ impl MultipartBlobStore for LocalStorageBackend {
                 })
             })
             .transpose()?;
-        let uploads = self.uploads_dir();
-        self.refuse_links(&uploads, prefix).await?;
         let prefix = prefix.to_string();
-        let mut found = tokio::task::spawn_blocking(move || {
-            let mut found = Vec::new();
-            let entries = match std::fs::read_dir(&uploads) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-                Err(source) => return Err(StorageError::io(&uploads, source)),
-            };
-            for entry in entries {
-                let path = entry.map_err(io(&uploads))?.path();
-                let Some(id) = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| Uuid::parse_str(name).is_ok() && !name.ends_with(".lock"))
-                    .map(str::to_string)
-                else {
-                    continue;
+        let mut found = self
+            .blocking(move |backend| {
+                let mut found = Vec::new();
+                let Some(uploads) = backend.uploads_blocking(&prefix)? else {
+                    return Ok(found);
                 };
-                // A directory without a manifest is a start that never finished.
-                let Some(manifest) = read_manifest(&path)? else {
-                    continue;
-                };
-                if manifest.key.starts_with(&prefix) && validate_blob_key(&manifest.key).is_ok() {
-                    found.push((
-                        manifest.key,
-                        id,
-                        manifest.started_at_unix,
-                        manifest.if_not_exists,
-                    ));
+                let entries = uploads
+                    .entries()
+                    .map_err(|source| StorageError::io(uploads.path(), source))?;
+                for entry in entries {
+                    if entry.kind != Kind::Dir {
+                        continue;
+                    }
+                    let Some(id) = entry
+                        .name
+                        .to_str()
+                        .filter(|name| Uuid::parse_str(name).is_ok() && !name.ends_with(".lock"))
+                        .map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    let dir = match uploads.child_dir(&id) {
+                        Ok(Some(dir)) => dir,
+                        Ok(None) => continue,
+                        // Replaced by a link: not an upload this backend made.
+                        Err(err) if crate::local_fs::is_refusal(&err) => continue,
+                        Err(source) => {
+                            return Err(StorageError::io(uploads.child_path(&id), source));
+                        }
+                    };
+                    // A directory without a manifest is a start that never
+                    // finished; a manifest that is a link is not this
+                    // backend's.
+                    let manifest = match read_manifest(&dir, &id) {
+                        Ok(Some(manifest)) => manifest,
+                        Ok(None) | Err(StorageError::InvalidStorageKey { .. }) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if manifest.key.starts_with(&prefix) && validate_blob_key(&manifest.key).is_ok()
+                    {
+                        found.push((
+                            manifest.key,
+                            id,
+                            manifest.started_at_unix,
+                            manifest.if_not_exists,
+                        ));
+                    }
                 }
-            }
-            Ok(found)
-        })
-        .await
-        .map_err(join_error)??;
+                Ok(found)
+            })
+            .await?;
         found.sort();
         let mut page = IncompleteMultipartPage::default();
         let mut remaining = found

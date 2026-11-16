@@ -14,17 +14,22 @@ supersedes: []
 
 Update the storage requirement to 0.16.0 and refresh the consumer lockfile.
 
-1. **Local storage refuses links below its root. Action needed** only if a
-   local root contains symbolic links, junctions or mount points below it.
-   Every operation on a key whose path names or passes through one now fails
-   with `StorageError::InvalidStorageKey`, wherever the link points, and
-   listings skip such entries. Replace each link with the real directory or
-   file, or point `LocalStorageBackend::new` at the real tree; the root itself
-   may stay a link. A FIFO, socket or device file at a key is refused too.
-   Hosts with no links below the root need no change. The trust boundary is
-   unchanged otherwise: a concurrent replacement of a directory by a local
-   writer can still race the checks, so keep the root exclusively managed.
-   See [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary).
+1. **Local storage refuses links and hard-linked files. Action needed** only
+   if a local root contains symbolic links, junctions or mount points below
+   it, or files hard-linked from elsewhere. Every operation on a key whose path
+   names or passes through a link now fails with
+   `StorageError::InvalidStorageKey`, wherever the link points, listings skip
+   links, and every read of a file with more than one hard link fails the same
+   way. Replace each link or hard link with a real directory or an
+   independent copy, or point `LocalStorageBackend::new` at the real tree; the
+   root itself may stay a link. A FIFO, socket or device file at a key is
+   refused too. Resolution is now relative to held directory handles, so a
+   directory replaced by a link while an operation runs no longer redirects
+   it. On Windows, local operations hold the directories on their path open
+   without delete sharing, so another process that renames or removes one of
+   them at that moment fails with a sharing violation. Hosts with neither
+   links nor hard links below the root need no change. See
+   [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary).
 2. **Local listing pages. Action needed** only for code that calls
    `list_blobs_page` directly and stops at a page shorter than its limit. A
    local page now ends after `2 * limit + 64` directory reads, as when many
@@ -32,7 +37,10 @@ Update the storage requirement to 0.16.0 and refresh the consumer lockfile.
    even none, with a continuation. Keep paging until `next_continuation` is
    `None`, as `list_blobs` does and S3 already required. Continuation tokens
    issued by 0.15.0 stay valid.
-3. **Canonical keys. No action.** `with_canonical_keys` on the SMB and local
+3. **Canonical keys. No action.** Local storage also applies the mode when a
+   multipart upload completes, so an upload started before the mode was
+   enabled cannot publish a key it refuses; complete or abort such uploads
+   before enabling it. `with_canonical_keys` on the SMB and local
    backends, and `validate_canonical_blob_key`, are opt-in and off by
    default. Enable the mode for a target that ignores case or Unicode
    normalisation only after checking that the keys you write are lowercase

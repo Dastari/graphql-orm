@@ -12,25 +12,43 @@ supersedes: []
 
 ## 0.16.0 (unreleased)
 
-- Local storage never follows a filesystem link below its root. Every read,
-  write, copy and delete of a blob, streaming object or multipart upload whose
+- Local storage never follows a filesystem link below its root, including
+  one that replaces a directory while an operation runs. Every local
+  operation (reads, writes and publication, renames, deletes, listings,
+  metadata, streaming objects, multipart staging and completion, and the
+  temporary-file sweep) opens the root and resolves the key one component at
+  a time relative to held directory handles, without following links:
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` on Linux where available,
+  `openat(O_NOFOLLOW | O_DIRECTORY)` walks otherwise, and `*at` leaf
+  operations on the parent descriptor; on Windows, held
+  `FILE_FLAG_OPEN_REPARSE_POINT` handles without delete sharing. A key whose
   path below the root names or passes through a symbolic link (on Windows,
   also a junction, mount point or other name-surrogate reparse point) fails
-  with `StorageError::InvalidStorageKey` before it touches the link's target,
-  wherever the link points. Writes check before creating any directory, and
-  reads check that the file they opened is the entry they inspected.
+  with `StorageError::InvalidStorageKey` before it touches the link's target.
   Listings neither list nor enter links, and a listing whose prefix directory
   is reached through a link is refused; a link cycle no longer fails a
   listing with a filesystem-loop error. A FIFO, socket or device file at a
   key is refused instead of being opened. The configured root may still be a
-  link. A concurrent replacement of a directory by a link can still race the
-  checks; see the trust boundary in `docs/blob-store.md`.
+  link. Conditional creates publish with a non-replacing rename
+  (`RENAME_NOREPLACE`, `RENAME_EXCL`) instead of a hard link where the
+  platform supports it. New Unix dependency: `rustix` (already in the
+  workspace lock); new Windows dependency: `winapi-util` (already in the
+  lock).
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- Local reads refuse a regular file with more than one hard link with
+  `InvalidStorageKey`, since it may share its data with a file outside the
+  root: blob reads, metadata and existence checks, copy sources, streaming
+  object data and metadata, and multipart manifests, receipts and part data.
+  Multipart completion reads staged parts without following links, so a part
+  replaced by a link or hard link to an outside file is refused.
   ([#540](https://github.com/Dastari/graphql-orm/issues/540))
 - Local listing pages resume at their continuation with bounded work and
   memory: a page reads only the directories on the path to its position and
   the subtrees it lists, reads no entry metadata beyond the directory read,
   keeps at most the entries the page still needs (at least 32) from each
-  directory instead of the whole directory, and ends after
+  directory instead of the whole directory, so memory per page is bounded;
+  work per page still grows with the size of the largest directory it reads,
+  a documented limit. A page ends after
   `2 * limit + 64` directory reads with the keys it found and a
   continuation. Such a page can hold fewer keys than its limit, even none;
   its token is the last directory finished, followed by `/`. Tokens from
@@ -39,7 +57,9 @@ supersedes: []
 - `validate_canonical_blob_key` accepts only portable, lowercase ASCII keys,
   so no two keys it accepts alias on a target that ignores case or Unicode
   normalisation. `SmbStorageBackend::with_canonical_keys` and
-  `LocalStorageBackend::with_canonical_keys` apply it to new writes only,
+  `LocalStorageBackend::with_canonical_keys` apply it to new writes only
+  (on local storage including the completion of a multipart upload started
+  before the mode was enabled),
   refusing a non-canonical key with `InvalidStorageKey` before any request or
   filesystem change; reads, deletes and listings are unchanged. Both default
   to off, and the default behaviour is unchanged and now documented.

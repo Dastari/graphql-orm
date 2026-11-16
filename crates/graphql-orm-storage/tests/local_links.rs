@@ -355,3 +355,132 @@ async fn a_linked_root_is_the_hosts_choice() {
     backend.delete_blob("a/b").await.expect("delete");
     assert!(!real.join("a/b").exists());
 }
+
+/// Completion reads staged parts without following links: a part replaced
+/// by a link to an outside file with the same bytes, so its digest would
+/// still match, is refused and nothing is published.
+#[tokio::test]
+async fn local_multipart_completion_refuses_a_linked_part() {
+    let fixture = Fixture::new().await;
+    let backend = &fixture.backend;
+    let handle = backend
+        .start_multipart("uploads/object", MultipartStartOptions::default())
+        .await
+        .expect("start");
+    let receipt = backend
+        .upload_part(&handle, 1, body(SECRET))
+        .await
+        .expect("part");
+    let part = staged_part(&fixture.root, &handle.upload_id);
+    std::fs::remove_file(&part).expect("remove part");
+    symlink(fixture.outside.join("secret"), &part).expect("part link");
+
+    assert_refused(
+        backend.complete_multipart(&handle, &[receipt]).await,
+        "completion from a linked part",
+    );
+    assert!(!fixture.root.join("uploads/object").exists());
+    fixture.assert_outside_untouched();
+}
+
+/// The data file of the upload's only staged part.
+fn staged_part(root: &Path, upload_id: &str) -> PathBuf {
+    let dir = root.join(".graphql-orm-storage/multipart").join(upload_id);
+    std::fs::read_dir(&dir)
+        .expect("upload dir")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "data")
+        })
+        .expect("a staged part")
+}
+
+/// A regular file that shares its data with another hard link, such as an
+/// outside file linked into the root, is never read.
+#[tokio::test]
+async fn local_reads_refuse_hard_linked_files() {
+    let fixture = Fixture::new().await;
+    let backend = &fixture.backend;
+    std::fs::hard_link(
+        fixture.outside.join("secret"),
+        fixture.root.join("real/hard"),
+    )
+    .expect("hard link");
+
+    let key = "real/hard";
+    assert_refused(backend.get_blob(key).await.map(|_| ()), key);
+    assert_refused(backend.get_blob_range(key, 0..4).await.map(|_| ()), key);
+    assert_refused(backend.head_blob(key).await, key);
+    assert_refused(backend.blob_exists(key).await, key);
+    assert_refused(backend.copy_blob(key, "copies/out").await, key);
+    assert!(!fixture.root.join("copies/out").exists());
+
+    // A staged part hard-linked to an outside file is refused too.
+    let handle = backend
+        .start_multipart("uploads/hard", MultipartStartOptions::default())
+        .await
+        .expect("start");
+    let receipt = backend
+        .upload_part(&handle, 1, body(SECRET))
+        .await
+        .expect("part");
+    let part = staged_part(&fixture.root, &handle.upload_id);
+    std::fs::remove_file(&part).expect("remove part");
+    std::fs::hard_link(fixture.outside.join("secret"), &part).expect("part hard link");
+    assert_refused(
+        backend.complete_multipart(&handle, &[receipt]).await,
+        "completion from a hard-linked part",
+    );
+    assert!(!fixture.root.join("uploads/hard").exists());
+
+    // Deleting the key removes only the link inside the root.
+    backend.delete_blob(key).await.expect("delete the link");
+    assert!(!fixture.root.join(key).exists());
+    fixture.assert_outside_untouched();
+
+    // A file this backend wrote has one link and reads normally, including
+    // one published by a conditional create.
+    backend
+        .put_blob_if_not_exists("real/conditional", body(b"x"), BlobPutOptions::default())
+        .await
+        .expect("conditional create")
+        .expect("created");
+    backend
+        .get_blob("real/conditional")
+        .await
+        .expect("a conditional create leaves one link");
+}
+
+/// Canonical keys apply when an upload completes, not only when it starts:
+/// an upload started before the mode was enabled cannot publish a key the
+/// mode refuses.
+#[tokio::test]
+async fn local_canonical_keys_refuse_a_resumed_completion() {
+    let owned = TempDir::new().expect("temp dir");
+    let ordinary = LocalStorageBackend::new(owned.path());
+    let handle = ordinary
+        .start_multipart("Uploads/Object", MultipartStartOptions::default())
+        .await
+        .expect("start without the mode");
+    let receipt = ordinary
+        .upload_part(&handle, 1, body(b"part"))
+        .await
+        .expect("part");
+
+    let canonical = LocalStorageBackend::new(owned.path()).with_canonical_keys(true);
+    assert_refused(
+        canonical
+            .complete_multipart(&handle, &[receipt.clone()])
+            .await,
+        "a non-canonical completion",
+    );
+    assert!(!owned.path().join("Uploads/Object").exists());
+
+    // The staged parts are intact: the upload can still complete without the
+    // mode, or be aborted.
+    ordinary
+        .complete_multipart(&handle, &[receipt])
+        .await
+        .expect("the ordinary backend completes it");
+}

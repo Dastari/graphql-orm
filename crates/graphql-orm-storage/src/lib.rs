@@ -40,6 +40,8 @@ mod key;
 #[cfg(feature = "local")]
 mod local;
 #[cfg(feature = "local")]
+mod local_fs;
+#[cfg(feature = "local")]
 mod local_multipart;
 mod multipart;
 mod object;

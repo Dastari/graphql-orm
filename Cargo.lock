@@ -3303,6 +3303,7 @@ dependencies = [
  "md-5 0.10.6",
  "picky",
  "picky-krb",
+ "rustix",
  "same-file",
  "secrecy",
  "serde",
@@ -3321,6 +3322,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "winapi-util",
 ]
 
 [[package]]
