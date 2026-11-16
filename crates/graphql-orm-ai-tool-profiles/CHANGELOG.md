@@ -3,12 +3,26 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.24.0
+
+- Preserve root description, title, examples and default through shared-schema compilation and expansion.
+
+Capability scale (part of #551). Capability, catalogue and index fingerprints are unchanged for existing inputs.
+
+- **Added:** `AiSharedTypePlanSchema` renders a compact plan schema with each repeated subschema defined once in a dictionary and referenced as `{"$ref": "#/types/<Name>"}`. The rendering is lossless (`expand` returns the input) and deterministic. `AiGraphqlQueryCapability::shared_type_plan_schema` names dictionary entries after the GraphQL input types they were generated from.
+- **Performance:** `AiCapabilityIndex` computes each entry's search terms once, when the index is compiled, and interns them per index. A search tokenises only its query. Ranking, scores and tie-breaking are unchanged, and the terms are not part of the serialized index or its fingerprint; a deserialized index rebuilds them on first search.
+- **Performance:** capabilities of one catalogue share one copy of the finished schema and the semantic catalogue. Each capability used to hold its own copy, which made catalogue memory and compile time quadratic in the number of roots.
+- **Changed:** a root whose compact schema exceeds the 1 MiB provider contract is excluded from its query, mutation or subscription catalogue and reported by `excluded_capabilities()` (`AiGraphqlCapabilityExclusion`, `AiGraphqlCapabilityExclusionReason`). It used to fail the whole catalogue. The catalogue fingerprint covers the capabilities that compiled.
+- **Added (opt-in):** `AiGraphqlQueryCapabilityOptions::with_strict_query_roots` compiles only the listed public Query roots (#463). The default still offers every exportable root. A listed name that is not an exportable public Query root is an error. The optional `strictQueryRoots` wire member is omitted when unset.
+- **Added:** `generated_entity_name` and `generated_category` on `AiGraphqlQueryCapability` and `AiGraphqlMutationCapability`.
+- **Added:** the `capability_startup_benchmark` example measures catalogue and index compile time, search latency and peak memory against the number of roots.
 
 ## Unreleased - 0.23.0
 

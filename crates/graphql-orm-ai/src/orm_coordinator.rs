@@ -75,6 +75,24 @@ enum AiReadOnlyAgentTurnMode {
     ExperimentalDynamicTools(AiToolResultEgressRoute),
 }
 
+/// Whether the turn's hierarchical rules admit every reviewed static tool the
+/// delivery turn brokers, exactly as they must admit an offered static read
+/// tool. A brokered tool is reached through the broker's own fingerprint, so
+/// without this check a rule that lists allowed tool fingerprints would not
+/// apply to it.
+pub(crate) fn brokered_static_tools_follow_rules(
+    delivery: &crate::AiCapabilityDeliveryTurn,
+    rules: &AiResolvedRuleSet,
+) -> bool {
+    delivery.brokered_static_tools_admitted(|fingerprint| {
+        rules.constrain_tool(
+            fingerprint,
+            crate::ToolMaturity::ReadOnly,
+            crate::AiApprovalRule::None,
+        ) == Some(crate::AiApprovalRule::None)
+    })
+}
+
 impl AiReadOnlyAgentTurnPlan {
     /// Binds a provider plan to current rule evidence and the server-selected
     /// route used for every exact application-tool result in that turn.
@@ -229,11 +247,16 @@ impl AiReadOnlyAgentTurnPlan {
     /// # Errors
     ///
     /// Returns [`AiError::InvalidInput`] unless the plan offers exactly the
-    /// crate-owned surface and carries an application-tool result route.
+    /// crate-owned surface and carries an application-tool result route, and
+    /// [`AiError::Forbidden`] when the turn's hierarchical rules do not admit
+    /// every brokered static tool as an approval-free read tool.
     pub fn with_capability_delivery(
         mut self,
         delivery: crate::AiCapabilityDeliveryTurn,
     ) -> Result<Self, AiError> {
+        if !brokered_static_tools_follow_rules(&delivery, &self.rules) {
+            return Err(AiError::Forbidden);
+        }
         if !delivery.matches_offered_tools(self.provider_call.offered_tools())
             || matches!(&self.mode, AiReadOnlyAgentTurnMode::ChatOnly)
             || self.provider_session.as_ref().is_some_and(|session| {

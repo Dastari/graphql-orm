@@ -162,6 +162,7 @@ pub struct AiRuntime {
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: ToolMaturity,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
+    dependent_effect_policy: Option<crate::AiDependentEffectPolicy>,
     tool_catalog: AiToolCatalog,
     proposal_catalog: AiProposalCatalog,
     secret_store: Arc<dyn AiSecretStore>,
@@ -347,6 +348,29 @@ impl AiRuntime {
     /// scope policy and the deployment maturity cap.
     pub fn tool_catalog(&self) -> &AiToolCatalog {
         &self.tool_catalog
+    }
+
+    /// Returns the installed dependent-effect policy for generated deletes,
+    /// when the host installed one.
+    pub fn dependent_effect_policy(&self) -> Option<&crate::AiDependentEffectPolicy> {
+        self.dependent_effect_policy.as_ref()
+    }
+
+    /// Applies the installed dependent-effect policy to one registered
+    /// generated mutation. Without an installed policy every mutation passes,
+    /// as before the policy existed.
+    fn permit_dependent_effects(
+        &self,
+        capability_id: &AiToolId,
+        execution_policy: AiMutationExecutionPolicy,
+    ) -> Result<(), AiError> {
+        crate::dependent_effects::permit_generated_mutation(
+            self.dependent_effect_policy.as_ref(),
+            &self.tool_catalog,
+            &self.generated_graphql_target_policy,
+            capability_id,
+            execution_policy,
+        )
     }
 
     /// Returns registered proposal contracts.
@@ -715,6 +739,9 @@ impl AiRuntime {
         {
             return Err(AiError::Forbidden);
         }
+        // Refuse a delete with a prohibited or unproven dependent effect
+        // before any approval is requested for it.
+        self.permit_dependent_effects(capability_id, execution_policy)?;
         let contract = descriptor
             .graphql_contract
             .clone()
@@ -870,6 +897,7 @@ impl AiRuntime {
         if prepared.execution_policy != AiMutationExecutionPolicy::Automatic {
             return Err(AiError::Forbidden);
         }
+        let effect_guard = self.mutation_effect_guard(&prepared)?;
         let (response, authorization) = self
             .tool_bridge
             .execute_generated_mutation(
@@ -878,6 +906,7 @@ impl AiRuntime {
                 &prepared.capability_fingerprint,
                 &prepared.descriptor,
                 prepared.request,
+                effect_guard,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -907,6 +936,7 @@ impl AiRuntime {
         if !approved_prepared_mutation_matches(principal_reference, &prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
+        let effect_guard = self.mutation_effect_guard(&prepared)?;
         approval.claim_execution()?;
         let registered = AiRegisteredToolExecutionBinding::generated_mutation(
             &prepared.descriptor.id,
@@ -924,6 +954,7 @@ impl AiRuntime {
                 registered,
                 &binding.policy_version,
                 &binding.authorization_state_digest,
+                effect_guard,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -933,6 +964,55 @@ impl AiRuntime {
             response,
             authorization,
         )
+    }
+
+    /// Builds the ORM effect guard for one prepared generated delete.
+    ///
+    /// Returns `None` when no dependent-effect policy is installed or the
+    /// mutation is not a generated delete. With a policy installed, a delete
+    /// whose capability, root entity or declaration cannot be found fails
+    /// closed rather than executing unguarded.
+    fn mutation_effect_guard(
+        &self,
+        prepared: &AiPreparedGraphqlMutation,
+    ) -> Result<Option<graphql_orm::graphql::orm::DependentDeleteGuard>, AiError> {
+        use graphql_orm::graphql::orm::{DependentDeleteEffect, DependentDeleteGuard};
+        use graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory as Category;
+
+        let Some(policy) = self.dependent_effect_policy.as_ref() else {
+            return Ok(None);
+        };
+        let capability = self
+            .tool_catalog
+            .mutation_capability(&prepared.descriptor.id)
+            .ok_or(AiError::Forbidden)?;
+        let is_delete = matches!(
+            capability.generated_category(),
+            Some(Category::Delete | Category::DeleteMany)
+        );
+        if !is_delete {
+            return Ok(None);
+        }
+        let root = capability
+            .generated_entity_name()
+            .ok_or(AiError::Forbidden)?;
+        let declared = policy
+            .declared_effects(capability.target_id(), root)
+            .ok_or(AiError::Forbidden)?;
+        let effects = declared
+            .iter()
+            .map(|effect| {
+                let entity = effect.entity().to_owned();
+                let kind = match effect.effect() {
+                    crate::AiDependentEffectKind::Delete => DependentDeleteEffect::Delete(entity),
+                    crate::AiDependentEffectKind::SetNull { field } => {
+                        DependentDeleteEffect::SetNull(entity, field.clone())
+                    }
+                };
+                (kind, effect.maximum_rows())
+            })
+            .collect();
+        Ok(Some(DependentDeleteGuard::new(root.to_owned(), effects)))
     }
 
     fn validate_prepared_mutation(
@@ -947,7 +1027,9 @@ impl AiRuntime {
         {
             return Err(AiError::Forbidden);
         }
-        Ok(())
+        // Checked again immediately before execution, so an approval granted
+        // earlier cannot carry a delete past the current policy.
+        self.permit_dependent_effects(&prepared.descriptor.id, prepared.execution_policy)
     }
 
     /// Rehydrates and evaluates current host tool policy for an exact
@@ -1074,6 +1156,7 @@ impl AiRuntime {
                 &binding.policy_version,
                 &binding.authorization_state_digest,
                 escalated_automatic.then_some(AiApprovalRule::OneShot),
+                None,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -1754,6 +1837,9 @@ fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {
         )
 }
 
+#[cfg(all(test, feature = "sqlite"))]
+mod dependent_effect_guard_tests;
+
 #[cfg(test)]
 mod mutation_binding_tests {
     use serde_json::json;
@@ -1989,6 +2075,7 @@ pub struct AiRuntimeBuilder {
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: Option<ToolMaturity>,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
+    dependent_effect_policy: Option<crate::AiDependentEffectPolicy>,
     tool_catalog: AiToolCatalog,
     proposal_catalog: AiProposalCatalog,
     secret_store: Option<Arc<dyn AiSecretStore>>,
@@ -2120,6 +2207,18 @@ impl AiRuntimeBuilder {
         policy: AiGeneratedGraphqlTargetPolicySet,
     ) -> Self {
         self.generated_graphql_target_policy = policy;
+        self
+    }
+
+    /// Installs the effect-aware AI policy for generated delete roots.
+    ///
+    /// Without one, a generated delete is decided by its own classification
+    /// alone, as before. With one, every generated `Delete` or `DeleteMany`
+    /// capability is refused unless the policy declares its dependent effects
+    /// and each dependent entity's own AI policy allows them. See
+    /// [`crate::AiDependentEffectPolicy`].
+    pub fn dependent_effect_policy(mut self, policy: crate::AiDependentEffectPolicy) -> Self {
+        self.dependent_effect_policy = Some(policy);
         self
     }
 
@@ -2271,6 +2370,7 @@ impl AiRuntimeBuilder {
             tool_result_media_resolvers: self.tool_result_media_resolvers,
             maximum_tool_maturity,
             generated_graphql_target_policy: self.generated_graphql_target_policy,
+            dependent_effect_policy: self.dependent_effect_policy,
             tool_catalog: self.tool_catalog,
             proposal_catalog: self.proposal_catalog,
             secret_store,
