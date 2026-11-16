@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.25.0
+
+Capability index version 3 and compact signatures for broker version 2 (#551, asks 5B, 3B and 2B). Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+- **Breaking (index, 5B):** `AI_CAPABILITY_INDEX_VERSION` is `3`. `AiCapabilityIndex::compile` groups every generated query root of one entity into one `AiCapabilityKind::GeneratedEntity` entry (shape `AiCapabilityOperationShape::Entity`) whose `operations` list each root (`AiCapabilityOperationMember`). The index and its limits count one entry per entity. Each root keeps its own `GeneratedQuery` entry, identity, capability fingerprint and entry fingerprint: `entry(root_id)` still resolves it, and `operation_entry` and `entity_entry_of` navigate between them. Roots without an entity stay standalone entries. Index and index-set fingerprints change once; the entity capability fingerprint (`AI_CAPABILITY_ENTITY_VERSION`) covers every root's ID and fingerprint.
+- **Breaking (API):** new `AiCapabilityKind` and `AiCapabilityOperationShape` variants; new `operations` fields on `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` (`AiCapabilityCandidateOperation`). `entries()` lists discoverable entries only, so grouped roots are not listed there.
+- **Added:** `AiCapabilityIndexSet::ranked_operation_matches` ranks like `ranked_matches` and replaces each entity entry with its roots, for delivery that installs one definition per root.
+- **Performance (3B):** search uses an inverted index built when the index is compiled: a query scores only the posting lists of its terms. Scores are the same fixed per-field weights as before; an entity entry is also found by its roots' operation names and descriptions. No IDF, BM25 or other catalogue-wide statistic contributes, so an entry's score never depends on other entries.
+- **Added (2B):** `AiCapabilitySignature` renders a plan schema as a compact typed signature and expands one named input type, `select` or `select.<path>` at a time, in pages (`AI_CAPABILITY_TYPE_PAGE_MAXIMUM`). `AiGraphqlQueryCapability::capability_signature` builds it; `AiSharedTypePlanSchema::compile_named` defines every named GraphQL input type once. Both are model-facing renderings: plans are still validated against the unchanged closed schema and no capability fingerprint changes.
+
 ## Unreleased - 0.24.0
 
 - **Breaking (fingerprints, #683):** requires operation catalogue 0.9.0, whose generated-operation fingerprint algorithm is `graphql-orm-sha256-len-v2`. Operation contracts and tool manifests record that name. A manifest or contract bound under `graphql-orm-sha256-len-v1` is refused as stale; regenerate it. No Rust API change. See the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).

@@ -18,9 +18,61 @@ The versions named are placeholders until that release is cut. Each entry is
 marked **Action needed** or **No action**. Do the steps once, in the order
 below, when you take the release.
 
-Placeholder versions: ORM and macros 0.160.0, operation catalogue 0.9.0, AI
-tool profiles 0.24.0, AI 0.146.0 (AI schema module `0.82.0`). Upgrade them
+Placeholder versions: ORM and macros 0.166.0, operation catalogue 0.9.0, AI
+tool profiles 0.25.0, AI 0.148.0 (AI schema module `0.82.0`). Upgrade them
 together.
+
+### Capability broker version 2: compact signatures, entity capabilities and the fixed-broker default (#551)
+
+**Action needed.** AI 0.148.0 and AI tool profiles 0.25.0. No SDL,
+persistent schema or data migration.
+
+What changes for the model: discover returns one `generated_entity`
+candidate per entity, listing its operations; describe returns one compact
+typed signature per operation instead of the plan schema; the new
+`graphql.capabilities.describe_type` operation expands one named input type,
+`select` or `select.<path>` at a time, in pages; and `describe_type` and
+execute take the entity's `operation`. Plans are still validated against the
+unchanged closed schema. Discovery scores only the posting lists of the
+query's terms, with the same fixed per-entry weights and no catalogue-wide
+statistic.
+
+Fingerprints, bindings and sessions:
+
+- `AI_CAPABILITY_BROKER_VERSION` is `2`. The fixed broker definitions (now
+  four) and every `FixedBroker` session binding change once, so each retained
+  fixed-broker session rebinds once through cleanup-and-rebind. This is the
+  only new rebind; nothing else was added to the binding, and catalogue or
+  schema changes still keep fixed-broker sessions.
+- The capability index is version 3 and groups each entity's query roots, so
+  index and index-set fingerprints change once. Bindings of `EagerExact`,
+  `ProviderDeferred` and `ClientDeferred` sessions hash the index set; they
+  already rebind once in this release for the fingerprint v2 change (#683).
+- Generated query capability fingerprints, tool manifests and approvals are
+  not changed by this entry. Mutations do not join the broker.
+- A selection or loaded reference from before the upgrade is
+  `selection_stale`; after a catalogue change a held one is
+  `capability_stale`, at describe, `describe_type` and execute alike.
+
+Host steps:
+
+1. Deploy AI and tool profiles together, and admit the four new broker
+   definition fingerprints wherever you list them by value.
+2. Make host capability policy decide `GeneratedEntity` entries as well as
+   root entries. Discover and describe ask about the entity; describe,
+   `describe_type` and execute also ask about each root, and describe lists
+   only the roots you admit.
+3. Large surfaces now default to the fixed broker when the provider supports
+   both it and `ProviderDeferred`. To keep native deferred loading, set
+   `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+   `false` (or call `with_provider_deferred_for_large_surfaces()`); a stored
+   configuration without the field now reads as `true`. Changing the mode
+   rebinds retained sessions, so decide before the upgrade's single rebind.
+4. Update exhaustive matches and struct literals, and any model guidance that
+   names `planSchema`. Details: the
+   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01470-to-01480-capability-broker-version-2)
+   and the
+   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-entity-capabilities-and-compact-signatures).
 
 ### Migration safety and live journal validation
 

@@ -29,6 +29,9 @@ use secrecy::SecretString;
 #[cfg(feature = "provider-openai-core")]
 use sha2::Sha256;
 
+#[path = "support/broker_entity_parity.rs"]
+mod broker_entity_parity;
+
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
 const POSTGRES_IMAGE: &str =
     "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065";
@@ -2209,4 +2212,16 @@ async fn owned_postgres_rotation_held_after_commit_cannot_strand_a_later_rotatio
     );
     drop(database);
     drop(container);
+}
+
+#[tokio::test]
+async fn owned_postgres_broker_v2_entity_capability_executes_one_root_through_the_generated_schema()
+{
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    broker_entity_parity::entity_capability_round_trip(database).await;
 }

@@ -10,6 +10,63 @@ supersedes: []
 
 # Migration Guide
 
+## 0.147.0 to 0.148.0: capability broker version 2
+
+**Action needed.** Part of the single breaking release; upgrade together with
+AI tool profiles 0.25.0. The workspace-wide steps are in the root
+[migration guide](../../MIGRATION.md#breaking-release-unreleased). No SDL,
+persistent schema or data migration; `AI_SCHEMA_MODULE_VERSION` stays
+`0.82.0`.
+
+Fingerprint, binding and session effects:
+
+| What | Effect |
+| --- | --- |
+| Fixed broker definitions | Four instead of three; every fingerprint changes once (broker version 2). |
+| `FixedBroker` session binding | Changes once (it hashes the broker version). Nothing else is added to it: catalogue and schema changes still keep the session. |
+| `EagerExact`, `ProviderDeferred`, `ClientDeferred` bindings | They hash the index-set fingerprint, which the tool-profiles index version 3 changes. This is the same single rebind the batch's fingerprint v2 already causes. |
+| Generated query capability fingerprints | Unchanged by this version. |
+| Loaded references, discovery cache | Process-local; a selection from before the upgrade is `selection_stale`. |
+| Approvals | Unaffected: mutations do not join the broker. |
+
+Steps:
+
+1. **Rebind once.** Deploy, and let each retained fixed-broker session go
+   through cleanup-and-rebind. Admit the four new broker definition
+   fingerprints wherever you list them by value (hierarchical rule policy).
+   A provider registration that still carries the three version 1
+   definitions is refused by the Codex and Grok capability-binding checks.
+2. **Host policy.** `AiCapabilityAuthorityPolicy` now sees
+   `AiCapabilityKind::GeneratedEntity` entries at discover and describe, and
+   each root's `GeneratedQuery` entry at describe, describe-type and execute.
+   A policy that allows only listed root IDs must also decide the entity
+   entry (for example from `entry.operations`), or the entity is never
+   discovered. A root the policy denies is left out of the description and
+   cannot be executed.
+3. **Delivery default.** Above the eager limits, a provider that supports
+   both `ProviderDeferred` and `FixedBroker` now gets `FixedBroker`. To keep
+   native deferred loading, set
+   `prefer_fixed_broker_for_large_surfaces: false` or call
+   `AiCapabilityDeliveryLimits::with_provider_deferred_for_large_surfaces()`;
+   that keeps your previous mode and binding. A stored configuration without
+   the field now reads as `true`.
+4. **Code.** Match `AiCapabilityBrokerOperation::DescribeType` and
+   `AiCapabilityKind::GeneratedEntity` (and
+   `AiCapabilityOperationShape::Entity`) in exhaustive matches. Struct
+   literals of `AiCapabilityBrokerAmplification` need `describe_type_calls`.
+   A host that renders describe itself replaces `with_plan_schema` or
+   `with_shared_type_plan_schema` with `with_operation_signatures`, one
+   summary per `AiCapabilityDescription::operations()` entry, and dispatches
+   `describe_type` through `dispatch_describe_type` and
+   `AiCapabilityTypeRequest::render`. `OrmAiApplicationToolCallService` does
+   both.
+5. **Prompts and tests.** Describe results no longer carry `planSchema`
+   unless `with_inline_describe_schema` is set. Model guidance that names
+   `planSchema` should name signatures and `describe_type`. Handle the new
+   `invalid_arguments` corrections for an unknown operation
+   (`AI_CAPABILITY_OPERATION_INVALID`) or type
+   (`AI_CAPABILITY_TYPE_UNKNOWN`).
+
 ## 0.146.0 to 0.147.0: webhook-receipt index replacement admission
 
 Requires `graphql-orm` 0.164.0. No schema-module, SDL or data change.

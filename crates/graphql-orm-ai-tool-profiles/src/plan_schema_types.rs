@@ -59,6 +59,32 @@ impl AiSharedTypePlanSchema {
     /// deeper than the supported bound, already uses the reserved dictionary
     /// key or reference prefix, or contains a reserved placeholder key.
     pub fn compile(schema: &Value, type_names: &BTreeMap<String, String>) -> Result<Self, AiError> {
+        Self::compile_with(schema, type_names, false)
+    }
+
+    /// Compiles the shared rendering with every named subschema defined
+    /// once, even when it is used only once or is small.
+    ///
+    /// [`Self::compile`] shares a subschema only when that saves bytes. This
+    /// rendering also shares each subschema `type_names` names, so every
+    /// GraphQL input type appears under its own name and a compact typed
+    /// signature can refer to it. It is equally lossless.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::compile`].
+    pub fn compile_named(
+        schema: &Value,
+        type_names: &BTreeMap<String, String>,
+    ) -> Result<Self, AiError> {
+        Self::compile_with(schema, type_names, true)
+    }
+
+    fn compile_with(
+        schema: &Value,
+        type_names: &BTreeMap<String, String>,
+        share_named: bool,
+    ) -> Result<Self, AiError> {
         if schema
             .as_object()
             .is_some_and(|root| root.contains_key(AI_PLAN_SCHEMA_TYPES_KEY))
@@ -67,7 +93,16 @@ impl AiSharedTypePlanSchema {
         }
         let mut arena = Arena::default();
         let (root, description) = arena.intern(schema, 0)?;
-        let hoisted = arena.hoisted(root);
+        let named = if share_named {
+            (0..arena.nodes.len())
+                .filter(|id| {
+                    arena.nodes[*id].shareable && arena.suggested_name(*id, type_names).is_some()
+                })
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let hoisted = arena.hoisted(root, &named);
         let names = arena.names(&hoisted, type_names);
         let mut types = BTreeMap::new();
         for (id, name) in &names {
@@ -340,7 +375,7 @@ impl<'a> Arena<'a> {
     /// rendering would otherwise emit it at least twice and it is large
     /// enough to be worth a reference. Sharing a node stops its children from
     /// being counted once per use of that node.
-    fn hoisted(&self, root: usize) -> BTreeSet<usize> {
+    fn hoisted(&self, root: usize, named: &BTreeSet<usize>) -> BTreeSet<usize> {
         let mut order = (0..self.nodes.len()).collect::<Vec<_>>();
         order.sort_by(|left, right| {
             self.nodes[*right]
@@ -355,8 +390,8 @@ impl<'a> Arena<'a> {
             let node = &self.nodes[id];
             let shared = id != root
                 && node.shareable
-                && uses[id] >= 2
-                && node.raw_bytes >= MINIMUM_SHARED_TYPE_BYTES;
+                && (named.contains(&id)
+                    || (uses[id] >= 2 && node.raw_bytes >= MINIMUM_SHARED_TYPE_BYTES));
             if shared {
                 hoisted.insert(id);
             }

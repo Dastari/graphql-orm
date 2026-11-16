@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.148.0 (placeholder, **breaking**) is capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; and large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once. See the [migration guide](MIGRATION.md#01470-to-01480-capability-broker-version-2) and the [capability contract](docs/capability-discovery-and-execution.md).
+
 AI 0.147.0 adds `AiSchemaModule::admit_index_replacements`, which admits an upgrade plan whose only destructive steps replace a legacy AI webhook-receipt index; ORM 0.164.0 otherwise refuses the index drop. Requires `graphql-orm` 0.164.0. AI schema module stays `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission).
 
 AI 0.146.0 (placeholder, **breaking**) is the AI part of the single breaking release: fixed-broker provider sessions keep their binding across schema and catalogue changes, with `capability_stale` and the new `selection_stale` as separate recoverable model-facing codes; generated-operation fingerprints change once (catalogue 0.9.0); `HighImpact` approvals always require recent MFA and the approval lifetime cap has a 7-day ceiling; AI schema module `0.82.0` adds three unique indexes. Rebind, re-approve and migrate once; see the [migration guide](MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes).

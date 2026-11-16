@@ -10,6 +10,32 @@ supersedes: []
 
 # Migration Guide
 
+## 0.24.0 to 0.25.0: entity capabilities and compact signatures
+
+**Action needed.** Part of the single breaking release; upgrade together with
+AI 0.148.0. No SDL or data migration.
+
+- **Index fingerprints change once.** `AI_CAPABILITY_INDEX_VERSION` is 3 and
+  the generated query roots of each entity become one `GeneratedEntity`
+  entry, so every index and index-set fingerprint that holds generated
+  queries changes. Recompile indexes; do not compare them with stored
+  version 2 fingerprints. Generated query capability fingerprints are
+  unchanged.
+- **Code.** Handle `AiCapabilityKind::GeneratedEntity` and
+  `AiCapabilityOperationShape::Entity` in exhaustive matches. Struct literals
+  of `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` need
+  `operations` (empty for every kind but an entity).
+- **Lookups.** `entries()` no longer lists the roots an entity groups. Look a
+  root up with `entry(root_id)`, which still resolves it, or with
+  `operation_entry(entity_id, operation_name)`. Code that searched with
+  `kind: Some(GeneratedQuery)` to find entity roots should search for
+  `GeneratedEntity`, or use `ranked_operation_matches` for one match per root.
+- **Search.** Ranking order for standalone entries is unchanged. Entity
+  entries score as one entry, including their roots' operation names and
+  descriptions. **No action.**
+- **Signatures.** `AiCapabilitySignature` and
+  `AiSharedTypePlanSchema::compile_named` are additions. **No action.**
+
 ## 0.23.0 to 0.24.0: operation fingerprint algorithm v2
 
 **Action needed.** Upgrade together with operation catalogue 0.9.0 and

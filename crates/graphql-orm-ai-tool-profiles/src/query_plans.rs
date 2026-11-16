@@ -756,6 +756,32 @@ impl AiGraphqlQueryCapability {
     ///
     /// Returns an error when the compact schema cannot be rendered.
     pub fn shared_type_plan_schema(&self) -> Result<AiSharedTypePlanSchema, AiError> {
+        AiSharedTypePlanSchema::compile(&self.compact_argument_schema, &self.input_type_names())
+    }
+
+    /// Compact typed signature of this capability for broker version 2.
+    ///
+    /// The signature renders [`Self::compact_argument_schema`] with every
+    /// GraphQL input type referenced by name, plus the selection tree. It is
+    /// model-facing only: plans are validated against the unchanged closed
+    /// schema and the capability fingerprint is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the compact schema cannot be rendered.
+    pub fn capability_signature(&self) -> Result<crate::AiCapabilitySignature, AiError> {
+        crate::AiCapabilitySignature::compile(
+            self.field_name(),
+            AiSharedTypePlanSchema::compile_named(
+                &self.compact_argument_schema,
+                &self.input_type_names(),
+            )?,
+        )
+    }
+
+    /// GraphQL input-type names of the compact schema's subschemas, keyed for
+    /// [`AiSharedTypePlanSchema::compile`].
+    fn input_type_names(&self) -> BTreeMap<String, String> {
         // Names are recovered by regenerating the compact schema with a
         // recorder, so no per-capability name table is retained. A schema
         // that does not regenerate identically still shares its types under
@@ -774,12 +800,11 @@ impl AiGraphqlQueryCapability {
                 },
             )
         });
-        let names = if regenerated.is_ok_and(|schema| schema == self.compact_argument_schema) {
+        if regenerated.is_ok_and(|schema| schema == self.compact_argument_schema) {
             names
         } else {
             BTreeMap::new()
-        };
-        AiSharedTypePlanSchema::compile(&self.compact_argument_schema, &names)
+        }
     }
 
     /// Returns the complete capability fingerprint.
@@ -11674,12 +11699,163 @@ mod tests {
             .search(&crate::AiCapabilitySearchQuery {
                 text: "customer-facing display name".to_owned(),
                 namespace: Some("inventory".to_owned()),
-                kind: Some(crate::AiCapabilityKind::GeneratedQuery),
+                kind: Some(crate::AiCapabilityKind::GeneratedEntity),
                 entity_or_operation: None,
                 maximum_results: 3,
             })
             .expect("new field description should be searchable");
         assert!(!result.candidates.is_empty());
+        // Roots of one entity are found through their entity capability.
+        assert!(
+            result
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.operations.is_empty())
+        );
+    }
+
+    #[test]
+    fn capability_signature_is_compact_and_expands_every_named_type() {
+        let catalogue = catalog();
+        for capability in catalogue.capabilities() {
+            let signature = capability.capability_signature().expect("signature");
+            assert_eq!(
+                &signature.plan_schema().expand().expect("expanded"),
+                capability.compact_argument_schema(),
+                "the signature is rendered from the unchanged closed schema"
+            );
+            let summary = signature.summary();
+            assert!(
+                summary["signature"]
+                    .as_str()
+                    .expect("signature text")
+                    .starts_with(&format!("{}(", capability.field_name()))
+            );
+            let summary_bytes = serde_json::to_vec(&summary).expect("summary").len();
+            let schema_bytes = serde_json::to_vec(capability.compact_argument_schema())
+                .expect("schema")
+                .len();
+            assert!(
+                summary_bytes < schema_bytes,
+                "{}: {summary_bytes} >= {schema_bytes}",
+                capability.field_name()
+            );
+            for name in signature.type_names() {
+                let page = signature
+                    .describe_type(&name, 0, crate::AI_CAPABILITY_TYPE_PAGE_MAXIMUM)
+                    .unwrap_or_else(|| panic!("{name} expands"));
+                assert_eq!(page["type"], name.as_str());
+            }
+            // Every input type the summary names is a GraphQL input type.
+            for name in summary["inputTypes"].as_array().into_iter().flatten() {
+                assert!(
+                    !name.as_str().expect("type name").starts_with("Type"),
+                    "{name} is named after its GraphQL input type"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_roots_of_one_entity_share_one_entity_capability() {
+        let semantics = semantic_catalog();
+        let catalogue = catalog();
+        let target = GraphqlExecutionTargetId::parse("inventory.graphql").expect("target");
+        let index = crate::AiCapabilityIndex::compile(
+            target,
+            catalogue.finished_schema_fingerprint(),
+            &semantics,
+            Some(&catalogue),
+            None,
+            None,
+            Vec::new(),
+            "target-policy-v1",
+            crate::AiCapabilityIndexLimits::default(),
+        )
+        .expect("index");
+        let roots = catalogue.capabilities().collect::<Vec<_>>();
+        let mut entities = BTreeSet::new();
+        for root in &roots {
+            // Each root keeps its own query entry, identity and fingerprint.
+            let entry = index.entry(root.id()).expect("root entry");
+            assert_eq!(entry.kind, crate::AiCapabilityKind::GeneratedQuery);
+            assert_eq!(entry.capability_fingerprint, root.fingerprint());
+            assert!(entry.operations.is_empty());
+            let Some(entity) = index.entity_entry_of(root.id()) else {
+                assert!(entry.entity_name.is_none());
+                continue;
+            };
+            entities.insert(entity.id.clone());
+            assert_eq!(entity.kind, crate::AiCapabilityKind::GeneratedEntity);
+            assert_eq!(entity.entity_name, entry.entity_name);
+            assert_eq!(
+                entity.operation_shape,
+                crate::AiCapabilityOperationShape::Entity
+            );
+            assert!(entity.id.as_str().starts_with("inventory.entity."));
+            assert_eq!(
+                index.operation_entry(&entity.id, root.field_name()),
+                Some(entry)
+            );
+            // A grouped root is never a discoverable entry of its own.
+            assert!(index.entries().all(|listed| &listed.id != root.id()));
+        }
+        assert!(!entities.is_empty());
+        let standalone = roots
+            .iter()
+            .filter(|root| index.entity_entry_of(root.id()).is_none())
+            .count();
+        assert_eq!(
+            index.entries().len(),
+            entities.len() + standalone,
+            "the index holds one entry per entity, not one per root"
+        );
+        assert_eq!(
+            index
+                .entries()
+                .filter(|entry| entry.kind == crate::AiCapabilityKind::GeneratedEntity)
+                .count(),
+            entities.len()
+        );
+        // Deserialization rebuilds the grouped root entries exactly.
+        let decoded: crate::AiCapabilityIndex =
+            serde_json::from_str(&serde_json::to_string(&index).expect("encode")).expect("decode");
+        assert_eq!(decoded, index);
+        for root in &roots {
+            assert_eq!(decoded.entry(root.id()), index.entry(root.id()));
+        }
+        // An index set resolves grouped roots to their owning index, and the
+        // per-root ranking lists roots, never entity entries.
+        let set = crate::AiCapabilityIndexSet::compile([std::sync::Arc::new(index.clone())])
+            .expect("set");
+        for root in &roots {
+            assert_eq!(
+                set.entry(root.id()).map(|(_, entry)| entry),
+                index.entry(root.id())
+            );
+        }
+        let query = crate::AiCapabilitySearchQuery {
+            text: "parent".to_owned(),
+            namespace: None,
+            kind: Some(crate::AiCapabilityKind::GeneratedQuery),
+            entity_or_operation: None,
+            maximum_results: 32,
+        };
+        let operations = set.ranked_operation_matches(&query).expect("operations");
+        assert!(!operations.is_empty());
+        assert!(operations.iter().all(|candidate| {
+            candidate.entry().kind == crate::AiCapabilityKind::GeneratedQuery
+        }));
+        let entity_matches = set
+            .ranked_matches(&crate::AiCapabilitySearchQuery {
+                kind: None,
+                ..query
+            })
+            .expect("entities");
+        assert!(entity_matches.iter().any(|candidate| {
+            candidate.entry().kind == crate::AiCapabilityKind::GeneratedEntity
+                && candidate.candidate().operations.len() == candidate.entry().operations.len()
+        }));
     }
 
     fn custom_input_fixture() -> (String, GraphqlSemanticCatalog) {

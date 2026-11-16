@@ -1806,43 +1806,40 @@ impl OrmAiApplicationToolCallService {
                     .dispatch_describe(lease.principal_reference(), &run, session, arguments)
                     .await?;
                 let maximum_bytes = session.limits().maximum_describe_bytes;
-                let description = if description.capability_kind()
-                    == crate::AiCapabilityKind::ReviewedStatic
-                {
-                    let descriptor = self.brokered_static_descriptor(
-                        description.capability_id(),
-                        description.capability_fingerprint(),
-                    )?;
-                    description
-                        .with_plan_schema(brokered_static_plan_schema(descriptor), maximum_bytes)?
-                } else {
-                    let definition = self
-                        .runtime
-                        .tool_catalog()
-                        .query_capability_model_definition(
-                            description.capability_id(),
-                            crate::capability_provider_alias(description.capability_id()),
-                        )?;
-                    if definition.fingerprint != description.capability_fingerprint() {
-                        return Err(AiError::Forbidden.into());
+                let mut summaries = Vec::with_capacity(description.operations().len());
+                for operation in description.operations() {
+                    let (signature, inline_schema) =
+                        self.operation_signature(operation, session.uses_inline_describe_schema())?;
+                    let mut summary = signature.summary();
+                    if let (Some(object), Some(schema)) = (summary.as_object_mut(), inline_schema) {
+                        object.insert("planSchema".to_owned(), schema);
                     }
-                    if session.uses_inline_describe_schema() {
-                        description.with_plan_schema(definition.parameters, maximum_bytes)?
-                    } else {
-                        let shared = self
-                            .runtime
-                            .tool_catalog()
-                            .query_capability_shared_type_plan_schema(
-                                description.capability_id(),
-                            )?;
-                        description.with_shared_type_plan_schema(&shared, maximum_bytes)?
-                    }
-                };
+                    summaries.push(summary);
+                }
+                let description =
+                    description.with_operation_signatures(summaries, maximum_bytes)?;
                 BrokerCallOutput::metadata(
                     description.into_model_result(),
                     broker_disclosure_fingerprint(operation),
                 )
                 .map_err(Into::into)
+            }
+            crate::AiCapabilityBrokerOperation::DescribeType => {
+                let request = broker
+                    .dispatch_describe_type(lease.principal_reference(), &run, session, arguments)
+                    .await?;
+                let (signature, _) = self.operation_signature(request.operation(), false)?;
+                let page = request.render(&signature)?;
+                let maximum_bytes = session.limits().maximum_describe_bytes as usize;
+                if serde_json::to_vec(&page).map_or(true, |encoded| encoded.len() > maximum_bytes) {
+                    return Err(AiError::InvalidInput(
+                        "broker capability type page exceeds its bound; request a smaller limit"
+                            .to_owned(),
+                    )
+                    .into());
+                }
+                BrokerCallOutput::metadata(page, broker_disclosure_fingerprint(operation))
+                    .map_err(Into::into)
             }
             crate::AiCapabilityBrokerOperation::Execute => {
                 let execution = broker
@@ -1935,6 +1932,43 @@ impl OrmAiApplicationToolCallService {
                 })
             }
         }
+    }
+
+    /// Compact signature of one described operation, from its exact
+    /// registered capability, and its inline plan schema when requested.
+    ///
+    /// The registered capability must still carry the fingerprint the broker
+    /// loaded; anything else fails closed.
+    fn operation_signature(
+        &self,
+        operation: &crate::AiCapabilityDescribedOperation,
+        inline_schema: bool,
+    ) -> Result<(crate::AiCapabilitySignature, Option<serde_json::Value>), AiError> {
+        if operation.capability_kind() == crate::AiCapabilityKind::ReviewedStatic {
+            let descriptor = self.brokered_static_descriptor(
+                operation.capability_id(),
+                operation.capability_fingerprint(),
+            )?;
+            let schema = brokered_static_plan_schema(descriptor);
+            let signature = crate::AiCapabilitySignature::compile(
+                operation.operation_name(),
+                crate::AiSharedTypePlanSchema::compile_named(
+                    &schema,
+                    &std::collections::BTreeMap::new(),
+                )?,
+            )?;
+            return Ok((signature, inline_schema.then_some(schema)));
+        }
+        let catalog = self.runtime.tool_catalog();
+        let definition = catalog.query_capability_model_definition(
+            operation.capability_id(),
+            crate::capability_provider_alias(operation.capability_id()),
+        )?;
+        if definition.fingerprint != operation.capability_fingerprint() {
+            return Err(AiError::Forbidden);
+        }
+        let signature = catalog.query_capability_signature(operation.capability_id())?;
+        Ok((signature, inline_schema.then_some(definition.parameters)))
     }
 
     /// Resolves the registered descriptor of one brokered static tool.
@@ -4761,11 +4795,21 @@ struct BrokerCorrection {
     disclosure_contract: &'static [u8],
 }
 
-const QUERY_PLAN_CORRECTION_CONTRACT: &[u8] = b"graphql-orm-ai/capability-query-plan-correction/v2";
+const QUERY_PLAN_CORRECTION_CONTRACT: &[u8] = b"graphql-orm-ai/capability-query-plan-correction/v3";
 
 const CAPABILITY_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
-    text: "Nothing was executed. The published capability catalogue changed after this capability was discovered or described, so its candidateFingerprint, planSchema and loadedReference are no longer valid. Call discover again, describe the new candidate, then issue a new call using only the new planSchema and loadedReference.",
-    disclosure_contract: b"graphql-orm-ai/capability-stale-correction/v1",
+    text: "Nothing was executed. The published capability catalogue changed after this capability was discovered or described, so its candidateFingerprint, signatures, expanded types and loadedReference are no longer valid. Call discover again, describe the new candidate, then issue a new call using only the new signatures and loadedReference.",
+    disclosure_contract: b"graphql-orm-ai/capability-stale-correction/v2",
+};
+
+const OPERATION_INVALID_CORRECTION: BrokerCorrection = BrokerCorrection {
+    text: "Nothing was executed. Set operation to one operation name from the operations list of the describe result for this loadedReference, then issue a new call.",
+    disclosure_contract: b"graphql-orm-ai/capability-operation-correction/v1",
+};
+
+const TYPE_UNKNOWN_CORRECTION: BrokerCorrection = BrokerCorrection {
+    text: "That type is not defined for this operation. Use a name from the operation's inputTypes, select, or a select.<path> type listed by an expanded selection type, then issue a new call.",
+    disclosure_contract: b"graphql-orm-ai/capability-type-correction/v1",
 };
 
 const SELECTION_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
@@ -4781,6 +4825,12 @@ impl From<AiError> for BrokerCallFailure {
             }
             AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_SELECTION_STALE => {
                 Some(SELECTION_STALE_CORRECTION)
+            }
+            AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_OPERATION_INVALID => {
+                Some(OPERATION_INVALID_CORRECTION)
+            }
+            AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_TYPE_UNKNOWN => {
+                Some(TYPE_UNKNOWN_CORRECTION)
             }
             _ => None,
         };
@@ -4808,11 +4858,11 @@ impl BrokerCallFailure {
                     })
             };
             let text = if unsupported("relationshipMaximumItems") {
-                "Remove relationshipMaximumItems entries not listed in planSchema.properties.relationshipMaximumItems.properties. If that properties object is empty, send relationshipMaximumItems as an empty array. Use the described relationshipArguments for connection paging; do not add a collection bound. Issue a new corrected call."
+                "Remove relationshipMaximumItems entries for paths whose select type lists no maximumItems. If none lists one, send relationshipMaximumItems as an empty array. Use the listed relationship arguments for connection paging; do not add a collection bound. Issue a new corrected call."
             } else if unsupported("relationshipArguments") {
-                "Remove relationshipArguments entries not listed in planSchema.properties.relationshipArguments.properties. Use only the described argument names and types, then issue a new corrected call."
+                "Remove relationshipArguments entries for paths whose select type lists no arguments. Use only the listed argument names and types, then issue a new corrected call."
             } else {
-                "The query was not executed. Compare the plan with the described planSchema: use only its exact selection paths, argument types and paging limits, omit unsupported bounds, then issue a new corrected call."
+                "The query was not executed. Compare the plan with the operation's signature and expanded types: use only its exact selection paths, argument types and paging limits, omit unsupported bounds, then issue a new corrected call."
             };
             Some(BrokerCorrection {
                 text,
@@ -4894,10 +4944,13 @@ fn brokered_static_plan_schema(descriptor: &crate::AiToolDescriptor) -> serde_js
 fn broker_disclosure_fingerprint(operation: crate::AiCapabilityBrokerOperation) -> String {
     hex::encode(Sha256::digest(match operation {
         crate::AiCapabilityBrokerOperation::Discover => {
-            b"graphql-orm-ai/capability-broker-discover/v1".as_slice()
+            b"graphql-orm-ai/capability-broker-discover/v2".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Describe => {
-            b"graphql-orm-ai/capability-broker-describe/v1".as_slice()
+            b"graphql-orm-ai/capability-broker-describe/v2".as_slice()
+        }
+        crate::AiCapabilityBrokerOperation::DescribeType => {
+            b"graphql-orm-ai/capability-broker-describe-type/v1".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Execute => {
             b"graphql-orm-ai/capability-broker-execute/v1".as_slice()

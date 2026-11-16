@@ -28,7 +28,14 @@ use crate::{
 };
 
 /// Current compact capability-index contract version.
-pub const AI_CAPABILITY_INDEX_VERSION: u16 = 2;
+///
+/// Version 3 groups every generated query root of one entity into a single
+/// [`AiCapabilityKind::GeneratedEntity`] entry, so the index holds one entry
+/// per entity instead of one per root.
+pub const AI_CAPABILITY_INDEX_VERSION: u16 = 3;
+
+/// Version of the entity-capability identity and fingerprint.
+pub const AI_CAPABILITY_ENTITY_VERSION: u16 = 1;
 
 /// Current deterministic multi-target capability-index-set contract version.
 pub const AI_CAPABILITY_INDEX_SET_VERSION: u16 = 1;
@@ -127,6 +134,12 @@ pub enum AiCapabilityKind {
     GeneratedMutation,
     /// Separately policy-bound generated subscription capability.
     GeneratedSubscription,
+    /// Entity-centric generated read capability: every generated query root
+    /// of one entity in one target. The root to run is chosen per call by
+    /// its operation name; each root keeps its own
+    /// [`AiCapabilityKind::GeneratedQuery`] identity, fingerprint and
+    /// authorization.
+    GeneratedEntity,
 }
 
 /// Public operation shape used for bounded discovery and filtering.
@@ -159,6 +172,8 @@ pub enum AiCapabilityOperationShape {
     Subscription,
     /// Reviewed static operation without a generated category.
     Custom,
+    /// Entity-centric capability whose operation is chosen per call.
+    Entity,
 }
 
 /// Compact public scalar-field semantics.
@@ -252,8 +267,44 @@ pub struct AiCapabilityIndexEntry {
     pub schema_fingerprint: String,
     /// Exact logical-target policy fingerprint.
     pub target_policy_fingerprint: String,
+    /// Generated query roots of an [`AiCapabilityKind::GeneratedEntity`]
+    /// entry, in operation-name order. Empty for every other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<AiCapabilityOperationMember>,
     /// Fingerprint of all preceding entry metadata.
     pub fingerprint: String,
+}
+
+/// One generated query root of an entity capability.
+///
+/// A member is the compact form of the root's own
+/// [`AiCapabilityKind::GeneratedQuery`] entry. That entry is still resolved by
+/// [`AiCapabilityIndex::entry`] with the member's `capability_id`, and keeps
+/// the identity, fingerprint and host-policy checks it had as a standalone
+/// entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiCapabilityOperationMember {
+    /// Stable capability identifier of the root.
+    pub capability_id: AiToolId,
+    /// Public GraphQL root field name, used as the operation argument.
+    pub operation_name: String,
+    /// Operation shape of the root.
+    pub operation_shape: AiCapabilityOperationShape,
+    /// Model-safe description of the root.
+    pub description: String,
+    /// Bounded result description of the root.
+    pub result_description: String,
+    /// Conservative compiler-owned result-record planning bounds.
+    pub result_record_cost: AiGraphqlResultRecordCostEstimate,
+    /// Risk classification of the root.
+    pub risk: AiToolRisk,
+    /// Approval classification of the root.
+    pub approval: AiApprovalRule,
+    /// Exact executable capability fingerprint of the root.
+    pub capability_fingerprint: String,
+    /// Exact source catalogue fingerprint of the root.
+    pub catalogue_fingerprint: String,
 }
 
 /// Complete deterministic compact index.
@@ -272,6 +323,10 @@ pub struct AiCapabilityIndex {
     /// it is rebuilt from the entries on first use after deserialization.
     #[serde(skip)]
     search_terms: SearchTermCache,
+    /// Root entries of every entity entry's members, derived from `entries`.
+    /// Never serialized, compared or counted against the limits.
+    #[serde(skip)]
+    operation_entries: OperationEntryCache,
 }
 
 impl AiCapabilityIndex {
@@ -347,6 +402,9 @@ impl AiCapabilityIndex {
         let mut entries = BTreeMap::new();
 
         if let Some(catalogue) = query_catalogue {
+            // Roots of one entity become one entity entry; a root without
+            // an entity stays a standalone entry.
+            let mut by_entity = BTreeMap::<String, Vec<AiCapabilityIndexEntry>>::new();
             for capability in catalogue.capabilities() {
                 let operation = exact_operation(
                     &operations,
@@ -365,6 +423,17 @@ impl AiCapabilityIndex {
                     &schema_fingerprint,
                     &target_policy_fingerprint,
                 )?;
+                match entry.entity_name.clone() {
+                    Some(entity) => by_entity.entry(entity).or_default().push(entry),
+                    None => insert_entry(&mut entries, entry)?,
+                }
+            }
+            for (entity, members) in by_entity {
+                let description = entities
+                    .get(entity.as_str())
+                    .map(|metadata| metadata.description.as_str())
+                    .unwrap_or_default();
+                let entry = entity_entry(&entity, description, members, catalogue.fingerprint())?;
                 insert_entry(&mut entries, entry)?;
             }
         }
@@ -457,10 +526,42 @@ impl AiCapabilityIndex {
             fingerprint,
             limits,
             search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
         };
+        let member_ids = index
+            .entries
+            .values()
+            .flat_map(|entry| entry.operations.iter().map(|member| &member.capability_id))
+            .collect::<Vec<_>>();
+        if member_ids.iter().any(|id| index.entries.contains_key(*id))
+            || member_ids.iter().collect::<BTreeSet<_>>().len() != member_ids.len()
+        {
+            return Err(configuration_error("duplicate capability index ID"));
+        }
         // Tokenise every entry once here, so no search does.
         index.search_terms();
+        index.operation_entries();
         Ok(index)
+    }
+
+    /// Root entries of every entity entry's members, keyed by root ID, each
+    /// with the ID of the entity entry that holds it.
+    fn operation_entries(&self) -> &BTreeMap<AiToolId, (AiToolId, AiCapabilityIndexEntry)> {
+        self.operation_entries.0.get_or_init(|| {
+            Arc::new(
+                self.entries
+                    .values()
+                    .flat_map(|entity| {
+                        entity.operations.iter().map(|member| {
+                            (
+                                member.capability_id.clone(),
+                                (entity.id.clone(), member_entry(entity, member)),
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+        })
     }
 
     /// Precomputed search terms of every entry, in entry order.
@@ -495,14 +596,44 @@ impl AiCapabilityIndex {
         &self.target_policy_fingerprint
     }
 
-    /// Every entry in stable capability-ID order.
+    /// Every discoverable entry in stable capability-ID order.
+    ///
+    /// The generated query roots grouped into an
+    /// [`AiCapabilityKind::GeneratedEntity`] entry are not listed here; see
+    /// [`Self::operation_entry`] and [`Self::entry`].
     pub fn entries(&self) -> impl ExactSizeIterator<Item = &AiCapabilityIndexEntry> {
         self.entries.values()
     }
 
-    /// Resolves one exact entry. This lookup grants no authority.
+    /// Resolves one exact entry: a discoverable entry, or the standalone
+    /// [`AiCapabilityKind::GeneratedQuery`] entry of a root that an entity
+    /// entry groups. This lookup grants no authority.
     pub fn entry(&self, id: &AiToolId) -> Option<&AiCapabilityIndexEntry> {
-        self.entries.get(id)
+        self.entries
+            .get(id)
+            .or_else(|| self.operation_entries().get(id).map(|(_, entry)| entry))
+    }
+
+    /// Resolves the entity entry that groups one generated query root.
+    pub fn entity_entry_of(&self, root_id: &AiToolId) -> Option<&AiCapabilityIndexEntry> {
+        let (entity, _) = self.operation_entries().get(root_id)?;
+        self.entries.get(entity)
+    }
+
+    /// Resolves the root entry of one operation of an entity entry, by the
+    /// operation's public root field name. This lookup grants no authority.
+    pub fn operation_entry(
+        &self,
+        entity_id: &AiToolId,
+        operation_name: &str,
+    ) -> Option<&AiCapabilityIndexEntry> {
+        let member = self
+            .entries
+            .get(entity_id)?
+            .operations
+            .iter()
+            .find(|member| member.operation_name == operation_name)?;
+        self.entry(&member.capability_id)
     }
 
     /// Runs deterministic bounded lexical discovery over model-safe metadata.
@@ -585,6 +716,9 @@ impl AiCapabilityIndexSet {
         let mut canonical = BTreeMap::new();
         let mut capability_owners = BTreeMap::new();
         let mut total_bytes = 0_u64;
+        // Discoverable entries only: the roots an entity entry groups are
+        // part of that entry and are not counted again.
+        let mut total_entries = 0_usize;
         let mut maximum_search_results = limits.maximum_search_results;
         for index in indexes {
             let index = index.into();
@@ -599,7 +733,11 @@ impl AiCapabilityIndexSet {
                     "capability index set contains a duplicate target",
                 ));
             }
-            for id in index.entries.keys() {
+            let member_ids = index
+                .entries
+                .values()
+                .flat_map(|entry| entry.operations.iter().map(|member| &member.capability_id));
+            for id in index.entries.keys().chain(member_ids) {
                 if capability_owners
                     .insert(id.clone(), target_id.clone())
                     .is_some()
@@ -618,6 +756,7 @@ impl AiCapabilityIndexSet {
                     configuration_error("capability index set byte size overflowed")
                 })?;
             }
+            total_entries = total_entries.saturating_add(index.entries.len());
             maximum_search_results =
                 maximum_search_results.min(index.limits.maximum_search_results);
             canonical.insert(target_id, index);
@@ -626,7 +765,7 @@ impl AiCapabilityIndexSet {
                     "capability index set contains too many targets",
                 ));
             }
-            if capability_owners.len() > limits.maximum_entries as usize {
+            if total_entries > limits.maximum_entries as usize {
                 return Err(configuration_error(
                     "capability index set contains too many entries",
                 ));
@@ -748,6 +887,33 @@ impl AiCapabilityIndexSet {
             .map(|(index, entry)| AiCapabilityRankedMatch { index, entry })
             .collect())
     }
+
+    /// Ranks like [`Self::ranked_matches`], then replaces every matching
+    /// [`AiCapabilityKind::GeneratedEntity`] entry with the root entries it
+    /// groups, so each match is one executable root.
+    ///
+    /// The roots of one entity follow its rank: roots of the query's
+    /// operation shape first, then in operation-name order. The query's kind
+    /// and entity-or-operation filters apply to the roots. This is the
+    /// per-root ranking that delivery modes installing one exact definition
+    /// per root use.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid query or result ceiling. Ranking emits
+    /// model-safe metadata only and grants no authority.
+    pub fn ranked_operation_matches(
+        &self,
+        query: &AiCapabilitySearchQuery,
+    ) -> Result<Vec<AiCapabilityRankedMatch<'_>>, AiError> {
+        query.validate(self.maximum_search_results)?;
+        Ok(
+            rank_operation_entries(self.indexes.values().map(Arc::as_ref), query)
+                .into_iter()
+                .map(|(index, entry)| AiCapabilityRankedMatch { index, entry })
+                .collect(),
+        )
+    }
 }
 
 /// One ranked query match and its exact owning index.
@@ -842,6 +1008,20 @@ pub struct AiCapabilitySearchCandidate {
     pub capability_fingerprint: String,
     /// Exact index-entry fingerprint.
     pub entry_fingerprint: String,
+    /// Operations of an [`AiCapabilityKind::GeneratedEntity`] candidate, in
+    /// operation-name order. Empty for every other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<AiCapabilityCandidateOperation>,
+}
+
+/// One operation of an entity candidate: its public root and shape only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiCapabilityCandidateOperation {
+    /// Public GraphQL root field name.
+    pub operation_name: String,
+    /// Operation shape.
+    pub operation_shape: AiCapabilityOperationShape,
 }
 
 /// Bounded deterministic discovery response.
@@ -875,15 +1055,16 @@ pub struct AiCapabilityIndexSetSearchResult {
     pub candidates: Vec<AiCapabilitySearchCandidate>,
 }
 
-/// Fixed per-field weights of one search term in one entry.
+/// Fixed per-field weights of one search term in one entry: one posting.
 ///
 /// Scores are per entry and fixed-weight by design. They never depend on how
 /// many other entries hold a term, so the rank of an entry a principal may see
-/// cannot reveal anything about entries it may not.
+/// cannot reveal anything about entries it may not. No inverse document
+/// frequency, BM25 or other catalogue-wide statistic is computed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TermWeight {
-    /// Position of the term in the owning index's term dictionary.
-    term: u32,
+struct Posting {
+    /// Position of the entry in the owning index's entry order.
+    entry: u32,
     /// Summed weights of the root fields (ID, name, operation, entity,
     /// target, namespace, description) that hold the term.
     root: u16,
@@ -892,24 +1073,31 @@ struct TermWeight {
     nested: u8,
 }
 
-/// Search terms of one entry, computed once when its index is compiled.
+/// Filter keys of one entry, computed once when its index is compiled.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct EntrySearchTerms {
-    /// Sorted by `term`.
-    weights: Vec<TermWeight>,
-    operation_key: String,
+struct EntrySearchKeys {
+    /// Identifier of the entry at this position.
+    id: AiToolId,
+    /// Semantic keys of the entry's operation name and, for an entity entry,
+    /// of every operation it groups.
+    operation_keys: BTreeSet<String>,
     entity_key: Option<String>,
+    /// The entry's own shape and, for an entity entry, every grouped shape.
+    shapes: BTreeSet<AiCapabilityOperationShape>,
 }
 
-/// Search terms of every entry of one index, in entry order.
+/// Inverted search index of one capability index: term to postings.
 ///
-/// Terms are interned per index, so an entry holds one small record per
-/// distinct term and a query resolves each of its terms once per index
-/// instead of once per entry.
+/// Terms are interned per index. A query resolves each of its terms once and
+/// scores only the entries in those terms' posting lists, so a search costs
+/// O(matching postings) instead of O(entries).
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SearchTermIndex {
     dictionary: BTreeMap<String, u32>,
-    entries: Vec<EntrySearchTerms>,
+    /// Indexed by term; each list is in entry order.
+    postings: Vec<Vec<Posting>>,
+    /// Indexed by entry position.
+    entries: Vec<EntrySearchKeys>,
 }
 
 impl SearchTermIndex {
@@ -917,78 +1105,121 @@ impl SearchTermIndex {
         target_id: &GraphqlExecutionTargetId,
         entries: &BTreeMap<AiToolId, AiCapabilityIndexEntry>,
     ) -> Self {
-        let mut dictionary = BTreeMap::new();
+        let mut dictionary = BTreeMap::<String, u32>::new();
+        let mut postings = Vec::<Vec<Posting>>::new();
         let target = search_terms(target_id.as_str());
-        let entries = entries
-            .values()
-            .map(|entry| {
-                let mut weights = BTreeMap::<u32, (u16, u8)>::new();
-                let mut add = |terms: &BTreeSet<String>, root: u16, nested: u8| {
-                    for term in terms {
-                        // A shape word in a query selects a shape and never
-                        // scores, so it is not stored.
-                        if search_shape_term(term) {
-                            continue;
-                        }
-                        let next = u32::try_from(dictionary.len()).unwrap_or(u32::MAX);
-                        let id = *dictionary.entry(term.clone()).or_insert(next);
-                        let weight = weights.entry(id).or_default();
-                        weight.0 += root;
-                        weight.1 += nested;
+        let mut keys = Vec::with_capacity(entries.len());
+        for (position, entry) in entries.values().enumerate() {
+            let position = u32::try_from(position).unwrap_or(u32::MAX);
+            let mut weights = BTreeMap::<u32, (u16, u8)>::new();
+            let mut add = |terms: &BTreeSet<String>, root: u16, nested: u8| {
+                for term in terms {
+                    // A shape word in a query selects a shape and never
+                    // scores, so it is not stored.
+                    if search_shape_term(term) {
+                        continue;
                     }
-                };
-                add(&search_terms(entry.id.as_str()), 12, 0);
-                add(&search_terms(&entry.name), 11, 0);
-                add(&search_terms(&entry.operation_name), 10, 0);
-                if let Some(entity) = &entry.entity_name {
-                    add(&search_terms(entity), 9, 0);
+                    let id = match dictionary.get(term) {
+                        Some(id) => *id,
+                        None => {
+                            let id = u32::try_from(dictionary.len()).unwrap_or(u32::MAX);
+                            dictionary.insert(term.clone(), id);
+                            postings.push(Vec::new());
+                            id
+                        }
+                    };
+                    let weight = weights.entry(id).or_default();
+                    weight.0 += root;
+                    weight.1 += nested;
                 }
-                add(&target, 8, 0);
-                add(&search_terms(&entry.namespace), 8, 0);
-                add(&search_terms(&entry.description), 7, 0);
-                add(
-                    &entry
-                        .relationships
-                        .iter()
-                        .flat_map(|relationship| {
-                            search_terms(&format!(
-                                "{} {} {}",
-                                relationship.name,
-                                relationship.description,
-                                relationship.target_entity
-                            ))
-                        })
-                        .collect(),
-                    0,
-                    3,
-                );
-                add(
-                    &entry
-                        .scalar_fields
-                        .iter()
-                        .flat_map(|field| {
-                            search_terms(&format!("{} {}", field.name, field.description))
-                        })
-                        .collect(),
-                    0,
-                    2,
-                );
-                EntrySearchTerms {
-                    weights: weights
-                        .into_iter()
-                        .map(|(term, (root, nested))| TermWeight { term, root, nested })
-                        .collect(),
-                    operation_key: semantic_key(&entry.operation_name),
-                    entity_key: entry.entity_name.as_deref().map(semantic_key),
-                }
-            })
-            .collect();
+            };
+            add(&search_terms(entry.id.as_str()), 12, 0);
+            add(&search_terms(&entry.name), 11, 0);
+            // An entity entry is found by any of its operations' names and
+            // descriptions, each counted once per field like a root's own.
+            let mut operation = search_terms(&entry.operation_name);
+            let mut description = search_terms(&entry.description);
+            for member in &entry.operations {
+                operation.extend(search_terms(&member.operation_name));
+                description.extend(search_terms(&member.description));
+            }
+            add(&operation, 10, 0);
+            if let Some(entity) = &entry.entity_name {
+                add(&search_terms(entity), 9, 0);
+            }
+            add(&target, 8, 0);
+            add(&search_terms(&entry.namespace), 8, 0);
+            add(&description, 7, 0);
+            add(
+                &entry
+                    .relationships
+                    .iter()
+                    .flat_map(|relationship| {
+                        search_terms(&format!(
+                            "{} {} {}",
+                            relationship.name, relationship.description, relationship.target_entity
+                        ))
+                    })
+                    .collect(),
+                0,
+                3,
+            );
+            add(
+                &entry
+                    .scalar_fields
+                    .iter()
+                    .flat_map(|field| {
+                        search_terms(&format!("{} {}", field.name, field.description))
+                    })
+                    .collect(),
+                0,
+                2,
+            );
+            for (term, (root, nested)) in weights {
+                postings[term as usize].push(Posting {
+                    entry: position,
+                    root,
+                    nested,
+                });
+            }
+            keys.push(EntrySearchKeys {
+                id: entry.id.clone(),
+                operation_keys: std::iter::once(semantic_key(&entry.operation_name))
+                    .chain(
+                        entry
+                            .operations
+                            .iter()
+                            .map(|member| semantic_key(&member.operation_name)),
+                    )
+                    .collect(),
+                entity_key: entry.entity_name.as_deref().map(semantic_key),
+                shapes: std::iter::once(entry.operation_shape)
+                    .chain(entry.operations.iter().map(|member| member.operation_shape))
+                    .collect(),
+            });
+        }
         Self {
             dictionary,
-            entries,
+            postings,
+            entries: keys,
         }
     }
 }
+
+/// Lazily built, never serialized, never compared cache of the root entries
+/// that entity entries group.
+#[derive(Clone, Debug, Default)]
+#[allow(clippy::type_complexity)]
+struct OperationEntryCache(OnceLock<Arc<BTreeMap<AiToolId, (AiToolId, AiCapabilityIndexEntry)>>>);
+
+impl PartialEq for OperationEntryCache {
+    fn eq(&self, _: &Self) -> bool {
+        // Derived from the entries, which the owning index already compares.
+        true
+    }
+}
+
+impl Eq for OperationEntryCache {}
 
 /// Lazily built, never serialized, never compared cache of search terms.
 #[derive(Clone, Debug, Default)]
@@ -1018,13 +1249,28 @@ impl SearchRank {
 
 /// Ranks every matching entry of `indexes` against one query.
 ///
-/// Only the query text is tokenised. Each entry is scored from the term
-/// weights precomputed when its index was compiled, with the same fixed
-/// per-field weights and the same order as tokenising it per search.
+/// Only the query text is tokenised. Each entry is scored from the postings
+/// of the query's terms, precomputed when its index was compiled, with fixed
+/// per-field weights. An entry's score depends only on the query and that
+/// entry's own metadata, never on any other entry.
 fn rank_entries<'a>(
     indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
     query: &AiCapabilitySearchQuery,
 ) -> Vec<(&'a AiCapabilityIndex, &'a AiCapabilityIndexEntry)> {
+    ranked_entries(indexes, query)
+        .into_iter()
+        .map(|(_, index, entry)| (index, entry))
+        .collect()
+}
+
+fn ranked_entries<'a>(
+    indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
+    query: &AiCapabilitySearchQuery,
+) -> Vec<(
+    SearchRank,
+    &'a AiCapabilityIndex,
+    &'a AiCapabilityIndexEntry,
+)> {
     let tokens = search_tokens(&query.text);
     let shape_intent = search_shape_intent(&tokens);
     let terms = tokens
@@ -1035,44 +1281,41 @@ fn rank_entries<'a>(
     let mut ranked = Vec::new();
     for index in indexes {
         let searchable = index.search_terms();
-        let mut term_ids = terms
-            .iter()
-            .filter_map(|term| searchable.dictionary.get(term).copied())
-            .collect::<Vec<_>>();
-        if term_ids.is_empty() {
+        let mut scores = BTreeMap::<u32, (u64, u64)>::new();
+        for term in &terms {
+            let Some(id) = searchable.dictionary.get(term) else {
+                continue;
+            };
+            for posting in &searchable.postings[*id as usize] {
+                let score = scores.entry(posting.entry).or_default();
+                score.0 += u64::from(posting.root);
+                score.1 += u64::from(posting.nested);
+            }
+        }
+        if scores.is_empty() {
             // No entry of this index holds any query term.
             continue;
         }
-        term_ids.sort_unstable();
-        for (entry, entry_terms) in index.entries.values().zip(&searchable.entries) {
+        for (position, (root_semantics, nested_semantics)) in scores {
+            let keys = &searchable.entries[position as usize];
+            let Some(entry) = index.entries.get(&keys.id) else {
+                continue;
+            };
             if query
                 .namespace
                 .as_ref()
                 .is_some_and(|namespace| &entry.namespace != namespace)
                 || query.kind.is_some_and(|kind| entry.kind != kind)
                 || name_key.as_ref().is_some_and(|name| {
-                    &entry_terms.operation_key != name
-                        && entry_terms.entity_key.as_ref() != Some(name)
+                    !keys.operation_keys.contains(name) && keys.entity_key.as_ref() != Some(name)
                 })
             {
                 continue;
             }
-            let mut root_semantics = 0_u64;
-            let mut nested_semantics = 0_u64;
-            for term in &term_ids {
-                if let Ok(position) = entry_terms
-                    .weights
-                    .binary_search_by_key(term, |weight| weight.term)
-                {
-                    let weight = entry_terms.weights[position];
-                    root_semantics += u64::from(weight.root);
-                    nested_semantics += u64::from(weight.nested);
-                }
-            }
             let rank = SearchRank {
                 root_semantics,
                 nested_semantics,
-                shape: u8::from(shape_intent == Some(entry.operation_shape)),
+                shape: u8::from(shape_intent.is_some_and(|shape| keys.shapes.contains(&shape))),
             };
             if rank.has_semantic_match() {
                 ranked.push((rank, index, entry));
@@ -1086,9 +1329,45 @@ fn rank_entries<'a>(
             .then_with(|| left.2.id.cmp(&right.2.id))
     });
     ranked
-        .into_iter()
-        .map(|(_, index, entry)| (index, entry))
-        .collect()
+}
+
+/// Ranks matching entries, then replaces each entity entry with the root
+/// entries it groups: roots of the query's shape first, then in operation
+/// order. Kind and name filters apply to the roots, not to the entity entry.
+fn rank_operation_entries<'a>(
+    indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
+    query: &AiCapabilitySearchQuery,
+) -> Vec<(&'a AiCapabilityIndex, &'a AiCapabilityIndexEntry)> {
+    let mut grouped = query.clone();
+    grouped.kind = None;
+    grouped.entity_or_operation = None;
+    let shape_intent = search_shape_intent(&search_tokens(&query.text));
+    let name_key = query.entity_or_operation.as_deref().map(semantic_key);
+    let mut expanded = Vec::new();
+    for (_, index, entry) in ranked_entries(indexes, &grouped) {
+        let roots = if entry.kind == AiCapabilityKind::GeneratedEntity {
+            let mut members = entry.operations.iter().collect::<Vec<_>>();
+            members.sort_by_key(|member| Some(member.operation_shape) != shape_intent);
+            members
+                .into_iter()
+                .filter_map(|member| index.entry(&member.capability_id))
+                .collect::<Vec<_>>()
+        } else {
+            vec![entry]
+        };
+        for root in roots {
+            if query.kind.is_some_and(|kind| root.kind != kind)
+                || name_key.as_ref().is_some_and(|name| {
+                    &semantic_key(&root.operation_name) != name
+                        && root.entity_name.as_deref().map(semantic_key).as_ref() != Some(name)
+                })
+            {
+                continue;
+            }
+            expanded.push((index, root));
+        }
+    }
+    expanded
 }
 
 fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandidate {
@@ -1103,6 +1382,14 @@ fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandida
         operation_shape: entry.operation_shape,
         capability_fingerprint: entry.capability_fingerprint.clone(),
         entry_fingerprint: entry.fingerprint.clone(),
+        operations: entry
+            .operations
+            .iter()
+            .map(|member| AiCapabilityCandidateOperation {
+                operation_name: member.operation_name.clone(),
+                operation_shape: member.operation_shape,
+            })
+            .collect(),
     }
 }
 
@@ -1173,11 +1460,219 @@ fn generated_entry(
         catalogue_fingerprint: catalogue_fingerprint.to_owned(),
         schema_fingerprint: schema_fingerprint.to_owned(),
         target_policy_fingerprint: target_policy_fingerprint.to_owned(),
+        operations: Vec::new(),
         fingerprint: String::new(),
     };
     validate_entry_text(&entry)?;
     entry.fingerprint = entry_fingerprint(&entry);
     Ok(entry)
+}
+
+/// Groups the generated query roots of one entity into one entity entry.
+///
+/// Every root entry must carry the same entity summaries, which
+/// [`generated_entry`] guarantees for roots of one entity. Each root stays
+/// resolvable as its own entry through [`member_entry`], which must rebuild
+/// it exactly.
+fn entity_entry(
+    entity: &str,
+    entity_description: &str,
+    mut roots: Vec<AiCapabilityIndexEntry>,
+    catalogue_fingerprint: &str,
+) -> Result<AiCapabilityIndexEntry, AiError> {
+    roots.sort_by(|left, right| {
+        left.operation_name
+            .cmp(&right.operation_name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let first = roots
+        .first()
+        .ok_or_else(|| configuration_error("entity capability has no operations"))?;
+    let namespace = first.namespace.clone();
+    if roots.iter().any(|root| {
+        root.namespace != namespace
+            || root.scalar_fields != first.scalar_fields
+            || root.relationships != first.relationships
+            || root.aggregate_features != first.aggregate_features
+            || root.result_classification != first.result_classification
+            || root.schema_fingerprint != first.schema_fingerprint
+            || root.target_policy_fingerprint != first.target_policy_fingerprint
+    }) {
+        return Err(configuration_error(
+            "entity capability operations disagree on their entity",
+        ));
+    }
+    let members = roots
+        .iter()
+        .map(|root| AiCapabilityOperationMember {
+            capability_id: root.id.clone(),
+            operation_name: root.operation_name.clone(),
+            operation_shape: root.operation_shape,
+            description: root.description.clone(),
+            result_description: root.result_description.clone(),
+            result_record_cost: root.result_record_cost,
+            risk: root.risk,
+            approval: root.approval,
+            capability_fingerprint: root.capability_fingerprint.clone(),
+            catalogue_fingerprint: root.catalogue_fingerprint.clone(),
+        })
+        .collect::<Vec<_>>();
+    if members
+        .windows(2)
+        .any(|pair| pair[0].operation_name == pair[1].operation_name)
+    {
+        return Err(configuration_error(
+            "entity capability has duplicate operation names",
+        ));
+    }
+    let id = AiToolId::parse(entity_capability_id(&namespace, entity))?;
+    let shapes = members
+        .iter()
+        .map(|member| shape_name(member.operation_shape).to_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let result_record_cost = members.iter().fold(
+        AiGraphqlResultRecordCostEstimate {
+            maximum_root_records: 0,
+            maximum_total_records: 0,
+            root_bound_required: false,
+        },
+        |total, member| AiGraphqlResultRecordCostEstimate {
+            maximum_root_records: total
+                .maximum_root_records
+                .max(member.result_record_cost.maximum_root_records),
+            maximum_total_records: total
+                .maximum_total_records
+                .max(member.result_record_cost.maximum_total_records),
+            root_bound_required: total.root_bound_required
+                || member.result_record_cost.root_bound_required,
+        },
+    );
+    let capability_fingerprint = sha256_json(&json!({
+        "version": AI_CAPABILITY_ENTITY_VERSION,
+        "kind": "generated_entity",
+        "id": id.as_str(),
+        "entity": entity,
+        "operations": members
+            .iter()
+            .map(|member| json!({
+                "id": member.capability_id.as_str(),
+                "operation": member.operation_name,
+                "fingerprint": member.capability_fingerprint,
+            }))
+            .collect::<Vec<_>>(),
+    }));
+    let mut entry = AiCapabilityIndexEntry {
+        id,
+        kind: AiCapabilityKind::GeneratedEntity,
+        name: format!("{entity} records"),
+        description: if entity_description.trim().is_empty() {
+            format!("Read {entity} records.")
+        } else {
+            entity_description.to_owned()
+        },
+        namespace,
+        entity_name: Some(entity.to_owned()),
+        operation_name: entity.to_owned(),
+        operation_shape: AiCapabilityOperationShape::Entity,
+        scalar_fields: first.scalar_fields.clone(),
+        relationships: first.relationships.clone(),
+        aggregate_features: first.aggregate_features.clone(),
+        result_classification: first.result_classification,
+        result_description: format!(
+            "Bounded {entity} reads ({shapes}); choose one operation per call."
+        ),
+        result_record_cost,
+        risk: members
+            .iter()
+            .map(|member| member.risk)
+            .max()
+            .unwrap_or(AiToolRisk::ReadOnly),
+        approval: if members
+            .iter()
+            .all(|member| member.approval == AiApprovalRule::None)
+        {
+            AiApprovalRule::None
+        } else {
+            return Err(configuration_error(
+                "entity capability operation requires approval",
+            ));
+        },
+        capability_fingerprint,
+        catalogue_fingerprint: catalogue_fingerprint.to_owned(),
+        schema_fingerprint: first.schema_fingerprint.clone(),
+        target_policy_fingerprint: first.target_policy_fingerprint.clone(),
+        operations: members,
+        fingerprint: String::new(),
+    };
+    validate_entry_text(&entry)?;
+    entry.fingerprint = entry_fingerprint(&entry);
+    for root in &roots {
+        let member = entry
+            .operations
+            .iter()
+            .find(|member| member.capability_id == root.id)
+            .ok_or_else(|| configuration_error("entity capability lost an operation"))?;
+        if &member_entry(&entry, member) != root {
+            return Err(configuration_error(
+                "entity capability cannot reproduce an operation entry",
+            ));
+        }
+    }
+    Ok(entry)
+}
+
+/// Rebuilds the standalone [`AiCapabilityKind::GeneratedQuery`] entry of one
+/// member of an entity entry, exactly as [`generated_entry`] produced it.
+fn member_entry(
+    entity: &AiCapabilityIndexEntry,
+    member: &AiCapabilityOperationMember,
+) -> AiCapabilityIndexEntry {
+    let entity_name = entity.entity_name.clone();
+    let mut entry = AiCapabilityIndexEntry {
+        id: member.capability_id.clone(),
+        kind: AiCapabilityKind::GeneratedQuery,
+        name: entity_name.as_deref().map_or_else(
+            || member.operation_name.clone(),
+            |name| format!("{} {}", shape_name(member.operation_shape), name),
+        ),
+        description: member.description.clone(),
+        namespace: id_namespace(&member.capability_id),
+        entity_name,
+        operation_name: member.operation_name.clone(),
+        operation_shape: member.operation_shape,
+        scalar_fields: entity.scalar_fields.clone(),
+        relationships: entity.relationships.clone(),
+        aggregate_features: entity.aggregate_features.clone(),
+        result_classification: entity.result_classification,
+        result_description: member.result_description.clone(),
+        result_record_cost: member.result_record_cost,
+        risk: member.risk,
+        approval: member.approval,
+        capability_fingerprint: member.capability_fingerprint.clone(),
+        catalogue_fingerprint: member.catalogue_fingerprint.clone(),
+        schema_fingerprint: entity.schema_fingerprint.clone(),
+        target_policy_fingerprint: entity.target_policy_fingerprint.clone(),
+        operations: Vec::new(),
+        fingerprint: String::new(),
+    };
+    entry.fingerprint = entry_fingerprint(&entry);
+    entry
+}
+
+/// Stable identifier of one entity capability. It never collides with a
+/// root identifier, which always names a root kind as its second segment.
+fn entity_capability_id(namespace: &str, entity: &str) -> String {
+    let identity = format!("{namespace}\0entity\0{entity}\0grouped-v1");
+    let hash = hex::encode(Sha256::digest(identity.as_bytes()));
+    format!(
+        "{}.entity.{}.grouped-{}",
+        namespace.to_ascii_lowercase(),
+        entity.to_ascii_lowercase(),
+        &hash[..16]
+    )
 }
 
 fn result_object_name(result: &GraphqlSemanticTypeRef) -> Option<&str> {
@@ -1263,6 +1758,7 @@ fn static_entry(
         catalogue_fingerprint: semantic_catalogue_fingerprint.to_owned(),
         schema_fingerprint: schema_fingerprint.to_owned(),
         target_policy_fingerprint: target_policy_fingerprint.to_owned(),
+        operations: Vec::new(),
         fingerprint: String::new(),
     };
     validate_entry_text(&entry)?;
@@ -1437,6 +1933,7 @@ fn shape_name(shape: AiCapabilityOperationShape) -> &'static str {
         AiCapabilityOperationShape::DeleteMany => "Delete many",
         AiCapabilityOperationShape::Subscription => "Watch",
         AiCapabilityOperationShape::Custom => "Use",
+        AiCapabilityOperationShape::Entity => "Read",
     }
 }
 
@@ -1445,9 +1942,9 @@ fn generated_risk(
     operation: &GraphqlSemanticOperationDescriptor,
 ) -> AiToolRisk {
     match kind {
-        AiCapabilityKind::GeneratedQuery | AiCapabilityKind::GeneratedSubscription => {
-            AiToolRisk::ReadOnly
-        }
+        AiCapabilityKind::GeneratedQuery
+        | AiCapabilityKind::GeneratedSubscription
+        | AiCapabilityKind::GeneratedEntity => AiToolRisk::ReadOnly,
         AiCapabilityKind::GeneratedMutation => match operation.ai_mutation_execution {
             Some(graphql_orm_operation_catalog::AiMutationExecutionPolicy::Automatic) => {
                 AiToolRisk::LowRiskWrite
@@ -1789,6 +2286,7 @@ mod tests {
             fingerprint: "a".repeat(64),
             limits: AiCapabilityIndexLimits::default(),
             search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
         }
     }
 
@@ -1953,6 +2451,7 @@ mod tests {
             fingerprint: "a".repeat(64),
             limits: AiCapabilityIndexLimits::default(),
             search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -1996,6 +2495,7 @@ mod tests {
             fingerprint: "b".repeat(64),
             limits: AiCapabilityIndexLimits::default(),
             search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -2379,7 +2879,12 @@ mod tests {
         let mut nested_semantics = 0_u64;
         let id = search_terms(entry.id.as_str());
         let name = search_terms(&entry.name);
-        let operation = search_terms(&entry.operation_name);
+        let mut operation = search_terms(&entry.operation_name);
+        let mut description = search_terms(&entry.description);
+        for member in &entry.operations {
+            operation.extend(search_terms(&member.operation_name));
+            description.extend(search_terms(&member.description));
+        }
         let entity = entry
             .entity_name
             .as_deref()
@@ -2387,7 +2892,6 @@ mod tests {
             .unwrap_or_default();
         let target = search_terms(target_id.as_str());
         let namespace = search_terms(&entry.namespace);
-        let description = search_terms(&entry.description);
         let relationships = entry
             .relationships
             .iter()
@@ -2420,7 +2924,13 @@ mod tests {
         SearchRank {
             root_semantics,
             nested_semantics,
-            shape: u8::from(shape_intent == Some(entry.operation_shape)),
+            shape: u8::from(shape_intent.is_some_and(|shape| {
+                entry.operation_shape == shape
+                    || entry
+                        .operations
+                        .iter()
+                        .any(|member| member.operation_shape == shape)
+            })),
         }
     }
 
@@ -2447,6 +2957,9 @@ mod tests {
                     && query.kind.is_none_or(|kind| entry.kind == kind)
                     && query.entity_or_operation.as_ref().is_none_or(|name| {
                         semantic_key(&entry.operation_name) == semantic_key(name)
+                            || entry.operations.iter().any(|member| {
+                                semantic_key(&member.operation_name) == semantic_key(name)
+                            })
                             || entry
                                 .entity_name
                                 .as_ref()
@@ -2598,5 +3111,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Groups the synthetic per-root entries of every entity into entity
+    /// entries, as compilation does for a query catalogue.
+    fn synthetic_entity_index(entity_count: usize) -> AiCapabilityIndex {
+        let roots = synthetic_shape_index(entity_count);
+        let mut by_entity = BTreeMap::<String, Vec<AiCapabilityIndexEntry>>::new();
+        for entry in roots.entries.values() {
+            let mut entry = entry.clone();
+            entry.description = format!(
+                "{} of {} records.",
+                shape_name(entry.operation_shape),
+                entry.entity_name.as_deref().expect("entity")
+            );
+            entry.fingerprint = entry_fingerprint(&entry);
+            by_entity
+                .entry(entry.entity_name.clone().expect("entity"))
+                .or_default()
+                .push(entry);
+        }
+        let mut entries = BTreeMap::new();
+        for (entity, members) in by_entity {
+            let entry = entity_entry(
+                &entity,
+                &format!("Operator {entity} investigations."),
+                members,
+                &"c".repeat(64),
+            )
+            .expect("entity entry");
+            assert!(entries.insert(entry.id.clone(), entry).is_none());
+        }
+        AiCapabilityIndex {
+            entries,
+            search_terms: SearchTermCache::default(),
+            operation_entries: OperationEntryCache::default(),
+            ..roots
+        }
+    }
+
+    #[test]
+    fn entity_entries_rank_like_the_reference_and_by_their_operations() {
+        let entities = synthetic_entity_index(30);
+        assert_eq!(entities.entries().len(), 30);
+        let roots = synthetic_shape_index(5);
+        let set = AiCapabilityIndexSet::compile([Arc::new(entities.clone())]).expect("entity set");
+        for text in [
+            "list SyntheticEntity003",
+            "how many SyntheticEntity014 records",
+            "Synthetic007keyset",
+            "operator investigation",
+            "aggregate of records",
+            "nothing matches zzzz",
+        ] {
+            for name in [
+                None,
+                Some("SyntheticEntity003"),
+                Some("Synthetic014aggregate"),
+            ] {
+                let query = AiCapabilitySearchQuery {
+                    entity_or_operation: name.map(str::to_owned),
+                    ..query(text)
+                };
+                let ranked = set
+                    .ranked_matches(&query)
+                    .expect("ranked")
+                    .into_iter()
+                    .map(|candidate| candidate.entry().id.as_str().to_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    ranked,
+                    reference_ranking(&[&entities], &query),
+                    "{text:?} {name:?}"
+                );
+            }
+        }
+        // An operation name reaches its entity entry, and the per-root
+        // ranking returns that root first among the entity's operations.
+        let keyset = set
+            .ranked_matches(&query("Synthetic007keyset"))
+            .expect("keyset");
+        assert_eq!(
+            keyset[0].entry().entity_name.as_deref(),
+            Some("SyntheticEntity007")
+        );
+        let operations = set
+            .ranked_operation_matches(&query("keyset SyntheticEntity007"))
+            .expect("operations");
+        assert_eq!(operations[0].entry().operation_name, "Synthetic007keyset");
+        assert!(
+            operations
+                .iter()
+                .all(|candidate| candidate.entry().kind == AiCapabilityKind::GeneratedQuery)
+        );
+        assert_eq!(roots.entries().len(), 25);
+    }
+
+    #[test]
+    fn scores_depend_only_on_the_query_and_the_entry_itself() {
+        // Adding many entries that share the query's terms changes neither
+        // the score nor the relative order of the original entries: no
+        // catalogue-wide statistic contributes to a score.
+        let small = synthetic_entity_index(3);
+        let large = synthetic_entity_index(120);
+        for text in [
+            "SyntheticEntity001 records",
+            "list operator investigation",
+            "count Synthetic002aggregate",
+        ] {
+            let query = query(text);
+            let small_ranks = ranked_entries([&small], &query)
+                .into_iter()
+                .map(|(rank, _, entry)| (entry.id.clone(), rank))
+                .collect::<Vec<_>>();
+            let large_ranks = ranked_entries([&large], &query)
+                .into_iter()
+                .map(|(rank, _, entry)| (entry.id.clone(), rank))
+                .collect::<BTreeMap<_, _>>();
+            assert!(!small_ranks.is_empty(), "{text:?}");
+            for (id, rank) in &small_ranks {
+                assert_eq!(large_ranks.get(id), Some(rank), "{text:?} {id:?}");
+            }
+            let small_order = small_ranks.iter().map(|(id, _)| id).collect::<Vec<_>>();
+            let large_order = ranked_entries([&large], &query)
+                .into_iter()
+                .map(|(_, _, entry)| &entry.id)
+                .filter(|id| small.entries.contains_key(*id))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                small_order,
+                large_order.into_iter().collect::<Vec<_>>(),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverted_index_holds_one_posting_per_entry_term() {
+        let index = synthetic_entity_index(10);
+        let searchable = index.search_terms();
+        assert_eq!(searchable.entries.len(), index.entries.len());
+        for postings in &searchable.postings {
+            assert!(!postings.is_empty());
+            assert!(
+                postings
+                    .windows(2)
+                    .all(|pair| pair[0].entry < pair[1].entry)
+            );
+        }
+        // A term only one entity holds has exactly one posting.
+        let term = searchable
+            .dictionary
+            .get(&semantic_key("SyntheticEntity004"))
+            .expect("entity term");
+        assert_eq!(searchable.postings[*term as usize].len(), 1);
     }
 }
