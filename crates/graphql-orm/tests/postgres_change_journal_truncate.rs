@@ -372,6 +372,9 @@ async fn a_cascade_into_a_table_without_a_recorder_is_refused()
         ))
         .execute(&owner)
         .await?;
+        let diagnostics = database.schema().validate_target(&graphql_orm_schema_target()).await?;
+        let messages = journal_errors(&diagnostics);
+        assert_eq!(messages.iter().any(|message| message.contains("Unjournaled cascade") && message.contains("trunc_host_links")), refused, "{action}: {messages:?}");
         let installed = database.ensure_change_journal_recorder(&entities).await;
         if refused {
             let error = installed.expect_err("the recorder install is refused");

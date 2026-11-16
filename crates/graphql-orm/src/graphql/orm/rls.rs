@@ -884,17 +884,19 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
     // rows of a table without the recorder, when a journaled row changes.
     statements.push(format!(
         "DO $graphql_orm$ DECLARE gap pg_catalog.record; BEGIN \
-         FOR gap IN SELECT con.conname, con.conrelid::pg_catalog.regclass AS child, con.confrelid::pg_catalog.regclass AS parent FROM pg_catalog.pg_constraint con \
-         WHERE con.contype OPERATOR(pg_catalog.=) 'f' AND (con.confdeltype OPERATOR(pg_catalog.=) ANY (ARRAY['c', 'n', 'd']::pg_catalog.\"char\"[]) OR con.confupdtype OPERATOR(pg_catalog.=) ANY (ARRAY['c', 'n', 'd']::pg_catalog.\"char\"[])) \
-         AND EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid OPERATOR(pg_catalog.=) con.confrelid AND NOT t.tgisinternal AND t.tgname OPERATOR(pg_catalog.=) {trigger} AND t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()')) \
-         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid OPERATOR(pg_catalog.=) con.conrelid AND NOT t.tgisinternal AND t.tgenabled OPERATOR(pg_catalog.=) 'O' AND t.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.=) 29 AND t.tgqual IS NULL AND t.tgname OPERATOR(pg_catalog.=) {trigger} AND t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()')) \
-         ORDER BY 2, 1 LOOP \
+         FOR gap IN {cascade_query} ORDER BY 2, 1 LOOP \
          RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = pg_catalog.format('graphql-orm change journal cannot record table %s, but foreign key %I changes its rows when a row of journaled table %s is deleted or updated', gap.child, gap.conname, gap.parent), \
          HINT = 'Give the table a single-column primary key so it is journaled, or make the foreign key restrict the change.'; \
          END LOOP; END $graphql_orm$",
-        trigger = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
+        cascade_query = change_journal_cascade_catalog_query(),
     ));
     statements
+}
+
+/// Catalog gaps used by both recorder installation and validation.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+pub(super) fn change_journal_cascade_catalog_query() -> &'static str {
+    "SELECT con.conname, con.conrelid::pg_catalog.regclass::pg_catalog.text AS child, con.confrelid::pg_catalog.regclass::pg_catalog.text AS parent FROM pg_catalog.pg_constraint con          WHERE con.contype OPERATOR(pg_catalog.=) 'f' AND (con.confdeltype OPERATOR(pg_catalog.=) ANY (ARRAY['c', 'n', 'd']::pg_catalog.\"char\"[]) OR con.confupdtype OPERATOR(pg_catalog.=) ANY (ARRAY['c', 'n', 'd']::pg_catalog.\"char\"[]))          AND EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid OPERATOR(pg_catalog.=) con.confrelid AND NOT t.tgisinternal AND t.tgname OPERATOR(pg_catalog.=) 'graphql_orm_change_journal' AND t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()'))          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid OPERATOR(pg_catalog.=) con.conrelid AND NOT t.tgisinternal AND t.tgenabled OPERATOR(pg_catalog.=) 'O' AND t.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.=) 29 AND t.tgqual IS NULL AND t.tgname OPERATOR(pg_catalog.=) 'graphql_orm_change_journal' AND t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()'))         "
 }
 
 /// Bind one table in the registry and (re)create its change journal trigger.
@@ -1665,6 +1667,8 @@ pub struct LiveRlsEnforcement {
     /// `pg_proc.prosrc` of `graphql_orm.refuse_change_journal_truncate()`,
     /// when present.
     pub change_journal_truncate_function: Option<String>,
+    /// Cascading foreign keys into live tables without an enabled recorder.
+    pub change_journal_cascade_gaps: Vec<(String, String, String)>,
     /// [`change_journal_table_key`] of every table with an enabled,
     /// unconditional `BEFORE TRUNCATE` statement trigger named
     /// `graphql_orm_change_journal_truncate` that calls that function.
@@ -2021,6 +2025,10 @@ pub(crate) fn validate_change_journal(
         diagnostics.push(error(format!(
             "graphql_orm.{CHANGE_JOURNAL_TRUNCATE_FUNCTION}() is missing or differs from the definition graphql-orm installs; re-apply the schema target"
         )));
+    }
+    for (constraint, child, parent) in &live.change_journal_cascade_gaps {
+        diagnostics.push(rls_diagnostic(SchemaDiagnosticSeverity::Error, child,
+            format!("Unjournaled cascade: foreign key {constraint} changes rows of {child} when journaled table {parent} changes")));
     }
     for gap in change_journal_cascade_gaps(&target.schema) {
         diagnostics.push(rls_diagnostic(

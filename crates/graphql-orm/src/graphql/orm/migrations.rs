@@ -1250,18 +1250,18 @@ enum ValueDomain {
 /// The domain of the closed set of types whose widenings are known to keep
 /// every stored value. Spellings of PostgreSQL, SQLite and SQL Server are
 /// recognised; anything else has no known domain.
-fn value_domain(sql_type: &str) -> Option<ValueDomain> {
+fn value_domain(backend: DatabaseBackend, sql_type: &str) -> Option<ValueDomain> {
     if let Some(name) = postgres_type_name(sql_type) {
         if name.array {
             return None;
         }
         return match (name.base, name.modifiers.as_slice()) {
             ("smallint", []) => Some(ValueDomain::Integer(16)),
-            ("integer", []) => Some(ValueDomain::Integer(32)),
+            ("integer", []) => Some(ValueDomain::Integer(if backend == DatabaseBackend::Sqlite { 64 } else { 32 })),
             ("bigint", []) => Some(ValueDomain::Integer(64)),
             ("real", []) => Some(ValueDomain::Real),
             ("double precision", []) => Some(ValueDomain::Double),
-            ("numeric", []) => Some(ValueDomain::Numeric(None)),
+            ("numeric", []) => Some(ValueDomain::Numeric(if backend == DatabaseBackend::Postgres { None } else { Some((18, 0)) })),
             ("numeric", [precision, scale]) => {
                 Some(ValueDomain::Numeric(Some((*precision, *scale))))
             }
@@ -1292,9 +1292,10 @@ fn value_domain(sql_type: &str) -> Option<ValueDomain> {
 /// at least the same integer digits and scale, and a longer or unlimited
 /// text. Everything else, including every type this function does not
 /// recognise, may round, truncate or reject stored values.
-fn lossless_type_widening(before: &str, after: &str) -> bool {
+fn lossless_type_widening(backend: DatabaseBackend, before: &str, after: &str) -> bool {
+    if backend == DatabaseBackend::Mssql && before.trim().to_ascii_lowercase().starts_with("nvarchar") && after.trim().to_ascii_lowercase().starts_with("varchar") { return false; }
     use ValueDomain::{Double, Integer, Numeric, Real, Text};
-    let (Some(before), Some(after)) = (value_domain(before), value_domain(after)) else {
+    let (Some(before), Some(after)) = (value_domain(backend, before), value_domain(backend, after)) else {
         return false;
     };
     // Decimal digits that hold every value of an integer of `bits` bits.
@@ -3789,6 +3790,14 @@ pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
     }
 }
 pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk, &'static str) {
+    classify_migration_step_context(None, step, None)
+}
+
+pub(super) fn classify_migration_step_context(
+    backend: Option<DatabaseBackend>,
+    step: &StepRef<'_>,
+    prior_append_only: Option<(bool, bool)>,
+) -> (MigrationRisk, &'static str) {
     let (risk, reason) = match step {
         StepRef::EnableExtension { .. } => (
             MigrationRisk::Additive,
@@ -3818,7 +3827,12 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             let type_changed = !postgres_types_equivalent(&before.sql_type, &after.sql_type);
             // A type change that can lose stored values outranks every other
             // change the same step makes.
-            if type_changed && !lossless_type_widening(&before.sql_type, &after.sql_type) {
+            if (before.is_unique && !after.is_unique) || (before.is_primary_key && !after.is_primary_key) {
+                (MigrationRisk::Destructive, "removes column uniqueness or primary-key enforcement")
+            } else if type_changed && !backend.map_or_else(
+                || [DatabaseBackend::Postgres, DatabaseBackend::Sqlite, DatabaseBackend::Mssql].into_iter().all(|backend| lossless_type_widening(backend, &before.sql_type, &after.sql_type)),
+                |backend| lossless_type_widening(backend, &before.sql_type, &after.sql_type),
+            ) {
                 (
                     MigrationRisk::Destructive,
                     "changes an existing column to a type that may round, truncate, or reject stored values",
@@ -3869,13 +3883,14 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             MigrationRisk::Destructive,
             "drops an existing referential constraint",
         ),
-        StepRef::SetAppendOnly { enabled: true, .. } => (
+        StepRef::SetAppendOnly { enabled: true, retention_purge, .. }
+            if prior_append_only.is_some_and(|(enabled, purge)| !enabled || purge || !retention_purge) => (
             MigrationRisk::Additive,
             "adds database enforcement that prevents row mutation",
         ),
-        StepRef::SetAppendOnly { enabled: false, .. } => (
+        StepRef::SetAppendOnly { .. } => (
             MigrationRisk::Destructive,
-            "removes append-only database enforcement",
+            "relaxes append-only enforcement or has no known prior enforcement state",
         ),
         StepRef::SetCompositeUniques { before, after, .. }
             if before.iter().any(|unique| !after.contains(unique)) =>
@@ -3904,6 +3919,17 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
     };
 
     (risk, reason)
+}
+
+pub(super) fn classify_migration_steps_for_backend(backend: DatabaseBackend, steps: &[MigrationStep], current: &SchemaModel) -> Vec<PlannedMigrationStep> {
+    steps.iter().map(|step| {
+        let prior = match step {
+            MigrationStep::SetAppendOnly { table_name, .. } => current.tables.iter().find(|t| &t.table_name == table_name).map(|t| (t.append_only, t.retention_purge)),
+            _ => None,
+        };
+        let (risk, reason) = classify_migration_step_context(Some(backend), &StepRef::from(step), prior);
+        PlannedMigrationStep { step: step.clone(), risk, reason: reason.into() }
+    }).collect()
 }
 
 pub fn classify_migration_steps(steps: &[MigrationStep]) -> Vec<PlannedMigrationStep> {
@@ -5749,6 +5775,9 @@ async fn postgres_rls_enforcement(
             security_definer: row.try_get("security_definer")?,
         });
     }
+    for row in sqlx::query(super::rls::change_journal_cascade_catalog_query()).fetch_all(&mut *conn).await? {
+        live.change_journal_cascade_gaps.push((row.try_get("conname")?, row.try_get("child")?, row.try_get("parent")?));
+    }
     live.change_journal_truncate_function = sqlx::query_scalar(
         "SELECT p.prosrc::pg_catalog.text FROM pg_catalog.pg_proc p
          JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
@@ -6440,5 +6469,27 @@ mod catalog_read_cancellation_tests {
                 .await?;
         assert_eq!(committed, i64::try_from(steps)?);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backend_risk_regressions {
+    use super::*;
+    #[test]
+    fn widening_respects_backend_value_domains() {
+        for (backend, before, after) in [
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "VARCHAR(50)"),
+            (DatabaseBackend::Mssql, "NVARCHAR(MAX)", "VARCHAR(MAX)"),
+            (DatabaseBackend::Mssql, "DECIMAL(20,4)", "DECIMAL"),
+            (DatabaseBackend::Mssql, "BIGINT", "NUMERIC"),
+            (DatabaseBackend::Sqlite, "INTEGER", "DOUBLE PRECISION"),
+        ] {
+            let column = |sql_type: &str| ColumnModel { name: "value".into(), sql_type: sql_type.into(), spatial: None, nullable: false, is_primary_key: false, is_unique: false, default: None };
+            let step = MigrationStep::AlterColumn { table_name: "records".into(), before: column(before), after: column(after) };
+            assert_eq!(classify_migration_step_context(Some(backend), &StepRef::from(&step), None).0, MigrationRisk::Destructive, "{backend:?}: {before} -> {after}");
+        }
+        assert!(lossless_type_widening(DatabaseBackend::Postgres, "DECIMAL(20,4)", "DECIMAL"));
+        assert!(lossless_type_widening(DatabaseBackend::Postgres, "BIGINT", "NUMERIC"));
+        assert!(lossless_type_widening(DatabaseBackend::Postgres, "INTEGER", "DOUBLE PRECISION"));
     }
 }

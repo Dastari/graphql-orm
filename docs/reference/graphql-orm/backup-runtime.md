@@ -218,6 +218,10 @@ rather than left unjournaled:
   reaches the table from another one. Delete the rows instead. A transaction that sets
   `graphql_orm.change_journal` (`CHANGE_JOURNAL_SETTING`) to `off` declares that it writes without
   journaling, as a restore does, and may truncate; take a full backup afterwards.
+  The guard reads the effective `current_setting`: a role-level or database-level
+  default of `off` also permits TRUNCATE. Hosts must never configure that default
+  on a role or database; scope trusted restore opt-outs to `SET LOCAL` in the
+  restore transaction.
   `validate_target` reports a journaled table without the guard.
 - A foreign key from a table without a recorder to a journaled table, whose delete action is
   `CASCADE` or `SET NULL`, is refused when the recorder is planned (`plan_schema_target`) or

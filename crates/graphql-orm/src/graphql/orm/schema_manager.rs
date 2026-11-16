@@ -9,7 +9,7 @@ use super::execution::{
     applied_migration_records, applied_version_set, ensure_managed_policy, ensure_planning_policy,
 };
 use super::migrations::{
-    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
+    build_migration_plan, classify_migration_steps_for_backend, validate_migration_step_capabilities,
 };
 use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{
@@ -1052,7 +1052,7 @@ fn plan_migration_for_backend<B: OrmBackend>(
     }
     let plan = build_migration_plan(B::DIALECT, current, target);
     validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
-    let steps = classify_migration_steps(&plan.steps);
+    let steps = classify_migration_steps_for_backend(B::DIALECT, &plan.steps, current);
     let plan_hash = stable_plan_hash(B::DIALECT.name(), &steps, &plan.statements);
     Ok(PlannedMigration {
         version,

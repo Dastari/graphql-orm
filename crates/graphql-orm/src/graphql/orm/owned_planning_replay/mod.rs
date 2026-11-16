@@ -528,7 +528,7 @@ fn compute_after_target(
     let steps = steps
         .into_iter()
         .map(|step| {
-            let (risk, reason) = classify_migration_step_view(&StepRef::from(&step));
+            let (risk, reason) = classify_migration_step_context(Some(backend), &StepRef::from(&step), None);
             OwnedPlannedMigrationStep {
                 step,
                 risk,

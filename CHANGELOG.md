@@ -14,13 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - breaking batch (ORM/macros 0.163.0, backup 0.25.0 on `next/breaking`)
+## Unreleased - breaking batch (ORM/macros 0.164.0, backup 0.25.0 on `next/breaking`)
 
 - **Breaking: migration plans no longer drop undeclared tables by default (#441).** `PlanOptions::default()` is `managed_tables_only()`. A plan drops a live table the target does not declare only when the caller plans with `PlanOptions::strict()`. Schema stages and ABI upgrades drop only tables that a stage declared.
 - **Breaking: lossy column type changes are `Destructive` (#568).** A type change is `Risky` only when it is a known lossless widening; every other type change needs `ApplyOptions::allow_destructive`.
 - **Breaking: integrity-removing steps are `Destructive` (#569).** `SetAppendOnly { enabled: false }`, `DropIndex`, `DropForeignKey`, and `SetCompositeUniques`/`SetCheckConstraints` steps that remove or change a constraint need `allow_destructive`. No new option was added.
 - **Breaking: the PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades (#592).** Journaled tables carry a `BEFORE TRUNCATE` guard that refuses the statement unless the transaction set `graphql_orm.change_journal` to `off`. A foreign key that changes rows of a table without a recorder when a journaled row is deleted is refused when the recorder is planned, installed or validated (`ChangeJournalCascadeGap`). `CHANGE_JOURNAL_SETTING` is public. Backup's `clear_restore_target` turns the setting off for its truncate.
 - **Breaking: backup result and error types.** `PruneResult` and `DeleteSnapshotResult` gain `deleted_snapshot_ids`, an unadmitted snapshot is refused with `BackupError::SnapshotNotAdmitted`, and all three types are `#[non_exhaustive]`.
+- Column UNIQUE/primary-key removal and newly enabled retention purge require destructive admission; type widening respects backend value domains. PostgreSQL validation reports live cascade gaps added outside the ORM.
 - See the [migration guide](MIGRATION.md#breaking-release-unreleased).
 
 ## Unreleased - ORM/macros 0.162.0

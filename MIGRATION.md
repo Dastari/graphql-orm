@@ -15,6 +15,24 @@ supersedes: []
 Entries for the next breaking release, collected on the `next/breaking`
 branch. Version numbers are assigned when the batch is released.
 
+### Migration safety and live journal validation
+
+- **Action needed:** replan pending migrations. Removing column-level UNIQUE or
+  primary-key enforcement, or enabling retention purge on an already append-only
+  table, is `Destructive` and requires `allow_destructive`. Append-only steps
+  without known prior state fail closed. These changes are refused by `additive_only`.
+- **Action needed:** review type conversions using the actual backend. SQL Server
+  NVARCHAR to VARCHAR may lose Unicode, and bare DECIMAL/NUMERIC means (18,0),
+  not PostgreSQL's unconstrained numeric. SQLite INTEGER is 64-bit; conversion
+  to DOUBLE PRECISION can lose precision. These lossy conversions are destructive.
+- **Action needed:** PostgreSQL `validate_target` now reports cascading foreign
+  keys into unjournaled live tables, including constraints added outside the ORM
+  after recorder installation. Journal those tables or use restrictive FK actions.
+- **Action needed:** never set `graphql_orm.change_journal = off` as a role-level
+  or database-level default. The TRUNCATE guard reads the effective
+  `current_setting`, so those defaults also disable the guard. Limit the opt-out
+  to a trusted restore transaction using `SET LOCAL`, then take a full backup.
+
 ### Backup: result and error types
 
 - **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
