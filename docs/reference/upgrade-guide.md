@@ -70,7 +70,13 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+### workspace-2026.11.16.3
+
+Commit `cd8072d8e576` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.3)
+
+Packages (changed in bold): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 - **Action needed** — ORM/macros 0.165.0: MSSQL hosts must install the canonical restore marker table (`MssqlPool::install_restore_marker()` on an external-writable pool) and grant the runtime role SELECT on it; until then every statement is refused with `RestoreStateUnavailable`, which names the missing install or grant (it is not `RestoreInProgress`). Hosts restoring runtime search must backfill after restore; ignored field-write denials now preserve stored values. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01650-backup-0260)
 - **No action** — ORM/macros 0.165.0: SQLite and PostgreSQL snapshot restores now commit atomically. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials)
