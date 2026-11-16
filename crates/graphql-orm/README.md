@@ -14,7 +14,8 @@ Version 0.163.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
 `MssqlPool::install_restore_marker()` and grant runtime roles SELECT before
-serving ORM work. Missing or unreadable restore state fails closed. See the
+serving ORM work. Missing or unreadable restore state fails closed with
+`RestoreStateUnavailable`, whose reason names the fix. See the
 [migration guide](../../MIGRATION.md#01620-to-01630-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL

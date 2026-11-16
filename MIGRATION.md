@@ -44,9 +44,18 @@ fingerprints are unchanged.
   installation, before runtime work. It creates the fixed
   `dbo.__graphql_orm_restore_marker` table without clearing existing rows.
   Grant the runtime role `SELECT` on that table; the restore role also needs
-  `INSERT` and `DELETE`. A missing or unreadable table means restore state
-  unknown and fails closed with `RestoreInProgress` (empty id, time zero).
-  Every SQL Server ORM
+  `INSERT` and `DELETE`. `install_restore_marker` needs an external-writable
+  pool, is idempotent, and is safe to run from several replicas at once. A
+  missing or unreadable table means restore state unavailable and fails
+  closed, refusing every statement with an error carrying the new
+  `RestoreStateUnavailable` (`RestoreStateUnavailable::from_error`), not
+  `RestoreInProgress`. Its `reason` is `MarkerNotInstalled` (call
+  `MssqlPool::install_restore_marker()` or run the DDL below),
+  `PermissionDenied` (grant the runtime role `SELECT`), `ConnectionFailed`
+  (the database could not be reached; retry, no marker fix needed) or `Other`
+  (for example a table of the wrong shape). The message names the fix and never
+  holds SQL text; the cause is its `source()`. Only a real restore in progress,
+  or a stale marker row, reports `RestoreInProgress`. Every SQL Server ORM
   transaction and autocommit statement now takes a shared application lock
   (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
   it, and checks for a restore marker. Transactions and autocommit reads pay

@@ -154,14 +154,29 @@ restore.finish().await?;
   `MssqlPool::install_restore_marker()` as part of schema installation.
   MSSQL schemas are externally managed; install this infrastructure even on
   hosts that never restore. Runtime roles need SELECT on the table; restore
-  roles also need INSERT and DELETE. A missing table or denied access fails
-  closed as unknown restore state, even when no marker is visible. See the
+  roles also need INSERT and DELETE. `install_restore_marker` needs an
+  external-writable pool, is idempotent and race-safe (replicas may install at
+  the same time; it serialises on an application lock, accepts a table another
+  installer created, and verifies the table's shape). A missing table or
+  denied access fails closed as unavailable restore state, even when no marker
+  is visible. See the
   [migration guide](../../../MIGRATION.md#01620-to-01630-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 - **The refusal.** A refused transaction or statement fails before it reads
   or writes, with an error carrying `RestoreInProgress` (read it with
-  `RestoreInProgress::from_error`). `restore_id` is empty in the short window
-  where the restore holds the lock and has not recorded its marker yet, or
-  when marker state is unknown (started_at is then zero).
+  `RestoreInProgress::from_error`). `restore_id` is empty, with `started_at`
+  zero, in the short window where the restore holds the lock and has not
+  recorded its marker yet.
+- **Unavailable restore state.** When the marker table is missing or
+  unreadable the gate still refuses every statement, but with an error
+  carrying `RestoreStateUnavailable` (`RestoreStateUnavailable::from_error`),
+  never `RestoreInProgress`. Its `reason` says what to fix:
+  `MarkerNotInstalled` (run `MssqlPool::install_restore_marker()` or the
+  documented DDL), `PermissionDenied` (grant the runtime role SELECT),
+  `ConnectionFailed` (the database could not be reached or timed out while
+  reading the marker; nothing to install), or `Other` (for example a table of
+  the wrong shape). The message names the fix and never contains SQL text; the
+  driver or server error is its `source()`, for logs. `begin_restore` and
+  `resume_restore` report a missing table or denied permission the same way.
   `Database::restore_in_progress` reads the marker during a restore, failing
   closed when it cannot read the table;
   `Database::ensure_no_restore_in_progress`,

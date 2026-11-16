@@ -363,8 +363,11 @@ impl OwnedSqlServer {
                 owned.connection_string = format!(
                     "server=tcp:127.0.0.1,{port};database={database_name};user id=sa;password={password};{tls_settings}"
                 );
-                let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(&owned.connection_string)
-                    .await?;
+                // The install writes, so it goes through a writable pool.
+                let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
+                    &owned.connection_string,
+                )
+                .await?;
                 pool.install_restore_marker().await?;
                 return Ok(owned);
             }
