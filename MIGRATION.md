@@ -18,6 +18,10 @@ Upgrade runtime and macros together.
 
 ### ORM and macros: page limits, identities, subscriptions, preloads and callback errors
 
+- **`PaginationConfig` gains a field. Action needed** for exhaustive struct
+  literals: add `refuse_oversized_limit: false` or use `..Default::default()`.
+  The public field form is confined to the breaking branch; #733's
+  source-compatible revision uses an additive database builder setting.
 - **Runtime cursor error enums gain a variant. Action needed** for exhaustive
   matches on `RuntimeQueryErrorCode` or `RuntimeRelationErrorCode`: handle
   `CursorKeyTooLarge`. A stored order value that cannot fit a cursor refuses
@@ -122,16 +126,9 @@ turn on one of the new settings.
   refetch. A runtime live client must now treat `authorization_denied` as a
   terminal frame. Source closure, host continuity signals and schema-revision
   changes still end at once.
-- **Runtime cursor keys that are too long. Action needed** only if you match
-  runtime error codes. A runtime page whose row has order values too long for
-  a cursor fails with `cursor_key_too_large`. Runtime GraphQL returned
-  `invalid_request` or `invalid_cursor` for it, and
-  `execute_runtime_read` / the relation batch returned `resource_limit`.
-  `RuntimeQueryErrorCode` and `RuntimeRelationErrorCode` each gain a
-  `CursorKeyTooLarge` variant: add an arm to an exhaustive `match`.
-- **`PaginationConfig` has a new field. Action needed** only for a struct
-  literal that lists every field: add `refuse_oversized_limit: false`, or use
-  `..Default::default()` or the constructors.
+- **Runtime cursor keys that are too long. No action.** Runtime GraphQL
+  reports `cursor_key_too_large` when a stored sort key cannot fit a cursor.
+  The public Rust enum additions are deferred to the breaking release above.
 - **Refusing oversized page limits. No action.** Off by default. To let a
   client tell a reduced page from a last page, set
   `DatabaseBuilder::refuse_oversized_page_limit(true)`: an explicit GraphQL
