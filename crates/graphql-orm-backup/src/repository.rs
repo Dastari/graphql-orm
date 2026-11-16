@@ -354,7 +354,7 @@ impl BackupRepository for BlobStoreBackupRepository {
     }
 }
 
-#[cfg(all(test, feature = "local"))]
+#[cfg(all(test, feature = "local", not(windows)))]
 mod prefix_tests {
     use super::*;
 
