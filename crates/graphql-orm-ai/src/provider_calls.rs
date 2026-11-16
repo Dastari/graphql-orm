@@ -3018,6 +3018,16 @@ impl AiProviderCallResult {
         &self.model_inference_manifest
     }
 
+    /// Logical profile of the response when the provider retains it: an
+    /// OpenAI response continued through provider-retained state, which the
+    /// adapter requests only with `store_responses = true`.
+    pub(crate) fn retained_response_profile(&self) -> Option<String> {
+        (self.provider_kind == ProviderKind::OpenAi
+            && self.request_snapshot.continuation_mode == ModelContinuationMode::ProviderRetained
+            && self.provider_response_id.is_some())
+        .then(|| self.model_inference_manifest.provider_profile_id.clone())
+    }
+
     pub(crate) fn uses_stateless_continuation(&self) -> bool {
         self.request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
     }
@@ -17373,6 +17383,7 @@ mod tests {
                             .clone()
                             .expect("provider model should bind"),
                         provider_response_id: call.provider_response_id.clone(),
+                        retained_response_profile: None,
                         budget_reservation_id: call
                             .budget_reservation_id
                             .expect("provider budget should bind"),

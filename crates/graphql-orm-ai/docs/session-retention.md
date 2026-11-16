@@ -426,28 +426,52 @@ only with an empty title, its original deletion timestamp, no protected or
 external session dependency, complete message tombstones, terminal runs,
 absent current/retained checkpoints, and its redacted finalization audit.
 
-### Stored provider responses are not deleted
+### Stored provider responses
 
-With `OpenAiProviderConfig::store_responses = true` (or the xAI equivalent)
-the provider keeps each response so a later turn can continue from it. No
-workflow in this crate deletes those stored responses: not run completion, not
-session deletion and not retention. They stay at the provider under the
-provider's own retention. The secure default, `store_responses = false`,
-stores nothing.
+<a id="stored-provider-responses-are-not-deleted"></a>
 
-A host that enables stored responses and needs them removed owns that job:
+With `OpenAiProviderConfig::store_responses = true` OpenAI keeps each response
+so a later turn can continue from it. The secure default,
+`store_responses = false`, stores nothing.
 
-- The response identifiers are in `provider_response_id` on run checkpoints,
-  tool calls and provider-session rows. Collect them before retention removes
-  the rows that hold them.
-- `OpenAiStoredResponseDeletionService::delete_and_confirm_absent` deletes one
-  response by its exact identifier. It reports `DeletedAndConfirmedAbsent`
-  only after OpenAI acknowledged that identifier as deleted and a following
-  retrieval returned not-found.
-- A not-found answer to the delete request is reported as
-  `NotFoundUnconfirmed`. It is not proof of absence: a credential that now
+The crate records every response OpenAI retains for a run in the
+stored-response ledger (`graphql_orm_ai_stored_provider_responses`), in the
+same transaction that first persists the response identifier: a provider turn
+or tool-batch checkpoint, the final output, or the terminal state of a stored
+background response. A ledger row holds the provider kind, the logical
+provider profile and the response identifier, never response content.
+
+- **Release.** When a deleting session passes its `deleted_content_purge_seconds`
+  cutoff, the retention pass moves its ledger rows from `retained` to
+  `delete_required`, one bounded page per pass. The session shell is finalized
+  only after every row was released.
+- **Deletion.** Install the deletion boundary with
+  `OrmAiSessionRetentionService::with_stored_response_deletion_service` and
+  schedule `delete_stored_provider_responses`. For OpenAI, use
+  `OpenAiStoredResponseDeletionService` bound with
+  `with_provider_profile_id` to the profile that stored the responses, with
+  that profile's credential, organization and project; install a boundary
+  that routes by profile when several profiles store responses. Without a
+  boundary the pass does nothing and released rows wait.
+- **Intent first.** A claim records the deletion intent and attempt count
+  before the request is sent, under a generation fence; an interrupted claim
+  is reclaimed after its lease (`AiStoredResponseCleanupLimits`).
+- **Confirmed absence only.** A row is removed only after OpenAI acknowledged
+  deleting that exact response and a following retrieval returned not-found.
+  A not-found answer to the delete itself is not proof: a credential that now
   belongs to a different project receives the same answer while the response
-  still exists. Keep the identifier and follow up.
+  still exists.
+- **Bounded retry.** Any other outcome is retried with backoff up to
+  `AiStoredResponseCleanupLimits::with_maximum_delete_attempts` (24 by
+  default). The row then ends in the terminal `cleanup_unconfirmed` state,
+  keeping the identifier for operator follow-up, and is counted in
+  `AiStoredResponseCleanupReport::unconfirmed`. It is never reported as
+  deleted.
 
-Durable tracking of which stored responses a deployment still owes a deletion
-is not implemented.
+Responses stored before AI schema module `0.82.0` are not in the ledger; their
+identifiers are still in `provider_response_id` on run attempts, checkpoints
+and tool calls, and `OpenAiStoredResponseDeletionService::delete_and_confirm_absent`
+deletes one by its exact identifier. The ledger covers OpenAI only: responses
+an xAI or OpenAI-compatible profile stores stay under that provider's own
+retention. A backup restores ledger rows as they were, so a restored row for a
+response already deleted on the live store ends `cleanup_unconfirmed`.

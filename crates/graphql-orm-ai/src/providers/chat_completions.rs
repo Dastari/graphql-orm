@@ -640,12 +640,20 @@ struct CallState {
     arguments: String,
 }
 
+/// Appended when a turn stopped at the output-token limit.
+const OUTPUT_LIMIT_NOTICE: &str =
+    "The response stopped at the output limit, so it may be incomplete.";
+/// Appended when that stop cut off one or more tool requests.
+const DROPPED_TOOL_NOTICE: &str = " A tool request was cut off, so no tool was run.";
+
 /// Normalizes `chat.completion.chunk` events into provider events.
 struct ChunkNormalizer {
     expected_model: String,
     offered_tools: BTreeMap<String, String>,
     parallel_tool_calls: bool,
     calls: BTreeMap<u64, CallState>,
+    /// Tool events held until the finish reason shows the requests are whole.
+    held_tool_events: Vec<ProviderEvent>,
     started: bool,
     finished: bool,
     completed: bool,
@@ -664,6 +672,7 @@ impl ChunkNormalizer {
             offered_tools,
             parallel_tool_calls,
             calls: BTreeMap::new(),
+            held_tool_events: Vec::new(),
             started: false,
             finished: false,
             completed: false,
@@ -680,7 +689,10 @@ impl ChunkNormalizer {
             .ok_or(ProviderError::Rejected)?;
         if self.completed
             || chunk.get("error").is_some()
-            || chunk.get("model").and_then(Value::as_str) != Some(self.expected_model.as_str())
+            || !chunk
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| super::http::echoed_model_matches(&self.expected_model, model))
             || chunk
                 .get("object")
                 .is_some_and(|object| object.as_str() != Some("chat.completion.chunk"))
@@ -719,22 +731,46 @@ impl ChunkNormalizer {
             match delta.get("tool_calls") {
                 None | Some(Value::Null) => {}
                 Some(Value::Array(calls)) => {
+                    // Held until the finish reason: a `length` stop can cut a
+                    // request off, and a started call cannot be withdrawn.
+                    let mut held = std::mem::take(&mut self.held_tool_events);
                     for call in calls {
-                        self.tool_call_fragment(call, &mut events)?;
+                        self.tool_call_fragment(call, &mut held)?;
                     }
+                    self.held_tool_events = held;
                 }
                 Some(_) => return Err(ProviderError::Rejected),
             }
             match choice.get("finish_reason") {
                 None | Some(Value::Null) => {}
                 Some(Value::String(reason)) => {
-                    // Only a complete answer or a complete tool request ends a
-                    // turn; truncated or filtered output is refused. Servers
-                    // differ on `stop` versus `tool_calls` after a tool call.
+                    // A complete answer or a complete tool request ends a turn;
+                    // servers differ on `stop` versus `tool_calls` after a tool
+                    // call. A `length` stop spent the tokens and ends the turn
+                    // early: it completes metered with a visible notice, and a
+                    // tool request in it is dropped because its arguments may
+                    // be cut off. Filtered output is refused.
+                    if reason == "length" {
+                        self.finished = true;
+                        let dropped = !self.calls.is_empty();
+                        self.calls.clear();
+                        self.held_tool_events.clear();
+                        let mut text = String::new();
+                        if self.visible_bytes > 0 {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(OUTPUT_LIMIT_NOTICE);
+                        if dropped {
+                            text.push_str(DROPPED_TOOL_NOTICE);
+                        }
+                        events.push(ProviderEvent::TextDelta { text });
+                        continue;
+                    }
                     if !matches!(reason.as_str(), "stop" | "tool_calls") {
                         return Err(ProviderError::Rejected);
                     }
                     self.finished = true;
+                    events.append(&mut self.held_tool_events);
                     for state in std::mem::take(&mut self.calls).into_values() {
                         let arguments: Value = serde_json::from_str(&state.arguments)
                             .ok()
@@ -1151,6 +1187,156 @@ mod tests {
         })
     }
 
+    fn normalize_all(
+        normalizer: &mut ChunkNormalizer,
+        chunks: &[Value],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let mut events = Vec::new();
+        for value in chunks {
+            events.extend(normalizer.normalize(value)?);
+        }
+        Ok(events)
+    }
+
+    fn tool_fragment(id: Option<&str>, name: Option<&str>, arguments: &str) -> Value {
+        let mut function = json!({"arguments": arguments});
+        if let Some(name) = name {
+            function["name"] = json!(name);
+        }
+        let mut call = json!({"index": 0, "function": function});
+        if let Some(id) = id {
+            call["id"] = json!(id);
+        }
+        json!({"tool_calls": [call]})
+    }
+
+    fn records_normalizer() -> ChunkNormalizer {
+        ChunkNormalizer::new(
+            "local-model".to_owned(),
+            [("records_read".to_owned(), "records.read".to_owned())]
+                .into_iter()
+                .collect(),
+            false,
+        )
+    }
+
+    fn text_of(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_dated_snapshot_echo_of_the_requested_model_is_accepted() {
+        let mut dated = chunk(json!({"content": "hi"}), None);
+        dated["model"] = json!("local-model-2025-01-01");
+        assert!(records_normalizer().normalize(&dated).is_ok());
+        let mut other = chunk(json!({"content": "hi"}), None);
+        other["model"] = json!("local-model-mini");
+        assert!(matches!(
+            records_normalizer().normalize(&other),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn a_length_stop_completes_metered_and_drops_a_cut_off_tool_request() {
+        let events = normalize_all(
+            &mut records_normalizer(),
+            &[
+                chunk(json!({"content": "partial"}), None),
+                chunk(json!({}), Some("length")),
+                usage(4, 6),
+            ],
+        )
+        .expect("a length stop is accepted");
+        let text = text_of(&events);
+        assert!(text.starts_with("partial\n\n"), "{text:?}");
+        assert!(text.contains("may be incomplete"), "{text:?}");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Usage {
+                input_tokens: 4,
+                output_tokens: 6,
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted { .. })
+        ));
+
+        let events = normalize_all(
+            &mut records_normalizer(),
+            &[
+                chunk(
+                    tool_fragment(Some("call_1"), Some("records_read"), r#"{"id":"#),
+                    None,
+                ),
+                chunk(json!({}), Some("length")),
+                usage(4, 6),
+            ],
+        )
+        .expect("a cut-off tool request is dropped, not refused");
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolCallStarted { .. }
+                | ProviderEvent::ToolArgumentsDelta { .. }
+                | ProviderEvent::ToolCallCompleted { .. }
+        )));
+        assert!(text_of(&events).contains("no tool was run"));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted { .. })
+        ));
+
+        // A complete tool request is still released in order.
+        let events = normalize_all(
+            &mut records_normalizer(),
+            &[
+                chunk(
+                    tool_fragment(Some("call_1"), Some("records_read"), r#"{"id":"#),
+                    None,
+                ),
+                chunk(tool_fragment(None, None, r#""1"}"#), None),
+                chunk(json!({}), Some("tool_calls")),
+                usage(4, 6),
+            ],
+        )
+        .expect("a complete tool request is accepted");
+        let calls = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ProviderEvent::ToolCallStarted { .. }
+                        | ProviderEvent::ToolArgumentsDelta { .. }
+                        | ProviderEvent::ToolCallCompleted { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 4);
+        assert!(
+            matches!(calls[0], ProviderEvent::ToolCallStarted { call_id, .. } if call_id == "call_1")
+        );
+        assert!(
+            matches!(calls[3], ProviderEvent::ToolCallCompleted { arguments, .. } if arguments == &json!({"id": "1"}))
+        );
+
+        // Filtered output stays refused.
+        assert!(matches!(
+            normalize_all(
+                &mut records_normalizer(),
+                &[chunk(json!({"content": "x"}), Some("content_filter"))],
+            ),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
     fn usage(prompt: u64, completion: u64) -> Value {
         json!({
             "object": "chat.completion.chunk",
@@ -1419,24 +1605,27 @@ mod tests {
         ));
         server_task.await.expect("server should finish");
 
-        // Truncated output is not a completed answer.
+        // Truncated output completes metered and says it may be incomplete.
         let (endpoint, _rx, server_task) = serve(
             "200 OK",
             sse(&[chunk(json!({"content": "hi"}), Some("length")), usage(1, 1)]),
         )
         .await;
         let provider = chat_provider(&endpoint, None, false, false);
+        let events = provider
+            .stream(
+                model_request.clone().into(),
+                context(&model_request, &endpoint, 0),
+            )
+            .await
+            .expect("stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("a length stop completes");
+        assert!(text_of(&events).contains("may be incomplete"));
         assert!(matches!(
-            provider
-                .stream(
-                    model_request.clone().into(),
-                    context(&model_request, &endpoint, 0)
-                )
-                .await
-                .expect("stream should start")
-                .try_collect::<Vec<_>>()
-                .await,
-            Err(ProviderError::Rejected)
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted { .. })
         ));
         server_task.await.expect("server should finish");
 

@@ -3,12 +3,14 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-ai
+
+AI 0.147.0 gives lease recovery a default clock-skew grace (a quarter of the lease TTL, at most 30 seconds), completes Anthropic `max_tokens`, `model_context_window_exceeded` and `pause_turn` turns and chat-completions `length` turns with exact usage and a visible notice instead of failing after the spend, accepts dated-snapshot model echoes, never treats a provider-file 404 as proof of absence, and deletes OpenAI stored responses after their session is deleted through a fail-closed [stored-response ledger](docs/session-retention.md#stored-provider-responses). Apply AI schema module `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
 
 AI 0.145.0 adds per-message structured [entity references](docs/entity-references.md): only the `{kind, id}` handle is stored, cloned or retried; a host hook resolves it for the current principal when the transcript is read and inside the provider-call executor at every dispatch; a reference never grants access or reveals whether an entity exists; and resolved data reaches the model as provenance-tagged data. **Breaking** for custom `AiProvider` implementations and `SendAiMessageInput` literals. Apply AI schema module `0.81.0`; see [migration guidance](MIGRATION.md#01440-to-01450-entity-references).
 

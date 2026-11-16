@@ -3,12 +3,57 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.146.0 to 0.147.0: lease grace, provider stops and stored-response deletion
+
+Apply AI schema module `0.82.0` before starting workers. It adds one table,
+`graphql_orm_ai_stored_provider_responses`, and needs no data backfill.
+GraphQL SDL is unchanged.
+
+- **Lease recovery grace. Action needed** only for hosts that rely on a run
+  being recovered as soon as its lease expires. `AiRunServiceLimits::new` now
+  applies a clock-skew grace of a quarter of the lease TTL in whole seconds,
+  at most 30 seconds, so recovery of a dead lease is delayed by that much.
+  Call `with_lease_recovery_grace(Duration::ZERO)` to keep the previous
+  timing, or another value up to the lease TTL. Hosts that already set a grace
+  keep it. See [lease clocks](docs/worker-provider-turn.md#lease-clocks).
+- **Stored responses. Action needed** for hosts with
+  `OpenAiProviderConfig::store_responses = true` that want stored responses
+  deleted. Bind `OpenAiStoredResponseDeletionService` to the storing profile
+  with `with_provider_profile_id`, install it with
+  `OrmAiSessionRetentionService::with_stored_response_deletion_service`, and
+  schedule `delete_stored_provider_responses` next to the retention pass. Then
+  watch `AiStoredResponseCleanupReport::unconfirmed` and the
+  `cleanup_unconfirmed` ledger rows for operator follow-up. Without a
+  deletion boundary nothing is deleted, as before. A deleting session is now
+  finalized only after retention has released its retained responses to the
+  ledger, which the same pass does. Responses stored before the upgrade are
+  not in the ledger; delete them by identifier with
+  `OpenAiStoredResponseDeletionService::delete_and_confirm_absent` if needed.
+  See [stored provider responses](docs/session-retention.md#stored-provider-responses).
+- **Provider-file 404. No action.** A 404 to an OpenAI file `DELETE` no longer
+  proves absence after the recorded provider expiry. An artifact whose file
+  is really gone now retries and ends `cleanup_unconfirmed` instead of being
+  confirmed; follow up as for any unconfirmed artifact
+  ([unconfirmed provider-file cleanup](docs/attachments.md#unconfirmed-provider-file-cleanup)).
+- **Anthropic and chat-completions stops. No action.** Turns that ended at the
+  output limit, a full context window or a pause (Anthropic) or with `length`
+  (chat completions) used to fail after the tokens were spent. They now
+  complete with exact usage and a visible notice that the answer may be
+  incomplete, and a cut-off tool request is never run. Clients that render
+  assistant text show the notice as part of the answer.
+- **Model echo. No action.** Anthropic, OpenAI Responses (including xAI and
+  OpenAI-compatible routes) and chat completions accept a response naming a
+  dated snapshot of the requested model. Budgets, pricing and usage stay keyed
+  by the requested identifier, so price an alias at the rate of the snapshot
+  it resolves to. `AnthropicProvider::with_model_snapshot` mappings keep
+  working.
 
 ## 0.144.0 to 0.145.0: entity references
 

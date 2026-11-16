@@ -291,9 +291,9 @@ Data that was already sent to a provider stays with that provider.
   `store_responses = true`) and **background responses**, the provider keeps
   the request it was sent, including any reference data, and continues from
   it. A later turn of that chain can still draw on that data after access is
-  revoked. The crate does not resend it and cannot remove it from the
-  provider's stored response; see
-  [session retention](session-retention.md#stored-provider-responses-are-not-deleted).
+  revoked. The crate does not resend it, and deletes an OpenAI stored response
+  only after its session is deleted; see
+  [session retention](session-retention.md#stored-provider-responses).
 - The model's own earlier output, and tool results, may repeat reference data
   it was given. Those are stored as assistant and tool content under their own
   rules.

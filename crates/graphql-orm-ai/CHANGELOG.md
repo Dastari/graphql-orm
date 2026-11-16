@@ -3,12 +3,23 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.147.0
+
+- **Changed (leases):** `AiRunServiceLimits::new` now sets a lease-recovery clock-skew grace of a quarter of the lease TTL in whole seconds, at most 30 seconds (15 seconds for a one-minute lease). `recover_expired_leases` waits that long past a lease's stamped expiry, so a recovering process whose clock runs ahead of the lease holder's by less than the grace can no longer close a live lease. Recovery of a dead lease is delayed by the same amount; `with_lease_recovery_grace(Duration::ZERO)` restores the previous timing. The approval half of #536 (approvals closed with their run, decisions refused once the run leaves `WaitingApproval`, the lease renewed during tool execution) shipped in 0.138.0. Fixes #536.
+- **Providers (Anthropic):** `max_tokens`, `model_context_window_exceeded` and `pause_turn` stops complete the turn with exact usage instead of being refused after the tokens were spent. The adapter appends a visible notice that the response may be incomplete. Tool requests are held until the stop reason arrives; one cut off by such a stop is dropped and never dispatched, and the notice says no tool was run. A response naming a dated snapshot of the requested model (`-YYYYMMDD` or `-YYYY-MM-DD`, or the base of a `-latest` alias followed by a date) is accepted; `with_model_snapshot` still declares one further identifier. Fixes #470.
+- **Providers (same shape elsewhere):** the OpenAI Responses adapter (also used for xAI and OpenAI-compatible routes), its background acknowledgement and retrieval, and the chat-completions adapter accept the same dated-snapshot model echo. A chat-completions `length` stop completes with the same notice and drops a cut-off tool request; `content_filter` and other finish reasons stay refused (#470).
+- **Fixed (provider files):** a 404 to an OpenAI file `DELETE` is never proof of absence, also at or after the artifact's recorded provider expiry: a credential that now addresses another project gets the same answer while the file still exists. Such cleanup now retries and ends `cleanup_unconfirmed` like any other unconfirmed outcome. `AiProviderFileDeletionRequest::provider_expired` is audit context only (#468).
+- **Added (stored responses):** responses OpenAI retains (`store_responses = true`) are recorded in a stored-response ledger in the same transaction that first persists their identifier, and are deleted after their session is deleted. Session retention releases a deleting session's rows once its purge cutoff passes and finalizes the shell only afterwards. `OrmAiSessionRetentionService::delete_stored_provider_responses` deletes released responses through the new `AiStoredProviderResponseDeletionService` boundary, installed with `with_stored_response_deletion_service` and bounded by `AiStoredResponseCleanupLimits`; it reports an `AiStoredResponseCleanupReport`. Intent and attempt count commit before each request, only an acknowledged delete followed by a not-found retrieval removes a row, and after the bounded attempts (24 by default) a row ends `cleanup_unconfirmed` with its identifier kept. `OpenAiStoredResponseDeletionService::with_provider_profile_id` binds the OpenAI adapter to one profile and implements the boundary. Fixes #468.
+- **Persistence:** apply AI schema module `0.82.0`. It adds the table `graphql_orm_ai_stored_provider_responses`. No data backfill: responses stored before the upgrade are not in the ledger.
+
+No GraphQL SDL change. See the [migration guide](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
 
 ## Unreleased - 0.145.0
 

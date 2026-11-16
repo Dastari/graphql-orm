@@ -344,15 +344,18 @@ pub enum OpenAiStoredResponseDeletion {
 
 /// Exact deletion adapter for responses stored by `store_responses = true`.
 ///
-/// The crate does not delete stored responses on its own: session retention,
-/// run completion and purge leave them at the provider, where OpenAI's own
-/// retention applies. This adapter is the provider half of a host-owned
-/// cleanup job. It deletes one response by its exact identifier and confirms
-/// the result; choosing which identifiers to delete, and recording that they
-/// were, is the host's responsibility.
+/// The crate records every response OpenAI retains for a run in its
+/// stored-response ledger and deletes it after the session is deleted:
+/// install this adapter, bound to the logical profile that stored the
+/// responses with [`Self::with_provider_profile_id`], through
+/// `OrmAiSessionRetentionService::with_stored_response_deletion_service`, and
+/// schedule `OrmAiSessionRetentionService::delete_stored_provider_responses`.
+/// [`Self::delete_and_confirm_absent`] remains available for one exact
+/// identifier a host selects itself.
 #[cfg(feature = "provider-openai-core")]
 pub struct OpenAiStoredResponseDeletionService {
     transport: OpenAiFileDeletionService,
+    provider_profile_id: Option<String>,
 }
 
 #[cfg(feature = "provider-openai-core")]
@@ -396,7 +399,37 @@ impl OpenAiStoredResponseDeletionService {
                 secrets,
                 responses_endpoint,
             )?,
+            provider_profile_id: None,
         })
+    }
+
+    /// Binds this adapter to the logical provider profile whose credential
+    /// stored the responses.
+    ///
+    /// The stored-response ledger hands it only responses recorded for that
+    /// exact profile; a request for any other profile is refused without a
+    /// network call. Use the same credential, organization and project as
+    /// that profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] for an empty profile, one
+    /// longer than 512 bytes, or one with control characters.
+    pub fn with_provider_profile_id(
+        mut self,
+        provider_profile_id: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let provider_profile_id = provider_profile_id.into();
+        if provider_profile_id.trim().is_empty()
+            || provider_profile_id.len() > 512
+            || provider_profile_id.chars().any(char::is_control)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "OpenAI stored-response profile is invalid".to_owned(),
+            ));
+        }
+        self.provider_profile_id = Some(provider_profile_id);
+        Ok(self)
     }
 
     /// Lets this service's client use the process proxy environment.
@@ -476,6 +509,25 @@ impl OpenAiStoredResponseDeletionService {
 
 #[cfg(feature = "provider-openai-core")]
 #[async_trait]
+impl crate::AiStoredProviderResponseDeletionService for OpenAiStoredResponseDeletionService {
+    async fn delete_and_confirm_absent(
+        &self,
+        request: &crate::AiStoredProviderResponseDeletionRequest,
+    ) -> Result<(), AiError> {
+        if request.provider_kind() != &ProviderKind::OpenAi
+            || self.provider_profile_id.as_deref() != Some(request.provider_profile_id())
+        {
+            return Err(AiError::ProviderFailed);
+        }
+        match Self::delete_and_confirm_absent(self, request.provider_response_id()).await? {
+            OpenAiStoredResponseDeletion::DeletedAndConfirmedAbsent => Ok(()),
+            OpenAiStoredResponseDeletion::NotFoundUnconfirmed => Err(AiError::ProviderFailed),
+        }
+    }
+}
+
+#[cfg(feature = "provider-openai-core")]
+#[async_trait]
 impl AiProviderFileDeletionService for OpenAiFileDeletionService {
     async fn delete_and_confirm_absent(
         &self,
@@ -490,9 +542,10 @@ impl AiProviderFileDeletionService for OpenAiFileDeletionService {
         }
         let endpoint = format!("{}/{}", self.files_endpoint, request.provider_reference());
         let deletion = self.send(reqwest::Method::DELETE, &endpoint).await?;
-        if deletion.status() == reqwest::StatusCode::NOT_FOUND && request.provider_expired() {
-            return Ok(());
-        }
+        // A 404 is never proof of absence, not even after the recorded expiry:
+        // a credential that now addresses another project receives the same
+        // answer while the file still exists. Only an acknowledged delete
+        // followed by a not-found retrieval confirms it.
         if !deletion.status().is_success() {
             return Err(AiError::ProviderFailed);
         }
@@ -1189,7 +1242,10 @@ impl AiProvider for OpenAiProvider {
             .ok_or(ProviderError::Rejected)?;
         if acknowledgement.get("object").and_then(Value::as_str) != Some("response")
             || acknowledgement.get("background").and_then(Value::as_bool) != Some(true)
-            || acknowledgement.get("model").and_then(Value::as_str) != Some(request.model.as_str())
+            || !acknowledgement
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| super::http::echoed_model_matches(&request.model, model))
             || acknowledgement
                 .get("max_output_tokens")
                 .and_then(Value::as_u64)
@@ -1537,7 +1593,10 @@ fn normalize_background_response(
         || response.get("id").and_then(Value::as_str) != Some(binding.response_id())
         || response.get("created_at").and_then(Value::as_i64) != Some(binding.provider_created_at())
         || response.get("background").and_then(Value::as_bool) != Some(true)
-        || response.get("model").and_then(Value::as_str) != Some(binding.provider_model())
+        || !response
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| super::http::echoed_model_matches(binding.provider_model(), model))
         || response.get("max_output_tokens").and_then(Value::as_u64)
             != Some(binding.maximum_output_tokens())
         || response.get("store").and_then(Value::as_bool) != Some(binding.provider_store())
@@ -2099,7 +2158,10 @@ impl OpenAiEventNormalizer {
         if self.started
             || self.completed
             || !valid_responses_reference(&response_id)
-            || response.get("model").and_then(Value::as_str) != Some(self.expected_model.as_str())
+            || !response
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| super::http::echoed_model_matches(&self.expected_model, model))
         {
             return Err(ProviderError::Rejected);
         }
@@ -2114,7 +2176,10 @@ impl OpenAiEventNormalizer {
         let response = event.get("response").ok_or(ProviderError::Rejected)?;
         let response_id = required_string(response, "id")?;
         if response_id != self.response_id.as_deref().ok_or(ProviderError::Rejected)?
-            || response.get("model").and_then(Value::as_str) != Some(self.expected_model.as_str())
+            || !response
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| super::http::echoed_model_matches(&self.expected_model, model))
             || response.get("status").and_then(Value::as_str) != Some("completed")
             || self
                 .function_calls
@@ -3735,6 +3800,50 @@ mod tests {
     }
 
     #[test]
+    fn stream_normalizer_accepts_a_dated_snapshot_echo_of_the_requested_model() {
+        let normalizer = || {
+            OpenAiEventNormalizer::new(
+                "test-model".to_owned(),
+                Some(32),
+                BTreeMap::new(),
+                BTreeSet::new(),
+                None,
+            )
+        };
+        let mut dated = normalizer();
+        dated
+            .normalize(&json!({
+                "type": "response.created",
+                "response": {"id": "resp-test", "model": "test-model-2025-01-01"}
+            }))
+            .expect("a dated snapshot of the requested model starts the response");
+        let events = dated
+            .normalize(&json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-test",
+                    "model": "test-model-2025-01-01",
+                    "status": "completed",
+                    "usage": {"input_tokens": 2, "output_tokens": 1}
+                }
+            }))
+            .expect("and completes it");
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted { .. })
+        ));
+        for other in ["test-model-mini", "other-model", "test-model-2025-01"] {
+            assert!(matches!(
+                normalizer().normalize(&json!({
+                    "type": "response.created",
+                    "response": {"id": "resp-test", "model": other}
+                })),
+                Err(ProviderError::Rejected)
+            ));
+        }
+    }
+
+    #[test]
     fn stream_normalizer_bounds_requested_summaries_and_citation_provenance() {
         let created = json!({
             "type": "response.created",
@@ -3890,14 +3999,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_404_requires_a_prior_delete_intent_or_recorded_expiry() {
-        for (previous, expires, accepted) in [
-            (true, Some(101), false),
-            (true, None, false),
-            (false, Some(100), true),
-            (false, Some(99), true),
-            (false, Some(101), false),
-            (false, None, false),
+    async fn a_file_404_never_proves_absence_even_after_recorded_expiry() {
+        // A credential that now addresses another project gets the same 404
+        // while the file still exists, whatever the local record says.
+        for (previous, expires) in [
+            (true, Some(101)),
+            (true, Some(100)),
+            (true, None),
+            (false, Some(100)),
+            (false, Some(99)),
+            (false, Some(101)),
+            (false, None),
         ] {
             let (endpoint, server) = file_mock_server(vec![(
                 "404 Not Found".to_owned(),
@@ -3921,9 +4033,8 @@ mod tests {
                 "file-proof".to_owned(),
             )
             .with_cleanup_evidence(previous, expires, 100);
-            assert_eq!(
-                service.delete_and_confirm_absent(&request).await.is_ok(),
-                accepted,
+            assert!(
+                service.delete_and_confirm_absent(&request).await.is_err(),
                 "previous={previous}, expiry={expires:?}"
             );
             assert_eq!(
@@ -4023,6 +4134,101 @@ mod tests {
                 Err(AiError::InvalidInput(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn the_ledger_boundary_deletes_only_its_own_profile_and_never_trusts_a_404() {
+        async fn ledger_delete(
+            service: OpenAiStoredResponseDeletionService,
+            request: crate::AiStoredProviderResponseDeletionRequest,
+        ) -> Result<(), AiError> {
+            crate::AiStoredProviderResponseDeletionService::delete_and_confirm_absent(
+                &service, &request,
+            )
+            .await
+        }
+        let request = |profile: &str| {
+            crate::AiStoredProviderResponseDeletionRequest::new(
+                ProviderKind::OpenAi,
+                profile.to_owned(),
+                "resp_stored_1".to_owned(),
+                false,
+            )
+        };
+        let bound = |endpoint: &str| {
+            stored_response_service(endpoint)
+                .with_provider_profile_id("profile-openai")
+                .expect("profile should validate")
+        };
+        // Unbound, or bound to another profile: refused before any request.
+        let unbound = stored_response_service("http://127.0.0.1:9/v1/files");
+        assert!(
+            ledger_delete(unbound, request("profile-openai"))
+                .await
+                .is_err()
+        );
+        assert!(
+            ledger_delete(
+                bound("http://127.0.0.1:9/v1/files"),
+                request("profile-other")
+            )
+            .await
+            .is_err()
+        );
+        for invalid in ["", " ", "a\nb"] {
+            assert!(
+                stored_response_service("http://127.0.0.1:9/v1/files")
+                    .with_provider_profile_id(invalid)
+                    .is_err()
+            );
+        }
+        let other_kind = crate::AiStoredProviderResponseDeletionRequest::new(
+            ProviderKind::Anthropic,
+            "profile-openai".to_owned(),
+            "resp_stored_1".to_owned(),
+            false,
+        );
+        assert!(
+            ledger_delete(bound("http://127.0.0.1:9/v1/files"), other_kind)
+                .await
+                .is_err()
+        );
+
+        // The owned profile: acknowledged delete plus not-found retrieval.
+        let (endpoint, server) = file_mock_server(vec![
+            (
+                "200 OK".to_owned(),
+                r#"{"id":"resp_stored_1","object":"response","deleted":true}"#.to_owned(),
+            ),
+            (
+                "404 Not Found".to_owned(),
+                r#"{"error":{"code":"not_found"}}"#.to_owned(),
+            ),
+        ])
+        .await;
+        ledger_delete(bound(&endpoint), request("profile-openai"))
+            .await
+            .expect("confirmed deletion");
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "DELETE /v1/responses/resp_stored_1 HTTP/1.1",
+                "GET /v1/responses/resp_stored_1 HTTP/1.1",
+            ]
+        );
+
+        // A not-found answer to the delete is not proof of absence.
+        let (endpoint, server) = file_mock_server(vec![(
+            "404 Not Found".to_owned(),
+            r#"{"error":{"code":"not_found"}}"#.to_owned(),
+        )])
+        .await;
+        assert!(
+            ledger_delete(bound(&endpoint), request("profile-openai"))
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

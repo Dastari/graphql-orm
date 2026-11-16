@@ -67,11 +67,11 @@ logical profile; the service never lists files.
 - **Confirmed absence.** A successful `DELETE` must be acknowledged for that
   exact file with `deleted: true`, and a following retrieval must return
   not-found. Only then is the file treated as absent.
-- **A 404 on `DELETE` is not proof by itself.** A credential that now addresses
-  another project receives the same answer while the file still exists. A 404
-  proves absence only when the artifact's recorded provider expiry has already
-  passed. An earlier deletion intent, a repeated 404, or an intent restored
-  from a backup proves nothing.
+- **A 404 on `DELETE` is never proof.** A credential that now addresses
+  another project receives the same answer while the file still exists. That
+  holds after the artifact's recorded provider expiry too, so the expiry is
+  audit context only. An earlier deletion intent, a repeated 404, or an intent
+  restored from a backup proves nothing either.
 - **Bounded retry.** Any other outcome is retried with backoff up to
   `AiAttachmentCleanupLimits::with_maximum_provider_delete_attempts` (24 by
   default). When the bound is reached the artifact ends in the terminal
@@ -87,8 +87,8 @@ See [unconfirmed provider-file cleanup](attachments.md#unconfirmed-provider-file
 for the operator inventory and the backup caveat.
 
 Responses stored with `store_responses = true` are a separate object with no
-artifact row; see
-[session retention](session-retention.md#stored-provider-responses-are-not-deleted).
+artifact row; the stored-response ledger deletes them under the same rules. See
+[session retention](session-retention.md#stored-provider-responses).
 
 ## Capability separation
 

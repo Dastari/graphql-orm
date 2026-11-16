@@ -70,7 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.23.0; **`graphql-orm-ai` 0.147.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+- **Action needed** — AI 0.147.0: apply AI schema module `0.82.0`. Lease recovery now waits a clock-skew grace past expiry (a quarter of the lease TTL, at most 30 s); set `with_lease_recovery_grace(Duration::ZERO)` only if you rely on immediate recovery. Hosts with `store_responses = true` install `OpenAiStoredResponseDeletionService` (bound with `with_provider_profile_id`) and schedule `delete_stored_provider_responses` to delete stored responses after session deletion. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01470)
+- **No action** — AI 0.147.0: Anthropic `max_tokens`, `model_context_window_exceeded` and `pause_turn` and chat-completions `length` complete metered with a visible notice instead of failing after the spend; dated-snapshot model echoes are accepted; a provider-file 404 never proves absence. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion)
 
 ### workspace-2026.11.16.3
 

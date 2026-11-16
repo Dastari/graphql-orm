@@ -63,35 +63,45 @@ model-authored tool definition or arbitrary GraphQL document.
 
 ### Stop reasons
 
-`end_turn`, `tool_use`, `refusal`, `max_tokens` and `stop_sequence` complete
-the response. A `max_tokens` or `stop_sequence` stop keeps the text and usage
-already streamed; the provider-neutral event stream does not yet carry a finish
-reason, so a truncated answer looks like a completed one to the caller.
+`end_turn`, `tool_use`, `refusal` and `stop_sequence` complete the response as
+the provider ended it. Tool requests are held until the stop reason arrives and
+are released, in order, only with `tool_use`; a request whose arguments are not
+a whole JSON object is refused with any of these stop reasons.
 
-`pause_turn` is refused. Anthropic emits it only while a server tool is
-running, and the adapter rejects every request that offers one, so a paused
-turn cannot be the answer to a request this adapter sent. Any other stop reason
-is refused too.
+`max_tokens`, `model_context_window_exceeded` and `pause_turn` mean the
+provider spent the tokens and ended the turn early. The turn still completes
+with its usage settled exactly, so the run ends `Completed` rather than failing
+after the spend. The adapter appends one visible notice to the answer: the
+response stopped at the output limit, stopped because the context window was
+full, or was paused, and so may be incomplete. Any tool request in such a turn
+is dropped and never dispatched, because its arguments may be cut off; the
+notice then says that no tool was run. Anthropic normally pauses only while a
+server tool runs. This adapter offers none, so it cannot resume a paused turn
+as-is and ends it the same way; the user can send a follow-up to continue.
+
+Any other stop reason is refused.
 
 ### Response model identifier
 
-By default the model named in the response must equal the requested string
-exactly. Anthropic answers a request for a model alias with the dated snapshot
-the alias currently points at, so an alias request is refused after its tokens
-were spent. Either request the dated snapshot directly, or declare the one
-snapshot an alias may resolve to:
+Anthropic answers a request for a model alias with the dated snapshot the
+alias currently points at. The response model is accepted when it is the
+requested identifier, the requested identifier followed by a date
+(`-YYYYMMDD` or `-YYYY-MM-DD`), or, for a request ending in `-latest`, the part
+before `-latest` followed by such a date. A response that names any other
+model, including another model that shares a prefix, is refused.
+
+When an alias resolves to an identifier that does not follow that pattern,
+declare it:
 
 ```rust
 let provider = AnthropicProvider::new(config, secrets)?
-    .with_model_snapshot("example-alias", "example-alias-20250101")?;
+    .with_model_snapshot("example-alias", "example-snapshot")?;
 ```
 
 The mapping accepts exactly one extra response identifier for one requested
-identifier. A response that names any other model is still refused, including a
-newer snapshot the alias later moves to; update the mapping deliberately when
-that happens. Budget reservations, pricing and usage stay keyed by the
-requested identifier, so declaring a mapping asserts that the host prices the
-alias at the pinned snapshot's rate.
+identifier. Budget reservations, pricing and usage stay keyed by the requested
+identifier, so a host that requests an alias prices it at the rate of the
+snapshot the alias resolves to.
 
 The following remain deliberately unsupported and fail closed:
 
