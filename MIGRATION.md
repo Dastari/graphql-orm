@@ -12,8 +12,15 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
-Entries for the next breaking release, collected on the `next/breaking`
-branch. Version numbers are assigned when the batch is released.
+Every change that breaks hosts, or that invalidates stored fingerprints,
+bindings, approvals or sessions, is collected here and ships in one release.
+The versions named are placeholders until that release is cut. Each entry is
+marked **Action needed** or **No action**. Do the steps once, in the order
+below, when you take the release.
+
+Placeholder versions: ORM and macros 0.160.0, operation catalogue 0.9.0, AI
+tool profiles 0.24.0, AI 0.146.0 (AI schema module `0.82.0`). Upgrade them
+together.
 
 ### Migration safety and live journal validation
 
@@ -115,7 +122,7 @@ reclassified step, because the hash covers each step's risk.
   of the above, for planned migrations, schema targets, schema stages, ABI
   upgrades and owned (runtime) migrations.
 
-### AI 0.146.0: webhook-receipt index replacement admission
+### AI 0.147.0: webhook-receipt index replacement admission
 
 - **Action needed** for hosts that compose `AiSchemaModule` and upgrade a
   store whose webhook-receipt table still has a legacy AI index. The upgrade
@@ -123,7 +130,7 @@ reclassified step, because the hash covers each step's risk.
   `Destructive`. Pass the plan's options through
   `AiSchemaModule::admit_index_replacements(&plan, options)`, which admits
   destructive steps only when every one is that known index replacement. See
-  the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-webhook-receipt-index-replacement-admission).
+  the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission).
 
 ### PostgreSQL change journal: TRUNCATE and unjournaled cascades are refused
 
@@ -162,6 +169,174 @@ affected.
   so it keeps working on journaled databases. No action.
 - SQLite records journal entries from the ORM's own writes and has no
   `TRUNCATE` statement; SQL Server has no change journal. Neither changes.
+
+### Generated-operation fingerprints no longer include the Rust module path (#683)
+
+**Action needed.** Every generated-operation fingerprint, catalogue
+fingerprint and router-export fingerprint changes once, for every entity.
+
+`GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` is now `graphql-orm-sha256-len-v2`.
+Version 1 hashed `module_path!()` plus the struct name (or a declared
+`stable_type_id`) and sorted the catalogue by it, so moving an entity to
+another module or crate changed its identity. Version 2 identifies an
+operation by its entity name, table, backend, root coordinate, arguments,
+result type and schema signature, and sorts the catalogue by those values.
+Authorization fingerprints keep their values and algorithm name.
+
+Host steps:
+
+1. Upgrade ORM, macros, the operation catalogue, AI tool profiles and AI in
+   one deployment. A producer and a consumer on different algorithm versions
+   do not agree on any fingerprint.
+2. Regenerate everything you export or store from the catalogue: router
+   descriptors and schema exports, and AI tool manifests. A manifest that
+   names `graphql-orm-sha256-len-v1` is refused as stale.
+3. Treat stored state that holds an old fingerprint as stale: tool bindings,
+   pending approvals of generated-operation tools, durable subscription waits
+   and retained provider sessions. Let pending approvals and waits finish or
+   expire before the upgrade where you can; afterwards request them again.
+   Retained provider sessions rebind once through the existing
+   cleanup-and-rebind lifecycle.
+4. Replace any fingerprint you compare against a recorded literal.
+5. `stable_type_id` is still accepted on `#[graphql_entity(...)]` and
+   `#[repository_entity(...)]`, and still detects two entity groups that
+   claim one identity, but it no longer changes any fingerprint. You may
+   remove it. `entity_rust_type()` and `diagnostic_rust_type()` are diagnostic
+   values only.
+
+Still true after the upgrade: the schema signature records field types,
+argument types and relation targets as spelled in source. Changing
+`crate::types::Status` to `other_crate::types::Status` changes fingerprints
+even when both name the same type. Keep those spellings identical across a
+move (imported bare names are safest) and compare `catalog().fingerprint()`
+before and after.
+
+### Fixed-broker sessions survive catalogue changes; stale selections have two codes (#551)
+
+**Action needed.** Retained fixed-broker provider sessions rebind once at the
+upgrade and then stop rebinding when the catalogue or a schema changes.
+
+- A `FixedBroker` `AiProviderCapabilitySessionBinding` now covers the broker
+  protocol version, the static bootstrap tools, the delivery mode and the
+  provider identity. It no longer covers the capability index, and the three
+  fixed broker definitions no longer hash it. `EagerExact`,
+  `ProviderDeferred` and `ClientDeferred` are unchanged: their definitions are
+  derived from the catalogue, so their bindings still rotate with it.
+- `AiProviderCapabilitySessionBinding::capability_index_fingerprint` and
+  `capability_index_set_fingerprint` return `Option<&str>`, `None` for a
+  fixed broker. `capability_broker_definitions()` takes no argument and
+  returns the definitions directly.
+- Describe and execute still check the current index, schema, catalogue,
+  entry, target-policy and host-policy fingerprints on every call. A drifted
+  selection now fails with the model-facing code `capability_stale`, including
+  at execute, which used to report `authorization_denied`. The error is
+  `AiError::InvalidInput` carrying `AI_CAPABILITY_STALE`.
+- A selection the run does not hold (a candidate discovery never returned to
+  it, or an unknown or expired `loadedReference`) now has its own code,
+  `selection_stale`
+  (`AiApplicationToolFailureCode::SelectionStale`, `AI_CAPABILITY_SELECTION_STALE`).
+  It used to share `capability_stale`. Both are retryable and both results
+  carry a fixed `correction` telling the model to discover and describe again.
+
+Host steps:
+
+1. Update calls to the two accessors and to `capability_broker_definitions`.
+   `AiProviderCapabilitySessionBinding::new` keeps its signature; for a fixed
+   broker the index fingerprint you pass is validated and then ignored.
+2. Deploy. Each retained fixed-broker session rebinds once, because its
+   binding fingerprint and broker definition fingerprints changed. Plan for
+   one cleanup-and-rebind per retained session.
+3. Admit the new fixed broker definition fingerprints wherever you list them
+   by value, for example in hierarchical rule policy.
+4. If you read tool failure codes (logs, dashboards, UI, tests), handle
+   `selection_stale` next to `capability_stale`, and expect `capability_stale`
+   where a drifted execute used to report `authorization_denied`.
+5. Remove any step that resets retained chats after a schema change. It is no
+   longer needed for fixed-broker sessions.
+
+### HighImpact approvals always require step-up; approval lifetime has a ceiling (#465)
+
+**Action needed.**
+
+- An approval of a `HighImpact` tool call always requires recent MFA. The
+  `recent_mfa_required` argument can add step-up to any approval and can no
+  longer waive it for a `HighImpact` call. This holds on every request path:
+  `OrmAiApprovalService::request_approval`, the supervised coordinator
+  (`AiSupervisedAgentCoordinatorLimits`), parked retained-provider waits and
+  prepared native approvals.
+- Pending `HighImpact` approvals staged before the upgrade without the flag
+  are also gated: every decision on them (approve, deny, revoke) requires
+  recent MFA, and `AiApprovalView.recent_mfa_required` reports `true`.
+- `AiApprovalServiceLimits::new` refuses a `maximum_approval_lifetime` above
+  `AI_APPROVAL_LIFETIME_CEILING` (7 days). The default stays 24 hours
+  (`AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME`) and is host-configurable up to the
+  ceiling. The cap applies when an approval is requested; an approval that is
+  already pending keeps its recorded expiry.
+
+Host steps:
+
+1. Make sure every principal who decides `HighImpact` approvals can satisfy
+   your `RecentMfaPolicy`, and that your approval UI starts step-up when
+   `recentMfaRequired` is `true` or a decision returns the recent-MFA error.
+2. If you construct `AiApprovalServiceLimits` with a lifetime above 7 days,
+   lower it. Construction now fails with `AiError::InvalidConfiguration`.
+3. Pending `HighImpact` approvals stay valid but need step-up to decide.
+   Tell approvers, or let those approvals expire and request them again.
+
+### AI unique constraints, and migrations refuse repeated unique keys before DDL (#532)
+
+**Action needed.** Apply AI schema module `0.82.0` before starting workers.
+
+It adds three unique indexes and no table or column:
+
+| Table | Unique key |
+| --- | --- |
+| `graphql_orm_ai_approvals` | `tool_call_id` |
+| `graphql_orm_ai_run_attempts` | `run_id, lease_generation` |
+| `graphql_orm_ai_context_checkpoints` | `session_id, through_sequence` |
+
+The runtime already wrote at most one row per key, so a healthy store has no
+repeated key. Duplicates are not merged or deleted for you.
+
+`SchemaManager::apply_migration` and `apply_schema_target` now look for rows
+that repeat the key of a unique index the plan creates, before they run any
+statement. If they find one they return an error that
+`UniqueIndexDuplicates::from_error` reads; it names the table, the index and
+the key columns and carries no row data. Nothing has changed at that point:
+no DDL has run and the migration version is not recorded. This check applies
+to every host migration that adds a unique index to an existing table, not
+only to the AI module.
+
+Host steps:
+
+1. Plan and apply the AI module as usual
+   (`plan_migration_to_entities(..., AiSchemaModule.entities())`, then
+   `apply_migration`). The three steps are additive.
+2. If the apply returns `UniqueIndexDuplicates`, find the repeated rows, for
+   example
+   `SELECT session_id, through_sequence, COUNT(*) FROM graphql_orm_ai_context_checkpoints GROUP BY session_id, through_sequence HAVING COUNT(*) > 1`,
+   decide which row is authoritative, remove the others, and apply the same
+   plan again. Repeated rows in these tables mean the store was written
+   outside the runtime or restored inconsistently; investigate before
+   deleting.
+3. Expect the check to add one grouped read per new unique index to the
+   apply. On a very large table, run it in a maintenance window.
+
+Limits of the check: it covers `CREATE UNIQUE INDEX` on a table and columns
+that exist before the plan. PostgreSQL and SQLite ignore rows with a `NULL`
+key column, as their unique indexes do; SQL Server compares them. A unique
+index over a column the same plan adds, a column-level `UNIQUE` and a
+composite unique constraint are not checked; if rows violate one, the
+database rejects the statement and the transactional apply rolls back.
+
+Tool-call `idempotency_key` gets no index of its own. Every non-null value is
+`ai-tool:` followed by the row's `provider_call_key`, which is already
+unique, and mutation rows leave it `NULL`; SQL Server would admit only one
+`NULL` under a second unique index.
+
+The AI tables are a trusted store. Their integrity hashes are unkeyed and
+detect accidental divergence only; see
+[the AI security guide](crates/graphql-orm-ai/docs/security.md#database-trust-boundary).
 
 ## 0.159.0 to 0.163.0: wrapper object compile cost
 

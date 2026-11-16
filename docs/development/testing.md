@@ -297,6 +297,10 @@ scripts/run-owned-database-lanes.sh ai-postgres
 authorized page regressions (`authorized_page_context_binding`) on SQLite,
 PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
 
+`scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
+unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
+predicate column, duplicate keys inside the filter, and duplicates outside it.
+
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order
 regressions (`query_loader_batch`, `order_aggregate_visibility`) on SQLite,

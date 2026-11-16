@@ -22,12 +22,21 @@ pub use semantic::*;
 
 /// Stable identifier for the resolver-operation fingerprint algorithm.
 ///
-/// Version 1 uses SHA-256 over a domain-separated sequence of UTF-8 fields.
+/// Version 2 uses SHA-256 over a domain-separated sequence of UTF-8 fields.
 /// Every field is encoded as an eight-byte big-endian label length, the label,
 /// an eight-byte big-endian value length, and the value. Argument descriptors
 /// are included in declaration order; catalog operations are sorted before
 /// hashing. The digest is rendered as 64 lowercase hexadecimal characters.
-pub const GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM: &str = "graphql-orm-sha256-len-v1";
+///
+/// Version 2 differs from `graphql-orm-sha256-len-v1` in one respect: the
+/// Rust location of the entity is no longer an input. Version 1 hashed
+/// `module_path!()` plus the struct name (or a declared `stable_type_id`) and
+/// sorted the catalogue by it, so moving an entity to another module or crate
+/// changed every fingerprint. Version 2 identifies an operation by its entity
+/// name, table, backend, root coordinate, arguments, result type and schema
+/// signature, and sorts the catalogue by those values. Every version 2
+/// fingerprint differs from its version 1 value.
+pub const GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM: &str = "graphql-orm-sha256-len-v2";
 
 /// Stable identifier for generated-operation authorization fingerprints.
 ///
@@ -698,7 +707,7 @@ impl GeneratedGraphqlOperationDescriptor {
         descriptor
     }
 
-    /// Records the real Rust path for diagnostics without changing fingerprints.
+    /// Records the real Rust path for diagnostics. No fingerprint includes it.
     #[doc(hidden)]
     #[must_use]
     pub fn with_diagnostic_rust_type(mut self, rust_type: &'static str) -> Self {
@@ -706,7 +715,8 @@ impl GeneratedGraphqlOperationDescriptor {
         self
     }
 
-    /// Returns the real Rust path, independently of the stable fingerprint identity.
+    /// Returns the real Rust path of the entity. It is diagnostic metadata
+    /// only and is never a fingerprint or ordering input.
     pub const fn diagnostic_rust_type(&self) -> &'static str {
         self.diagnostic_rust_type
     }
@@ -730,8 +740,12 @@ impl GeneratedGraphqlOperationDescriptor {
         self.query_shape
     }
 
-    /// Returns the fingerprint/sort identity: the declared stable type ID, or
-    /// the fully qualified Rust entity type emitted with `module_path!`.
+    /// Returns the entity's declared identity: its `stable_type_id`, or the
+    /// fully qualified Rust entity type emitted with `module_path!`.
+    ///
+    /// The value distinguishes entity groups when a catalogue is composed and
+    /// appears in diagnostics. It is not a fingerprint or ordering input, so
+    /// moving or re-exporting an entity changes this value and nothing else.
     /// Use [`Self::diagnostic_rust_type`] for the real path.
     pub const fn entity_rust_type(&self) -> &'static str {
         self.entity_rust_type
@@ -837,9 +851,10 @@ impl GeneratedGraphqlOperationDescriptor {
     }
 
     fn compute_fingerprint(&self) -> String {
-        let mut hash = FingerprintBuilder::new("graphql-orm:generated-operation:v1");
+        // The Rust location (`entity_rust_type`) is deliberately absent: it is
+        // source layout, not part of the operation's public identity.
+        let mut hash = FingerprintBuilder::new("graphql-orm:generated-operation:v2");
         hash.part("algorithm", GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM);
-        hash.part("entity_rust_type", self.entity_rust_type);
         hash.part("entity_name", self.entity_name);
         hash.part("table_name", self.table_name);
         hash.part("backend", self.backend);
@@ -940,7 +955,7 @@ pub struct GraphqlResolverOperationDescriptor {
 
 impl GraphqlResolverOperationDescriptor {
     fn new(generated: &'static GeneratedGraphqlOperationDescriptor, exposed: bool) -> Self {
-        let mut hash = FingerprintBuilder::new("graphql-orm:resolved-operation:v1");
+        let mut hash = FingerprintBuilder::new("graphql-orm:resolved-operation:v2");
         hash.part("generated_fingerprint", generated.fingerprint());
         hash.part("exposed", if exposed { "true" } else { "false" });
         let fingerprint = hash.finish();
@@ -1094,7 +1109,8 @@ impl GraphqlOperationCatalog {
     ///
     /// # Panics
     ///
-    /// Panics when entity groups repeat a fingerprint identity. The diagnostic
+    /// Panics when entity groups repeat a declared identity
+    /// ([`GeneratedGraphqlOperationDescriptor::entity_rust_type`]). The diagnostic
     /// names both Rust types, including when an explicit identity collides with
     /// a default module-path identity. Generated `try_schema_builder*` helpers
     /// compose the catalogue at schema build, so they also panic on a repeated
@@ -1130,22 +1146,29 @@ impl GraphqlOperationCatalog {
                 })
             })
             .collect::<Vec<_>>();
+        // The order is a fingerprint input, so it must not depend on where an
+        // entity is declared. The resolved fingerprint is the final key: it
+        // covers every remaining distinguishing value.
         operations.sort_by(|left, right| {
             (
                 left.kind(),
                 left.field_name(),
-                left.entity_rust_type(),
+                left.entity_name(),
+                left.generated().table_name(),
                 left.category(),
+                left.fingerprint(),
             )
                 .cmp(&(
                     right.kind(),
                     right.field_name(),
-                    right.entity_rust_type(),
+                    right.entity_name(),
+                    right.generated().table_name(),
                     right.category(),
+                    right.fingerprint(),
                 ))
         });
 
-        let mut hash = FingerprintBuilder::new("graphql-orm:operation-catalog:v1");
+        let mut hash = FingerprintBuilder::new("graphql-orm:operation-catalog:v2");
         hash.part("algorithm", GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM);
         hash.part("operation_count", &operations.len().to_string());
         for (index, operation) in operations.iter().enumerate() {
@@ -1547,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_and_entity_identity_changes_invalidate_generated_fingerprints() {
+    fn schema_changes_invalidate_generated_fingerprints_and_rust_location_does_not() {
         let descriptor = |entity_rust_type, schema_signature| {
             GeneratedGraphqlOperationDescriptor::generated(
                 entity_rust_type,
@@ -1567,10 +1590,117 @@ mod tests {
         };
         let original = descriptor("example::Record", "record-shape-v1");
         let changed_schema = descriptor("example::Record", "record-shape-v2");
-        let changed_entity = descriptor("other::Record", "record-shape-v1");
+        let moved_entity = descriptor("other_crate::models::Record", "record-shape-v1")
+            .with_diagnostic_rust_type("other_crate::models::Record");
 
         assert_ne!(original.fingerprint(), changed_schema.fingerprint());
-        assert_ne!(original.fingerprint(), changed_entity.fingerprint());
+        assert_eq!(original.fingerprint(), moved_entity.fingerprint());
+        assert_eq!(
+            original.authorization_fingerprint(),
+            moved_entity.authorization_fingerprint()
+        );
+        assert_eq!(
+            original.router_export_fingerprint(),
+            moved_entity.router_export_fingerprint()
+        );
+        assert_eq!(
+            moved_entity.entity_rust_type(),
+            "other_crate::models::Record"
+        );
+        assert_eq!(
+            GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM,
+            "graphql-orm-sha256-len-v2"
+        );
+    }
+
+    #[test]
+    fn moving_entities_between_modules_keeps_the_catalogue_fingerprints_and_order() {
+        fn group(
+            rust_type: &'static str,
+            entity: &'static str,
+            table: &'static str,
+            field: &'static str,
+        ) -> &'static [GeneratedGraphqlOperationDescriptor] {
+            Box::leak(Box::new([
+                GeneratedGraphqlOperationDescriptor::generated(
+                    rust_type,
+                    entity,
+                    table,
+                    "sqlite",
+                    GraphqlOperationKind::Query,
+                    GeneratedGraphqlOperationCategory::SingleRead,
+                    field,
+                    vec![GraphqlOperationArgumentDescriptor::generated(
+                        "id", "String", "String!",
+                    )],
+                    "Option<Entity>",
+                    entity,
+                    "shape-v1",
+                ),
+                GeneratedGraphqlOperationDescriptor::generated(
+                    rust_type,
+                    entity,
+                    table,
+                    "sqlite",
+                    GraphqlOperationKind::Mutation,
+                    GeneratedGraphqlOperationCategory::Create,
+                    // Both entities share this root name, so the catalogue
+                    // order between them is decided by the tie-break keys.
+                    "createEntry",
+                    Vec::new(),
+                    "Entity",
+                    entity,
+                    "shape-v1",
+                ),
+            ]))
+        }
+        // Before the move `zeta::Record` sorts after `alpha::Note` by Rust
+        // path; after it, `aaa::Record` sorts before. Version 1 changed both
+        // the per-operation fingerprints and the catalogue order here.
+        let before = GraphqlOperationCatalog::compose([
+            (
+                group("zeta::Record", "Record", "records", "record"),
+                true,
+                true,
+            ),
+            (group("alpha::Note", "Note", "notes", "note"), true, true),
+        ]);
+        let after = GraphqlOperationCatalog::compose([
+            (group("alpha::Note", "Note", "notes", "note"), true, true),
+            (
+                group("aaa::models::Record", "Record", "records", "record"),
+                true,
+                true,
+            ),
+        ]);
+        assert_eq!(before.fingerprint(), after.fingerprint());
+        assert_eq!(
+            before.authorization_fingerprint(),
+            after.authorization_fingerprint()
+        );
+        assert_eq!(
+            before.router_export_fingerprint(),
+            after.router_export_fingerprint()
+        );
+        let order = |catalog: &GraphqlOperationCatalog| {
+            catalog
+                .operations()
+                .iter()
+                .map(|operation| (operation.entity_name(), operation.fingerprint().to_owned()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&before), order(&after));
+
+        // A real contract change is still detected.
+        let renamed_table = GraphqlOperationCatalog::compose([
+            (
+                group("zeta::Record", "Record", "records_v2", "record"),
+                true,
+                true,
+            ),
+            (group("alpha::Note", "Note", "notes", "note"), true, true),
+        ]);
+        assert_ne!(before.fingerprint(), renamed_table.fingerprint());
     }
 
     fn authorized_descriptor(
@@ -1616,8 +1746,10 @@ mod tests {
             scopes: vec!["records.read".to_string()],
         });
 
+        // Pinned `graphql-orm-sha256-len-v2` value. The version 1 value was
+        // 1f5821ce9c4366dd9bb0021215c8ce056ba484cb441726cf91e6673ed6dfbda9.
         const EXISTING_FINGERPRINT: &str =
-            "1f5821ce9c4366dd9bb0021215c8ce056ba484cb441726cf91e6673ed6dfbda9";
+            "3cfa8d68f8ad3b67b8adf440ef39340a5e83cd1f11dbdc93111e89d52fde8762";
         assert_eq!(legacy.fingerprint(), EXISTING_FINGERPRINT);
         assert_eq!(public.fingerprint(), EXISTING_FINGERPRINT);
         assert_eq!(scoped.fingerprint(), EXISTING_FINGERPRINT);

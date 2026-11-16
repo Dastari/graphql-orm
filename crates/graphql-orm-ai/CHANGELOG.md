@@ -10,11 +10,24 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.146.0
+## Unreleased - 0.147.0
 
 - **Added:** `AiSchemaModule::admit_index_replacements(&plan, options)` admits an upgrade that only replaces an AI-owned webhook-receipt index. ORM 0.164.0 classifies every index drop as `Destructive`, so `ApplyOptions::default()` now refuses the upgrade from a store created before `provider_kind` joined the receipt primary key, or before module 0.72.0's composite index was renamed (including the 63-byte name PostgreSQL stored). The method sets `allow_destructive` only when every destructive step in the plan drops one of those known, non-unique legacy index names and the same plan creates the current composite index; any other destructive step leaves the options unchanged, and the gate refuses the plan.
 
-No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.81.0`. See the migration guide.
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`. See the migration guide.
+
+## Unreleased - 0.146.0
+
+Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). Requires ORM/macros 0.160.0, operation catalogue 0.9.0 and AI tool profiles 0.24.0.
+
+- **Breaking (sessions, #551):** a `FixedBroker` `AiProviderCapabilitySessionBinding` no longer includes the capability index fingerprint, and the three fixed broker definitions no longer hash it. They depend on `AI_CAPABILITY_BROKER_VERSION`, the static bootstrap tools, the delivery mode and the provider identity. A schema or catalogue change therefore keeps retained fixed-broker sessions. Each such session rebinds once at this upgrade. `EagerExact`, `ProviderDeferred` and `ClientDeferred` bindings are unchanged and still rotate with the catalogue.
+- **Breaking (API):** `AiProviderCapabilitySessionBinding::capability_index_fingerprint` and `capability_index_set_fingerprint` return `Option<&str>` (`None` for a fixed broker). `capability_broker_definitions()` takes no argument and returns `Vec<ModelToolDefinition>`.
+- **Breaking (model-facing codes, #551):** broker describe and execute report catalogue drift as `capability_stale` (`AI_CAPABILITY_STALE`). Execute used to report drift as `authorization_denied`, which is not retryable. A selection the run does not hold (never returned by discovery, or an unknown or expired `loadedReference`) now reports the new `selection_stale` (`AiApplicationToolFailureCode::SelectionStale`, `AI_CAPABILITY_SELECTION_STALE`); it used to share `capability_stale`. Both are retryable and carry a fixed `correction` (envelope version 2). `AiCapabilityDiscoveryBroker::authorize_execution` returns `AiError::InvalidInput(AI_CAPABILITY_STALE)` for drift and still returns `Forbidden` for denial, expiry and substitution.
+- **Breaking (fingerprints, #683):** generated-operation and catalogue fingerprints change once because catalogue 0.9.0 drops the Rust module path. Tool, capability and index fingerprints derived from them change with them.
+- **Security (approvals, #465):** an approval of a `HighImpact` tool call always requires recent MFA; the `recent_mfa_required` argument can no longer waive it. Pending `HighImpact` approvals staged without the flag are gated at every decision, and `AiApprovalView.recent_mfa_required` reports the requirement that will be enforced.
+- **Breaking (approvals, #465):** `AiApprovalServiceLimits::new` refuses a `maximum_approval_lifetime` above `AI_APPROVAL_LIFETIME_CEILING` (7 days). The default is the new constant `AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME` (24 hours, unchanged). `AiApprovalServiceLimits::maximum_approval_lifetime()` reads the configured cap.
+- **Persistence (#532):** apply AI schema module `0.82.0`. It adds unique indexes on approvals `tool_call_id`, run attempts `(run_id, lease_generation)` and context checkpoints `(session_id, through_sequence)`. The ORM refuses the migration with `UniqueIndexDuplicates` before any DDL if existing rows repeat one of these keys; duplicates are not merged for you. Tool-call `idempotency_key` gets no separate index: every non-null value is derived from the already-unique `provider_call_key`.
+- **Documentation (#532):** the [security guide](docs/security.md#database-trust-boundary) states the database trust boundary: integrity hashes are unkeyed and lifecycle columns are not authenticated, so the AI tables must be a trusted store.
 
 ## Unreleased - 0.145.0
 

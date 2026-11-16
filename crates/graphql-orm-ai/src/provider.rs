@@ -2876,8 +2876,15 @@ pub enum AiApplicationToolFailureCode {
     RelationshipDepthExceeded,
     /// The complete selected result exceeds its byte or aggregate record budget.
     ResultBudgetExceeded,
-    /// The loaded schema/catalogue/target/capability binding is stale.
+    /// The loaded schema/catalogue/target/capability binding is stale: the
+    /// published contract changed after the capability was discovered or
+    /// described. Discover and describe again before retrying.
     CapabilityStale,
+    /// The broker selection is not held by this run: the candidate was never
+    /// returned to it, or the `loadedReference` is unknown or expired. This
+    /// says nothing about whether the capability exists. Discover or describe
+    /// again before retrying.
+    SelectionStale,
     /// Current authorization denied the call without disclosing why.
     AuthorizationDenied,
     /// Current authentication or assurance must be renewed before dispatch.
@@ -2912,6 +2919,7 @@ impl AiApplicationToolFailureCode {
             Self::ResultBudgetExceeded => "result_budget_exceeded",
             Self::ToolCallLimitReached => "tool_call_limit_reached",
             Self::CapabilityStale => "capability_stale",
+            Self::SelectionStale => "selection_stale",
             Self::AuthorizationDenied => "authorization_denied",
             Self::AuthenticationRequired => "preflight_authentication_required",
             Self::PreflightAuthorizationDenied => "preflight_authorization_denied",
@@ -2933,6 +2941,7 @@ impl AiApplicationToolFailureCode {
                 | Self::RelationshipDepthExceeded
                 | Self::ResultBudgetExceeded
                 | Self::CapabilityStale
+                | Self::SelectionStale
                 | Self::ResolverValidationFailed
         )
     }
@@ -2991,6 +3000,9 @@ pub fn classify_safe_application_tool_error(
                 || message.contains("complexity limits") =>
         {
             Some(AiApplicationToolFailureCode::SelectionTooLarge)
+        }
+        AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_SELECTION_STALE => {
+            Some(AiApplicationToolFailureCode::SelectionStale)
         }
         AiError::InvalidInput(message) if message.contains("stale") => {
             Some(AiApplicationToolFailureCode::CapabilityStale)

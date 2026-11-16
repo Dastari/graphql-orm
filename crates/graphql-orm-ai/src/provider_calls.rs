@@ -7106,14 +7106,30 @@ mod tests {
             .expect("AI schema should apply");
         crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
+        // The supervised fixture tool is HighImpact, so its approvals always
+        // need recent MFA. The fixture principal has just completed it.
+        let authenticated_at =
+            OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+                .expect("current second should be representable");
+        let assurance = agql_auth::SessionAssurance::new(
+            authenticated_at,
+            ["otp", "pwd"],
+            Some("urn:test:loa:2".to_owned()),
+            Some("test".to_owned()),
+            agql_auth::MfaAcceptance::Satisfied,
+        )
+        .expect("test assurance should validate");
         let principal = AuthPrincipal::User(AuthUser {
             user_id: "provider-user".to_owned(),
             session_id: Uuid::new_v4(),
             roles: vec![],
             scopes: vec![],
-            session: SessionContext::default(),
+            session: SessionContext::default().with_assurance(assurance),
             token_claims: AccessTokenMetadata {
                 tenant_id: Some("provider-tenant".to_owned()),
+                auth_time: Some(authenticated_at.unix_timestamp()),
+                amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
+                acr: Some("urn:test:loa:2".to_owned()),
                 ..AccessTokenMetadata::default()
             },
         });

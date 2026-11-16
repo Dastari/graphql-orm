@@ -253,6 +253,47 @@ only that this worker removed the protected preview and block rows; it does not
 prove deletion of metadata, external objects, provider files, tools,
 proposals, usage, audit, or domain data.
 
+## Database trust boundary
+
+The AI tables are a trusted store. The runtime protects content with the
+configured content protector and binds rows to each other with hashes, but it
+does not defend against a party that can write to those tables directly.
+
+- **Integrity hashes are unkeyed.** `coordinator_checkpoint_hash`,
+  `binding_hash`, `source_hash` and the other stored digests are plain SHA-256
+  over canonical values. They detect accidental divergence, a wrong row or a
+  stale binding. They are not MACs: a writer who can change a row can also
+  recompute its hash.
+- **Lifecycle columns are not authenticated.** State columns (run, approval,
+  tool-call and wait states), lease owners, generations, expiries and counters
+  are plain values checked by compare-and-swap. A direct write that sets an
+  approval to `approved`, or rewinds a lease generation, is indistinguishable
+  from a runtime transition.
+- **Uniqueness is enforced by the database** where the runtime relies on it:
+  one approval per tool call, one attempt per run fencing generation, one
+  context checkpoint per session position, one tool call per provider call
+  key, and the keys listed in the schema module. These constraints stop
+  duplicate rows from concurrent or faulty writers; they do not authenticate
+  the rows.
+
+Deployment requirements that follow:
+
+1. Grant write access to the `graphql_orm_ai_*` tables only to the AI runtime's
+   database role. Do not share that role with other services or operators.
+2. Treat database administrators, backups and replicas as inside the trust
+   boundary. Protect backups as you protect the database; a restored snapshot
+   stays closed until recovery reconciles it (see
+   [recovery and restore](recovery-and-restore.md)).
+3. Approval never substitutes for resolver authorization. A forged approval row
+   still meets current resolver authorization, current host tool policy and the
+   exact binding check before any mutation runs, so the application's own
+   authorization remains the last line of defence.
+4. Use database audit logging if you need evidence of direct writes; the
+   runtime cannot produce it.
+
+Keyed integrity (an HMAC over lifecycle tuples with a protector-held key) is
+deliberately not implemented.
+
 ## Operational safety
 
 Runs use monotonically increasing fencing generations. Stale workers and late

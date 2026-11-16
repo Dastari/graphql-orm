@@ -420,6 +420,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         refuse_taken_search_helpers::<B>(self.database.pool(), plan).await?;
+        refuse_unique_index_duplicates::<B>(self.database.pool(), plan).await?;
         B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
@@ -494,6 +495,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         refuse_taken_search_helpers::<B>(self.database.pool(), &plan.migration).await?;
+        refuse_unique_index_duplicates::<B>(self.database.pool(), &plan.migration).await?;
         B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
@@ -1025,6 +1027,23 @@ async fn refuse_taken_search_helpers<B: OrmBackend>(
         .collect::<Vec<_>>();
     match super::migrations::search_helper_taken::<B>(pool, &steps).await? {
         Some(conflict) => Err(conflict.into_error()),
+        None => Ok(()),
+    }
+}
+
+/// Refuses a plan before any of its statements run when existing rows repeat
+/// the key of a unique index the plan creates.
+async fn refuse_unique_index_duplicates<B: OrmBackend>(
+    pool: &B::Pool,
+    plan: &PlannedMigration,
+) -> crate::Result<()> {
+    let steps = plan
+        .steps
+        .iter()
+        .map(|step| StepRef::from(&step.step))
+        .collect::<Vec<_>>();
+    match super::migrations::unique_index_duplicates::<B>(pool, &steps).await? {
+        Some(duplicates) => Err(duplicates.into_error()),
         None => Ok(()),
     }
 }

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.145.0 to 0.146.0: webhook-receipt index replacement admission
+## 0.146.0 to 0.147.0: webhook-receipt index replacement admission
 
 Requires `graphql-orm` 0.164.0. No schema-module, SDL or data change.
 
@@ -35,6 +35,41 @@ Requires `graphql-orm` 0.164.0. No schema-module, SDL or data change.
   `allow_destructive: true` yourself.
 - Stores created on a current module see no index replacement and need no
   action.
+
+## 0.145.0 to 0.146.0: fingerprints, fixed-broker sessions, approvals and unique indexes
+
+**Action needed.** This is the AI part of the single breaking release. The
+complete host steps, including the ORM and catalogue changes, are in the root
+[migration guide](../../MIGRATION.md#breaking-release-unreleased). Upgrade
+ORM/macros 0.160.0, operation catalogue 0.9.0, AI tool profiles 0.24.0 and AI
+0.146.0 together.
+
+In order:
+
+1. **Migrate.** Apply AI schema module `0.82.0` before starting workers. It
+   adds three unique indexes: approvals `tool_call_id`, run attempts
+   `(run_id, lease_generation)` and context checkpoints
+   `(session_id, through_sequence)`. If existing rows repeat a key, the apply
+   returns `UniqueIndexDuplicates` before any DDL and changes nothing; remove
+   the repeated rows and apply the same plan again. No data backfill.
+2. **Update code.** `capability_index_fingerprint()` and
+   `capability_index_set_fingerprint()` on
+   `AiProviderCapabilitySessionBinding` return `Option<&str>`.
+   `capability_broker_definitions()` takes no argument and is infallible.
+   `AiApprovalServiceLimits::new` refuses an approval lifetime above 7 days.
+3. **Rebind.** Regenerate tool manifests and capability indexes; every
+   generated-operation fingerprint changed. Retained provider sessions rebind
+   once through the existing cleanup-and-rebind lifecycle. After that, a
+   fixed-broker session keeps its binding across schema and catalogue changes.
+4. **Re-approve.** Approvals bound to an old tool fingerprint cannot be
+   consumed; request them again. `HighImpact` approvals now need recent MFA
+   for every decision, including ones already pending.
+5. **Handle the codes.** Treat `selection_stale` like `capability_stale`
+   (retry after discovering and describing again), and expect
+   `capability_stale` where a drifted broker execute used to report
+   `authorization_denied`.
+
+No GraphQL SDL change.
 
 ## 0.144.0 to 0.145.0: entity references
 

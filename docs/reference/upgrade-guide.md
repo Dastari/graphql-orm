@@ -72,9 +72,9 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.163.0, `graphql-orm-macros` 0.163.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-Breaking batch (ORM/macros 0.164.0, backup 0.25.0, AI 0.146.0):
+Breaking batch, collected on `next/breaking` (ORM/macros 0.164.0, backup 0.25.0, AI 0.147.0, catalogue 0.9.0, AI tool profiles 0.24.0; versions are placeholders):
 
-- **Action needed — AI 0.146.0:** upgrading an AI store with a legacy webhook-receipt index now needs `AiSchemaModule::admit_index_replacements` or explicit destructive admission. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-webhook-receipt-index-replacement-admission) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **Action needed — AI 0.147.0:** upgrading an AI store with a legacy webhook-receipt index now needs `AiSchemaModule::admit_index_replacements` or explicit destructive admission. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01470)
 
 - **Action needed — ORM/macros 0.164.0:** column constraint removal and retention-purge relaxation require destructive admission, widening is backend-aware, and live journal validation detects host-added cascade gaps. Avoid role/database journal-off defaults. [Safety follow-up](../../MIGRATION.md#migration-safety-and-live-journal-validation).
 
@@ -82,6 +82,10 @@ Breaking batch (ORM/macros 0.164.0, backup 0.25.0, AI 0.146.0):
 - **Action needed — ORM/macros 0.164.0:** lossy type conversions and integrity-removing migration steps require the existing destructive gate. Re-plan and review pending migrations. [Risk classification](../../MIGRATION.md#migration-plans-undeclared-tables-lossy-type-changes-and-integrity-removal).
 - **Action needed — ORM 0.164.0:** re-install PostgreSQL journal recorders; TRUNCATE and cascades into tables without recorders fail closed. [Journal upgrade](../../MIGRATION.md#postgresql-change-journal-truncate-and-unjournaled-cascades-are-refused).
 - **Action needed — backup 0.25.0:** deletion results expose snapshot ids, and result/error types are non-exhaustive with a dedicated snapshot admission error. Update literals and exhaustive matches. [Backup API](../../MIGRATION.md#backup-result-and-error-types).
+- **Action needed** — ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.24.0: generated-operation fingerprints no longer include the Rust module path; every operation, catalogue and router-export fingerprint changes once [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../CHANGELOG.md#unreleased---breaking-release-ormmacros-01600-catalogue-090-ai-tool-profiles-0240-ai-01460)
+- **Action needed** — AI 0.146.0: fixed-broker provider sessions rebind once, then survive catalogue changes; `capability_stale` and `selection_stale` are separate codes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **Action needed** — AI 0.146.0: `HighImpact` approvals always require recent MFA; approval lifetime cap has a 7-day ceiling [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **Action needed** — AI 0.146.0 (schema module `0.82.0`), ORM/macros 0.160.0: three AI unique indexes; applying a migration refuses repeated unique keys before any DDL [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 
 - **No action** — ORM/macros 0.163.0: hand-emitted wrapper objects reduce compile cost; generated SDL, catalogues and fingerprints are unchanged [migration](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
 - **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)

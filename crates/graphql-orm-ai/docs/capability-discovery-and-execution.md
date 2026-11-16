@@ -219,11 +219,41 @@ also consume the corresponding continuation turns. Size provider-turn,
 tool-call, duration, budget and hierarchical-rule ceilings for this bounded
 amplification. The library never raises a host ceiling automatically.
 
-`AiProviderCapabilitySessionBinding` fingerprints delivery mode, the complete
-canonical index set, static bootstrap definitions, projection algorithm,
-model, reasoning effort and the underlying registration identity. Pass it to
+`AiProviderCapabilitySessionBinding` fingerprints delivery mode, static
+bootstrap definitions, projection algorithm, model, reasoning effort and the
+underlying registration identity. Pass it to
 `AiProviderSessionDescriptor::new_with_capability_binding`; the existing
 durable registration fence then makes any change cleanup-and-rebind only.
+
+What else the binding covers depends on the mode:
+
+| Mode | Also bound | A schema or catalogue change |
+| --- | --- | --- |
+| `EagerExact`, `ProviderDeferred`, `ClientDeferred` | the complete canonical index set | rebinds the retained session |
+| `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` | keeps the retained session |
+
+The three fixed broker definitions are the same for every catalogue, so a
+retained fixed-broker session, and the chat it carries, survives a schema
+change in any target. The index is checked where it matters instead: every
+describe and execute compares the current index-set, index, schema, semantic
+catalogue, entry, capability, target-policy and host-policy fingerprints with
+the ones the selection was made under.
+
+### Stale selections
+
+Both outcomes are retryable, execute nothing, and carry a fixed `correction`
+(failure envelope version 2) telling the model what to do next.
+
+| Model-facing code | When | Model recovery |
+| --- | --- | --- |
+| `capability_stale` | The run holds the candidate or loaded capability, and a fingerprint above has changed since. | Discover again, describe the new candidate, use the new `planSchema` and `loadedReference`. |
+| `selection_stale` | The run does not hold the selection: discovery never returned that candidate to it, or the `loadedReference` is unknown or expired. | Discover (or describe) again. |
+
+`capability_stale` is reported only for a candidate the current principal was
+already shown, or a capability it already loaded, so it reveals nothing about
+capabilities the principal cannot see. `selection_stale` says nothing about
+whether the named capability exists. A current policy denial with unchanged
+fingerprints is `authorization_denied`, never a stale code.
 
 Native OpenAI deferred loading is disabled by default. Review exact compatible
 models and opt them in with
@@ -392,8 +422,10 @@ an automatic consequence of migrations:
    compile their canonical index set and provider registrations; only then
    start ordinary workers and subscriptions.
 
-Changing provider profile, delivery mode, model/effort, projection or catalogue
-requires the same cleanup/absence/rebind lifecycle. A live provider session is
+Changing provider profile, delivery mode, model/effort or projection requires
+the same cleanup/absence/rebind lifecycle. So does a catalogue change for
+`EagerExact`, `ProviderDeferred` and `ClientDeferred` sessions; a `FixedBroker`
+session keeps its binding across catalogue changes. A live provider session is
 never relabeled in place.
 
 ## Correcting rejected broker query plans

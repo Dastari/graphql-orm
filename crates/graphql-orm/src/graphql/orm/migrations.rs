@@ -68,6 +68,167 @@ impl TableIdentifierConflict {
     }
 }
 
+/// A planned unique index whose key already repeats in the table's rows.
+///
+/// [`SchemaManager::apply_migration`](super::SchemaManager::apply_migration)
+/// and [`SchemaManager::apply_schema_target`](super::SchemaManager::apply_schema_target)
+/// look for such rows before they run any statement of the plan, and refuse
+/// the whole plan with this error when they find one. Nothing has been
+/// changed: no DDL has run and no migration version has been recorded. The
+/// host removes or merges the duplicate rows and applies the same plan again.
+///
+/// The value names the table, the index and its key columns only. It carries
+/// no row data.
+///
+/// The check covers a `CREATE UNIQUE INDEX` step on a table that exists
+/// before the plan, over columns that exist before the plan. It follows the
+/// backend's own uniqueness rule for `NULL`: PostgreSQL and SQLite treat
+/// `NULL` keys as distinct, so rows with a `NULL` key column are ignored;
+/// SQL Server treats them as equal, so they are compared. A unique index over
+/// a column the same plan adds, a column-level `UNIQUE` and a composite
+/// unique constraint are not checked here; if existing rows violate one, the
+/// database rejects that statement and the transactional apply rolls back.
+/// Conditional indexes apply their structured closed-set predicate to the
+/// check. If the plan adds the predicate column, the check is skipped too.
+/// Predicate dependencies are tracked structurally, never inferred from SQL;
+/// an unanalysable predicate must defer to database enforcement at creation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniqueIndexDuplicates {
+    /// The declared table the index belongs to.
+    pub table: String,
+    /// The unique index the plan creates.
+    pub index: String,
+    /// The index key columns, in index order.
+    pub columns: Vec<String>,
+}
+
+impl std::fmt::Display for UniqueIndexDuplicates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "table {} has rows that repeat the key ({}) of planned unique index {}; \
+             no migration statement was run",
+            self.table,
+            self.columns.join(", "),
+            self.index
+        )
+    }
+}
+impl std::error::Error for UniqueIndexDuplicates {}
+impl UniqueIndexDuplicates {
+    /// Read a duplicate-key refusal carried by an ORM error.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+    pub(crate) fn into_error(self) -> crate::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+}
+
+/// Finds the first planned unique index whose key existing rows repeat.
+///
+/// Read-only. See [`UniqueIndexDuplicates`] for the exact coverage.
+pub(super) async fn unique_index_duplicates<B: super::OrmBackend>(
+    pool: &B::Pool,
+    steps: &[StepRef<'_>],
+) -> crate::Result<Option<UniqueIndexDuplicates>> {
+    let backend = B::DIALECT;
+    if backend == DatabaseBackend::Mysql {
+        return Ok(None);
+    }
+    // A table or column the plan itself creates has no rows or values to
+    // repeat yet, and cannot be read before the plan runs.
+    let created_tables = steps
+        .iter()
+        .filter_map(|step| match step {
+            StepRef::CreateTable(table) => Some(table.table_name.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let added_columns = steps
+        .iter()
+        .filter_map(|step| match step {
+            StepRef::AddColumn { table_name, column } => {
+                Some((table_name.as_str(), column.name.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for step in steps {
+        let StepRef::CreateIndex { table_name, index } = step else {
+            continue;
+        };
+        if !index.is_unique
+            || index.is_spatial
+            || index.columns.is_empty()
+            || created_tables.contains(table_name.as_str())
+            || index
+                .columns
+                .iter()
+                .any(|column| added_columns.contains(&(table_name.as_str(), column)))
+        {
+            continue;
+        }
+        // Closed-set predicates track their sole column explicitly. Do not
+        // query a predicate column before this plan creates it (SQLite may
+        // even interpret the missing quoted identifier as a string literal).
+        // Any future predicate form without known dependencies must skip this
+        // preflight and let CREATE UNIQUE INDEX enforce uniqueness instead.
+        if index.predicate.as_ref().is_some_and(|predicate| {
+            added_columns.contains(&(table_name.as_str(), predicate.column))
+        }) {
+            continue;
+        }
+        let key = index
+            .columns
+            .iter()
+            .map(|column| backend.quote_identifier(column))
+            .collect::<Vec<_>>();
+        let mut conditions = Vec::new();
+        if backend != DatabaseBackend::Mssql {
+            conditions.extend(key.iter().map(|column| format!("{column} IS NOT NULL")));
+        }
+        if let Some(predicate) = index.predicate.as_ref() {
+            let values = predicate
+                .values
+                .iter()
+                .map(|value| sql_string_literal(value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!(
+                "{} IN ({values})",
+                backend.quote_identifier(predicate.column)
+            ));
+        }
+        let filter = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+        let (top, limit) = if backend == DatabaseBackend::Mssql {
+            ("TOP 1 ", "")
+        } else {
+            ("", " LIMIT 1")
+        };
+        let sql = format!(
+            "SELECT {top}1 AS present FROM {}{filter} GROUP BY {} HAVING COUNT(*) > 1{limit}",
+            backend.render_table_identifier_path(table_name),
+            key.join(", "),
+        );
+        if !B::fetch_rows(pool, &sql, &[]).await?.is_empty() {
+            return Ok(Some(UniqueIndexDuplicates {
+                table: table_name.to_string(),
+                index: index.name.to_string(),
+                columns: index.columns.iter().map(ToString::to_string).collect(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn table_identifier_conflict<'a>(
     backend: DatabaseBackend,
     tables: impl IntoIterator<Item = &'a str>,

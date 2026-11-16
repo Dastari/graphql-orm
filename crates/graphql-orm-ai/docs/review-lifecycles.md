@@ -128,9 +128,25 @@ reconstructs mutation replay authority.
 Compose `AiApprovalQueryRoot` and `AiApprovalMutationRoot` only with an
 installed `AiApprovalService`. Reads, decisions, and revocation all rehydrate
 the request principal and reapply host scope/session policy. Decisions require
-the exact displayed row version and unexpired `Pending` state. When the durable
-request says recent MFA is required, the configured `agql-auth`
-`RecentMfaPolicy` must accept the freshly resolved user.
+the exact displayed row version and unexpired `Pending` state. When recent MFA
+is required, the configured `agql-auth` `RecentMfaPolicy` must accept the
+freshly resolved user for every decision: approve, deny and revoke.
+
+Recent MFA is required when the request asked for it, and always when the tool
+call's risk is `HighImpact`. The caller's `recent_mfa_required` argument can
+add step-up to any approval; it cannot waive it for a `HighImpact` call, on any
+request path. A `HighImpact` approval staged before this rule existed is gated
+at decision time, and `AiApprovalView.recent_mfa_required` reports the
+requirement that will be enforced.
+
+An approval expires at the expiry it was requested with. That expiry is at
+most `AiApprovalServiceLimits::maximum_approval_lifetime` after the request:
+24 hours by default (`AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME`), configurable by
+the host up to `AI_APPROVAL_LIFETIME_CEILING` (7 days). A request for a later
+expiry is refused. The supervised coordinator's `approval_ttl` is at most one
+day. Lowering the cap does not shorten approvals that are already pending;
+`AiApprovalWaitReconciliationLimits::maximum_pending_duration` closes waits by
+age.
 
 The UI renders only the decrypted server-generated canonical preview. It must
 not use model prose as the authoritative action description. Approval and

@@ -16,6 +16,20 @@ changes and integrity-removing steps need `allow_destructive`, and the
 PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.160.0 (placeholder, **breaking fingerprints**) uses operation
+catalogue 0.9.0: generated-operation fingerprints no longer include the Rust
+module path, so moving an entity keeps them and every fingerprint changes once
+at this upgrade. `stable_type_id` is still accepted and no longer affects
+fingerprints. Applying a planned migration now refuses, before any statement
+runs, a new unique index whose key existing rows repeat
+(`UniqueIndexDuplicates`). For conditional indexes, the check applies the
+structured closed-set predicate and examines only included rows. If the plan
+adds either a key column or the predicate column, the database enforces
+uniqueness when creating the index instead of running the preflight. Predicate
+dependencies come from metadata, not SQL text; predicates that cannot be
+analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
 per-entity wrapper objects (edges, connections, mutation results, change
 events, bulk results and authorized scan pages) carry hand-emitted output
