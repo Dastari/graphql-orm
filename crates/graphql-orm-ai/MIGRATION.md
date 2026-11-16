@@ -10,10 +10,10 @@ supersedes: []
 
 # Migration Guide
 
-## 0.147.0 to 0.148.0: capability broker version 2
+## 0.148.0 to 0.149.0: capability broker version 2
 
 **Action needed.** Part of the single breaking release; upgrade together with
-AI tool profiles 0.25.0. The workspace-wide steps are in the root
+AI tool profiles 0.26.0. The workspace-wide steps are in the root
 [migration guide](../../MIGRATION.md#breaking-release-unreleased). No SDL,
 persistent schema or data migration; `AI_SCHEMA_MODULE_VERSION` stays
 `0.82.0`.
@@ -68,6 +68,17 @@ Steps:
    `invalid_arguments` corrections for an unknown operation
    (`AI_CAPABILITY_OPERATION_INVALID`) or type
    (`AI_CAPABILITY_TYPE_UNKNOWN`).
+
+## 0.147.0 to 0.148.0: runtime live keys under default identities
+
+**No action.** Tool profiles 0.25.0 accept the runtime live key inputs of the
+ORM's default string identities and of the opt-in legacy `Int` identities.
+Keyset windows the runtime reads for itself (message and list windows,
+bootstraps, retention and cleanup scans) are now read completely, in pages
+within the database's maximum page limit, now that the ORM refuses oversized
+host keyset pages. A window larger than a host's maximum returns every row it
+asks for instead of being shortened to the maximum. No AI schema module
+change, no SDL change and no data migration.
 
 ## 0.146.0 to 0.147.0: webhook-receipt index replacement admission
 

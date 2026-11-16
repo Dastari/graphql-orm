@@ -528,6 +528,24 @@ invalidation metadata and refresh separately authorized queries for richer data.
 
 Repository-only entities cannot authorize GraphQL subscription provenance for creates or updates, so such a source suppresses those events even for a public target. Delete invalidations instead start authority at the current parent. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
 
+`#[graphql_entity(key_only_deletes)]` adds a key-only delete signal. When a
+generated delete releases no row to a subscriber (the row policy grants no
+deleted preimage, or SQL visibility cannot authorize a missing row), a
+subscriber whose `Key` or `Keys` argument names the deleted row's complete key
+receives `DELETED` with `id` (and `key` for a composite key) and a null entity.
+Unkeyed subscribers, and subscribers of other keys, receive nothing, as
+without the attribute. The subscriber's resolver authentication, scopes,
+assurance and entity access, and its read access to every key field, are
+checked before and after the payload is prepared. A key field must be
+exposed on change events and pass the host field policy, which is asked with
+no record. Row policy is not checked, because there is no row: a subscriber
+with entity and key-field access who names a key learns that a row with that
+key was deleted, whether or not it could read that row. Use the attribute
+only where that is acceptable. It is a compile error when a primary-key field
+declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is
+not GraphQL-readable, and it applies to direct deletes only, not to
+propagated events.
+
 Direct generated deleted preimages default to suppression. They require an
 explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or
 unrestricted ORM visibility, plus current entity/row/selected-field policies.
@@ -895,7 +913,10 @@ alias/path; providers may be evaluated again during ordinary field resolution. A
 and execution-pruned skip/include selections retain their field identities.
 
 The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its default
-`NoCache` storage. It batches concurrent loads without reusing results across
+`NoCache` storage. The loader and its keys are generated-resolver plumbing:
+its key constructors are generated-only, hidden and outside semver, and apply
+no policy if called by hand. A handwritten schema registers the loader
+with `graphql::loaders::relation_data_loader::<T, B>(db)`. It batches concurrent loads without reusing results across
 requests; other cache types are not accepted as authoritative targets and the
 resolver falls back to a fresh typed query. Current visibility predicates and
 structural `DbAuthContext::partition_key()` values participate in SQL batch grouping. A cursor, snapshot,

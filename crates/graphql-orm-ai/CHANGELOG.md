@@ -10,9 +10,9 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.148.0
+## Unreleased - 0.149.0
 
-Capability broker version 2 (#551, asks 2B, 5B and 3B, and the 1A default). Part of the single breaking release, with AI tool profiles 0.25.0; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`.
+Capability broker version 2 (#551, asks 2B, 5B and 3B, and the 1A default). Part of the single breaking release, with AI tool profiles 0.26.0; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`.
 
 - **Breaking (broker protocol, sessions):** `AI_CAPABILITY_BROKER_VERSION` is `2`. The fixed broker offers four definitions: discover, describe, the new `graphql.capabilities.describe_type` (`AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID`) and execute. Every broker definition fingerprint and every `FixedBroker` session binding fingerprint changes once, so each retained fixed-broker session rebinds once at the upgrade. No other binding input changed.
 - **Breaking (describe, 2B):** describe returns one compact typed signature per operation (for example `Records(where?: RecordWhereInput|null, page?: PageInput) -> select`), the top level of the selection tree, the root result bound and the input types it names, instead of the plan schema. `describe_type` expands one input type, `select` or `select.<path>`, in pages of up to 128 fields or values. Plans are still validated against the unchanged closed schema. `AiCapabilityDescription::with_operation_signatures` attaches the signatures; `AiCapabilityBrokerSession::with_inline_describe_schema` now adds each operation's inline `planSchema` beside its signature when it fits the describe bound.
@@ -22,6 +22,11 @@ Capability broker version 2 (#551, asks 2B, 5B and 3B, and the 1A default). Part
 - **Breaking (defaults, 1A):** `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` defaults to `true`: above the eager limits a provider that supports both `ProviderDeferred` and `FixedBroker` gets the fixed broker. A stored configuration without the field reads as `true`. Opt out with `prefer_fixed_broker_for_large_surfaces: false` or `with_provider_deferred_for_large_surfaces()`, which keeps the previous mode and binding.
 - **Performance (3B, in tool profiles):** discovery scores only the posting lists of the query's terms. Scores remain fixed per-entry field weights, with no catalogue-wide statistic.
 - **Changed:** query-plan correction texts refer to signatures and expanded types instead of `planSchema`; their disclosure contracts are versioned up.
+
+## Unreleased - 0.148.0
+
+- **Fixed:** adopts tool profiles 0.25.0, so runtime-composed collections with live subscriptions, a node identity and a UUID or integer key compile as query, mutation and subscription capability catalogues under the ORM's default `RuntimeInt64` identities and under `with_legacy_int_identities()`. A regression test covers each key shape in both modes. No AI schema module change and no data migration.
+- **Fixed:** every keyset window the runtime reads for itself is read completely, in pages no larger than the database's maximum page limit. Under the ORM breaking batch a host keyset page above that maximum is refused instead of being shortened, so any window larger than a host's maximum failed: conversation bootstraps and message windows (up to 200 messages against the default maximum of 100), session, attachment, approval, proposal and usage lists, the session-retention candidate scan (`maximum_sessions`), attachment and artifact cleanup batches, and pending secret cleanups. Each now returns exactly the window it asked for, with the same cursors and has-page flags; before the batch these windows were shortened to the maximum without notice. No AI schema module change and no data migration.
 
 ## Unreleased - 0.147.0
 

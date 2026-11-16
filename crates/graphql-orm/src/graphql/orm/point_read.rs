@@ -82,7 +82,8 @@ where
             limit: Some(2),
             offset: Some(0),
         })
-        .fetch_all_with_auth(db, auth)
+        // An internal two-row uniqueness probe, independent of the maximum.
+        .fetch_all_with_auth_and_pagination(db, auth, super::PaginationConfig::unbounded())
         .await
         .map_err(graphql_error_from_sqlx)?;
     if rows.len() > 1 {

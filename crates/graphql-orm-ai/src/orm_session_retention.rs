@@ -526,30 +526,36 @@ impl OrmAiSessionRetentionService {
 
     async fn candidates(&self, after: Option<String>) -> Result<SessionCandidatePage, AiError> {
         validate_cursor(after.as_deref())?;
-        let connection =
-            AiSessionRecord::keyset_connection_page(
-                &self.database,
-                AiSessionRecordWhereInput {
-                    state: Some(StringFilter {
-                        in_list: Some(vec![
-                            "active".to_owned(),
-                            "archived".to_owned(),
-                            "deleting".to_owned(),
-                        ]),
-                        ..Default::default()
-                    }),
+        let connection = {
+            let filter = AiSessionRecordWhereInput {
+                state: Some(StringFilter {
+                    in_list: Some(vec![
+                        "active".to_owned(),
+                        "archived".to_owned(),
+                        "deleting".to_owned(),
+                    ]),
                     ..Default::default()
-                },
+                }),
+                ..Default::default()
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
                 KeysetConnectionInput {
                     after,
+                    // Exactly `maximum_sessions` per pass: `keyset_window` reads
+                    // them in pages within the database maximum.
                     first: Some(i64::try_from(self.limits.maximum_sessions).map_err(|_| {
                         AiError::InvalidConfiguration("invalid scan limit".to_owned())
                     })?),
                     ..Default::default()
                 },
+                move |chunk| {
+                    AiSessionRecord::keyset_connection_page(&self.database, filter.clone(), chunk)
+                },
             )
-            .await
-            .map_err(map_orm)?;
+        }
+        .await
+        .map_err(map_orm)?;
         let next_cursor = connection
             .page_info
             .has_next_page

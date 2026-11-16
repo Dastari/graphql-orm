@@ -10,7 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.148.0 (placeholder, **breaking**) is capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; and large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once. See the [migration guide](MIGRATION.md#01470-to-01480-capability-broker-version-2) and the [capability contract](docs/capability-discovery-and-execution.md).
+AI 0.149.0 (placeholder, **breaking**) is capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; and large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once. See the [migration guide](MIGRATION.md#01480-to-01490-capability-broker-version-2) and the [capability contract](docs/capability-discovery-and-execution.md).
+
+AI 0.148.0 adopts tool profiles 0.25.0: UUID- and integer-keyed runtime collections with live subscriptions compile as capability catalogues under the ORM's default string identities and the legacy `Int` identities alike. No data migration; see [migration guidance](MIGRATION.md#01470-to-01480-runtime-live-keys-under-default-identities).
 
 AI 0.147.0 adds `AiSchemaModule::admit_index_replacements`, which admits an upgrade plan whose only destructive steps replace a legacy AI webhook-receipt index; ORM 0.164.0 otherwise refuses the index drop. Requires `graphql-orm` 0.164.0. AI schema module stays `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission).
 

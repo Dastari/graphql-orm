@@ -59,7 +59,12 @@ impl WriteInputTransform for NormaliseOrders {
             if let Some(input) = input.downcast_mut::<CreateOrderInput>() {
                 input.reference = input.reference.trim().to_uppercase();
                 if input.reference.is_empty() {
-                    return Err(async_graphql::Error::new("a reference is required"));
+                    // A coded refusal: an uncoded error reaches clients as INTERNAL_ERROR.
+                    return Err(OrmPublicError::with_message(
+                        OrmErrorCode::InvalidInput,
+                        "a reference is required",
+                    )
+                    .into_graphql_error());
                 }
             }
             Ok(())

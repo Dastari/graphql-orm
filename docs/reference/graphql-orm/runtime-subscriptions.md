@@ -27,26 +27,23 @@ and Boolean primary keys, including complete composite keys, use the shared
 NodeId encoder. Float identities are refused, as with derived entities.
 
 The existing `id` keeps its name, scalar and meaning. The object additionally
-implements `Node` and serves fixed `NodeId: ID!` and `RecordVersion: Int!` fields.
+implements `Node` and serves fixed `NodeId: ID!` and `RecordVersion: RuntimeInt64!` fields.
 The local Query root has `node(NodeId: ID!): Node`. Hidden, missing, malformed
 and mismatched identities produce null, without an existence diagnostic. Field
 or operation authorization failures remain ordinary authorization errors,
 independent of whether a valid key exists. Aliases and list reads share the
 operation's admission and response budgets.
 
-`RecordVersion` and integer live-event keys (`id`, and the `key` members typed
-`Int`) carry the full 64-bit stored value, although GraphQL `Int` is 32-bit.
-JSON clients that parse numbers as doubles, such as browsers, lose precision
-above 2^53: an event for such a key cannot be matched to the record by an
-id the client encodes itself. Ordinary `RuntimeInt64` fields are strings and
-are unaffected. `RuntimeGraphqlOptions::with_int64_identity_strings()` serves
-these values exactly: `RecordVersion`, the `…Changed` `keys` argument, the
-members of `…KeyInput` and the event `id` and `key` members are then typed
-`RuntimeInt64`, sent as decimal strings and accepted only as strings. It
-changes the SDL, the semantic catalogue and their fingerprints, so it is
-opt-in; the next breaking release makes it the default. Without it, where a
-client needs exact identity for such keys, select the
-record's `NodeId` in the event payload.
+`RecordVersion` and integer live keys (the `…Changed` `keys` argument, the
+members of `…KeyInput`, and the event `id` and `key` members) are typed
+`RuntimeInt64`: sent as decimal strings and accepted only as strings, like
+every other runtime 64-bit integer. A JSON client that parses numbers as
+doubles, such as a browser, would otherwise change a value above 2^53 and
+could not match an event to its record. Releases before the breaking release
+typed these values `Int` and sent JSON numbers;
+`RuntimeGraphqlOptions::with_legacy_int_identities()` keeps that form, with
+its SDL and fingerprints, while clients move. Static (derived) entities keep
+`RecordVersion: Int!`.
 
 Runtime creates initialize the declared version to 1; every runtime update,
 including no-op patches and link writes, increments it in the transaction.
@@ -87,10 +84,10 @@ refuse with `subscription_root_limit_exceeded` before opening any source,
 authorizing or reading, independently of key existence. Unused operations are
 not counted. An empty list observes nothing. Supply `keys` on each operation;
 unkeyed observation and `keys: null` are refused. Single-key lists use the derived
-wire scalar (`String`, `Int`, `UUID`, or `Boolean`). Composite lists use
+wire scalar (`String`, `RuntimeInt64`, `UUID`, or `Boolean`). Composite lists use
 `<Entity>KeyInput`; their event also exposes the complete `<Entity>Key` and the
 shared opaque composite `id` representation. Live collections share these typed
-key inputs with mutations (`Int`/`UUID` for keys); stored-field inputs and the
+key inputs with mutations (`RuntimeInt64`/`UUID` for keys); stored-field inputs and the
 existing `id` output keep their runtime scalar types. Initial admission
 conservatively budgets the selected delivery shape for every key; visibility
 probes themselves load only keys.

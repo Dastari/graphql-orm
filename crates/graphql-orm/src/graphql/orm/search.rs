@@ -976,8 +976,8 @@ where
     ///
     /// A limit above the configured maximum page limit fails with
     /// `PAGE_LIMIT_EXCEEDED` instead of being reduced; see
-    /// [`PaginationConfig::checked_explicit_limit`]. [`Self::paginate`] keeps
-    /// GraphQL page semantics and clamps.
+    /// [`PaginationConfig::checked_explicit_limit`]. [`Self::paginate`]
+    /// checks its limit the same way.
     pub fn limit(mut self, limit: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.limit = Some(limit);
@@ -1008,11 +1008,17 @@ where
         self
     }
 
-    /// Apply a generated page input with GraphQL page semantics: a limit
-    /// above the configured maximum is clamped.
+    /// Read the offset/limit page `page`.
+    ///
+    /// Like [`Self::limit`], an explicit `page.limit` is honoured exactly or
+    /// refused: a limit above the configured maximum page limit fails with
+    /// `PAGE_LIMIT_EXCEEDED`, never a shorter page. Raise the maximum for one
+    /// trusted search with [`Self::pagination_config`]. To apply GraphQL
+    /// client page semantics to a client-supplied page, resolve it first with
+    /// [`ClientPaginationConfig::resolve_client_page`](super::ClientPaginationConfig::resolve_client_page).
     pub fn paginate(mut self, page: PageInput) -> Self {
         self.query = self.query.paginate(&page);
-        self.explicit_limit = None;
+        self.explicit_limit = page.limit;
         self
     }
 
@@ -1416,7 +1422,18 @@ where
         if self.query.requires_in_memory_filtering() {
             return Err(invalid());
         }
+        // Client page semantics, before either executor reads: an oversized
+        // limit is reduced, or refused when the host opted in.
+        let resolved = db
+            .client_pagination_config()
+            .resolve_client_page(page.as_ref(), true)
+            .map_err(|error| error.into_graphql_error())?;
+        let page = Some(PageInput {
+            limit: resolved.limit,
+            offset: Some(resolved.offset),
+        });
         self.query.page = page.clone();
+        self.explicit_limit = None;
         if matches!(
             visibility,
             ReadVisibility::Complete(_) | ReadVisibility::Unrestricted

@@ -1,0 +1,17 @@
+error[E0425]: cannot find type `RelationLoader` in this scope
+  --> tests/ui/relation_loader_not_in_prelude.rs:14:45
+   |
+14 | fn loader(db: graphql_orm::db::Database) -> RelationLoader<Board> {
+   |                                             ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0599]: no associated function or constant named `new` found for struct `RelationLoader<T, B>` in the current scope
+  --> tests/ui/relation_loader_not_in_prelude.rs:15:61
+   |
+15 |     graphql_orm::graphql::loaders::RelationLoader::<Board>::new(db)
+   |                                                             ^^^ associated function or constant not found in `RelationLoader<Board>`
+   |
+note: if you're trying to build a new `RelationLoader<Board>`, consider using `RelationLoader::<T, B>::__generated` which returns `RelationLoader<_, _>`
+  --> src/graphql/loaders.rs
+   |
+   |     pub fn __generated(db: crate::db::Database<B>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

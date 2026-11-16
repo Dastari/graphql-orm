@@ -56,6 +56,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
+| `key_only_deletes` | flag | absent; a `Key`/`Keys` subscriber of the exact key gets a key-only `DELETED` event when a delete releases no row. Not allowed when a primary-key field declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is not GraphQL-readable. See [subscription release authorization](entities-and-relations.md#subscription-release-authorization) |
 | `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
@@ -315,17 +316,9 @@ equivalent to `#[graphql(complex, rename_fields = "PascalCase")]`. A relation wi
 the primary-key field as its source. The one exception is an entity with `schema_only = true`,
 which has no generated object. A relation target needs no loader implementation: generated
 relations take their keys from the relation, and every generated entity is a `RelationTarget`.
-`BatchLoadEntity` is needed only to load an entity through `RelationLoader`'s single-column
-`Loader<String>` form from handwritten code:
-
-```rust,ignore
-impl BatchLoadEntity for Account {
-    fn batch_column() -> &'static str { "id" }
-    fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
-        row.try_get("id")
-    }
-}
-```
+`BatchLoadEntity` is no longer used: `RelationLoader`'s single-column `Loader<String>` form,
+which read rows without entity, row or field policy, was removed in the breaking release.
+Existing implementations still compile and can be deleted.
 
 `GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
 `RecordVersion` (for an exported managed version) to its complex object.
@@ -753,11 +746,11 @@ missing. An empty or incomplete manual list therefore cannot hide a collision, a
 at start-up rather than at compile time. A schema assembled by hand with `Schema::build` gets neither
 check.
 
-`max_page_limit: N` declares the maximum page limit of the `Database` the schema serves. The module
-then exposes `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the semantic catalogue publishes `N` as the ceiling of
-pageable relationship lists, the relation complexity estimate caps pages at `N`, and the schema
-builders panic for a `Database` whose `PaginationConfig::max_limit` is not `Some(N)`. It is optional;
-without it the catalogue and the estimate use the compile-time default of 100. See
+`max_page_limit: N` declares the maximum page limit of the `Database` the schema serves; a schema
+that omits it has a maximum of 100. The module exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
+semantic catalogue publishes it as the ceiling of pageable relationship lists, the relation
+complexity estimate caps pages at it, and the schema builders panic for a `Database` whose
+`PaginationConfig::max_limit` is not that value. See
 [page size](pagination-migration.md#page-size-reduced-by-default-refused-on-request).
 
 `require_policies: true` is an opt-in review gate. Every entity in `entities` must then record a

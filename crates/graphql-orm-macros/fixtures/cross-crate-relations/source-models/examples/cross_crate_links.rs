@@ -4,10 +4,10 @@ mod support;
 #[cfg(feature = "sqlite")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema, dataloader::DataLoader};
+    use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema};
     use cross_crate_source_models::{Activity, Session};
     use cross_crate_target_models::{CreateEndpointInput, Endpoint};
-    use graphql_orm::{db::Database, graphql::loaders::RelationLoader, prelude::*};
+    use graphql_orm::{db::Database, prelude::*};
 
     struct Query;
     #[Object]
@@ -56,10 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("example-user"))
-        .data(DataLoader::new(
-            RelationLoader::<Endpoint, SqliteBackend>::new(db),
-            tokio::spawn,
-        ))
+        .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, SqliteBackend>(db))
         .finish();
     let response = schema.execute("{ session { id endpoint { id name } } activity { id endpointName endpoint { id name } } }").await;
     if !response.errors.is_empty() {

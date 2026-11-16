@@ -10,10 +10,10 @@ supersedes: []
 
 # Migration Guide
 
-## 0.24.0 to 0.25.0: entity capabilities and compact signatures
+## 0.25.0 to 0.26.0: entity capabilities and compact signatures
 
 **Action needed.** Part of the single breaking release; upgrade together with
-AI 0.148.0. No SDL or data migration.
+AI 0.149.0. No SDL or data migration.
 
 - **Index fingerprints change once.** `AI_CAPABILITY_INDEX_VERSION` is 3 and
   the generated query roots of each entity become one `GeneratedEntity`
@@ -35,6 +35,13 @@ AI 0.148.0. No SDL or data migration.
   descriptions. **No action.**
 - **Signatures.** `AiCapabilitySignature` and
   `AiSharedTypePlanSchema::compile_named` are additions. **No action.**
+
+## 0.24.0 to 0.25.0: runtime live keys under default identities
+
+**No action.** Runtime collections with live subscriptions and a node identity
+compile under both ORM identity modes: the default `RuntimeInt64` strings and
+the opt-in `with_legacy_int_identities()`. Capability sets and fingerprints are
+unchanged for schemas that already compiled. No SDL or data migration is needed.
 
 ## 0.23.0 to 0.24.0: operation fingerprint algorithm v2
 

@@ -1,0 +1,11 @@
+error: key_only_deletes cannot be combined with `graphql(skip)` on a primary-key field: a key-only DELETED event would release the key without evaluating that restriction
+ --> tests/ui/key_only_deletes_key_skipped.rs:6:57
+  |
+6 | #[graphql_entity(table = "tickets", plural = "Tickets", key_only_deletes)]
+  |                                                         ^^^^^^^^^^^^^^^^
+
+error: this primary-key field is skipped from GraphQL
+  --> tests/ui/key_only_deletes_key_skipped.rs:12:5
+   |
+12 |     id: String,
+   |     ^^

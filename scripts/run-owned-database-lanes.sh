@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|all) ;;
+  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -253,16 +253,23 @@ case "${lane}" in
         --test query_loader_batch --test order_aggregate_visibility -- --include-ignored --test-threads=1
     done
     ;;
-  page-limit-contract)
-    for backend in sqlite postgres mssql; do
-      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
-        --test page_limit_contract -- --include-ignored --test-threads=1
-    done
-    ;;
   authorized-page)
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
         --test authorized_page_context_binding -- --include-ignored --test-threads=1
+    done
+    ;;
+  callback-errors)
+    cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+      --test mutation_hook_public_errors --test sqlite_compat --test keyset_pagination
+    cargo test -p graphql-orm --locked --no-default-features --features postgres \
+      --test mutation_hook_public_errors --test postgres_compat --test keyset_pagination \
+      -- --include-ignored --test-threads=1
+    ;;
+  page-limit-contract)
+    for backend in sqlite postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+        --test page_limit_contract -- --include-ignored --test-threads=1
     done
     ;;
   changed-subscriptions)
@@ -274,10 +281,12 @@ case "${lane}" in
   runtime-live)
     cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
       --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_queries \
-      --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1
+      --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes \
+      --test runtime_operation_assurance --test runtime_graphql_formats -- --test-threads=1
     cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
       --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_live \
-      --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1
+      --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir \
+      --test runtime_many_to_many --test runtime_search_long_tables -- --test-threads=1
     ;;
   postgres-table-case)
     cargo test -p graphql-orm --locked --no-default-features --features postgres --lib \

@@ -10,6 +10,21 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.167.0 (placeholder for the breaking batch) fixes each schema's
+maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
+when omitted) and refuses a `Database` configured differently; host-side
+keyset pages and host `paginate(PageInput)` reads
+refuse a limit above the maximum instead of returning fewer rows; runtime
+GraphQL serves `RecordVersion` and integer live keys as `RuntimeInt64`
+strings; an uncoded host callback error reads as `INTERNAL_ERROR` unless the
+schema's `Database` opts in; and the policy-free relation preload API and
+direct relation data-loader use are removed. `#[graphql_entity(key_only_deletes)]`
+adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
+items need action.
+
+Version 0.166.0 (breaking batch) makes migration planning safer by default:
+
 Version 0.167.0 (breaking batch) makes migration planning safer by default:
 plans no longer drop tables the target does not declare, lossy column type
 changes and integrity-removing steps need `allow_destructive`, and the

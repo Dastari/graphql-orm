@@ -471,20 +471,20 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
                sorts: Vec<SortExpression>,
                pagination: Option<PaginationRequest>| {
         let values = vec![SqlValue::Int(n), SqlValue::Int(n + 1), SqlValue::Int(n + 2)];
-        CompositeRelationQueryKey {
-            relation: "wide_children",
-            parent_key: RelationKey::from_sql_values(&values),
-            parent_values: values,
-            fk_columns: vec!["[PartA]", "[PartB]", "[PartC]"],
-            key_part_kinds: vec![RelationKeyPartKind::Int; 3],
-            where_signature: filter.as_ref().map(|_| "visible".into()),
-            order_signature: (!sorts.is_empty()).then(|| "ranked".into()),
-            page_signature: pagination.as_ref().map(|_| "first".into()),
+        CompositeRelationQueryKey::__generated(
+            "wide_children",
+            RelationKey::from_sql_values(&values),
+            values,
+            vec!["[PartA]", "[PartB]", "[PartC]"],
+            vec![RelationKeyPartKind::Int; 3],
+            filter.as_ref().map(|_| "visible".into()),
+            (!sorts.is_empty()).then(|| "ranked".into()),
+            pagination.as_ref().map(|_| "first".into()),
             filter,
             sorts,
             pagination,
-            auth_context: None,
-        }
+            None,
+        )
     };
     let ids = |page: &graphql_orm::graphql::loaders::RelationLoadResult<GomBatchChild>| {
         page.entities
@@ -492,7 +492,7 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
             .map(|child| child.id)
             .collect::<Vec<_>>()
     };
-    let loader = RelationLoader::<GomBatchChild, MssqlBackend>::new(database.clone());
+    let loader = RelationLoader::<GomBatchChild, MssqlBackend>::__generated(database.clone());
 
     // Every child of every parent, unpaged and as a first page.
     for paged in [false, true] {
@@ -572,7 +572,7 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
             .await
             .map_err(|error| format!("duplicates, paged {paged}: {error}"))?;
         for key in &keys {
-            let n = match &key.parent_values[0] {
+            let n = match &key.parent_values()[0] {
                 SqlValue::Int(n) => *n,
                 other => panic!("{other:?}"),
             };
@@ -670,17 +670,6 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
     }
     assert!(resolved[&representations[800]].is_none());
 
-    // The single-column loader: 2,500 keys in one `IN` list.
-    let singles = (1..=2_500).map(|id| id.to_string()).collect::<Vec<_>>();
-    let loaded = Loader::<String>::load(&loader, &singles)
-        .await
-        .map_err(|error| format!("load 5: {error}"))?;
-    assert_eq!(loaded.len(), 2_500);
-    let found = loaded.values().filter(|rows| !rows.is_empty()).count();
-    // Children 11, 12, 13, 21, ... up to 2493.
-    assert_eq!(found, 249 * 3);
-    assert_eq!(loaded["2493"][0].id, 2493);
-    assert!(loaded["2500"].is_empty());
     Ok(())
 }
 
@@ -730,26 +719,26 @@ async fn long_string_keys_stay_distinct(connection: &str) -> TestResult {
     .await?;
     let database =
         graphql_orm::db::Database::<MssqlBackend>::new(MssqlPool::connect_ado(connection).await?);
-    let loader = RelationLoader::<GomLongKeyChild, MssqlBackend>::new(database);
+    let loader = RelationLoader::<GomLongKeyChild, MssqlBackend>::__generated(database);
     let key = |suffix: &str, paged: bool| {
         let values = vec![SqlValue::String(format!("{}{suffix}", "k".repeat(4000)))];
-        CompositeRelationQueryKey {
-            relation: "long_children",
-            parent_key: RelationKey::from_sql_values(&values),
-            parent_values: values,
-            fk_columns: vec!["[ParentKey]"],
-            key_part_kinds: vec![RelationKeyPartKind::String],
-            where_signature: None,
-            order_signature: None,
-            page_signature: paged.then(|| "first".into()),
-            filter: None,
-            sorts: vec![],
-            pagination: paged.then_some(PaginationRequest {
+        CompositeRelationQueryKey::__generated(
+            "long_children",
+            RelationKey::from_sql_values(&values),
+            values,
+            vec!["[ParentKey]"],
+            vec![RelationKeyPartKind::String],
+            None,
+            None,
+            paged.then(|| "first".into()),
+            None,
+            vec![],
+            paged.then_some(PaginationRequest {
                 limit: Some(5),
                 offset: 0,
             }),
-            auth_context: None,
-        }
+            None,
+        )
     };
     for paged in [false, true] {
         let keys = [

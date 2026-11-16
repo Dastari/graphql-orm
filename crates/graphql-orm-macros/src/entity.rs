@@ -58,6 +58,9 @@ pub(crate) struct EntityMetadata {
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
     /// `node_id`: generate the global `NodeId` field and its resolvable `@key`.
     pub(crate) node_id: Option<proc_macro2::Span>,
+    /// `key_only_deletes`: a `Key`/`Keys` subscriber of the exact key gets a
+    /// `DELETED` event carrying only the key when no preimage is released.
+    pub(crate) key_only_deletes: Option<proc_macro2::Span>,
 }
 
 /// One declared `@key` for a resolvable Federation entity.
@@ -423,6 +426,14 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         ));
                     }
                     metadata.upsert = Some(cols);
+                } else if meta.path.is_ident("key_only_deletes") {
+                    if attribute_name == "repository_entity" {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "key_only_deletes requires a GraphQL entity; repository-only entities have no Changed subscription",
+                        ));
+                    }
+                    metadata.key_only_deletes = Some(meta.path.span());
                 } else if meta.path.is_ident("node_id") {
                     if attribute_name == "repository_entity" {
                         return Err(syn::Error::new(

@@ -619,6 +619,65 @@ async fn sqlite_managed_fts_is_maintained_by_orm_writes() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// #667: a trusted `EntitySearchQuery::paginate` read is exact or refused,
+/// never reduced to the maximum page limit.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_host_search_pages_are_exact_or_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    let target = SchemaModel::from_entities(&[SearchArticle::metadata()]);
+    let plan = build_migration_plan(
+        DatabaseBackend::Sqlite,
+        &SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
+        &target,
+    );
+    for statement in &plan.statements {
+        graphql_orm::sqlx::query(statement).execute(&pool).await?;
+    }
+    let db = graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool.clone());
+    for title in ["Melbourne Park", "Melbourne Markets", "Melbourne Docks"] {
+        SearchArticle::insert(
+            &db,
+            CreateSearchArticleInput {
+                title: title.to_string(),
+                body: None,
+                published: true,
+            },
+        )
+        .await?;
+    }
+    let search = |maximum: i64| {
+        SearchArticle::search(
+            db.pool(),
+            SearchInput {
+                query: "melbourne".to_string(),
+                mode: Some(SearchMode::Plain),
+                min_score: None,
+            },
+        )
+        .pagination_config(PaginationConfig::secure().with_max_limit(Some(maximum)))
+        .paginate(PageInput {
+            limit: Some(3),
+            offset: Some(0),
+        })
+    };
+    let code = |error: graphql_orm::sqlx::Error| OrmPublicError::from(error).code;
+    assert_eq!(
+        code(search(2).fetch_connection().await.expect_err("connection")),
+        OrmErrorCode::PageLimitExceeded
+    );
+    assert_eq!(
+        code(search(2).fetch_all().await.expect_err("fetch_all")),
+        OrmErrorCode::PageLimitExceeded
+    );
+    assert_eq!(search(3).fetch_connection().await?.edges.len(), 3);
+    assert_eq!(search(3).fetch_all().await?.len(), 3);
+    Ok(())
+}
+
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_search_schema_plans_fts5_table() {

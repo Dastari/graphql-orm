@@ -525,9 +525,9 @@ fn assert_failure(error: &OrmPublicError, failure: Failure, label: &str) {
     );
 }
 
-/// The code and message a GraphQL client sees. An authored refusal without an
-/// allow-listed code keeps its existing GraphQL rendering; only repository
-/// callers see it sanitized.
+/// The code and message a GraphQL client sees. A refusal with an
+/// application-defined code keeps its GraphQL rendering, and only repository
+/// callers see it sanitized. An error with no code is internal everywhere.
 fn graphql_rendering(failure: Failure) -> (Option<&'static str>, &'static str) {
     match failure {
         Failure::Public(OrmErrorCode::InternalError)
@@ -537,7 +537,8 @@ fn graphql_rendering(failure: Failure) -> (Option<&'static str>, &'static str) {
         Failure::Public(code) | Failure::PublicPropagated(code) => {
             (Some(code.as_str()), "refused by hook policy")
         }
-        Failure::Uncoded => (None, SECRET),
+        // #682: an error with no code is not a public refusal anywhere.
+        Failure::Uncoded => (Some("INTERNAL_ERROR"), "internal error"),
         Failure::UnknownCode => (Some("PRIVATE"), SECRET),
         Failure::Propagated => (Some("INTERNAL_ERROR"), "internal error"),
     }
@@ -702,8 +703,9 @@ async fn entity_write_denial_reports_forbidden() {
 }
 
 /// A hook's refused nested write reaches GraphQL and repository callers with
-/// its public code when propagated, and as safe text when stringified: the
-/// carried refusal's text never exposes the internal transport token.
+/// its public code when propagated, and as an internal error when
+/// stringified: the carried refusal's text never exposes the internal
+/// transport token.
 async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
     for mode in [NestedRefusal::Propagated, NestedRefusal::Stringified] {
         let (mut db, mut owner, _hook) = fixture().await;
@@ -728,7 +730,6 @@ async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
             !error.message.contains("graphql-orm-public"),
             "{label}: {error:?}"
         );
-        assert!(error.message.contains("forbidden"), "{label}: {error:?}");
         let code = error.extensions.as_ref().and_then(|ext| ext.get("code"));
         match mode {
             NestedRefusal::Propagated => {
@@ -739,8 +740,16 @@ async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
                     "{label}"
                 );
             }
-            // An uncoded authored refusal keeps its GraphQL rendering.
-            NestedRefusal::Stringified => assert_eq!(code, None, "{label}"),
+            // Stringifying drops the code, and an uncoded error is internal
+            // on every surface (#682).
+            NestedRefusal::Stringified => {
+                assert_eq!(error.message, "internal error", "{label}");
+                assert_eq!(
+                    code,
+                    Some(&async_graphql::Value::from("INTERNAL_ERROR")),
+                    "{label}"
+                );
+            }
         }
 
         let id = existing.id;
@@ -856,6 +865,68 @@ async fn graphql_refusals_match_repository_refusals() {
     owner.cleanup().unwrap();
 }
 
+/// #682: the opt-in that renders an uncoded callback error as written belongs
+/// to the schema built from the opted-in `Database`. A second schema in the
+/// same process, run in between and concurrently, keeps the default.
+async fn uncoded_callback_messages_are_scoped_to_the_opted_in_schema() {
+    let (db, mut owner, hook) = fixture().await;
+    assert!(!db.exposes_uncoded_callback_messages());
+    let exposed_db = db.clone().with_uncoded_callback_messages_exposed(true);
+    assert!(exposed_db.exposes_uncoded_callback_messages());
+    let exposing = schema_builder(exposed_db)
+        .data(AuthSubject::new("test-principal"))
+        .finish();
+    let default = schema_builder(db.clone())
+        .data(AuthSubject::new("test-principal"))
+        .finish();
+    let mutation = "mutation { createHookRecord(input: {recordKey: \"scoped\", status: \"before\"}) { success } }";
+    let code = |response: &async_graphql::Response| {
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code"))
+            .cloned()
+    };
+    *hook.phase.lock().unwrap() = Some((MutationPhase::Before, Failure::Uncoded));
+    for _ in 0..2 {
+        let response = exposing.execute(mutation).await;
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert_eq!(response.errors[0].message, SECRET, "opted-in schema");
+        let response = default.execute(mutation).await;
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert_eq!(
+            response.errors[0].message, "internal error",
+            "default schema"
+        );
+        assert_eq!(
+            code(&response),
+            Some(async_graphql::Value::from("INTERNAL_ERROR"))
+        );
+    }
+    let (exposed, hidden) = tokio::join!(exposing.execute(mutation), default.execute(mutation));
+    assert_eq!(
+        exposed.errors[0].message, SECRET,
+        "concurrent opted-in schema"
+    );
+    assert_eq!(
+        hidden.errors[0].message, "internal error",
+        "concurrent default schema"
+    );
+    // Outside any schema the default applies to the opted-in handle too.
+    let repository = HookRecord::insert(
+        &db.clone().with_uncoded_callback_messages_exposed(true),
+        create("repository"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        OrmPublicError::from(repository).message,
+        OrmErrorCode::InternalError.default_message()
+    );
+    *hook.phase.lock().unwrap() = None;
+    owner.cleanup().unwrap();
+}
+
 macro_rules! case {
     ($name:ident) => {
         #[tokio::test]
@@ -877,4 +948,5 @@ mod cases {
     case!(retention_purge_entity_denial_reports_forbidden);
     case!(nested_hook_write_refusals_keep_their_code_and_safe_text);
     case!(graphql_refusals_match_repository_refusals);
+    case!(uncoded_callback_messages_are_scoped_to_the_opted_in_schema);
 }
