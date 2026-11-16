@@ -1,0 +1,11 @@
+error: key_only_deletes cannot be combined with `subscribe = false` on a primary-key field: a key-only DELETED event would release the key without evaluating that restriction
+ --> tests/ui/key_only_deletes_key_unsubscribed.rs:6:57
+  |
+6 | #[graphql_entity(table = "tickets", plural = "Tickets", key_only_deletes)]
+  |                                                         ^^^^^^^^^^^^^^^^
+
+error: this primary-key field is excluded from change events
+  --> tests/ui/key_only_deletes_key_unsubscribed.rs:11:5
+   |
+11 |     id: String,
+   |     ^^

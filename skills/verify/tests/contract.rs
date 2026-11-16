@@ -860,11 +860,20 @@ async fn a_hook_passes_a_nested_write_refusal_on_with_its_code() {
     }
 }
 
+/// Stringifying a nested write error drops its public code. Since #682 the
+/// resulting uncoded error is not a public refusal: clients see
+/// `INTERNAL_ERROR` with the default message, and the text stays server-side.
 #[tokio::test]
-async fn stringifying_a_nested_write_error_in_a_hook_loses_the_code() {
+async fn stringifying_a_nested_write_error_in_a_hook_becomes_an_internal_error() {
     let response = create_order_through_nested_write_hook(NestedWriteError::Stringify).await;
     assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
-    assert_eq!(error_code(&response), None, "{:?}", response.errors);
+    assert_eq!(
+        error_code(&response),
+        Some(async_graphql::Value::from("INTERNAL_ERROR")),
+        "{:?}",
+        response.errors
+    );
+    assert_eq!(response.errors[0].message, "internal error");
 }
 
 #[tokio::test]
@@ -1767,8 +1776,19 @@ fn callback_error_privacy_preserves_authored_refusals() {
         masked.extensions.unwrap().get("code"),
         Some(&async_graphql::Value::from("INTERNAL_ERROR"))
     );
+    // #682: an authored error without a `code` is not a public refusal, so
+    // its text stays server-side unless the schema's `Database` opted in.
+    let uncoded = graphql_error_from_callback(async_graphql::Error::new("authored text"));
+    assert_eq!(uncoded.message, "internal error");
+    assert_eq!(
+        uncoded.extensions.unwrap().get("code"),
+        Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+    );
+    // A coded refusal keeps its message and every extension.
     for error in [
-        async_graphql::Error::new("authored refusal"),
+        async_graphql::Error::new("authored refusal").extend_with(|_, ext| {
+            ext.set("code", "CUSTOM_REFUSAL");
+        }),
         async_graphql::Error::from(std::io::Error::other("authored refusal")).extend_with(
             |_, ext| {
                 ext.set("code", "CUSTOM_REFUSAL");

@@ -82,7 +82,7 @@ async fn every_chunk_of_a_relation_batch_carries_the_auth_context()
     .execute(&pool)
     .await?;
     let database = graphql_orm::db::Database::<PostgresBackend>::new(pool.clone());
-    let loader = RelationLoader::<ChunkChild, PostgresBackend>::new(database);
+    let loader = RelationLoader::<ChunkChild, PostgresBackend>::__generated(database);
 
     let context = |tenant: &str| DbAuthContext {
         tenant_id: Some(tenant.to_string()),
@@ -90,29 +90,29 @@ async fn every_chunk_of_a_relation_batch_carries_the_auth_context()
     };
     let key = |n: i64, auth: Option<DbAuthContext>, paged: bool| {
         let values = vec![SqlValue::Int(n), SqlValue::Int(n + 1), SqlValue::Int(n + 2)];
-        CompositeRelationQueryKey {
-            relation: "chunk_children",
-            parent_key: RelationKey::from_sql_values(&values),
-            parent_values: values,
-            fk_columns: vec!["part_a", "part_b", "part_c"],
-            key_part_kinds: vec![RelationKeyPartKind::Int; 3],
-            where_signature: Some("tenant".into()),
-            order_signature: None,
-            page_signature: paged.then(|| "first".into()),
-            filter: Some(FilterExpression::trusted_fragment(
+        CompositeRelationQueryKey::__generated(
+            "chunk_children",
+            RelationKey::from_sql_values(&values),
+            values,
+            vec!["part_a", "part_b", "part_c"],
+            vec![RelationKeyPartKind::Int; 3],
+            Some("tenant".into()),
+            None,
+            paged.then(|| "first".into()),
+            Some(FilterExpression::trusted_fragment(
                 format!(
                     "tenant = current_setting('app.tenant_id', true) AND part_a NOT IN ({})",
                     vec!["?"; FILTER_BINDS].join(", ")
                 ),
                 vec![SqlValue::Int(0); FILTER_BINDS],
             )),
-            sorts: vec![],
-            pagination: paged.then_some(PaginationRequest {
+            vec![],
+            paged.then_some(PaginationRequest {
                 limit: Some(5),
                 offset: 0,
             }),
-            auth_context: auth,
-        }
+            auth,
+        )
     };
 
     for paged in [false, true] {

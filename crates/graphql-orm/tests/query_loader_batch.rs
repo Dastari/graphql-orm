@@ -9,7 +9,7 @@
     all(feature = "postgres", feature = "mssql"),
 )))]
 
-use graphql_orm::async_graphql::dataloader::{DataLoader, Loader};
+use graphql_orm::async_graphql::dataloader::Loader;
 use graphql_orm::async_graphql::{Context, SimpleObject};
 use graphql_orm::futures::future::BoxFuture;
 use graphql_orm::graphql::loaders::{
@@ -887,20 +887,20 @@ async fn batched_relations_use_the_target_default_order() -> Result<(), Box<dyn 
 
 fn step_key(parent: &str, filter: Option<(&str, FilterExpression)>) -> CompositeRelationQueryKey {
     let values = vec![SqlValue::String(parent.to_string())];
-    CompositeRelationQueryKey {
-        relation: "List::steps",
-        parent_key: RelationKey::from_sql_values(&values),
-        parent_values: values,
-        fk_columns: vec!["list_id"],
-        key_part_kinds: vec![RelationKeyPartKind::String],
-        where_signature: filter.as_ref().map(|(signature, _)| signature.to_string()),
-        order_signature: None,
-        page_signature: None,
-        filter: filter.map(|(_, filter)| filter),
-        sorts: Vec::new(),
-        pagination: None,
-        auth_context: None,
-    }
+    CompositeRelationQueryKey::__generated(
+        "List::steps",
+        RelationKey::from_sql_values(&values),
+        values,
+        vec!["list_id"],
+        vec![RelationKeyPartKind::String],
+        filter.as_ref().map(|(signature, _)| signature.to_string()),
+        None,
+        None,
+        filter.map(|(_, filter)| filter),
+        Vec::new(),
+        None,
+        None,
+    )
 }
 
 #[tokio::test]
@@ -911,7 +911,7 @@ fn step_key(parent: &str, filter: Option<(&str, FilterExpression)>) -> Composite
 async fn a_failing_key_group_fails_only_its_own_keys() -> Result<(), Box<dyn std::error::Error>> {
     let _turn = QUERY_COUNT_LOCK.lock().await;
     let fixture = Fixture::start("relation-group-isolation").await?;
-    let loader = RelationLoader::<Step, DefaultBackend>::new(fixture.db.clone());
+    let loader = RelationLoader::<Step, DefaultBackend>::__generated(fixture.db.clone());
 
     // Three groups in one loader call. The second selects a row that cannot
     // be decoded; the third names a column that does not exist.
@@ -970,23 +970,23 @@ async fn a_failing_key_group_fails_only_its_own_keys() -> Result<(), Box<dyn std
     // A relation keyed by the column its target orders by default (a to-one
     // relation to a primary key): the default order adds no second term for
     // that column, which SQL Server would refuse.
-    let lists = RelationLoader::<List, DefaultBackend>::new(fixture.db.clone());
+    let lists = RelationLoader::<List, DefaultBackend>::__generated(fixture.db.clone());
     let list_key = |id: &str| {
         let values = vec![SqlValue::String(id.to_string())];
-        CompositeRelationQueryKey {
-            relation: "Step::list",
-            parent_key: RelationKey::from_sql_values(&values),
-            parent_values: values,
-            fk_columns: vec![<List as DatabaseEntity>::PRIMARY_KEY],
-            key_part_kinds: vec![RelationKeyPartKind::String],
-            where_signature: None,
-            order_signature: None,
-            page_signature: None,
-            filter: None,
-            sorts: Vec::new(),
-            pagination: None,
-            auth_context: None,
-        }
+        CompositeRelationQueryKey::__generated(
+            "Step::list",
+            RelationKey::from_sql_values(&values),
+            values,
+            vec![<List as DatabaseEntity>::PRIMARY_KEY],
+            vec![RelationKeyPartKind::String],
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+        )
     };
     let loaded = lists
         .load(&[list_key("a"), list_key("b")].map(IsolatedLoad))
@@ -1040,9 +1040,8 @@ async fn a_failing_key_group_fails_only_its_own_keys() -> Result<(), Box<dyn std
     // puts both in the same batch; the failing one must not fail the other.
     let schema = schema_builder(fixture.db.clone())
         .data(
-            DataLoader::new(
-                RelationLoader::<Step, DefaultBackend>::new(fixture.db.clone()),
-                tokio::spawn,
+            graphql_orm::graphql::loaders::relation_data_loader::<Step, DefaultBackend>(
+                fixture.db.clone(),
             )
             .delay(Duration::from_millis(250)),
         )
@@ -1368,9 +1367,8 @@ async fn default_order_holds_for_every_role_key_shape_and_authority()
     // rows in the declared order, and the refused one fails alone.
     let shared = schema_builder(fixture.db.clone())
         .data(
-            DataLoader::new(
-                RelationLoader::<Card, DefaultBackend>::new(fixture.db.clone()),
-                tokio::spawn,
+            graphql_orm::graphql::loaders::relation_data_loader::<Card, DefaultBackend>(
+                fixture.db.clone(),
             )
             .delay(Duration::from_millis(250)),
         )

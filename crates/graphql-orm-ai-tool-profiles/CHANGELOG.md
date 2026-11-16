@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.25.0
+
+- **Fixed:** runtime live key inputs compile under the ORM's default string identities. With live subscriptions and a node identity, a UUID key member is `UUID!` in both identity modes, and an integer key member is `RuntimeInt64!` by default and `Int!` only under `with_legacy_int_identities()`. The matcher previously recognised live key inputs only when `RecordVersion` was `Int!`, so a UUID-keyed collection under default options failed every query, mutation and subscription catalogue with `InvalidConfiguration("generated input <Object>KeyInput.<field> differs from its canonical contract")`. The identity mode is now read from the `RecordVersion` scalar. No data migration is needed.
+
 ## Unreleased - 0.24.0
 
 - **Breaking (fingerprints, #683):** requires operation catalogue 0.9.0, whose generated-operation fingerprint algorithm is `graphql-orm-sha256-len-v2`. Operation contracts and tool manifests record that name. A manifest or contract bound under `graphql-orm-sha256-len-v1` is refused as stale; regenerate it. No Rust API change. See the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).

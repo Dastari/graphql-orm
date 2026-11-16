@@ -1480,7 +1480,7 @@ pub(super) fn dependent_semantic(
 
 pub(super) fn key_scalar(module: &RuntimeGraphqlModule, kind: RuntimeValueKind) -> &'static str {
     match kind {
-        RuntimeValueKind::Integer if !module.options.int64_identity_strings => "Int",
+        RuntimeValueKind::Integer if module.options.legacy_int_identities => "Int",
         RuntimeValueKind::Uuid => "UUID",
         _ => scalar::name(kind),
     }
@@ -1495,7 +1495,7 @@ pub(super) fn decode_key_value(
     value: &Value,
     limits: RuntimeScalarLimits,
 ) -> Result<RuntimeValue, RuntimeGraphqlError> {
-    if !module.options.int64_identity_strings
+    if module.options.legacy_int_identities
         && let (RuntimeValueKind::Integer, Value::Number(value)) = (kind, value)
     {
         return value
@@ -1510,7 +1510,7 @@ pub(super) fn decode_key_value(
 /// `RuntimeInt64` string when the module opted in.
 fn key_output(module: &RuntimeGraphqlModule, value: &RuntimeValue) -> Value {
     match value {
-        RuntimeValue::Integer(v) if !module.options.int64_identity_strings => {
+        RuntimeValue::Integer(v) if module.options.legacy_int_identities => {
             Value::Number((*v).into())
         }
         value => scalar::encode(value),
@@ -1642,10 +1642,10 @@ pub(super) fn insert_identity_fields(
         };
         values.insert(
             Name::new("RecordVersion"),
-            if module.options.int64_identity_strings {
-                scalar::encode(&RuntimeValue::Integer(*version))
-            } else {
+            if module.options.legacy_int_identities {
                 Value::Number((*version).into())
+            } else {
+                scalar::encode(&RuntimeValue::Integer(*version))
             },
         );
     }

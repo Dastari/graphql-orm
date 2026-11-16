@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.148.0
+
+- **Fixed:** adopts tool profiles 0.25.0, so runtime-composed collections with live subscriptions, a node identity and a UUID or integer key compile as query, mutation and subscription capability catalogues under the ORM's default `RuntimeInt64` identities and under `with_legacy_int_identities()`. A regression test covers each key shape in both modes. No AI schema module change and no data migration.
+- **Fixed:** every keyset window the runtime reads for itself is read completely, in pages no larger than the database's maximum page limit. Under the ORM breaking batch a host keyset page above that maximum is refused instead of being shortened, so any window larger than a host's maximum failed: conversation bootstraps and message windows (up to 200 messages against the default maximum of 100), session, attachment, approval, proposal and usage lists, the session-retention candidate scan (`maximum_sessions`), attachment and artifact cleanup batches, and pending secret cleanups. Each now returns exactly the window it asked for, with the same cursors and has-page flags; before the batch these windows were shortened to the maximum without notice. No AI schema module change and no data migration.
+
 ## Unreleased - 0.147.0
 
 - **Added:** `AiSchemaModule::admit_index_replacements(&plan, options)` admits an upgrade that only replaces an AI-owned webhook-receipt index. ORM 0.164.0 classifies every index drop as `Destructive`, so `ApplyOptions::default()` now refuses the upgrade from a store created before `provider_kind` joined the receipt primary key, or before module 0.72.0's composite index was renamed (including the 63-byte name PostgreSQL stored). The method sets `allow_destructive` only when every destructive step in the plan drops one of those known, non-unique legacy index names and the same plan creates the current composite index; any other destructive step leaves the options unchanged, and the gate refuses the plan.

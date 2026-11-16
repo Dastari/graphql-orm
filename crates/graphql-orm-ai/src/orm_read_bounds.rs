@@ -7,10 +7,12 @@
 //! The read stays bounded by its own limit, and the database-wide maximum that
 //! GraphQL clients see is unchanged.
 
+use graphql_orm::graphql::errors::OrmPublicError;
 use graphql_orm::graphql::orm::{
     DatabaseFilter, DatabaseOrderBy, Entity, FromSqlRow, MutationQuery, OrmBackend, ReadProjection,
     RepositoryQuery, TransactionProjectionQuery, WriteBackend,
 };
+use graphql_orm::graphql::pagination::{Connection, KeysetConnectionInput, PageInfo};
 
 /// Applies an internal read's own limit as that read's maximum.
 pub(crate) trait InternalReadBound: Sized {
@@ -68,12 +70,117 @@ pub(crate) fn client_page_limit(
         .unwrap_or(requested)
 }
 
+/// Reads one host keyset window completely, in pages no larger than the
+/// database's maximum page limit.
+///
+/// A host keyset read (`Record::keyset_connection_page` with no GraphQL
+/// context) refuses a `first` or `last` above the maximum with
+/// `PAGE_LIMIT_EXCEEDED`; it never returns fewer rows than asked for. A window
+/// this crate has already validated may be larger than a host's maximum, so
+/// it is read here as consecutive cursor pages of at most that maximum until
+/// the window is full or the set ends. The result is the window one page of
+/// that size would return: the same edges in canonical order, the outer
+/// cursors, and both has-page flags, so callers continue from its cursors as
+/// before. A window within the maximum, or an ambiguous one (both `first` and
+/// `last`), is passed through unchanged for the ORM to read or refuse.
+pub(crate) async fn keyset_window<T, F, Fut>(
+    maximum: Option<i64>,
+    page: KeysetConnectionInput,
+    mut fetch: F,
+) -> Result<Connection<T>, OrmPublicError>
+where
+    F: FnMut(KeysetConnectionInput) -> Fut,
+    Fut: std::future::Future<Output = Result<Connection<T>, OrmPublicError>>,
+{
+    let backward = match (page.first, page.last) {
+        (Some(_), None) => false,
+        (None, Some(_)) => true,
+        _ => return fetch(page).await,
+    };
+    let requested = page.first.or(page.last).unwrap_or_default();
+    let Some(maximum) = maximum.map(|maximum| maximum.max(1)) else {
+        return fetch(page).await;
+    };
+    if requested <= maximum {
+        return fetch(page).await;
+    }
+    let mut cursor = if backward {
+        page.before.clone()
+    } else {
+        page.after.clone()
+    };
+    let mut remaining = requested;
+    let mut chunks: Vec<Connection<T>> = Vec::new();
+    loop {
+        let size = remaining.min(maximum);
+        let chunk = fetch(KeysetConnectionInput {
+            after: if backward { None } else { cursor.clone() },
+            before: if backward { cursor.clone() } else { None },
+            first: (!backward).then_some(size),
+            last: backward.then_some(size),
+            // A requested count is read once, with the first page.
+            include_total_count: page.include_total_count && chunks.is_empty(),
+        })
+        .await?;
+        let read = i64::try_from(chunk.edges.len()).unwrap_or(i64::MAX);
+        remaining = remaining.saturating_sub(read);
+        let more = if backward {
+            chunk.page_info.has_previous_page
+        } else {
+            chunk.page_info.has_next_page
+        };
+        cursor = if backward {
+            chunk.page_info.start_cursor.clone()
+        } else {
+            chunk.page_info.end_cursor.clone()
+        };
+        chunks.push(chunk);
+        if remaining <= 0 || !more || read == 0 || cursor.is_none() {
+            break;
+        }
+    }
+    // `chunks[0]` is nearest the starting cursor, the last one farthest.
+    let first_read = chunks.first().map(|chunk| chunk.page_info.clone());
+    let last_read = chunks.last().map(|chunk| chunk.page_info.clone());
+    let (Some(first_read), Some(last_read)) = (first_read, last_read) else {
+        return Err(OrmPublicError::new(
+            graphql_orm::graphql::errors::OrmErrorCode::InternalError,
+        ));
+    };
+    if backward {
+        chunks.reverse();
+    }
+    let edges = chunks
+        .into_iter()
+        .flat_map(|chunk| chunk.edges)
+        .collect::<Vec<_>>();
+    let page_info = if backward {
+        PageInfo {
+            has_next_page: first_read.has_next_page,
+            has_previous_page: last_read.has_previous_page,
+            start_cursor: last_read.start_cursor,
+            end_cursor: first_read.end_cursor,
+            total_count: first_read.total_count,
+        }
+    } else {
+        PageInfo {
+            has_next_page: last_read.has_next_page,
+            has_previous_page: first_read.has_previous_page,
+            start_cursor: first_read.start_cursor,
+            end_cursor: last_read.end_cursor,
+            total_count: first_read.total_count,
+        }
+    };
+    Ok(Connection { edges, page_info })
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::{InternalReadBound, client_page_limit};
     use crate::persistence::{AiInboxStreamRecord, CreateAiInboxStreamRecordInput};
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule, TransactionMode};
+    use graphql_orm::graphql::pagination::{Connection, KeysetConnectionInput, PageInfo};
     use graphql_orm::prelude::{Database, PaginationConfig, SqliteBackend};
 
     const ROWS: i64 = 150;
@@ -155,6 +262,124 @@ mod tests {
             .expect("transaction should commit");
         assert_eq!(exact as i64, BOUND + 1);
         assert_eq!(refused, Some(OrmErrorCode::PageLimitExceeded));
+    }
+
+    /// A keyset source over `0..rows` that refuses any page above `maximum`,
+    /// as a host keyset read does, and records every page size it served.
+    fn fake_keyset(
+        rows: i64,
+        maximum: i64,
+        sizes: &std::sync::Mutex<Vec<i64>>,
+        page: KeysetConnectionInput,
+    ) -> Result<Connection<i64>, OrmPublicError> {
+        use graphql_orm::graphql::pagination::Edge;
+        let size = page.first.or(page.last).expect("one direction");
+        if size > maximum {
+            return Err(OrmPublicError::new(OrmErrorCode::PageLimitExceeded));
+        }
+        sizes.lock().unwrap().push(size);
+        let parse = |cursor: &Option<String>| cursor.as_ref().map(|c| c.parse::<i64>().unwrap());
+        let (start, end) = if page.last.is_some() {
+            let end = parse(&page.before).unwrap_or(rows);
+            ((end - size).max(0), end)
+        } else {
+            let start = parse(&page.after).map_or(0, |after| after + 1);
+            (start, (start + size).min(rows))
+        };
+        let edges = (start..end)
+            .map(|node| Edge {
+                node,
+                cursor: node.to_string(),
+            })
+            .collect::<Vec<_>>();
+        Ok(Connection {
+            page_info: PageInfo {
+                has_next_page: end < rows,
+                has_previous_page: start > 0,
+                start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                total_count: page.include_total_count.then_some(rows),
+            },
+            edges,
+        })
+    }
+
+    #[tokio::test]
+    async fn keyset_windows_above_the_maximum_are_read_completely() {
+        let nodes = |connection: &Connection<i64>| {
+            connection
+                .edges
+                .iter()
+                .map(|edge| edge.node)
+                .collect::<Vec<_>>()
+        };
+        // Forward: 25 rows of 30, in pages of at most 10.
+        let sizes = std::sync::Mutex::new(Vec::new());
+        let forward = super::keyset_window(
+            Some(10),
+            KeysetConnectionInput {
+                first: Some(25),
+                include_total_count: true,
+                ..Default::default()
+            },
+            |page| std::future::ready(fake_keyset(30, 10, &sizes, page)),
+        )
+        .await
+        .expect("window is read in pages");
+        assert_eq!(nodes(&forward), (0..25).collect::<Vec<_>>());
+        assert_eq!(*sizes.lock().unwrap(), [10, 10, 5]);
+        assert!(forward.page_info.has_next_page && !forward.page_info.has_previous_page);
+        assert_eq!(forward.page_info.start_cursor.as_deref(), Some("0"));
+        assert_eq!(forward.page_info.end_cursor.as_deref(), Some("24"));
+        assert_eq!(forward.page_info.total_count, Some(30));
+
+        // Backward from a cursor: the 25 rows before 28, in canonical order.
+        let sizes = std::sync::Mutex::new(Vec::new());
+        let backward = super::keyset_window(
+            Some(10),
+            KeysetConnectionInput {
+                last: Some(25),
+                before: Some("28".to_owned()),
+                ..Default::default()
+            },
+            |page| std::future::ready(fake_keyset(30, 10, &sizes, page)),
+        )
+        .await
+        .expect("window is read in pages");
+        assert_eq!(nodes(&backward), (3..28).collect::<Vec<_>>());
+        assert_eq!(*sizes.lock().unwrap(), [10, 10, 5]);
+        assert!(backward.page_info.has_next_page && backward.page_info.has_previous_page);
+        assert_eq!(backward.page_info.start_cursor.as_deref(), Some("3"));
+        assert_eq!(backward.page_info.end_cursor.as_deref(), Some("27"));
+
+        // A window larger than the set ends with the set.
+        let sizes = std::sync::Mutex::new(Vec::new());
+        let all = super::keyset_window(
+            Some(10),
+            KeysetConnectionInput {
+                first: Some(200),
+                ..Default::default()
+            },
+            |page| std::future::ready(fake_keyset(30, 10, &sizes, page)),
+        )
+        .await
+        .expect("window is read in pages");
+        assert_eq!(nodes(&all), (0..30).collect::<Vec<_>>());
+        assert!(!all.page_info.has_next_page);
+
+        // Within the maximum, or without one, the page is passed through.
+        let sizes = std::sync::Mutex::new(Vec::new());
+        super::keyset_window(
+            None,
+            KeysetConnectionInput {
+                first: Some(7),
+                ..Default::default()
+            },
+            |page| std::future::ready(fake_keyset(30, 10, &sizes, page)),
+        )
+        .await
+        .expect("one page");
+        assert_eq!(*sizes.lock().unwrap(), [7]);
     }
 
     #[test]

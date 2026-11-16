@@ -284,8 +284,13 @@ client tells a deliberate refusal from an internal failure, so keep it:
   with `?`. The conversion keeps the ORM error as the source, and the ORM restores its public code from
   it. Or map it with `graphql_error_from_sqlx`, which does the same explicitly.
 - **Never stringify it**, as in `async_graphql::Error::new(error.to_string())`. That drops the source
-  and the code: the client gets the driver's text as written, with no `code`, and can't tell a refusal
-  from a bug.
+  and the code, so the refusal becomes an internal error: the client gets `INTERNAL_ERROR` with the
+  default message, and the text stays server-side.
+
+An error with no `code` extension is never a public refusal. Generated operations report it as
+`INTERNAL_ERROR` with the default message, so give every refusal a client may read a public code, as
+above. Only a schema whose `Database` opts in with `DatabaseBuilder::expose_uncoded_callback_messages(true)`
+renders uncoded text as written.
 
 ### Which work goes where
 
@@ -731,7 +736,8 @@ Only for services that use them:
 | Hand-written twin of a generated mutation | The generated mutation stays callable and skips the domain logic | Put the logic in a hook on the generated mutation |
 | Custom resolver with a generated name | `schema_roots!` refuses to compile it, naming both sides: a merged root would serve only one of them | Hook or transform. Pick a distinct name only for a genuine action |
 | Validation inside a custom resolver | Generated writes and repository writes bypass it | Field validators or the transform |
-| Stringifying a nested write's error in a hook (`Error::new(error.to_string())`) | The public `code` is lost, and driver text reaches the client | `?`, or `graphql_error_from_sqlx` |
+| Stringifying a nested write's error in a hook (`Error::new(error.to_string())`) | The public `code` is lost, so the client gets `INTERNAL_ERROR` instead of the refusal | `?`, or `graphql_error_from_sqlx` |
+| Returning a refusal as plain text (`Error::new("seat taken")`) | No `code`, so the client gets `INTERNAL_ERROR` with the default message | `OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken").into_graphql_error()` |
 | Irreversible or slow side effect in a hook | A rollback can't undo it, and it holds locks | `hook_ctx.defer`, or a job row |
 | Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row in the transaction for anything that must happen, with `defer` only to wake the worker |
 | A hand-spawned delayed task from a hook | Racy: it can run before the commit or after a rollback | `hook_ctx.defer` |

@@ -265,10 +265,10 @@ async fn preloaded_and_loader_relation_failures_are_sanitized()
             Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription).data(db.clone());
         let schema = if use_loader {
             builder
-                .data(async_graphql::dataloader::DataLoader::new(
-                    RelationLoader::<SanitizerNode>::new(db.clone()),
-                    tokio::spawn,
-                ))
+                .data(graphql_orm::graphql::loaders::relation_data_loader::<
+                    SanitizerNode,
+                    _,
+                >(db.clone()))
                 .finish()
         } else {
             builder.finish()
@@ -403,10 +403,10 @@ async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() 
             Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription).data(db.clone());
         let schema = if use_loader {
             builder
-                .data(async_graphql::dataloader::DataLoader::new(
-                    RelationLoader::<SanitizerNode>::new(db),
-                    tokio::spawn,
-                ))
+                .data(graphql_orm::graphql::loaders::relation_data_loader::<
+                    SanitizerNode,
+                    _,
+                >(db))
                 .finish()
         } else {
             builder.finish()

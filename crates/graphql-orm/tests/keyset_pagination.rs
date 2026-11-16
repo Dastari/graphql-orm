@@ -188,18 +188,36 @@ async fn bidirectional_connection_reads_tail_and_older_window_in_canonical_order
 }
 
 #[tokio::test]
-async fn keyset_applies_max_limit_and_counts_only_when_requested() -> graphql_orm::Result<()> {
+async fn keyset_refuses_a_limit_above_the_maximum_and_counts_only_when_requested()
+-> graphql_orm::Result<()> {
     let database = setup()
         .await?
         .with_pagination_config(PaginationConfig::secure().with_max_limit(Some(2)));
     for rank in 0..5 {
         KeysetItem::insert(&database, input(Some(1), rank, "item")).await?;
     }
-    let page = KeysetItem::keyset_page(
+    // A repository keyset read is trusted Rust code: a limit above the
+    // maximum is an error, never a shorter page than the caller asked for.
+    let refused = KeysetItem::keyset_page(
         &database,
         KeysetItemWhereInput::default(),
         KeysetPageInput {
             limit: Some(500),
+            include_total_count: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("an over-limit repository page is refused");
+    assert_eq!(
+        refused.code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
+    );
+    let page = KeysetItem::keyset_page(
+        &database,
+        KeysetItemWhereInput::default(),
+        KeysetPageInput {
+            limit: Some(2),
             include_total_count: true,
             ..Default::default()
         },

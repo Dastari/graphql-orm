@@ -15,36 +15,40 @@ fn context(scopes: &[&str]) -> DbAuthContext {
 }
 
 fn relation(auth: DbAuthContext) -> RelationQueryKey {
-    RelationQueryKey {
-        relation: "Parent::children",
-        parent_key: "parent".into(),
-        parent_value: SqlValue::String("parent".into()),
-        fk_column: "parent_id",
-        where_signature: None,
-        order_signature: None,
-        page_signature: None,
-        filter: None,
-        sorts: vec![],
-        pagination: None,
-        auth_context: Some(auth),
-    }
+    relation_for(auth, "parent", SqlValue::String("parent".into()))
+}
+
+fn relation_for(auth: DbAuthContext, parent_key: &str, parent_value: SqlValue) -> RelationQueryKey {
+    RelationQueryKey::__generated(
+        "Parent::children",
+        parent_key.into(),
+        parent_value,
+        "parent_id",
+        None,
+        None,
+        None,
+        None,
+        vec![],
+        None,
+        Some(auth),
+    )
 }
 
 fn composite(auth: DbAuthContext) -> CompositeRelationQueryKey {
-    CompositeRelationQueryKey {
-        relation: "Parent::children",
-        parent_key: RelationKey::single("parent".into()),
-        parent_values: vec![SqlValue::String("parent".into())],
-        fk_columns: vec!["parent_id"],
-        key_part_kinds: vec![RelationKeyPartKind::String],
-        where_signature: None,
-        order_signature: None,
-        page_signature: None,
-        filter: None,
-        sorts: vec![],
-        pagination: None,
-        auth_context: Some(auth),
-    }
+    CompositeRelationQueryKey::__generated(
+        "Parent::children",
+        RelationKey::single("parent".into()),
+        vec![SqlValue::String("parent".into())],
+        vec!["parent_id"],
+        vec![RelationKeyPartKind::String],
+        None,
+        None,
+        None,
+        None,
+        vec![],
+        None,
+        Some(auth),
+    )
 }
 
 #[test]
@@ -57,11 +61,8 @@ fn delimiter_collision_cannot_merge_principals_or_loader_identities() {
         HashSet::from([relation(left.clone()), relation(right.clone())]).len(),
         2
     );
-    let mut string_key = relation(left.clone());
-    string_key.parent_key = "1".into();
-    string_key.parent_value = SqlValue::String("1".into());
-    let mut integer_key = string_key.clone();
-    integer_key.parent_value = SqlValue::Int(1);
+    let string_key = relation_for(left.clone(), "1", SqlValue::String("1".into()));
+    let integer_key = relation_for(left.clone(), "1", SqlValue::Int(1));
     assert_ne!(string_key, integer_key);
 
     assert_eq!(
@@ -290,13 +291,12 @@ mod sqlite_batch {
             .execute(&pool)
             .await
             .unwrap();
-        let loader =
-            async_graphql::dataloader::DataLoader::new(
-                RelationLoader::<Child, graphql_orm::SqliteBackend>::new(
-                    graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool.clone()),
-                ),
-                tokio::spawn,
-            );
+        let loader = async_graphql::dataloader::DataLoader::new(
+            graphql_orm::graphql::loaders::RelationLoader::<Child, graphql_orm::SqliteBackend>::__generated(
+                graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool.clone()),
+            ),
+            tokio::spawn,
+        );
         let keys = [
             composite(context(&["read,write"])),
             composite(context(&["read", "write"])),
@@ -380,7 +380,7 @@ mod postgres_batch {
             .connect(&owned.url)
             .await?;
         let loader = async_graphql::dataloader::DataLoader::new(
-            RelationLoader::<Child, graphql_orm::PostgresBackend>::new(
+            graphql_orm::graphql::loaders::RelationLoader::<Child, graphql_orm::PostgresBackend>::__generated(
                 graphql_orm::db::Database::<graphql_orm::PostgresBackend>::new(pool.clone()),
             ),
             tokio::spawn,

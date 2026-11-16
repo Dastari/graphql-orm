@@ -612,14 +612,23 @@ impl OrmAiAttachmentService {
             if candidates.len() >= self.cleanup_limits.maximum_batch_size as usize {
                 break;
             }
-            let connection = AiAttachmentArtifactRecord::keyset_connection_page(
-                &self.database,
-                query,
-                KeysetConnectionInput {
-                    first: Some(limit),
-                    ..Default::default()
-                },
-            )
+            let connection = {
+                let filter = query;
+                crate::orm_read_bounds::keyset_window(
+                    self.database.pagination_config().max_limit,
+                    KeysetConnectionInput {
+                        first: Some(limit),
+                        ..Default::default()
+                    },
+                    move |chunk| {
+                        AiAttachmentArtifactRecord::keyset_connection_page(
+                            &self.database,
+                            filter.clone(),
+                            chunk,
+                        )
+                    },
+                )
+            }
             .await
             .map_err(map_orm)?;
             for edge in connection.edges {
@@ -1002,14 +1011,23 @@ impl OrmAiAttachmentService {
             if candidates.len() >= maximum_batch_size as usize {
                 break;
             }
-            let connection = AiAttachmentRecord::keyset_connection_page(
-                &self.database,
-                query,
-                KeysetConnectionInput {
-                    last: Some(limit),
-                    ..Default::default()
-                },
-            )
+            let connection = {
+                let filter = query;
+                crate::orm_read_bounds::keyset_window(
+                    self.database.pagination_config().max_limit,
+                    KeysetConnectionInput {
+                        last: Some(limit),
+                        ..Default::default()
+                    },
+                    move |chunk| {
+                        AiAttachmentRecord::keyset_connection_page(
+                            &self.database,
+                            filter.clone(),
+                            chunk,
+                        )
+                    },
+                )
+            }
             .await
             .map_err(map_orm)?;
             for edge in connection.edges {
@@ -1293,9 +1311,8 @@ impl AiAttachmentService for OrmAiAttachmentService {
         self.visible_session(principal, session_id, AiSessionAction::Read)
             .await?;
         let (kind, subject) = principal_identity(principal);
-        let connection = AiAttachmentRecord::keyset_connection_page(
-            &self.database,
-            AiAttachmentRecordWhereInput {
+        let connection = {
+            let filter = AiAttachmentRecordWhereInput {
                 owner_principal_kind: Some(StringFilter {
                     eq: Some(kind),
                     ..Default::default()
@@ -1313,9 +1330,19 @@ impl AiAttachmentService for OrmAiAttachmentService {
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-            page_input(&page),
-        )
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                page_input(&page),
+                move |chunk| {
+                    AiAttachmentRecord::keyset_connection_page(
+                        &self.database,
+                        filter.clone(),
+                        chunk,
+                    )
+                },
+            )
+        }
         .await
         .map_err(map_orm)?;
         Ok(AiAttachmentConnection {

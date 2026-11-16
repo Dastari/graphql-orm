@@ -617,9 +617,8 @@ impl AiSessionService for OrmAiSessionService {
         }
         for _ in 0..3 {
             let before = self.inbox_head(&kind, subject).await?;
-            let connection = AiSessionRecord::keyset_connection_page(
-                &self.database,
-                AiSessionRecordWhereInput {
+            let connection = {
+                let filter = AiSessionRecordWhereInput {
                     owner_principal_kind: Some(StringFilter {
                         eq: Some(kind.clone()),
                         ..Default::default()
@@ -633,9 +632,19 @@ impl AiSessionService for OrmAiSessionService {
                         ..Default::default()
                     }),
                     ..Default::default()
-                },
-                page_input(&page, false),
-            )
+                };
+                crate::orm_read_bounds::keyset_window(
+                    self.database.pagination_config().max_limit,
+                    page_input(&page, false),
+                    move |chunk| {
+                        AiSessionRecord::keyset_connection_page(
+                            &self.database,
+                            filter.clone(),
+                            chunk,
+                        )
+                    },
+                )
+            }
             .await
             .map_err(map_orm)?;
 
@@ -720,17 +729,22 @@ impl AiSessionService for OrmAiSessionService {
             .ok_or(AiError::NotFound)?;
         let scope = record_scope(&session);
         let policy = self.protection_policy(principal, &scope).await?;
-        let connection = AiMessageRecord::keyset_connection_page(
-            &self.database,
-            AiMessageRecordWhereInput {
+        let connection = {
+            let filter = AiMessageRecordWhereInput {
                 session_id: Some(UuidFilter {
                     eq: Some(session_id.0),
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-            page_input(&page, false),
-        )
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                page_input(&page, false),
+                move |chunk| {
+                    AiMessageRecord::keyset_connection_page(&self.database, filter.clone(), chunk)
+                },
+            )
+        }
         .await
         .map_err(map_orm)?;
 

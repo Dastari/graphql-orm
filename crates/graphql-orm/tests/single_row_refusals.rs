@@ -431,7 +431,9 @@ async fn single_row_callback_contract() {
                     "{source} {mode:?} {op}: {response:?}"
                 );
                 let error = &response.errors[0];
-                let masked = matches!(mode, Mode::Driver | Mode::Sourced);
+                // Only a refusal that carries a `code` extension is rendered
+                // as written; an uncoded error is internal (#682).
+                let masked = !matches!(mode, Mode::Coded);
                 assert_eq!(
                     error.message,
                     if masked {
@@ -445,16 +447,10 @@ async fn single_row_callback_contract() {
                     async_graphql::Error::new("internal error")
                         .extend_with(|_, ext| ext.set("code", "INTERNAL_ERROR"))
                 } else {
-                    match mode {
-                        Mode::Plain => async_graphql::Error::new("host refusal"),
-                        Mode::Coded => {
-                            async_graphql::Error::new("host refusal").extend_with(|_, ext| {
-                                ext.set("code", "CUSTOM_REFUSAL");
-                                ext.set("detail", "preserved");
-                            })
-                        }
-                        _ => HostRefusal.into(),
-                    }
+                    async_graphql::Error::new("host refusal").extend_with(|_, ext| {
+                        ext.set("code", "CUSTOM_REFUSAL");
+                        ext.set("detail", "preserved");
+                    })
                 };
                 assert_eq!(
                     error.extensions, expected.extensions,

@@ -20,6 +20,15 @@ compiler's diagnostics, and the locked S3/Azure SDK lane requires Rust 1.94.1
 or newer. Rust 1.90.0 is the separate router minimum-version lane; it is not
 a workspace-wide compiler requirement.
 
+The `runtime-live` owned lane includes the runtime GraphQL CI test sets for
+SQLite and PostgreSQL, including assurance, format, many-to-many and long-table
+search regressions.
+
+The `callback-errors` owned lane runs callback refusal and keyset compatibility
+regressions on SQLite and a test-owned PostgreSQL container:
+`bash scripts/run-owned-database-lanes.sh callback-errors`. SQL Server callback
+refusals remain covered by the `bulk-refusals` lane.
+
 ## Workflow dependencies and permissions
 
 Pin external GitHub Actions to full commit SHAs and retain the upstream version
@@ -295,9 +304,8 @@ scripts/run-owned-database-lanes.sh ai-postgres
 
 `scripts/run-owned-database-lanes.sh page-limit-contract` runs
 `page_limit_contract` (the opt-in oversized page refusal, the declared
-`schema_roots!` maximum and host keyset maxima) on SQLite, an owned PostgreSQL
+`schema_roots!` maximum, host keyset maxima and exact host `paginate` reads) on SQLite, an owned PostgreSQL
 container and an owned SQL Server container.
-
 `scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
 authorized page regressions (`authorized_page_context_binding`) on SQLite,
 PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.

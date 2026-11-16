@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.24.0 to 0.25.0: runtime live keys under default identities
+
+**No action.** Runtime collections with live subscriptions and a node identity
+compile under both ORM identity modes: the default `RuntimeInt64` strings and
+the opt-in `with_legacy_int_identities()`. Capability sets and fingerprints are
+unchanged for schemas that already compiled. No SDL or data migration is needed.
+
 ## 0.23.0 to 0.24.0: operation fingerprint algorithm v2
 
 **Action needed.** Upgrade together with operation catalogue 0.9.0 and

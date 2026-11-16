@@ -1,8 +1,5 @@
 use super::*;
-use crate::backend::{
-    backend_marker_tokens, backend_pool_type_tokens, backend_render_identifier_path,
-    resolve_backend,
-};
+use crate::backend::{backend_marker_tokens, backend_render_identifier_path, resolve_backend};
 use crate::entity::{
     RelationConditionMetadata, RelationConditionValue, collect_parsed_fields,
     graphql_relation_target_checks, has_graphql_complex, parse_entity_metadata,
@@ -29,7 +26,6 @@ struct RelationDef {
     emit_foreign_key: bool,
     on_delete: proc_macro2::TokenStream,
     propagate_change: proc_macro2::TokenStream,
-    storage_kind: RelationStorageKind,
     source_condition: Option<ResolvedSourceCondition>,
     target_condition: Option<RelationConditionMetadata>,
 }
@@ -48,49 +44,6 @@ pub(crate) enum RelationValueKind {
     Int,
     Float,
     Bool,
-}
-
-#[derive(Copy, Clone)]
-enum RelationStorageKind {
-    Direct,
-    BoxedSingle,
-    BoxedMany,
-}
-
-fn relation_storage_kind(ty: &syn::Type, is_multiple: bool) -> RelationStorageKind {
-    match ty {
-        syn::Type::Path(type_path) => {
-            let Some(segment) = type_path.path.segments.last() else {
-                return RelationStorageKind::Direct;
-            };
-            match segment.ident.to_string().as_str() {
-                "Option" if !is_multiple => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                        && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_path))) =
-                            args.args.first()
-                        && let Some(inner_segment) = inner_path.path.segments.last()
-                        && inner_segment.ident == "Box"
-                    {
-                        return RelationStorageKind::BoxedSingle;
-                    }
-                    RelationStorageKind::Direct
-                }
-                "Vec" if is_multiple => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                        && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_path))) =
-                            args.args.first()
-                        && let Some(inner_segment) = inner_path.path.segments.last()
-                        && inner_segment.ident == "Box"
-                    {
-                        return RelationStorageKind::BoxedMany;
-                    }
-                    RelationStorageKind::Direct
-                }
-                _ => RelationStorageKind::Direct,
-            }
-        }
-        _ => RelationStorageKind::Direct,
-    }
 }
 
 pub(crate) fn classify_relation_value_type(ty: &syn::Type) -> Option<(RelationValueKind, bool)> {
@@ -289,7 +242,6 @@ pub(crate) fn generate_graphql_relations(
         "graphql_entity",
     )?;
     let backend_marker = backend_marker_tokens(backend);
-    let pool_type = backend_pool_type_tokens(backend);
 
     let data = match &input.data {
         Data::Struct(data) => data,
@@ -497,7 +449,6 @@ pub(crate) fn generate_graphql_relations(
             meta.relation_propagate_change.as_deref(),
             field.span(),
         )?;
-        let storage_kind = relation_storage_kind(&field.ty, is_multiple);
 
         relations.push(RelationDef {
             field_name,
@@ -518,7 +469,6 @@ pub(crate) fn generate_graphql_relations(
             emit_foreign_key: emits_foreign_key,
             on_delete,
             propagate_change,
-            storage_kind,
             source_condition,
             target_condition: meta.relation_target_condition.clone(),
         });
@@ -789,22 +739,22 @@ pub(crate) fn generate_graphql_relations(
                 } else {
                     None
                 };
-            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
-                relation: #relation_loader_identity,
-                parent_key: relation_loader_key.clone(),
-                parent_values: relation_sql_values.clone(),
-                fk_columns: vec![#(#fk_columns_sql),*],
-                key_part_kinds: vec![#(#key_part_kind_tokens),*],
-                where_signature: where_input
+            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey::__generated(
+                #relation_loader_identity,
+                relation_loader_key.clone(),
+                relation_sql_values.clone(),
+                vec![#(#fk_columns_sql),*],
+                vec![#(#key_part_kind_tokens),*],
+                where_input
                     .as_ref()
                     .and_then(|filter| filter.to_filter_expression().map(|expr| format!("{expr:?}"))),
-                order_signature: order_by
+                order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression().map(|expr| expr.clause)),
-                page_signature: __gom_relation_pagination
+                __gom_relation_pagination
                     .as_ref()
                     .map(|page| format!("limit={:?};offset={}", page.limit, page.offset)),
-                filter: {
+                {
                     let supplied = where_input
                         .as_ref()
                         .and_then(|filter| filter.to_filter_expression());
@@ -816,31 +766,31 @@ pub(crate) fn generate_graphql_relations(
                         (None, supplied) => supplied,
                     }
                 },
-                sorts: order_by
+                order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression())
                     .into_iter()
                     .collect(),
-                pagination: __gom_relation_pagination,
-                auth_context: auth_context.clone(),
-            }
+                __gom_relation_pagination,
+                auth_context.clone(),
+            )
         }};
 
         let single_relation_query_key = quote! {
-            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
-                relation: #relation_loader_identity,
-                parent_key: relation_loader_key.clone(),
-                parent_values: relation_sql_values.clone(),
-                fk_columns: vec![#(#fk_columns_sql),*],
-                key_part_kinds: vec![#(#key_part_kind_tokens),*],
-                where_signature: None,
-                order_signature: None,
-                page_signature: None,
-                filter: #target_condition_filter,
-                sorts: Vec::new(),
-                pagination: None,
-                auth_context: auth_context.clone(),
-            }
+            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey::__generated(
+                #relation_loader_identity,
+                relation_loader_key.clone(),
+                relation_sql_values.clone(),
+                vec![#(#fk_columns_sql),*],
+                vec![#(#key_part_kind_tokens),*],
+                None,
+                None,
+                None,
+                #target_condition_filter,
+                Vec::new(),
+                None,
+                auth_context.clone(),
+            )
         };
         let fallback_predicate_parts = fk_columns_sql
             .iter()
@@ -938,10 +888,10 @@ pub(crate) fn generate_graphql_relations(
                         // Loaded with its own outcome: another caller's
                         // failing group in the same batch does not fail this one.
                         ::graphql_orm::graphql::loaders::isolated_load_result(loader
-                            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::SelectedRelationQueryKey {
-                                query: ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
-                                selection: ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
-                            }))
+                            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::SelectedRelationQueryKey::__generated(
+                                ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
+                                ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
+                            )))
                             .await)
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {
@@ -1106,312 +1056,6 @@ pub(crate) fn generate_graphql_relations(
     })
     .collect::<syn::Result<Vec<_>>>()?;
 
-    let bulk_load_blocks: Vec<proc_macro2::TokenStream> = relations
-        .iter()
-        .map(|r| -> syn::Result<proc_macro2::TokenStream> {
-            let field_name = &r.field_name;
-            let graphql_name = &r.graphql_name;
-            let target_type = syn::Ident::new(&r.target_type_str, struct_name.span());
-            let storage_kind = r.storage_kind;
-            let source_condition =
-                source_condition_tokens(r.source_condition.as_ref(), quote! { entity });
-            let (bulk_target_column, bulk_target_value) = if let Some(condition) = &r.target_condition
-            {
-                let column = backend_render_identifier_path(backend, &condition.member);
-                let value = condition_sql_value_tokens(&condition.value);
-                (
-                    quote! { Some::<&str>(#column) },
-                    quote! { Some::<::graphql_orm::graphql::orm::SqlValue>(#value) },
-                )
-            } else {
-                (
-                    quote! { None::<&str> },
-                    quote! { None::<::graphql_orm::graphql::orm::SqlValue> },
-                )
-            };
-            let fk_columns_sql = r
-                .fk_columns
-                .iter()
-                .map(|column| backend_render_identifier_path(backend, column))
-                .collect::<Vec<_>>();
-            let first_fk_column_sql = fk_columns_sql
-                .first()
-                .expect("relation has target column")
-                .clone();
-            let key_part_kind_tokens = r
-                .source_kinds
-                .iter()
-                .copied()
-                .map(relation_key_part_kind_tokens)
-                .collect::<Vec<_>>();
-            let relation_key_aliases = (0..r.fk_columns.len())
-                .map(|index| format!("__gom_relation_key_{index}"))
-                .collect::<Vec<_>>();
-            let relation_key_arity = r.fk_columns.len();
-
-            let source_value_bindings = r
-                .source_field_idents
-                .iter()
-                .zip(r.source_kinds.iter())
-                .zip(r.source_optional.iter())
-                .map(|((source_field, source_kind), source_is_option)| {
-                    let sql_value_expr = match source_kind {
-                        RelationValueKind::String => quote! { ::graphql_orm::graphql::orm::SqlValue::String(value.clone()) },
-                        RelationValueKind::Uuid => quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(*value) },
-                        RelationValueKind::Int => quote! { ::graphql_orm::graphql::orm::SqlValue::Int(*value as i64) },
-                        RelationValueKind::Float => quote! { ::graphql_orm::graphql::orm::SqlValue::Float((*value).into()) },
-                        RelationValueKind::Bool => quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(*value) },
-                    };
-                    let key_part_expr = match source_kind {
-                        RelationValueKind::String => quote! { value.clone() },
-                        RelationValueKind::Uuid => quote! { value.to_string() },
-                        _ => quote! { value.to_string() },
-                    };
-                    if *source_is_option {
-                        quote! {
-                            let value = entity.#source_field.as_ref()?;
-                            relation_sql_values.push(#sql_value_expr);
-                            relation_key_parts.push(#key_part_expr);
-                        }
-                    } else {
-                        quote! {
-                            let value = &entity.#source_field;
-                            relation_sql_values.push(#sql_value_expr);
-                            relation_key_parts.push(#key_part_expr);
-                        }
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let source_key_bindings = r
-                .source_field_idents
-                .iter()
-                .zip(r.source_kinds.iter())
-                .zip(r.source_optional.iter())
-                .map(|((source_field, source_kind), source_is_option)| {
-                    let key_part_expr = match source_kind {
-                        RelationValueKind::String => quote! { value.clone() },
-                        RelationValueKind::Uuid => quote! { value.to_string() },
-                        _ => quote! { value.to_string() },
-                    };
-                    if *source_is_option {
-                        quote! {
-                            let value = entity.#source_field.as_ref()?;
-                            relation_key_parts.push(#key_part_expr);
-                        }
-                    } else {
-                        quote! {
-                            let value = &entity.#source_field;
-                            relation_key_parts.push(#key_part_expr);
-                        }
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let entity_key_pair_expr = quote! {
-                (|| {
-                    if !(#source_condition) {
-                        return None;
-                    }
-                    let mut relation_sql_values = Vec::new();
-                    let mut relation_key_parts = Vec::new();
-                    #(#source_value_bindings)*
-                    Some((
-                        ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]),
-                        relation_sql_values,
-                    ))
-                })()
-            };
-            let entity_key_expr = quote! {
-                (|| {
-                    if !(#source_condition) {
-                        return None;
-                    }
-                    let mut relation_key_parts = Vec::new();
-                    #(#source_key_bindings)*
-                    Some(::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]))
-                })()
-            };
-
-            let assign_expr = if r.source_optional.iter().any(|is_option| *is_option) {
-                if r.is_multiple {
-                    let assign_value = match storage_kind {
-                        RelationStorageKind::BoxedMany => {
-                            quote! { grouped.remove(&relation_key).unwrap_or_default().into_iter().map(Box::new).collect() }
-                        }
-                        _ => quote! { grouped.remove(&relation_key).unwrap_or_default() },
-                    };
-                    quote! {
-                        if let Some(relation_key) = #entity_key_expr {
-                            entity.#field_name = #assign_value;
-                        } else {
-                            entity.#field_name = Vec::new();
-                        }
-                    }
-                } else {
-                    let assign_value = match storage_kind {
-                        RelationStorageKind::BoxedSingle => {
-                            quote! { grouped.remove(&relation_key).map(Box::new) }
-                        }
-                        _ => quote! { grouped.remove(&relation_key) },
-                    };
-                    quote! {
-                        if let Some(relation_key) = #entity_key_expr {
-                            entity.#field_name = #assign_value;
-                        } else {
-                            entity.#field_name = None;
-                        }
-                    }
-                }
-            } else if r.is_multiple {
-                let assign_value = match storage_kind {
-                    RelationStorageKind::BoxedMany => {
-                        quote! { grouped.remove(&relation_key).unwrap_or_default().into_iter().map(Box::new).collect() }
-                    }
-                    _ => quote! { grouped.remove(&relation_key).unwrap_or_default() },
-                };
-                quote! {
-                    if let Some(relation_key) = #entity_key_expr {
-                        entity.#field_name = #assign_value;
-                    } else {
-                        entity.#field_name = Vec::new();
-                    }
-                }
-            } else {
-                let assign_value = match storage_kind {
-                    RelationStorageKind::BoxedSingle => {
-                        quote! { grouped.remove(&relation_key).map(Box::new) }
-                    }
-                    _ => quote! { grouped.remove(&relation_key) },
-                };
-                quote! {
-                    if let Some(relation_key) = #entity_key_expr {
-                        entity.#field_name = #assign_value;
-                    } else {
-                        entity.#field_name = None;
-                    }
-                }
-            };
-
-            let grouped_type = if r.is_multiple {
-                quote! { std::collections::HashMap<::graphql_orm::graphql::loaders::RelationKey, Vec<#target_type>> }
-            } else {
-                quote! { std::collections::HashMap<::graphql_orm::graphql::loaders::RelationKey, #target_type> }
-            };
-
-            let insert_grouped = if r.is_multiple {
-                quote! {
-                    grouped.entry(relation_key).or_default().push(related);
-                }
-            } else {
-                quote! {
-                    grouped.entry(relation_key).or_insert(related);
-                }
-            };
-
-            Ok(quote! {
-                if Self::__gom_selection_contains(selection, #graphql_name)
-                    && !Self::__gom_selected_field_has_arguments(selection, #graphql_name)
-                {
-                    let mut unique_relation_keys: Vec<(
-                        ::graphql_orm::graphql::loaders::RelationKey,
-                        Vec<::graphql_orm::graphql::orm::SqlValue>,
-                    )> = Vec::new();
-                    let mut seen_relation_keys = std::collections::HashSet::new();
-
-                    for entity in entities.iter() {
-                        if let Some((relation_key, relation_value)) = #entity_key_pair_expr {
-                            if seen_relation_keys.insert(relation_key.clone()) {
-                                unique_relation_keys.push((relation_key, relation_value));
-                            }
-                        }
-                    }
-
-                    let mut grouped: #grouped_type = std::collections::HashMap::new();
-
-                    if !unique_relation_keys.is_empty() {
-                        let mut bind_values = unique_relation_keys
-                            .iter()
-                            .flat_map(|(_, values)| values.iter().cloned())
-                            .collect::<Vec<_>>();
-                        let mut relation_predicate = if #relation_key_arity == 1 {
-                            let placeholders = (0..unique_relation_keys.len())
-                                .map(|index| <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(index + 1))
-                                .collect::<Vec<_>>();
-                            format!("{} IN ({})", #first_fk_column_sql, placeholders.join(", "))
-                        } else {
-                            let mut next_placeholder = 1usize;
-                            unique_relation_keys
-                                .iter()
-                                .map(|_| {
-                                    let predicates = vec![
-                                        #({
-                                            let placeholder = <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(next_placeholder);
-                                            next_placeholder += 1;
-                                            format!("{} = {}", #fk_columns_sql, placeholder)
-                                        }),*
-                                    ];
-                                    format!("({})", predicates.join(" AND "))
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" OR ")
-                        };
-                        if let (Some(column), Some(value)) =
-                            (#bulk_target_column, #bulk_target_value)
-                        {
-                            let placeholder =
-                                <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(bind_values.len() + 1);
-                            relation_predicate = format!(
-                                "({}) AND {} = {}",
-                                relation_predicate, column, placeholder,
-                            );
-                            bind_values.push(value);
-                        }
-                        let relation_key_projections = vec![
-                            #(format!(
-                                "{} AS {}",
-                                ::graphql_orm::graphql::loaders::relation_key_projection(
-                                    <#backend_marker as ::graphql_orm::OrmBackend>::DIALECT,
-                                    #fk_columns_sql,
-                                    #key_part_kind_tokens,
-                                ),
-                                #relation_key_aliases,
-                            )),*
-                        ].join(", ");
-                        let sql = format!(
-                            "SELECT {}, {} FROM {} WHERE {}",
-                            <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
-                            relation_key_projections,
-                            <#backend_marker as ::graphql_orm::OrmBackend>::DIALECT.render_identifier_path(
-                                <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
-                            ),
-                            relation_predicate,
-                        );
-
-                        let rows = <#backend_marker as ::graphql_orm::OrmBackend>::fetch_rows_with_auth(
-                            pool,
-                            &sql,
-                            &bind_values,
-                            auth_context,
-                        )
-                        .await?;
-                        for row in rows {
-                            let relation_key = ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(vec![
-                                #(<#backend_marker as ::graphql_orm::OrmBackend>::try_get_string(&row, #relation_key_aliases)?),*
-                            ], &[#(#key_part_kind_tokens),*]);
-                            let related = <#target_type as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row(&row)?;
-                            #insert_grouped
-                        }
-                    }
-
-                    for entity in entities.iter_mut() {
-                        #assign_expr
-                    }
-                }
-            })
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
-
     let struct_name_str = struct_name.to_string();
     let has_relations = !relations.is_empty();
 
@@ -1504,43 +1148,6 @@ pub(crate) fn generate_graphql_relations(
 
     Ok(quote! {
         #(#relation_target_checks)*
-        impl ::graphql_orm::graphql::orm::RelationLoader<#backend_marker> for #struct_name {
-            async fn load_relations(
-                &mut self,
-                pool: &#pool_type,
-                selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
-            ) -> ::graphql_orm::Result<()> {
-                Self::bulk_load_relations_with_auth(std::slice::from_mut(self), pool, selection, None).await
-            }
-
-            async fn bulk_load_relations(
-                entities: &mut [Self],
-                pool: &#pool_type,
-                selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
-            ) -> ::graphql_orm::Result<()> {
-                Self::bulk_load_relations_with_auth(entities, pool, selection, None).await
-            }
-
-            async fn load_relations_with_auth(
-                &mut self,
-                pool: &#pool_type,
-                selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
-                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> ::graphql_orm::Result<()> {
-                Self::bulk_load_relations_with_auth(std::slice::from_mut(self), pool, selection, auth_context).await
-            }
-
-            async fn bulk_load_relations_with_auth(
-                entities: &mut [Self],
-                pool: &#pool_type,
-                selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
-                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> ::graphql_orm::Result<()> {
-                #(#bulk_load_blocks)*
-                Ok(())
-            }
-        }
-
         #identity_witness
 
         impl #struct_name {
