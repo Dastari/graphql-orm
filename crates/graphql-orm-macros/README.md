@@ -21,6 +21,11 @@ API is removed. `#[graphql_entity(key_only_deletes)]` adds an opt-in key-only
 delete signal for `Key`/`Keys` subscribers. Every item needs action; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
+context-bound authorized pages for handwritten resolvers. The macros are
+unchanged. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages).
+
 Version 0.161.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
 of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and

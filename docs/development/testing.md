@@ -90,8 +90,8 @@ enables `sqlite,auth-agql` and runs `current_authority`, `authorization_mode`,
 These cover accepted-request coherence and revocation, strict policy modes,
 bounded authorized pagination, event-time authority and private provenance.
 
-The `orm-security-portable` matrix runs `subscription_portable_authorization` and
-`bounded_protected_scans` with exactly one backend selected: SQLite, PostgreSQL
+The `orm-security-portable` matrix runs `subscription_portable_authorization`,
+`bounded_protected_scans` and `authorized_page_context_binding` with exactly one backend selected: SQLite, PostgreSQL
 or MSSQL. SQLite uses temporary in-memory databases. The other profiles create
 their own disposable loopback containers with random ownership identities and
 exact-identity cleanup; they do not take an application database URL. These
@@ -111,8 +111,8 @@ resource-controlled runner:
 
 ```sh
 bash scripts/run-security-test-targets.sh sqlite,auth-agql current_authority authorization_mode authorized_pagination subscription_release_authorization subscription_provenance_authorization subscription_repository_provenance
-bash scripts/run-security-test-targets.sh postgres subscription_portable_authorization bounded_protected_scans
-bash scripts/run-security-test-targets.sh mssql subscription_portable_authorization bounded_protected_scans
+bash scripts/run-security-test-targets.sh postgres subscription_portable_authorization bounded_protected_scans authorized_page_context_binding
+bash scripts/run-security-test-targets.sh mssql subscription_portable_authorization bounded_protected_scans authorized_page_context_binding
 ```
 
 Nested fixture Cargo commands inherit the caller's `CARGO_BUILD_JOBS` budget.
@@ -302,6 +302,9 @@ scripts/run-owned-database-lanes.sh ai-postgres
 `page_limit_contract` (the opt-in oversized page refusal, the declared
 `schema_roots!` maximum and host keyset maxima) on SQLite, an owned PostgreSQL
 container and an owned SQL Server container.
+`scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
+authorized page regressions (`authorized_page_context_binding`) on SQLite,
+PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
 
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order

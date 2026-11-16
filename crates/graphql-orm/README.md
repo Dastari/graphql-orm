@@ -21,6 +21,15 @@ API is removed. `#[graphql_entity(key_only_deletes)]` adds an opt-in key-only
 delete signal for `Key`/`Keys` subscribers. Every item needs action; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
+resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its
+continuation with a service-owned key under a server-authored
+`AuthorizedPageBinding`, refuses a continuation from a different context
+before any row is read, and resolves entity, row and field authorization again
+on every page. The API is additive and needs no action. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages) and the
+[reference](../../docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
+
 Version 0.161.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
 of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and

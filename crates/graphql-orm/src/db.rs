@@ -101,6 +101,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
+    page_config: Option<Arc<crate::graphql::orm::AuthorizedPageConfig>>,
     read_observer: Option<Arc<dyn crate::graphql::orm::ReadQueryObserver>>,
     subscription_key_limit: usize,
     subscription_authority_recheck_interval: std::time::Duration,
@@ -125,6 +126,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
             scan_config: self.scan_config.clone(),
+            page_config: self.page_config.clone(),
             read_observer: self.read_observer.clone(),
             subscription_key_limit: self.subscription_key_limit,
             subscription_authority_recheck_interval: self.subscription_authority_recheck_interval,
@@ -200,6 +202,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -230,6 +233,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -257,6 +261,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -284,6 +289,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -311,6 +317,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -341,6 +348,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -378,6 +386,7 @@ impl<B: OrmBackend> Database<B> {
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -1199,6 +1208,24 @@ impl<B: OrmBackend> Database<B> {
 
     pub fn authorized_scan_config(&self) -> Option<&crate::graphql::orm::AuthorizedScanConfig> {
         self.scan_config.as_ref()
+    }
+
+    /// Enable context-bound authorized pages
+    /// (`EntityQuery::fetch_authorized_page`). Every replica that serves the
+    /// same pages needs the same keys; see
+    /// [`AuthorizedPageKeys`](crate::graphql::orm::AuthorizedPageKeys) for
+    /// key custody and rotation.
+    pub fn with_authorized_page_config(
+        mut self,
+        config: crate::graphql::orm::AuthorizedPageConfig,
+    ) -> Self {
+        self.page_config = Some(Arc::new(config));
+        self
+    }
+
+    /// The installed context-bound page configuration, if any.
+    pub fn authorized_page_config(&self) -> Option<&crate::graphql::orm::AuthorizedPageConfig> {
+        self.page_config.as_deref()
     }
 
     /// Observe SQL text (without bind values) and database rows fetched by
