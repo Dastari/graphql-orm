@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.166.0 to 0.168.0: SQL Server correctness and a client offset bound
+## 0.167.0 to 0.169.0: SQL Server correctness and a client offset bound
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and
 fingerprints are unchanged.
@@ -64,6 +64,11 @@ fingerprints are unchanged.
 - **SQL Server routing. No action.** A second routing redirect is refused with
   `sqlx::Error::Protocol` saying only one redirect is followed; the message
   used to be the driver's.
+
+## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
+
+**No action.** Generated code, schemas and runtime behavior are unchanged. The
+macros unit tests no longer assume the SQLite backend (#735).
 
 ## ORM/macros 0.166.0: guarded dependent deletes
 

@@ -11616,6 +11616,21 @@ mod query_shape_tests {
     }
 }
 
+/// Extra `graphql_entity` arguments that let a test fixture generate write
+/// operations on whichever backend feature the test run enables.
+///
+/// SQL Server entities are read-only unless their schema policy is
+/// `external_writable`; the other backends are always writable. Fixtures name
+/// no backend, so the enabled one is used.
+#[cfg(test)]
+fn writable_fixture_arguments() -> proc_macro2::TokenStream {
+    if cfg!(feature = "mssql") {
+        quote! { , schema_policy = "external_writable" }
+    } else {
+        quote! {}
+    }
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod upsert_primary_key_tests {
     use super::generate_graphql_operations;
@@ -11693,8 +11708,9 @@ mod update_assignment_tests {
     /// from every generated update path (#677).
     #[test]
     fn infallible_assignments_are_emitted_once_and_shared_with_graphql() {
+        let writable = super::writable_fixture_arguments();
         let generated = generated(syn::parse_quote! {
-            #[graphql_entity(table = "update_assignment_fixture")]
+            #[graphql_entity(table = "update_assignment_fixture" #writable)]
             struct UpdateAssignmentFixture {
                 #[primary_key]
                 id: String,
@@ -11736,8 +11752,9 @@ mod update_assignment_tests {
     /// keeps a copy that fails with `async_graphql::Error` as before.
     #[test]
     fn fallible_assignments_keep_a_graphql_typed_copy() {
+        let writable = super::writable_fixture_arguments();
         let generated = generated(syn::parse_quote! {
-            #[graphql_entity(table = "update_assignment_json_fixture")]
+            #[graphql_entity(table = "update_assignment_json_fixture" #writable)]
             struct UpdateAssignmentJsonFixture {
                 #[primary_key]
                 id: String,
@@ -11769,8 +11786,9 @@ mod update_assignment_tests {
     /// Field write checks run before the shared assignment helper (#677, #678).
     #[test]
     fn field_write_checks_precede_the_assignment_helper() {
+        let writable = super::writable_fixture_arguments();
         let generated = generated(syn::parse_quote! {
-            #[graphql_entity(table = "update_assignment_policy_fixture")]
+            #[graphql_entity(table = "update_assignment_policy_fixture" #writable)]
             struct UpdateAssignmentPolicyFixture {
                 #[primary_key]
                 id: String,
@@ -11916,8 +11934,9 @@ mod update_assignment_tests {
     /// An entity may name its own fields `db` and `ctx` (#680).
     #[test]
     fn fields_named_db_and_ctx_generate() {
+        let writable = super::writable_fixture_arguments();
         let generated = generated(syn::parse_quote! {
-            #[graphql_entity(table = "update_assignment_names_fixture")]
+            #[graphql_entity(table = "update_assignment_names_fixture" #writable)]
             struct UpdateAssignmentNamesFixture {
                 #[primary_key]
                 id: String,
@@ -11934,8 +11953,9 @@ mod update_assignment_tests {
     /// Raw identifiers are not the keywords the purity check looks for.
     #[test]
     fn raw_identifier_fields_generate() {
+        let writable = super::writable_fixture_arguments();
         let generated = generated(syn::parse_quote! {
-            #[graphql_entity(table = "update_assignment_raw_fixture")]
+            #[graphql_entity(table = "update_assignment_raw_fixture" #writable)]
             struct UpdateAssignmentRawFixture {
                 #[primary_key]
                 id: String,
@@ -11962,8 +11982,9 @@ mod update_assignment_tests {
 mod write_transform_rejection_tests {
     #[test]
     fn rejects_write_transforms_instead_of_skipping_typed_binds() {
+        let writable = super::writable_fixture_arguments();
         let input = syn::parse_quote! {
-            #[graphql_entity(backend = "sqlite", table = "transform_records")]
+            #[graphql_entity(table = "transform_records" #writable)]
             struct TransformRecord {
                 #[primary_key]
                 id: String,

@@ -10,11 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.168.0 maps a SQL Server `String` field that is a key, unique, an
+Version 0.169.0 maps a SQL Server `String` field that is a key, unique, an
 index member or a foreign-key source to `NVARCHAR(450)`, which SQL Server can
 index, and an unmapped Rust type to `NVARCHAR(MAX)` instead of `TEXT`.
 Recompile entities with aligned ORM/macros versions. See the
-[migration guide](../../MIGRATION.md#01660-to-01680-sql-server-correctness-and-a-client-offset-bound).
+[migration guide](../../MIGRATION.md#01670-to-01690-sql-server-correctness-and-a-client-offset-bound).
+
+Version 0.167.0 changes test code only: the macros unit tests no longer assume
+the SQLite backend, so they run under each backend feature. No generated code
+or behavior changes.
 
 Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan
