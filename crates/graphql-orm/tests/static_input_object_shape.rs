@@ -378,3 +378,201 @@ async fn a_null_for_a_required_input_object_is_still_refused_by_validation() {
     assert_eq!(fixture.decisions.load(Ordering::SeqCst), 0);
     assert_eq!(names(&fixture.db).await, ["alpha", "beta"]);
 }
+
+async fn execute_in(
+    fixture: &Fixture,
+    mode: async_graphql::ValidationMode,
+    query: &str,
+    variables: serde_json::Value,
+) -> Response {
+    let schema = schema_builder(fixture.db.clone())
+        .validation_mode(mode)
+        .finish();
+    schema
+        .execute(
+            Request::new(query)
+                .variables(Variables::from_json(variables))
+                .data(AuthSubject::new("fixture-principal")),
+        )
+        .await
+}
+
+/// async-graphql 7.2.1 declares the rule that a variable's declared type must
+/// fit the position it is used in, but never applies it, in either validation
+/// mode, so a variable reference is checked against its position here.
+#[tokio::test]
+async fn a_variable_whose_type_does_not_fit_its_position_is_refused_in_every_mode() {
+    const FIRST: &str = "first: updateShapeItems(where: {id: {eq: \"a\"}}, input: {name: \"changed\"}) { affectedCount }";
+    for (query, variables) in [
+        // A scalar variable where an input object is expected.
+        (
+            format!(
+                "mutation($w: String) {{ {FIRST} second: deleteShapeItems(where: $w) {{ deletedCount }} }}"
+            ),
+            serde_json::json!({ "w": "b" }),
+        ),
+        // A scalar variable of another type nested in an input object.
+        (
+            format!(
+                "mutation($n: Int) {{ {FIRST} second: deleteShapeItems(where: {{name: $n}}) {{ deletedCount }} }}"
+            ),
+            serde_json::json!({ "n": 5 }),
+        ),
+        // A variable of another input-object type.
+        (
+            format!(
+                "mutation($n: StringFilter) {{ {FIRST} second: deleteShapeItems(where: $n) {{ deletedCount }} }}"
+            ),
+            serde_json::json!({ "n": { "eq": "b" } }),
+        ),
+        // A list variable where a single input object is expected.
+        (
+            format!(
+                "mutation($w: [ShapeItemWhereInput]) {{ {FIRST} second: deleteShapeItems(where: $w) {{ deletedCount }} }}"
+            ),
+            serde_json::json!({ "w": [{ "id": { "eq": "b" } }] }),
+        ),
+        // A nullable variable without a default where a value is required.
+        (
+            format!(
+                "mutation($i: UpdateShapeItemInput) {{ {FIRST} second: updateShapeItems(where: {{id: {{eq: \"b\"}}}}, input: $i) {{ affectedCount }} }}"
+            ),
+            serde_json::json!({ "i": { "name": "changed" } }),
+        ),
+        // A nullable single value where the list's items must be non-null.
+        (
+            format!(
+                "mutation($n: String) {{ {FIRST} second: deleteShapeItems(where: {{name: {{inList: $n}}}}) {{ deletedCount }} }}"
+            ),
+            serde_json::json!({ "n": "beta" }),
+        ),
+        // A list variable of nullable items where the items must be non-null.
+        (
+            format!(
+                "mutation($n: [String]) {{ {FIRST} second: deleteShapeItems(where: {{name: {{inList: $n}}}}) {{ deletedCount }} }}"
+            ),
+            serde_json::json!({ "n": ["beta"] }),
+        ),
+    ] {
+        for mode in [
+            async_graphql::ValidationMode::Fast,
+            async_graphql::ValidationMode::Strict,
+        ] {
+            let fixture = fixture().await;
+            let response = execute_in(&fixture, mode, &query, variables.clone()).await;
+            let probe = format!("{mode:?} {query} {variables}");
+            // Strict validation catches some of these itself, with its own
+            // message; either way nothing runs.
+            assert_eq!(response.data, Value::Null, "{probe}: {response:?}");
+            assert!(!response.errors.is_empty(), "{probe}");
+            if matches!(mode, async_graphql::ValidationMode::Fast) {
+                assert_refused(&response, &probe);
+            }
+            assert_eq!(fixture.decisions.load(Ordering::SeqCst), 0, "{probe}");
+            assert_eq!(names(&fixture.db).await, ["alpha", "beta"], "{probe}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn variables_in_allowed_positions_still_execute_in_every_mode() {
+    for (query, variables, expected) in [
+        (
+            "mutation($w: ShapeItemWhereInput) { deleteShapeItems(where: $w) { deletedCount } }",
+            serde_json::json!({ "w": { "id": { "eq": "b" } } }),
+            ["alpha"].as_slice(),
+        ),
+        (
+            "mutation($n: StringFilter!) { deleteShapeItems(where: {name: $n}) { deletedCount } }",
+            serde_json::json!({ "n": { "eq": "beta" } }),
+            ["alpha"].as_slice(),
+        ),
+        // A nullable variable with a default may stand where a value is required.
+        (
+            "mutation($i: UpdateShapeItemInput = {name: \"changed\"}) { updateShapeItems(where: {id: {eq: \"a\"}}, input: $i) { affectedCount } }",
+            serde_json::json!({}),
+            ["changed", "beta"].as_slice(),
+        ),
+        (
+            "mutation($i: UpdateShapeItemInput!) { updateShapeItems(where: {id: {eq: \"a\"}}, input: $i) { affectedCount } }",
+            serde_json::json!({ "i": { "name": "changed" } }),
+            ["changed", "beta"].as_slice(),
+        ),
+        // A non-null list variable where a nullable list is expected.
+        (
+            "mutation($n: [String!]!) { deleteShapeItems(where: {name: {inList: $n}}) { deletedCount } }",
+            serde_json::json!({ "n": ["beta"] }),
+            ["alpha"].as_slice(),
+        ),
+        // A nullable list variable with a default where a nullable list is expected.
+        (
+            "mutation($n: [String!] = [\"beta\"]) { deleteShapeItems(where: {name: {inList: $n}}) { deletedCount } }",
+            serde_json::json!({}),
+            ["alpha"].as_slice(),
+        ),
+        // A non-null single value where a list is expected: execution
+        // coerces it to a one-element list.
+        (
+            "mutation($n: String!) { deleteShapeItems(where: {name: {inList: $n}}) { deletedCount } }",
+            serde_json::json!({ "n": "beta" }),
+            ["alpha"].as_slice(),
+        ),
+        // A non-null item variable inside a list literal.
+        (
+            "mutation($n: String!) { deleteShapeItems(where: {name: {inList: [$n]}}) { deletedCount } }",
+            serde_json::json!({ "n": "beta" }),
+            ["alpha"].as_slice(),
+        ),
+    ] {
+        for mode in [
+            async_graphql::ValidationMode::Fast,
+            async_graphql::ValidationMode::Strict,
+        ] {
+            let fixture = fixture().await;
+            let response = execute_in(&fixture, mode, query, variables.clone()).await;
+            assert!(
+                response.errors.is_empty(),
+                "{mode:?} {query} {variables}: {:?}",
+                response.errors
+            );
+            assert_eq!(names(&fixture.db).await, expected, "{mode:?} {query}");
+        }
+    }
+}
+
+/// A request may arrive already parsed, without query text: the check's work
+/// bound is sized from the document, so a large valid document still runs.
+#[tokio::test]
+async fn a_large_pre_parsed_document_is_not_refused() {
+    let fixture = fixture().await;
+    let fields = (0..400)
+        .map(|index| {
+            format!(
+                "a{index}: shapeItems(where: {{name: {{eq: \"alpha\"}}, and: [{{id: {{eq: \"a\"}}}}]}}) {{ edges {{ node {{ id }} }} }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let document =
+        graphql_orm::async_graphql::parser::parse_query(format!("{{ {fields} }}")).unwrap();
+    let schema = schema_builder(fixture.db.clone())
+        .limit_complexity(usize::MAX)
+        .finish();
+    let mut request = Request::new("").data(AuthSubject::new("fixture-principal"));
+    request.set_parsed_query(document);
+    let response = schema.execute(request).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    assert_eq!(data.as_object().unwrap().len(), 400);
+    assert_eq!(data["a399"]["edges"][0]["node"]["id"], "a");
+
+    // The same document with one non-object value is still refused.
+    let document = graphql_orm::async_graphql::parser::parse_query(format!(
+        "{{ {fields} bad: shapeItems(where: 5) {{ edges {{ node {{ id }} }} }} }}"
+    ))
+    .unwrap();
+    let mut request = Request::new("").data(AuthSubject::new("fixture-principal"));
+    request.set_parsed_query(document);
+    let response = schema.execute(request).await;
+    assert_refused(&response, "pre-parsed document");
+}

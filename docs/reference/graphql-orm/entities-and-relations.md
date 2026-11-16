@@ -399,22 +399,37 @@ any other failure is reported as `INTERNAL_ERROR` without its text.
 
 async-graphql 7.2.1 accepts any value where an input object is expected while
 it validates a request, and leaves an omitted variable's default unchecked until
-execution. Such a value used to fail later, while its field resolved, with an
-uncoded coercion message, after earlier fields of the same operation, including
-mutations, had already run.
+execution. It also never applies the rule that a variable's declared type must
+fit the position the variable is used in (its validator does not pass argument
+values on to that rule, in either `ValidationMode`). Such a value used to fail
+later, while its field resolved, with an uncoded coercion
+message, after earlier fields of the same operation, including mutations, had
+already run.
 
 Generated `schema_builder` helpers install
 `graphql_orm::graphql::input_validation::GeneratedInputValidation`. After
 async-graphql's validation it checks every argument of the selected operation
 with the values execution resolves: each variable's value, or its default when
 the request omits it, once against the variable's declared type, then each
-argument, in fragments too. A scalar, list or enum sent for an input object, at
-any depth, refuses the whole request before any resolver, policy callback or
-SQL runs, with the error runtime GraphQL schemas return: message and
-`extensions.code` both `invalid_graphql_input`, without a position or the
-offending value. `null` for an optional input object is still accepted, and
-async-graphql still refuses `null` for a required one. A schema built by hand
-from generated roots should install the extension too.
+argument, in fragments too. Each variable reference must stand where the
+GraphQL rule "All Variable Usages Are Allowed" admits its declared type: a
+nullable variable stands where a value is required only with a non-null
+default behind it (its own or the position's), and list wrapping must match,
+except that a variable that is not a list may stand where the list's item type
+admits it, since execution coerces it to a one-element list. A
+scalar, list or enum sent for an input object at any depth, or a variable whose
+type does not fit its position, refuses the whole request before any resolver,
+policy callback or SQL runs. The error is the one runtime GraphQL schemas
+return: message and `extensions.code` both `invalid_graphql_input`, without a
+position or the offending value. `null` for an optional input object is still
+accepted, and async-graphql still refuses `null` for a required one. The
+check's work bound is sized from the parsed document, so a request supplied
+already parsed (`Request::set_parsed_query`) is checked the same way.
+
+A schema built by hand from generated roots does not get this check unless it
+installs the extension:
+`Schema::build(..).extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`.
+Without it such a schema keeps async-graphql's behaviour described above.
 
 ## Relation target auth mode and operation scopes
 

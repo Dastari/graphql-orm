@@ -15,16 +15,28 @@ supersedes: []
 Upgrade ORM and macros together and recompile entities. Generated SDL,
 operation catalogues and fingerprints are unchanged.
 
-- **Input-object values on generated static schemas. No action.** A request
-  that sends a scalar, list or enum where an input object is expected (as a
-  literal, a variable or a variable default, at any depth) is now refused as
-  a whole before any resolver runs, with message and `extensions.code`
-  `invalid_graphql_input`. It used to fail while that field resolved, with an
-  uncoded async-graphql coercion message, after earlier fields had run.
-  Requests whose values are valid behave as before. Generated
-  `schema_builder` helpers install `GeneratedInputValidation`; a schema built
-  by hand from generated roots keeps the previous behaviour until it adds
-  `.extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`.
+- **Input-object values on generated `schema_builder` schemas. No action.**
+  A request that sends a scalar, list or enum where an input object is
+  expected (as a literal, a variable or a variable default, at any depth), or
+  a variable whose declared type does not fit the position it is used in, is
+  now refused as a whole before any resolver runs, with message and
+  `extensions.code` `invalid_graphql_input`. It used to fail while that field
+  resolved, with an uncoded async-graphql coercion message, after earlier
+  fields had run. async-graphql 7.2.1 never applies the rule that a
+  variable's declared type must fit its position, so a wrongly typed variable
+  was not caught by validation in either `ValidationMode`. Requests whose
+  values are valid behave as before. A request whose variable stood at a
+  position the GraphQL rule does not allow but whose value happened to coerce
+  (for example a nullable variable without a default at a required argument,
+  or a list of nullable items where the items must be non-null) is now refused
+  too; declare the variable with the position's type. A variable that is not a
+  list still stands where a list is expected when the item type admits it.
+- **Schemas built by hand from generated roots. Action needed.** Such a
+  schema does not get this check: generated roots do not install it
+  themselves. Add
+  `.extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`
+  to the `Schema::build(..)` chain. Without it the schema keeps async-graphql's
+  behaviour above.
 - **Bulk-write filter authority. No action.** Generated `updateMany` and
   `deleteMany` keep authorizing every filter field with its read policy before
   any SQL, as they have since 0.129.0, and report a denial in the payload
