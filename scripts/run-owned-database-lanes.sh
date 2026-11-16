@@ -26,7 +26,7 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
 run_backup_postgres() {
-  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres \
+  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,graphql-orm/change-journal \
     --test orm_016_postgres_conformance -- --include-ignored --test-threads=1
 }
 

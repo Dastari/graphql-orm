@@ -398,7 +398,9 @@ async fn a_cascade_into_a_table_without_a_recorder_is_refused()
         .await
         .expect_err("a disabled trigger cannot journal a cascade");
     assert!(
-        error.to_string().contains("cannot record table trunc_host_links"),
+        error
+            .to_string()
+            .contains("cannot record table trunc_host_links"),
         "{error}"
     );
     Ok(())
