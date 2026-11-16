@@ -23,8 +23,6 @@ adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
 items need action.
 
-Version 0.166.0 (breaking batch) makes migration planning safer by default:
-
 Version 0.167.0 (breaking batch) makes migration planning safer by default:
 plans no longer drop tables the target does not declare, lossy column type
 changes and integrity-removing steps need `allow_destructive`, and the
@@ -44,6 +42,10 @@ uniqueness when creating the index instead of running the preflight. Predicate
 dependencies come from metadata, not SQL text; predicates that cannot be
 analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+Version 0.167.0 changes test code only: the macros unit tests no longer assume
+the SQLite backend, so they run under each backend feature. No generated code
+or behavior changes.
 
 Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan

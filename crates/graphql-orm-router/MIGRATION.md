@@ -47,6 +47,11 @@ operation returns no `data`, only errors with `UNAUTHENTICATED` or
 Anonymous development mode is unchanged. No configuration or public API
 changes.
 
+## 0.15.4 to 0.15.5
+
+No consumer migration is required. Only the wire tests change; router
+behavior, configuration and public APIs are unchanged.
+
 ## 0.15.3 to 0.15.4
 
 No consumer migration is required. Only the wire tests change; router

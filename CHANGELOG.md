@@ -49,6 +49,10 @@ Host steps are in the [migration guide](MIGRATION.md#breaking-release-unreleased
 - **AI 0.149.0, AI tool profiles 0.26.0 (#551):** capability broker version 2. Describe returns compact typed signatures and `describe_type` expands one named type at a time; discovery returns one entity capability per entity with the root chosen per call; search uses an inverted index with fixed per-entry weights; large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once.
 - **AI 0.146.0:** fixed-broker sessions survive catalogue changes, `capability_stale` and `selection_stale` are separate model-facing codes (#551), HighImpact approvals force step-up and the approval lifetime cap has a 7-day ceiling (#465), and AI schema module `0.82.0` adds three unique indexes (#532). See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md).
 
+## Unreleased - ORM/macros 0.167.0
+
+- Test-only: the macros unit tests for update assignments and write-transform rejection name no backend, so `cargo test -p graphql-orm-macros --no-default-features --features postgres` and `--features mssql` pass as well as the default SQLite run (#735). Generated code and runtime behavior do not change; the version moves because the macros package archive carries its unit tests. See the [migration guide](MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests).
+
 ## Unreleased - ORM/macros 0.166.0
 
 - Add request-local `DependentDeleteGuard`: compare admitted effects with the

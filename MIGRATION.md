@@ -20,10 +20,9 @@ below, when you take the release.
 
 The breaking release upgrades ORM and macros, the operation catalogue, AI tool
 profiles, AI (AI schema module `0.82.0`), backup and the router. Upgrade them
-together; each section names the package it changes. Placeholder versions:
-ORM and macros 0.167.0, operation catalogue 0.9.0, AI tool profiles 0.25.0,
-AI 0.148.0, backup 0.27.0, router 0.16.0. Entries may name the earlier
-placeholder each change was written against.
+together; each section names the package it changes. Version numbers in the
+entries below are placeholders: each names the version its change was written
+against, and the release assigns the final numbers.
 
 ### Capability broker version 2: compact signatures, entity capabilities and the fixed-broker default (#551)
 
@@ -596,6 +595,11 @@ detect accidental divergence only; see
   profiles 0.25.0 accept the default `RuntimeInt64` and the legacy `Int`
   identity alike; AI 0.148.0 adopts them. See the
   [tool-profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-runtime-live-keys-under-default-identities).
+
+## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
+
+**No action.** Generated code, schemas and runtime behavior are unchanged. The
+macros unit tests no longer assume the SQLite backend (#735).
 
 ## ORM/macros 0.166.0: guarded dependent deletes
 

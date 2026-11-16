@@ -61,6 +61,15 @@ supersedes: []
   cannot reach a rule are not walked. A graph with no composed directives
   skips the walk.
 
+## 0.15.5 (unreleased)
+
+- Tests: the Prometheus exporter wire test reserves its port on the public
+  loopback address as well as the exporter's own address, and holds the public
+  side for the test's duration, so another test's listener on the same port
+  number can no longer answer the "not served on the public address" probe.
+  It skips with a logged reason when the IPv6 loopback cannot be bound. No
+  router behavior changes. ([#745](https://github.com/Dastari/graphql-orm/issues/745))
+
 ## 0.15.4 (unreleased)
 
 - Tests: the wire-test WebSocket client completes the closing handshake,
