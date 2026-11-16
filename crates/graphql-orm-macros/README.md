@@ -12,8 +12,9 @@ supersedes: []
 
 Version 0.168.0 installs `GeneratedInputValidation` in the generated schema
 builders, so a value that is not an object where an input object is expected
-is refused with `invalid_graphql_input` before any resolver runs. Recompile
-entities with aligned ORM/macros versions. See the
+is refused with `invalid_graphql_input` before any resolver runs, as is a
+variable at a position the GraphQL rule does not allow. Recompile entities with
+aligned ORM/macros versions. See the
 [migration guide](../../MIGRATION.md#01670-to-01680-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
 
 Version 0.167.0 changes test code only: the macros unit tests no longer assume

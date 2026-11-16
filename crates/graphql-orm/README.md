@@ -11,9 +11,11 @@ supersedes: []
 # `graphql-orm`
 
 Version 0.168.0 refuses, on generated static schemas, a value that is not an
-object where an input object is expected, with `invalid_graphql_input` before
-any resolver runs, as runtime GraphQL schemas do. Valid requests are
-unchanged and no action is needed. See the
+object where an input object is expected, and on static and runtime schemas a
+variable at a position the GraphQL rule does not allow, with
+`invalid_graphql_input` before any resolver runs. Spec-valid requests are
+unchanged. Clients that send such variable usages, and hosts that build
+schemas from generated roots by hand, need action. See the
 [migration guide](../../MIGRATION.md#01670-to-01680-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
 
 Version 0.167.0 changes test code only: the macros unit tests no longer assume
