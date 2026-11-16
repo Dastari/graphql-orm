@@ -70,12 +70,17 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Current package identities come from the [Cargo manifests](../../Cargo.toml)
+and the [generated workspace inventory](workspace-packages.md).
 
-- **Action needed** — AI 0.146.0: a provider that declares both `ProviderDeferred` and `FixedBroker` now gets `FixedBroker` for a non-frozen surface above the eager limits, and a retained session for it rebinds once [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — ORM/macros 0.164.0: opt-in dependent-delete effect verification and transaction-bound row limits; unsupported plans refuse [migration](../../MIGRATION.md#ormmacros-01640-guarded-dependent-deletes)
+
+- **No action** — AI 0.146.0: delivery selection stays unchanged unless the host opts into `prefer_fixed_broker_for_large_surfaces`; opting in requires a retained-session rebind [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **No action** — AI 0.146.0: fixed-broker `describe` returns each repeated input type once under `planSchema.types`; execute arguments and fingerprints are unchanged [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **No action** — AI 0.146.0: opt-in reviewed static read tools behind the fixed broker, host-held epoch anchor for file-level restores, and dependent-effect policy for generated deletes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **No action** — Tool profiles 0.24.0: one oversized generated root is excluded and reported instead of failing its target; opt-in strict query roots; shared type dictionary rendering; precomputed search terms [migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale) · [changelog](../../crates/graphql-orm-ai-tool-profiles/CHANGELOG.md#unreleased---0240)
+
+- **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)
 
 ### workspace-2026.11.15.6
 

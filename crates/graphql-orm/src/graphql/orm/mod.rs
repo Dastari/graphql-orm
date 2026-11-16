@@ -3,6 +3,8 @@ pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
 #[doc(hidden)]
 pub use generated_filter::*;
+mod authorized_page;
+pub use authorized_page::*;
 mod authorized_pagination;
 pub use authorized_pagination::*;
 mod backend;
