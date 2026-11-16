@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## 0.25.0 (unreleased, breaking batch)
+## 0.27.0 (unreleased, breaking batch)
 
 - **Breaking:** `PruneResult` and `DeleteSnapshotResult` gain
   `deleted_snapshot_ids`, the ids whose deletion completed, in ascending
@@ -23,10 +23,10 @@ supersedes: []
   reason }` instead of `ManifestAuthenticationFailed`.
   `BackupError::is_snapshot_not_admitted()` keeps working.
 - `OrmBackupAdapter::clear_restore_target` clears a PostgreSQL target in a
-  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.163.0
+  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.166.0
   installs a `TRUNCATE` guard on journaled tables (#592) that admits only
   such a transaction; without this the clear would be refused on a journaled
-  database. The clear is not journaled, as before. Requires ORM 0.163.0 for
+  database. The clear is not journaled, as before. Requires ORM 0.166.0 for
   the optional ORM adapter. SQLite is unchanged.
 
 ## 0.26.0 (unreleased)

@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.164.0 (breaking batch) makes migration planning safer by default:
+Version 0.166.0 (breaking batch) makes migration planning safer by default:
 plans no longer drop tables the target does not declare, lossy column type
 changes and integrity-removing steps need `allow_destructive`, and the
 PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
@@ -843,8 +843,10 @@ README remains project-neutral.
 - **Federation entities:** `federation_key` opts an entity into a resolvable
   Apollo Federation v2 `@key`, generating a batched entity resolver that runs
   the same authorization chain as the single-row read. A joined field is
-  authorized only by the subgraph that owns the entity; the router's contract
-  covers root fields.
+  authorized by the subgraph that owns the entity. The router's descriptor
+  contract covers root fields; since router 0.16.0 it also refuses fields whose
+  composed `@authenticated` or `@requiresScopes` the caller does not meet, but
+  it grants nothing.
 - **Checked calendar filters:** generated date predicates use half-open
   calendar ranges and recursively reject invalid spans, offsets, and ranges
   before database work. PostgreSQL uses session `CURRENT_DATE`, SQL Server uses

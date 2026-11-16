@@ -10,12 +10,12 @@ supersedes: []
 
 # graphql-orm-backup
 
-Version 0.25.0 (breaking batch) reports deleted snapshot ids in `PruneResult`
+Version 0.27.0 (breaking batch) reports deleted snapshot ids in `PruneResult`
 and `DeleteSnapshotResult`, refuses an unadmitted snapshot with the dedicated
 `BackupError::SnapshotNotAdmitted`, and marks those three types
 `#[non_exhaustive]`. `OrmBackupAdapter::clear_restore_target` keeps working on
 PostgreSQL databases whose change journal refuses `TRUNCATE`. Requires ORM
-0.163.0 for the optional ORM adapter. See [MIGRATION.md](MIGRATION.md).
+0.166.0 for the optional ORM adapter. See [MIGRATION.md](MIGRATION.md).
 
 Version 0.26.0 adds host-held snapshot records: a known-snapshot list or a
 revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is

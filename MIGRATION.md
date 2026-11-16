@@ -18,9 +18,9 @@ The versions named are placeholders until that release is cut. Each entry is
 marked **Action needed** or **No action**. Do the steps once, in the order
 below, when you take the release.
 
-Placeholder versions: ORM and macros 0.166.0, operation catalogue 0.9.0, AI
-tool profiles 0.25.0, AI 0.148.0 (AI schema module `0.82.0`). Upgrade them
-together.
+The breaking release upgrades ORM and macros, the operation catalogue, AI tool
+profiles, AI (AI schema module `0.82.0`), backup and the router. Upgrade them
+together; each section names the package it changes.
 
 ### Capability broker version 2: compact signatures, entity capabilities and the fixed-broker default (#551)
 
@@ -74,6 +74,39 @@ Host steps:
    and the
    [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-entity-capabilities-and-compact-signatures).
 
+### Router 0.16.0: nested `@authenticated` and `@requiresScopes` are enforced
+
+- **Action needed** for authenticated `graphql-orm-router` hosts whose
+  subgraph SDL carries `@authenticated` or `@requiresScopes` below the root,
+  on a field or a type, and whose clients select those fields without the
+  authority they name. The router now evaluates the composed directives on
+  every selected field (nested object fields, joined entity fields, interface
+  and union members, fragments and aliases) and refuses the whole operation
+  before any subgraph request, with `UNAUTHENTICATED` or `FORBIDDEN` and the
+  refused selection's response path. It used to evaluate only root fields'
+  descriptors and leave nested fields to the subgraph. Root fields are now
+  also checked against their SDL directives. When several subgraphs declare
+  `@requiresScopes` on one type or field, every declaration must hold, and a
+  field of an implementation inherits the rules declared on its interface or
+  on an `@interfaceObject` type.
+  - A graph is refused when it is built if a `@requiresScopes` argument is an
+    empty list, contains an empty set, or contains a scope that is not a
+    non-empty string; if a directive named `requiresScopes` or
+    `authenticated` (or an import alias of either), with or without a
+    `<prefix>__`, does not resolve to Federation's directive; or if either
+    directive is placed on an argument, input field, enum value, union, input
+    object or the schema. Fix such declarations before upgrading.
+  - Find the directives in each subgraph's SDL and confirm every client that
+    selects such a field presents a bearer and, for `@requiresScopes`, one
+    complete scope set. A field selected through an interface needs the rules
+    of every implementation of it.
+  - A client that should still receive the rest of an operation must move the
+    protected selection into its own operation; the router does not null a
+    refused field.
+  - Keep subgraph guards and policies: the router check grants nothing.
+  See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#0154-to-0160).
+  Anonymous development mode is unchanged.
+
 ### Migration safety and live journal validation
 
 - **Action needed:** replan pending migrations. Removing column-level UNIQUE or
@@ -119,7 +152,7 @@ Host steps:
   unadmitted snapshot is refused with `BackupError::SnapshotNotAdmitted`.
   Action needed** for struct literals, exhaustive destructuring and
   wildcard-free matches on those types; see the
-  [backup migration guide](crates/graphql-orm-backup/MIGRATION.md#to-0250-result-and-error-types-target-clear-on-journaled-databases).
+  [backup migration guide](crates/graphql-orm-backup/MIGRATION.md#to-0270-result-and-error-types-target-clear-on-journaled-databases).
 
 ### Migration plans: undeclared tables, lossy type changes and integrity removal
 
