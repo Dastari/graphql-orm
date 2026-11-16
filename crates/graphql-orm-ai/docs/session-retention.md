@@ -458,7 +458,12 @@ a response from a provider that sends `store: false` is never recorded.
   commit, whatever its terminal status.
 
 Recording is idempotent, so a response met on several of these paths keeps
-one row.
+one row. The coordinator record is refused with `InvalidInput` when the
+result's run or session differs from the lease's, so one run's response is
+never filed under another session. A response recorded after its session was
+already finalized to `deleted` is due at once (`delete_required`); one
+recorded while the session is `deleting` stays `retained` until retention
+releases it at the purge cutoff.
 
 **Not recorded:**
 

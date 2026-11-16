@@ -1601,13 +1601,25 @@ impl OrmAiRunService {
     ///
     /// The response exists at the provider whatever happens to the turn next
     /// (a rule or budget refusal, cancellation, lease loss or a failed write),
-    /// so this needs no live lease: it checks only that the run belongs to the
-    /// lease's session. Recording is idempotent.
+    /// so this needs no live lease: it checks only that the result belongs to
+    /// the lease's run and session, and that the run belongs to that session.
+    /// Recording is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] when the result's run or session
+    /// differs from the lease's, so one run's response is never filed under
+    /// another session and deleted with it.
     pub(crate) async fn record_retained_provider_response(
         &self,
         lease: &AiRunLease,
         result: &crate::AiProviderCallResult,
     ) -> Result<(), AiError> {
+        if result.run_id() != lease.run_id || result.session_id() != lease.session_id {
+            return Err(AiError::InvalidInput(
+                "provider result does not belong to the lease's run".to_owned(),
+            ));
+        }
         let (Some(profile), Some(response_id)) = (
             result.retained_response_profile(),
             result.provider_response_id().map(str::to_owned),
@@ -1617,6 +1629,7 @@ impl OrmAiRunService {
         let provider_kind = result.provider_kind().as_str().to_owned();
         let run_id = lease.run_id.0;
         let session_id = lease.session_id.0;
+        let now = canonical_second(self.clock.now()).unix_timestamp();
         retry_transaction(self.limits.maximum_transaction_retries, || {
             let profile = profile.clone();
             let response_id = response_id.clone();
@@ -1638,6 +1651,7 @@ impl OrmAiRunService {
                             &provider_kind,
                             &profile,
                             &response_id,
+                            now,
                         )
                         .await
                     })
@@ -1762,6 +1776,7 @@ impl OrmAiRunService {
                                 &output.provider_kind,
                                 profile,
                                 response_id,
+                                now.unix_timestamp(),
                             )
                             .await?;
                         }
@@ -2395,6 +2410,7 @@ impl OrmAiRunService {
                             &checkpoint.provider_kind,
                             profile,
                             response_id,
+                            now.unix_timestamp(),
                         )
                         .await?;
                     }
@@ -9189,6 +9205,113 @@ mod tests {
         assert_eq!(rows[0].session_id, lease.session_id().0);
         assert_eq!(rows[0].provider_response_id, "resp_kept");
         assert_eq!(rows[0].cleanup_state, "retained");
+    }
+
+    async fn stored_response_rows(fixture: &Fixture) -> Vec<AiStoredProviderResponseRecord> {
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiStoredProviderResponseRecord>()
+                        .limit(8)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("ledger should load")
+    }
+
+    #[tokio::test]
+    async fn a_retained_response_is_never_filed_under_another_run() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        seed_queued(&fixture).await;
+        let first = fixture
+            .service
+            .claim_next("worker-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let second = fixture
+            .service
+            .claim_next("worker-b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.session_id(), second.session_id());
+        let result = crate::AiProviderCallResult::test_result(&first, None, "resp_first", vec![])
+            .with_test_provider_retains_responses(true);
+        assert!(matches!(
+            fixture
+                .service
+                .record_retained_provider_response(&second, &result)
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        assert!(stored_response_rows(&fixture).await.is_empty());
+        fixture
+            .service
+            .record_retained_provider_response(&first, &result)
+            .await
+            .expect("the matching run records");
+        let rows = stored_response_rows(&fixture).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, first.session_id().0);
+    }
+
+    #[tokio::test]
+    async fn a_response_returned_after_session_deletion_is_due_at_once() {
+        for state in ["deleting", "deleted"] {
+            let fixture = fixture().await;
+            seed_queued(&fixture).await;
+            let lease = fixture
+                .service
+                .claim_next("worker-late")
+                .await
+                .unwrap()
+                .unwrap();
+            let session = AiSessionRecord::find_by_id(&fixture.database, &lease.session_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            AiSessionRecord::update_by_id(
+                &fixture.database,
+                &session.id,
+                UpdateAiSessionRecordInput {
+                    state: Some(state.to_owned()),
+                    deleted_at: Some(Some(fixture.clock.now().unix_timestamp())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let result =
+                crate::AiProviderCallResult::test_result(&lease, None, "resp_late", vec![])
+                    .with_test_provider_retains_responses(true);
+            fixture
+                .service
+                .record_retained_provider_response(&lease, &result)
+                .await
+                .expect("a late response still records");
+            let rows = stored_response_rows(&fixture).await;
+            assert_eq!(rows.len(), 1, "{state}");
+            if state == "deleted" {
+                // Retention releases only rows of deleting sessions, so a
+                // finalized session's row is due at once instead of staying
+                // retained forever.
+                assert_eq!(rows[0].cleanup_state, "delete_required");
+                assert_eq!(
+                    rows[0].cleanup_next_attempt_at,
+                    Some(fixture.clock.now().unix_timestamp())
+                );
+            } else {
+                // A deleting session keeps its purge cutoff: retention
+                // releases the row then, and finalization waits for it.
+                assert_eq!(rows[0].cleanup_state, "retained");
+            }
+        }
     }
 
     #[tokio::test]

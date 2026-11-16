@@ -57,6 +57,7 @@ pub(crate) async fn record_retained_provider_response(
     provider_kind: &str,
     provider_profile_id: &str,
     provider_response_id: &str,
+    now: i64,
 ) -> Result<(), OrmPublicError> {
     if parse_recorded_kind(provider_kind).is_none() {
         return Ok(());
@@ -75,16 +76,31 @@ pub(crate) async fn record_retained_provider_response(
     {
         return Ok(());
     }
+    // Retention releases rows only while their session is `deleting`. A
+    // response that returns after the session was finalized would otherwise
+    // stay `retained` forever, so it is due at once. A `deleting` session
+    // keeps its purge cutoff: retention releases the row then, and
+    // finalization waits until it has.
+    let session_finalized = tx
+        .find_by_id::<AiSessionRecord>(&session_id)
+        .await
+        .map_err(OrmPublicError::from)?
+        .is_none_or(|session| session.state == "deleted");
+    let (cleanup_state, cleanup_next_attempt_at) = if session_finalized {
+        (DELETE_REQUIRED, Some(now))
+    } else {
+        (RETAINED, None)
+    };
     tx.insert::<AiStoredProviderResponseRecord>(CreateAiStoredProviderResponseRecordInput {
         id,
         session_id,
         provider_kind: provider_kind.to_owned(),
         provider_profile_id: provider_profile_id.to_owned(),
         provider_response_id: provider_response_id.to_owned(),
-        cleanup_state: RETAINED.to_owned(),
+        cleanup_state: cleanup_state.to_owned(),
         cleanup_generation: 0,
         cleanup_lease_expires_at: None,
-        cleanup_next_attempt_at: None,
+        cleanup_next_attempt_at,
         provider_delete_requested_at: None,
         provider_delete_attempts: 0,
     })

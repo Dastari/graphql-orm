@@ -9813,6 +9813,7 @@ mod tests {
                         provider_kind,
                         "profile-openai",
                         response_id,
+                        now().unix_timestamp(),
                     )
                     .await
                 })

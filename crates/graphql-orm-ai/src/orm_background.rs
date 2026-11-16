@@ -3331,6 +3331,7 @@ async fn commit_background_terminal_graph(
             &submission.provider_kind,
             &submission.provider_profile_id,
             response_id,
+            now.unix_timestamp(),
         )
         .await?;
     }
