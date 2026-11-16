@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.167.0 changes test code only: the macros unit tests no longer assume
+the SQLite backend, so they run under each backend feature. No generated code
+or behavior changes.
+
 Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan
 and enforces dependent row limits before writes. Generated physical opt-out and

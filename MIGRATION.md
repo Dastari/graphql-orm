@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
+
+**No action.** Generated code, schemas and runtime behavior are unchanged. The
+macros unit tests no longer assume the SQLite backend (#735).
+
 ## ORM/macros 0.166.0: guarded dependent deletes
 
 **No action** for unchanged hosts. No data or schema migration is needed.
