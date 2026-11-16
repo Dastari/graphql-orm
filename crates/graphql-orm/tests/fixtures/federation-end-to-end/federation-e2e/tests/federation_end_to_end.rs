@@ -339,10 +339,7 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
         "every refused reference is null: {denied_nullable}"
     );
     let nullable_error = &denied_nullable["errors"][0];
-    assert_eq!(
-        nullable_error["extensions"]["code"],
-        "DOWNSTREAM_SERVICE_ERROR"
-    );
+    assert_eq!(nullable_error["extensions"]["code"], "INTERNAL_ERROR");
     assert_eq!(
         nullable_error["extensions"]["service"], "zones",
         "the denial is attributed to the owning subgraph: {denied_nullable}"
@@ -380,7 +377,7 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
         "a non-null reference propagates the null to the root: {denied}"
     );
     let error = &denied["errors"][0];
-    assert_eq!(error["extensions"]["code"], "DOWNSTREAM_SERVICE_ERROR");
+    assert_eq!(error["extensions"]["code"], "INTERNAL_ERROR");
     assert_eq!(
         error["extensions"]["service"], "zones",
         "the denial is attributed to the owning subgraph: {denied}"
@@ -390,9 +387,9 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
     // (e) The router granted nothing. It was configured with
     // `allow_anonymous_development(true)` and no scope matcher, so it took no
     // authorization decision at all: it forwarded the header and relayed a
-    // sanitized downstream failure. Hive replaces the subgraph's own message
-    // with "Unexpected error", so the proof that the text originates in the
-    // zones subgraph is read from the subgraph directly.
+    // sanitized downstream failure. The uncoded policy error is classified
+    // as INTERNAL_ERROR at the subgraph boundary (#682); its authored text
+    // reaches neither the router client nor the direct subgraph client.
     let direct = client
         .post(format!("http://{zones}/graphql"))
         .json(&json!({
@@ -405,12 +402,9 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
         .json::<Value>()
         .await
         .expect("the zones subgraph returns JSON");
+    assert_eq!(direct["errors"][0]["extensions"]["code"], "INTERNAL_ERROR");
     assert_eq!(
-        direct["errors"][0]["message"],
-        format!(
-            "zones subgraph denied the caller: scope `{}` is required",
-            zones_subgraph::READ_SCOPE
-        ),
-        "the denial originates in the subgraph, not the router: {direct}"
+        direct["errors"][0]["message"], "internal error",
+        "uncoded policy diagnostics stay server-side: {direct}"
     );
 }
