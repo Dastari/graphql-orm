@@ -88,6 +88,10 @@ impl TableIdentifierConflict {
 /// a column the same plan adds, a column-level `UNIQUE` and a composite
 /// unique constraint are not checked here; if existing rows violate one, the
 /// database rejects that statement and the transactional apply rolls back.
+/// Conditional indexes apply their structured closed-set predicate to the
+/// check. If the plan adds the predicate column, the check is skipped too.
+/// Predicate dependencies are tracked structurally, never inferred from SQL;
+/// an unanalysable predicate must defer to database enforcement at creation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniqueIndexDuplicates {
     /// The declared table the index belongs to.
@@ -166,6 +170,16 @@ pub(super) async fn unique_index_duplicates<B: super::OrmBackend>(
                 .iter()
                 .any(|column| added_columns.contains(&(table_name.as_str(), column)))
         {
+            continue;
+        }
+        // Closed-set predicates track their sole column explicitly. Do not
+        // query a predicate column before this plan creates it (SQLite may
+        // even interpret the missing quoted identifier as a string literal).
+        // Any future predicate form without known dependencies must skip this
+        // preflight and let CREATE UNIQUE INDEX enforce uniqueness instead.
+        if index.predicate.as_ref().is_some_and(|predicate| {
+            added_columns.contains(&(table_name.as_str(), predicate.column))
+        }) {
             continue;
         }
         let key = index
