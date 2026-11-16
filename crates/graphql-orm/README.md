@@ -10,11 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.160.0 restores a snapshot in one transaction on PostgreSQL and
-SQLite, adds `SchemaManager::reset_runtime_search` and a restore-in-progress
-marker for host-run SQL Server restores, and keeps the stored value when an
-upsert's denied field write is ignored. See the
-[migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
+resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its
+continuation with a service-owned key under a server-authored
+`AuthorizedPageBinding`, refuses a continuation from a different context
+before any row is read, and resolves entity, row and field authorization again
+on every page. The API is additive and needs no action. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages) and the
+[reference](../../docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,

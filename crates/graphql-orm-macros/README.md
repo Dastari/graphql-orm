@@ -10,11 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.160.0 restores a snapshot in one transaction on PostgreSQL and
-SQLite, adds `SchemaManager::reset_runtime_search` and a restore-in-progress
-marker for host-run SQL Server restores, and keeps the stored value when an
-upsert's denied field write is ignored. See the
-[migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
+context-bound authorized pages for handwritten resolvers. The macros are
+unchanged. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,
