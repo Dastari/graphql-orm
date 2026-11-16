@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -284,7 +284,11 @@ and output bytes. Providers must also honor their supplied limits.
 New cursors use the host's active key; old cursors resume only while their key is
 in the bounded allowed ring and host expiry/revocation permits it. Retired keys
 and provider unavailability yield `cursor_unavailable`; framing, tampering and
-context/authentication failures yield indistinguishable `invalid_cursor`. Errors
+context/authentication failures yield indistinguishable `invalid_cursor`. A
+page whose row has order values too long to carry (an unprotected cursor above
+`max_cursor_bytes`, or a protected one above the 16 KiB plaintext or 32 KiB
+token bound) is refused with `cursor_key_too_large`; with the default limits
+that is one stored string sort key of roughly 8 KiB or more. Errors
 carry no ciphertext, plaintext, crypto source error or caller values. Tokens grant
 no access. Hosts may include a policy revision in their trusted partition to revoke
 old cursors; otherwise current row policies still apply to resumed pages.

@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -473,15 +473,22 @@ default scheduled delay is 30–33 seconds. Configure before schema construction
 Events never trigger or reset this deadline, including zero matches and empty
 key lists. Timers require stream polling; host policy latency, scheduler load
 and transport backpressure can delay detection/delivery. This is not a hard
-wall-clock guarantee or a claim of constant-time execution. Source-closure and
-queue-continuity signals retain their existing timing. In particular, lag is
-checked before event filtering: `SUBSCRIPTION_CONTINUITY_LOST` reveals that the
-shared channel exceeded this receiver's capacity, although it includes no key,
-payload or skipped-event count. Hidden write volume can cause that signal, and
-a revoked subscriber can receive it before the authority timer fires. This
-residual occurrence/timing signal is unchanged; Related to
-[#387](https://github.com/Dastari/graphql-orm/issues/387). CacheSync also uses the independent authority timer; see
-[cache invalidations](cache-sync.md).
+wall-clock guarantee or a claim of constant-time execution. Source closure
+ends the stream at once with `SUBSCRIPTION_SOURCE_CLOSED`.
+
+Lag is detected before event filtering, so writes hidden from a subscriber can
+cause it. Since 0.164.0 lag no longer ends the stream when it is detected. The
+stream stops delivering and waits for its next authority tick. At the tick, a
+subscriber whose authority is gone ends with `FORBIDDEN`, and any other ends
+with `SUBSCRIPTION_CONTINUITY_LOST`, which still carries no key, payload or
+skipped-event count. A revoked subscriber therefore never receives a
+continuity-loss frame, and hidden writes cannot choose when a stream ends: the
+end comes up to one recheck period (plus jitter) after the lag. An authorized
+subscriber can still tell that lag happened, and events between the lag and
+the tick are not delivered; as before, resubscribe and refetch. See
+[#387](https://github.com/Dastari/graphql-orm/issues/387). CacheSync also uses the
+independent authority timer; its own lag handling, an authorized refetch
+signal, is unchanged. See [cache invalidations](cache-sync.md).
 
 Operations selecting a generated Changed root must have exactly one root-field
 occurrence, counting aliases, fragments and skipped/included fields. Otherwise

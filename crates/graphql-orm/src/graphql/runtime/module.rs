@@ -23,6 +23,7 @@ pub struct RuntimeGraphqlOptions {
     pub(super) scalar_formats: Vec<(RuntimeFormatNamespace, std::ops::RangeInclusive<u16>)>,
     pub(super) relation_filters: RelationFilterOptions,
     pub(super) search_limits: crate::graphql::orm::RuntimeSearchLimits,
+    pub(super) int64_identity_strings: bool,
 }
 /// Default bound on relation predicates in one GraphQL operation.
 pub const RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTERS: usize = 16;
@@ -116,6 +117,25 @@ impl RuntimeGraphqlOptions {
         versions: std::ops::RangeInclusive<u16>,
     ) -> Self {
         self.scalar_formats.push((namespace, versions));
+        self
+    }
+
+    /// Serve 64-bit identity values as `RuntimeInt64` strings instead of
+    /// GraphQL `Int`.
+    ///
+    /// GraphQL `Int` is a 32-bit type, and a browser reads a JSON number as a
+    /// double, so a value above 2^53 arrives changed. By default the managed
+    /// `RecordVersion` field and integer keys of collections with live
+    /// subscriptions (the `…Changed` `keys` argument, `…KeyInput` members, and
+    /// the event `id` and `key` members) are typed `Int` and sent as JSON
+    /// numbers. With this option they are typed `RuntimeInt64` and sent and
+    /// accepted as decimal strings, like every other runtime 64-bit integer.
+    /// A JSON number is then refused as input for these keys.
+    ///
+    /// This changes the SDL, the semantic catalogue and their fingerprints,
+    /// so it is off by default. `NodeId` values are unchanged.
+    pub fn with_int64_identity_strings(mut self) -> Self {
+        self.int64_identity_strings = true;
         self
     }
 
@@ -524,6 +544,14 @@ impl RuntimeGraphqlModule {
         field: &FieldId,
     ) -> Option<&Arc<super::projection::ProjectionBinding>> {
         self.projections.get(field)
+    }
+    /// Scalar of the managed `RecordVersion` field.
+    pub(super) fn record_version_scalar(&self) -> &'static str {
+        if self.options.int64_identity_strings {
+            super::scalar::name(RuntimeValueKind::Integer)
+        } else {
+            "Int"
+        }
     }
     pub(super) fn object_name(&self, c: &RuntimeCollection) -> String {
         format!("{}{}", self.options.type_prefix, c.api_type_name)

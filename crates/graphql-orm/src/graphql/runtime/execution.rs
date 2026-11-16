@@ -1367,7 +1367,7 @@ fn row_security_refused() -> RuntimeGraphqlError {
     RuntimeGraphqlError::new("authorization_misconfigured")
 }
 fn relation_error(e: RuntimeRelationError) -> RuntimeGraphqlError {
-    RuntimeGraphqlError::new(e.code().as_str())
+    RuntimeGraphqlError::new(e.detail().unwrap_or(e.code().as_str()))
 }
 fn object(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
     Value::Object(

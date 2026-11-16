@@ -274,6 +274,8 @@ impl Fixture {
         let db = Database::<Backend>::connect_sqlite("sqlite::memory:")
             .await
             .unwrap();
+        // The shortest authority tick: a lagging stream ends on its next tick.
+        let db = db.with_subscription_authority_recheck_interval(Duration::from_secs(1));
         let schema = Arc::new(definition.validate().unwrap());
         let target = schema
             .physical_schema::<Backend>(Default::default())
@@ -657,11 +659,12 @@ async fn deleted_images_require_complete_evidence_current_policy_and_application
         .unwrap();
     assert_eq!(error.0[0].code(), "unsupported_deleted_image_profile");
 }
-#[tokio::test]
-async fn overflow_during_authorization_closes_before_any_partial_payload() {
-    let f = Fixture::new().await;
-    let mut stream = f.stream(LIVE).await;
-    baseline(&f, &mut stream).await;
+/// Overflow the subscriber's receiver while its delivery authorization is
+/// paused, then let the authorization finish.
+async fn lag_during_authorization(
+    f: &Fixture,
+    mut stream: BoxStream<'static, Response>,
+) -> tokio::task::JoinHandle<(Option<Response>, BoxStream<'static, Response>)> {
     f.authority.pause.store(true, Ordering::SeqCst);
     f.emit("visible", RuntimeMutationAction::Update, None);
     let task = tokio::spawn(async move {
@@ -672,21 +675,58 @@ async fn overflow_during_authorization_closes_before_any_partial_payload() {
     for _ in 0..32 {
         f.emit("visible", RuntimeMutationAction::Update, None);
     }
-    f.authority.resume.notify_one();
-    let (response, mut stream) = task.await.unwrap();
-    let response = response.unwrap();
+    task
+}
+fn terminal_code(response: &Response) -> String {
     assert_eq!(response.data, graphql_orm::async_graphql::Value::Null);
     assert_eq!(response.errors.len(), 1);
-    assert_eq!(
-        response.errors[0]
-            .extensions
-            .as_ref()
-            .unwrap()
-            .get("code")
-            .unwrap()
-            .to_string(),
-        "\"SUBSCRIPTION_CONTINUITY_LOST\""
+    match response.errors[0].extensions.as_ref().unwrap().get("code") {
+        Some(graphql_orm::async_graphql::Value::String(code)) => code.clone(),
+        other => panic!("terminal error has no code: {other:?}"),
+    }
+}
+// #387: lag can be caused by writes the subscriber may not see, so it does not
+// end the stream when it is detected. The end is held until the stream's next
+// independent authority tick, and nothing is delivered meanwhile.
+#[tokio::test]
+async fn overflow_during_authorization_closes_at_the_authority_tick_before_any_partial_payload() {
+    let f = Fixture::new().await;
+    let mut stream = f.stream(LIVE).await;
+    baseline(&f, &mut stream).await;
+    let mut task = lag_during_authorization(&f, stream).await;
+    let resumed = std::time::Instant::now();
+    f.authority.resume.notify_one();
+    assert!(
+        timeout(Duration::from_millis(300), &mut task)
+            .await
+            .is_err(),
+        "lag must not end the stream before the authority tick"
     );
+    let (response, mut stream) = timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal_code(&response.unwrap()),
+        "SUBSCRIPTION_CONTINUITY_LOST"
+    );
+    assert!(resumed.elapsed() < Duration::from_secs(3));
+    assert!(stream.next().await.is_none());
+}
+#[tokio::test]
+async fn lag_of_a_revoked_subscriber_ends_denied_at_the_authority_tick() {
+    let f = Fixture::new().await;
+    let mut stream = f.stream(LIVE).await;
+    baseline(&f, &mut stream).await;
+    let task = lag_during_authorization(&f, stream).await;
+    // Authority is lost while the lag end is held.
+    f.authority.revoked.store(true, Ordering::SeqCst);
+    f.authority.resume.notify_one();
+    let (response, mut stream) = timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal_code(&response.unwrap()), "authorization_denied");
     assert!(stream.next().await.is_none());
 }
 #[tokio::test]
@@ -1890,6 +1930,160 @@ async fn composite_numeric_live_keys_share_mutation_inputs_including_create_only
             })
             .unwrap();
         no_delivery(&mut stream).await;
+    }
+}
+
+// #528 (4): a browser reads a JSON number as a double, so a 64-bit key or
+// version above 2^53 arrives changed. The opt-in serves them as strings.
+#[tokio::test]
+async fn int64_identity_strings_are_opt_in_for_versions_and_integer_live_keys() {
+    const BIG: i64 = 9_007_199_254_740_993; // 2^53 + 1
+    for composite in [false, true] {
+        let mut definition = definition();
+        definition.collections[0].fields[0].value_kind = RuntimeValueKind::Integer;
+        if composite {
+            definition.collections[0].primary_key = vec![fid("tenant"), fid("id")];
+        }
+        definition.collections[0]
+            .live_subscriptions
+            .as_mut()
+            .unwrap()
+            .deleted_images = false;
+        let mut f = Fixture::with_definition(definition).await;
+        graphql_orm::sqlx::query(&format!(
+            "INSERT INTO runtime_live_records (id,title,tenant) VALUES ({BIG},'big','north')"
+        ))
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+        let key = if composite {
+            f.schema
+                .runtime_key(
+                    &f.collection(),
+                    &[
+                        (f.field("tenant"), RuntimeValue::String("north".into())),
+                        (f.field("id"), RuntimeValue::Integer(BIG)),
+                    ],
+                )
+                .unwrap()
+        } else {
+            f.schema
+                .runtime_key(
+                    &f.collection(),
+                    &[(f.field("id"), RuntimeValue::Integer(BIG))],
+                )
+                .unwrap()
+        };
+        for strings in [false, true] {
+            let mut options = RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_mutations(RuntimeGraphqlMutationOptions::default())
+                .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls);
+            if strings {
+                options = options.with_int64_identity_strings();
+            }
+            let module = RuntimeGraphqlModule::compile(f.schema.clone(), options).unwrap();
+            let (api, catalog) =
+                RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+                    .unwrap()
+                    .mutation_root("Mutation")
+                    .unwrap()
+                    .install(module)
+                    .unwrap()
+                    .finish_with_semantic_catalog()
+                    .unwrap();
+            catalog.validate().unwrap();
+            f.api = api;
+            let sdl = f.api.sdl();
+            let scalar = if strings { "RuntimeInt64" } else { "Int" };
+            assert!(sdl.contains(&format!("RecordVersion: {scalar}!")), "{sdl}");
+            // Descriptions sit between names and types, so compare the SDL
+            // without them and without whitespace.
+            let compact = sdl
+                .split("\"\"\"")
+                .step_by(2)
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<String>();
+            let keys_type = if composite { "RecordKeyInput" } else { scalar };
+            assert!(
+                compact.contains(&format!("recordChanged(keys:[{keys_type}!])")),
+                "{sdl}"
+            );
+            let key_input = compact
+                .split("inputRecordKeyInput{")
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap()
+                .to_owned();
+            assert!(key_input.contains(&format!("id:{scalar}!")), "{key_input}");
+            let catalog = serde_json::to_string(&catalog).unwrap();
+            assert_eq!(
+                catalog.contains(r#""field_name":"RecordVersion","description":"Managed record version advanced by every runtime write","type_ref":{"shape":"named","name":"RuntimeInt64""#),
+                strings,
+                "{catalog}"
+            );
+
+            let literal = |quoted: bool| {
+                let id = if quoted {
+                    format!("\"{BIG}\"")
+                } else {
+                    BIG.to_string()
+                };
+                if composite {
+                    format!("{{tenant:\"north\",id:{id}}}")
+                } else {
+                    id
+                }
+            };
+            let selection = if composite {
+                "id key { tenant id } record { id RecordVersion }"
+            } else {
+                "id record { id RecordVersion }"
+            };
+            let subscribe = |quoted: bool| {
+                format!(
+                    "subscription {{ recordChanged(keys:[{}]) {{ {selection} }} }}",
+                    literal(quoted)
+                )
+            };
+            // The other wire form is refused as input.
+            let refused = f
+                .api
+                .execute_stream(f.request(&subscribe(!strings)))
+                .boxed()
+                .next()
+                .await
+                .unwrap();
+            assert!(!refused.errors.is_empty(), "{refused:?}");
+
+            let mut stream = f.stream(&subscribe(strings)).await;
+            f.source
+                .tx
+                .send(RuntimeLiveEvent::Changed {
+                    key: key.clone(),
+                    action: RuntimeMutationAction::Update,
+                    preimage: None,
+                })
+                .unwrap();
+            let response = next(&mut stream).await;
+            assert!(response.errors.is_empty(), "{response:?}");
+            let data = response.data.into_json().unwrap();
+            let event = &data["recordChanged"];
+            let (expected_key, expected_version) = if strings {
+                (serde_json::json!(BIG.to_string()), serde_json::json!("1"))
+            } else {
+                (serde_json::json!(BIG), serde_json::json!(1))
+            };
+            if composite {
+                assert_eq!(event["key"]["id"], expected_key, "{event}");
+            } else {
+                assert_eq!(event["id"], expected_key, "{event}");
+            }
+            // Ordinary integer fields were strings already.
+            assert_eq!(event["record"]["id"], BIG.to_string());
+            assert_eq!(event["record"]["RecordVersion"], expected_version);
+        }
     }
 }
 

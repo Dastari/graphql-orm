@@ -95,8 +95,15 @@ pub struct RuntimeDeletedImageCheck<'a> {
 /// Code that ends a live subscription without database context once a table
 /// of its module has row-level security.
 const ROW_SECURITY_REFUSED: &str = "authorization_misconfigured";
+/// Internal code for a receiver that fell behind the shared source. It is
+/// never sent: [`wire_error`] renders it as a marked continuity error, which
+/// an open stream holds until its next authority tick.
+const LAGGED: &str = "lagged";
 fn wire_error(code: &'static str) -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
+    if code == LAGGED {
+        return crate::graphql::subscriptions::lag_end();
+    }
     if code == SUBSCRIPTION_CONTINUITY_LOST {
         return crate::graphql::subscriptions::subscription_end(
             code,
@@ -111,6 +118,21 @@ fn wire_error(code: &'static str) -> async_graphql::Error {
     }
 
     async_graphql::Error::new(code).extend_with(|_, e| e.set("code", code))
+}
+/// A continuity failure during registration. Nothing has been delivered and
+/// authority was just checked, so lag is reported at once, unmarked.
+fn registration_error(code: &'static str) -> async_graphql::Error {
+    let mut error = wire_error(code);
+    crate::graphql::subscriptions::take_lag_marker(&mut error);
+    error
+}
+/// The next tick, at or after now, of a period that started at `start`. The
+/// tick times do not depend on when lag happened.
+fn next_tick(start: tokio::time::Instant, period: std::time::Duration) -> tokio::time::Instant {
+    let period = period.max(std::time::Duration::from_millis(1));
+    let elapsed = tokio::time::Instant::now().saturating_duration_since(start);
+    let ticks = elapsed.as_nanos() / period.as_nanos() + 1;
+    start + period.saturating_mul(u32::try_from(ticks).unwrap_or(u32::MAX))
 }
 fn safe(error: RuntimeGraphqlError) -> async_graphql::Error {
     wire_error(error.code())
@@ -342,7 +364,7 @@ fn parse_keys(
                 };
                 map.get(field.api_name.as_str()).ok_or_else(invalid)?
             };
-            let value = decode_key_value(field.value_kind, value, limits.scalars)?;
+            let value = decode_key_value(module, field.value_kind, value, limits.scalars)?;
             fields.push((
                 module
                     .schema
@@ -374,11 +396,11 @@ fn probe(
             Ok(RuntimeLiveEvent::SourceClosed) => return Err(SUBSCRIPTION_SOURCE_CLOSED),
             Ok(event) => {
                 if pending.len() >= 1024 {
-                    return Err(SUBSCRIPTION_CONTINUITY_LOST);
+                    return Err(LAGGED);
                 }
                 pending.push_back(event);
             }
-            Err(TryRecvError::Lagged(_)) => return Err(SUBSCRIPTION_CONTINUITY_LOST),
+            Err(TryRecvError::Lagged(_)) => return Err(LAGGED),
             Err(TryRecvError::Closed) => return Err(SUBSCRIPTION_SOURCE_CLOSED),
             Err(TryRecvError::Empty) => return Ok(()),
         }
@@ -542,7 +564,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
             .iter()
             .find(|f| f.id == c.primary_key[0])
             .expect("validated key");
-        key_scalar(f.value_kind).to_owned()
+        key_scalar(&module, f.value_kind).to_owned()
     } else {
         format!("{object}KeyInput")
     };
@@ -693,7 +715,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                 let eligibility =
                     authorize_live(&original, request, protection.as_ref(), limits).await;
                 fence(&mut receiver, &mut pending, module.schema.fingerprint())
-                    .map_err(wire_error)?;
+                    .map_err(registration_error)?;
                 let mut eligibility = eligibility.map_err(safe)?;
                 // Keep bounded admission probes without retaining per-key visibility
                 // history. Do not run projectors or fetch related records here.
@@ -723,7 +745,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     )
                     .await;
                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
-                        .map_err(wire_error)?;
+                        .map_err(registration_error)?;
                     value.map_err(safe)?;
                 }
                 let key_set = keys
@@ -734,6 +756,15 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                 let c = Arc::new(c);
                 let key_set = Arc::new(key_set);
                 let original = Arc::new(original);
+                let lag_original = original.clone();
+                let lag_protection = protection.clone();
+                // An independent, jittered period fixed at registration. A
+                // lagging subscriber ends on its next tick, so hidden writes
+                // cannot choose when the stream ends.
+                let tick_start = tokio::time::Instant::now();
+                let tick_period = crate::graphql::subscriptions::authority_recheck_delay(
+                    database.subscription_authority_recheck_interval(),
+                );
                 let stream =
                     futures::stream::unfold(Some((receiver, pending)), move |subscription_state| {
                         let c = c.clone();
@@ -756,10 +787,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                         Err(tokio::sync::broadcast::error::RecvError::Lagged(
                                             _,
                                         )) => {
-                                            return Some((
-                                                Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
-                                                None,
-                                            ));
+                                            return Some((Err(wire_error(LAGGED)), None));
                                         }
                                         Err(_) => {
                                             return Some((
@@ -1017,7 +1045,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                     Name::new("changeKind"),
                                     Value::Enum(Name::new("DIRECT")),
                                 );
-                                let id = match event_identity(&key) {
+                                let id = match event_identity(&module, &key) {
                                     Ok(value) => value,
                                     Err(_) => {
                                         return Some((
@@ -1037,10 +1065,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                             .expect("key")
                                             .api_name
                                             .as_str();
-                                        let value = match value {
-                                            RuntimeValue::Integer(v) => Value::Number((*v).into()),
-                                            v => scalar::encode(v),
-                                        };
+                                        let value = key_output(&module, value);
                                         output.insert(Name::new(name), value);
                                     }
                                     payload.insert(Name::new("key"), Value::Object(output));
@@ -1078,6 +1103,35 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                             }
                         }
                     });
+                // Lag is detected before key filtering, and writes this
+                // subscriber may not see can cause it. Hold a lag end until
+                // the next tick and check authority then: a subscriber whose
+                // authority is gone ends as denied, any other with continuity
+                // loss. Nothing is delivered while it is held.
+                let stream = futures::stream::unfold(Some(Box::pin(stream)), move |held| {
+                    let original = lag_original.clone();
+                    let protection = lag_protection.clone();
+                    async move {
+                        use futures::StreamExt;
+                        let mut events = held?;
+                        let mut item = events.next().await?;
+                        if let Err(error) = &mut item
+                            && crate::graphql::subscriptions::take_lag_marker(error)
+                        {
+                            drop(events);
+                            tokio::time::sleep_until(next_tick(tick_start, tick_period)).await;
+                            let grant =
+                                authorize_live(&original, request, protection.as_ref(), limits)
+                                    .await;
+                            if matches!(grant, Err(error) if error == RuntimeGraphqlError::denied())
+                            {
+                                item = Err(safe(RuntimeGraphqlError::denied()));
+                            }
+                            return Some((item, None));
+                        }
+                        Some((item, Some(events)))
+                    }
+                });
                 Ok(stream)
             })
         },
@@ -1121,13 +1175,14 @@ pub(super) fn types(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -> Vec
                 .expect("validated key");
             key = key.field(InputValue::new(
                 &field.api_name,
-                TypeRef::named_nn(key_scalar(field.value_kind)),
+                TypeRef::named_nn(key_scalar(module, field.value_kind)),
             ));
         }
         result.push(key.into());
     }
     let id_type = if c.primary_key.len() == 1 {
         key_scalar(
+            module,
             c.fields
                 .iter()
                 .find(|f| f.id == c.primary_key[0])
@@ -1143,7 +1198,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -> Vec
             let field = c.fields.iter().find(|f| &f.id == id).expect("key");
             key = key.field(super::schema::output(
                 &field.api_name,
-                TypeRef::named_nn(key_scalar(field.value_kind)),
+                TypeRef::named_nn(key_scalar(module, field.value_kind)),
             ));
         }
         result.push(key.into());
@@ -1234,6 +1289,7 @@ pub(super) fn event_semantics(
     }
     let key_type = if c.primary_key.len() == 1 {
         key_scalar(
+            module,
             c.fields
                 .iter()
                 .find(|f| f.id == c.primary_key[0])
@@ -1275,7 +1331,7 @@ pub(super) fn event_semantics(
                 dependent_semantic(
                     &field.api_name,
                     named(
-                        key_scalar(field.value_kind),
+                        key_scalar(module, field.value_kind),
                         GraphqlSemanticTypeKind::Scalar,
                         false,
                     ),
@@ -1422,22 +1478,26 @@ pub(super) fn dependent_semantic(
     result
 }
 
-pub(super) fn key_scalar(kind: RuntimeValueKind) -> &'static str {
+pub(super) fn key_scalar(module: &RuntimeGraphqlModule, kind: RuntimeValueKind) -> &'static str {
     match kind {
-        RuntimeValueKind::Integer => "Int",
+        RuntimeValueKind::Integer if !module.options.int64_identity_strings => "Int",
         RuntimeValueKind::Uuid => "UUID",
         _ => scalar::name(kind),
     }
 }
 
-// Live keys follow the derived scalar contract; ordinary RuntimeInt64 values
-// remain strings. This decoder is used only for these explicitly typed keys.
+// Live keys follow the derived scalar contract unless the module opted in to
+// `RuntimeInt64` strings; ordinary RuntimeInt64 values are always strings.
+// This decoder is used only for these explicitly typed keys.
 pub(super) fn decode_key_value(
+    module: &RuntimeGraphqlModule,
     kind: RuntimeValueKind,
     value: &Value,
     limits: RuntimeScalarLimits,
 ) -> Result<RuntimeValue, RuntimeGraphqlError> {
-    if let (RuntimeValueKind::Integer, Value::Number(value)) = (kind, value) {
+    if !module.options.int64_identity_strings
+        && let (RuntimeValueKind::Integer, Value::Number(value)) = (kind, value)
+    {
         return value
             .as_i64()
             .map(RuntimeValue::Integer)
@@ -1446,12 +1506,23 @@ pub(super) fn decode_key_value(
     scalar::decode(kind, value, limits)
 }
 
-fn event_identity(key: &RuntimeKey) -> Result<Value, RuntimeGraphqlError> {
+/// One key member of a live event: a JSON number for an integer key, or its
+/// `RuntimeInt64` string when the module opted in.
+fn key_output(module: &RuntimeGraphqlModule, value: &RuntimeValue) -> Value {
+    match value {
+        RuntimeValue::Integer(v) if !module.options.int64_identity_strings => {
+            Value::Number((*v).into())
+        }
+        value => scalar::encode(value),
+    }
+}
+
+fn event_identity(
+    module: &RuntimeGraphqlModule,
+    key: &RuntimeKey,
+) -> Result<Value, RuntimeGraphqlError> {
     if key.fields().len() == 1 {
-        return match &key.fields()[0].1 {
-            RuntimeValue::Integer(v) => Ok(Value::Number((*v).into())),
-            value => Ok(scalar::encode(value)),
-        };
+        return Ok(key_output(module, &key.fields()[0].1));
     }
     let values = key
         .fields()
@@ -1569,7 +1640,14 @@ pub(super) fn insert_identity_fields(
         let RuntimeValue::Integer(version) = record.value(&field).map_err(|_| invalid())? else {
             return Err(invalid());
         };
-        values.insert(Name::new("RecordVersion"), Value::Number((*version).into()));
+        values.insert(
+            Name::new("RecordVersion"),
+            if module.options.int64_identity_strings {
+                scalar::encode(&RuntimeValue::Integer(*version))
+            } else {
+                Value::Number((*version).into())
+            },
+        );
     }
     Ok(())
 }

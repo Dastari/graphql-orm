@@ -328,7 +328,7 @@ impl RuntimeGraphqlModule {
                     fields.push(super::live::dependent_semantic(
                         "RecordVersion",
                         GraphqlSemanticTypeRef::named(
-                            "Int",
+                            self.record_version_scalar(),
                             GraphqlSemanticTypeKind::Scalar,
                             false,
                         ),
@@ -394,7 +394,7 @@ impl RuntimeGraphqlModule {
                     }
                     if c.primary_key.contains(&field.id) {
                         let scalar = if c.live_subscriptions.is_some() {
-                            super::live::key_scalar(field.value_kind)
+                            super::live::key_scalar(self, field.value_kind)
                         } else {
                             scalar::name(field.value_kind)
                         };
