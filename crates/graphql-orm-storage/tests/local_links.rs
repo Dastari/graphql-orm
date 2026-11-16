@@ -471,7 +471,7 @@ async fn local_canonical_keys_refuse_a_resumed_completion() {
     let canonical = LocalStorageBackend::new(owned.path()).with_canonical_keys(true);
     assert_refused(
         canonical
-            .complete_multipart(&handle, &[receipt.clone()])
+            .complete_multipart(&handle, std::slice::from_ref(&receipt))
             .await,
         "a non-canonical completion",
     );
