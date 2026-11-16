@@ -27,11 +27,17 @@ operation returns no `data`, only errors with `UNAUTHENTICATED` or
    `@requiresScopes`, one complete scope set. A field selected through an
    interface needs the rules of every implementation of that field, and a
    type-level rule applies to every field of the type and to fragments on it.
-3. Where a client should keep reading the rest of an operation, move the
+3. Fix any `@requiresScopes` argument that is an empty list, contains an
+   empty set, or contains a scope that is not a non-empty string: the router
+   now refuses such a graph when it is built. Where several subgraphs declare
+   scopes on one shared type or field, a caller needs a set from every one of
+   them, and a field of an interface implementation also needs the rules
+   declared on the interface or an `@interfaceObject` type.
+4. Where a client should keep reading the rest of an operation, move the
    protected selection into its own operation, or remove the directive from
    the subgraph SDL and keep the subgraph's own guard. Do not rely on the
    router to null a refused field: it refuses the operation.
-4. Keep subgraph resolver guards and policies. The router check is defence in
+5. Keep subgraph resolver guards and policies. The router check is defence in
    depth and grants nothing.
 
 Anonymous development mode is unchanged. No configuration or public API

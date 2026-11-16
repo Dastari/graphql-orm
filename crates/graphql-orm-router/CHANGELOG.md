@@ -21,11 +21,19 @@ supersedes: []
   the WebSocket gateway, including subscription admission. For each included
   field `P.f` returning `R` it requires the rules on `P`, `P.f` and `R`; a
   field selected on an interface also requires the rules of every
-  implementation of it; an inline fragment requires the rule on its type
-  condition. `@requiresScopes` is an OR of AND sets and implies
-  authentication. Aliases, fragment spreads, inline fragments, interfaces and
+  implementation of it, and a field of an implementation also requires the
+  rules declared on the same interface field and on the interface, including
+  those declared on an `@interfaceObject` type in another subgraph; an inline
+  fragment requires the rule on its type condition. `@requiresScopes` is an
+  OR of AND sets and implies authentication. Aliases, fragment spreads,
+  inline fragments, `@defer` fragments, `@stream` fields, interfaces and
   union members reach the same rules. Root fields are covered too, in
   addition to their descriptor requirements.
+- Per-subgraph scope requirements are combined with AND semantics.
+  Composition merges the `@requiresScopes` sets that several subgraphs
+  declare for one type or field into a single list of alternatives; the
+  router reads each subgraph's declaration from its SDL (following `@link`
+  imports, `as:` renames and namespace prefixes) and requires every one.
   ([#729](https://github.com/Dastari/graphql-orm/issues/729))
 - A refused selection refuses the whole operation with no `data`, as a refused
   root field does. Each error is `UNAUTHENTICATED` (no caller) or `FORBIDDEN`
@@ -36,8 +44,11 @@ supersedes: []
 - `__typename` is never refused at any depth. `__schema` and `__type` keep
   the introspection policy. Anonymous development mode, which has no
   authorization catalogue, enforces nothing, as before.
-- A malformed composed `@requiresScopes` argument fails graph construction, so
-  the last-known-good graph stays active.
+- Graph construction fails, so the last-known-good graph stays active, when a
+  subgraph's `@requiresScopes` argument is not a non-empty list of non-empty
+  lists of non-empty strings (an empty set, or a value composition would drop,
+  is refused rather than read as always satisfied), or when the composed
+  scope sets do not match the subgraph declarations they came from.
 - Each distinct rule is evaluated once per operation, and selection sets that
   cannot reach a rule are not walked. A graph with no composed directives
   skips the walk.

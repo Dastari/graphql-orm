@@ -18,9 +18,9 @@ The versions named are placeholders until that release is cut. Each entry is
 marked **Action needed** or **No action**. Do the steps once, in the order
 below, when you take the release.
 
-Placeholder versions: ORM and macros 0.160.0, operation catalogue 0.9.0, AI
-tool profiles 0.24.0, AI 0.146.0 (AI schema module `0.82.0`). Upgrade them
-together. The router is released on its own line as 0.16.0.
+The breaking release upgrades ORM and macros, the operation catalogue, AI tool
+profiles, AI (AI schema module `0.82.0`), backup and the router. Upgrade them
+together; each section names the package it changes.
 
 ### Router 0.16.0: nested `@authenticated` and `@requiresScopes` are enforced
 
@@ -33,7 +33,13 @@ together. The router is released on its own line as 0.16.0.
   before any subgraph request, with `UNAUTHENTICATED` or `FORBIDDEN` and the
   refused selection's response path. It used to evaluate only root fields'
   descriptors and leave nested fields to the subgraph. Root fields are now
-  also checked against their SDL directives.
+  also checked against their SDL directives. When several subgraphs declare
+  `@requiresScopes` on one type or field, every declaration must hold, and a
+  field of an implementation inherits the rules declared on its interface or
+  on an `@interfaceObject` type.
+  - A graph is refused when it is built if a `@requiresScopes` argument is an
+    empty list, contains an empty set, or contains a scope that is not a
+    non-empty string. Fix such declarations before upgrading.
   - Find the directives in each subgraph's SDL and confirm every client that
     selects such a field presents a bearer and, for `@requiresScopes`, one
     complete scope set. A field selected through an interface needs the rules

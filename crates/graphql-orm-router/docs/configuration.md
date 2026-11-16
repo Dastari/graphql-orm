@@ -287,11 +287,22 @@ checked against the new scopes.
 - A field selected on an interface also requires, for every object type that
   implements it, the rules on that type, on its field, and on that field's
   return type, because the field may resolve on any of them.
+- A field of a type that implements an interface also requires the rules
+  declared on the same field of that interface and on the interface itself,
+  including rules a subgraph declares on an `@interfaceObject` type.
 - An inline fragment, or a fragment spread (normalized into one), requires
   the rule on its type condition. Aliases change only the reported path.
 - `@requiresScopes(scopes: [["a", "b"], ["c"]])` holds when every scope of at
   least one inner list is granted, matched with the configured scope matcher.
   It implies authentication.
+- When several subgraphs declare `@requiresScopes` on the same type or field,
+  every subgraph's declaration must hold. Composition merges them into one
+  list of alternatives, so the router reads each subgraph's own declaration.
+  A graph whose declarations are malformed (an empty list or set, or a scope
+  that is not a non-empty string), or whose composed sets cannot be matched
+  to the declarations they came from, is refused when it is built.
+- Fragments marked `@defer` and fields marked `@stream` are checked like any
+  other selection.
 - `@skip` and `@include` are applied as for root fields: a selection left out
   by its condition is not checked.
 - `__typename` is never refused. `__schema` and `__type` follow the

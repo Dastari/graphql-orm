@@ -18,11 +18,18 @@
 //!   type, because the field may be resolved on any of them. This fails closed
 //!   whether or not composition copied implementation rules onto the
 //!   interface.
+//! - A field `T.f` of a type that implements interface `I` also requires the
+//!   rules declared on `I.f` and on `I`. Composition keeps a rule declared on
+//!   an interface, or on an `@interfaceObject` type in another subgraph, only
+//!   on the interface.
 //! - An inline fragment on type `T` requires the rule on `T`.
 //! - `@requiresScopes(scopes: [[a, b], [c]])` holds when every scope of at
 //!   least one inner set is granted (OR of AND sets). It also requires
 //!   authentication. Several scope requirements on one selection must all
-//!   hold.
+//!   hold, and each subgraph's declaration on a shared type or field is its
+//!   own requirement: composition merges them into one list of alternatives,
+//!   so they are read from each subgraph's SDL and checked against the
+//!   composed sets.
 //! - `__typename` is answered without a subgraph and is never refused.
 //!   `__schema` and `__type` are governed by the router's introspection
 //!   policy, before this check.
@@ -32,7 +39,7 @@
 //! Each refusal names only its response path. The router may deny early but
 //! never grants: subgraph guards and policies stay authoritative.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use hive_router::{
     query_planner::{
@@ -46,7 +53,10 @@ use super::{
     AuthenticatedPrincipal, AuthorizationDenial, DirectiveInclusion, ScopeMatcher,
     VariableResolution, directive_inclusion,
 };
-use crate::{RouterError, RouterErrorKind};
+use crate::{
+    RouterError, RouterErrorKind,
+    federation::{ScopeSite, SubgraphScopeRequirements},
+};
 
 /// Most refusals reported for one operation. The operation is refused as soon
 /// as one selection is; the bound keeps the response and the walk small for a
@@ -117,10 +127,14 @@ pub(super) struct NestedAuthorization {
 }
 
 impl NestedAuthorization {
-    pub(super) fn build(state: &SupergraphState) -> Result<Self, RouterError> {
+    pub(super) fn build(
+        state: &SupergraphState,
+        declared: &SubgraphScopeRequirements,
+    ) -> Result<Self, RouterError> {
         let mut type_rules = HashMap::new();
         let mut field_rules = HashMap::<String, HashMap<String, Requirement>>::new();
         let mut return_types = HashMap::<String, HashMap<String, String>>::new();
+        let mut visited = HashSet::<ScopeSite>::new();
         for definition in state.definitions.values() {
             let (name, authenticated, requires_scopes) = match definition {
                 SupergraphDefinition::Object(object) => {
@@ -141,11 +155,14 @@ impl NestedAuthorization {
                 ),
                 SupergraphDefinition::Union(_) | SupergraphDefinition::InputObject(_) => continue,
             };
-            let rule = requirement(
+            let site = (name.clone(), None);
+            let rule = site_requirement(
                 !authenticated.is_empty(),
                 requires_scopes.iter().map(|directive| &directive.scopes),
-                name,
+                &site,
+                declared,
             )?;
+            visited.insert(site);
             if !rule.is_empty() {
                 type_rules.insert(name.clone(), rule);
             }
@@ -160,14 +177,17 @@ impl NestedAuthorization {
                     .entry(name.clone())
                     .or_default()
                     .insert(field_name.clone(), field.field_type.inner_type().to_owned());
-                let rule = requirement(
+                let site = (name.clone(), Some(field_name.clone()));
+                let rule = site_requirement(
                     !field.authenticated.is_empty(),
                     field
                         .requires_scopes
                         .iter()
                         .map(|directive| &directive.scopes),
-                    &format!("{name}.{field_name}"),
+                    &site,
+                    declared,
                 )?;
+                visited.insert(site);
                 if !rule.is_empty() {
                     field_rules
                         .entry(name.clone())
@@ -176,20 +196,48 @@ impl NestedAuthorization {
                 }
             }
         }
+        // Every subgraph declaration must land on a composed site. One that
+        // does not cannot be enforced, so the graph is refused.
+        if let Some(((type_name, field), _)) = declared
+            .sites
+            .iter()
+            .find(|(site, _)| !visited.contains(*site))
+        {
+            return Err(unmapped(type_name, field.as_deref()));
+        }
 
         let possible_types = possible_types(state);
+        let implemented = implemented_interfaces(state);
         let type_rule = |name: &str| type_rules.get(name).cloned().unwrap_or_default();
+        // A field's own rule includes the rules declared on the same field of
+        // every interface its type implements, and those interfaces' type
+        // rules. Composition keeps a directive declared on an interface, or on
+        // an `@interfaceObject` type in another subgraph, only on the
+        // interface, so the implementation must inherit it.
         let field_rule = |parent: &str, field: &str| {
-            field_rules
+            let mut rule = field_rules
                 .get(parent)
                 .and_then(|fields| fields.get(field))
                 .cloned()
-                .unwrap_or_default()
+                .unwrap_or_default();
+            for interface in implemented.get(parent).into_iter().flatten() {
+                let declares_field = return_types
+                    .get(interface)
+                    .is_some_and(|fields| fields.contains_key(field));
+                if !declares_field {
+                    continue;
+                }
+                if let Some(inherited) = field_rules
+                    .get(interface)
+                    .and_then(|fields| fields.get(field))
+                {
+                    rule.and(inherited);
+                }
+                rule.and(&type_rule(interface));
+            }
+            rule
         };
-        let mut nested = Self {
-            return_types,
-            ..Self::default()
-        };
+        let mut nested = Self::default();
         let mut interned = HashMap::<Requirement, usize>::new();
         let mut intern = |rule: Requirement, nested: &mut Self| -> usize {
             *interned.entry(rule.clone()).or_insert_with(|| {
@@ -198,27 +246,21 @@ impl NestedAuthorization {
             })
         };
 
-        let parents = nested
-            .return_types
-            .iter()
-            .map(|(parent, fields)| (parent.clone(), fields.clone()))
-            .collect::<Vec<_>>();
-        for (parent, fields) in parents {
+        for (parent, fields) in &return_types {
             for (field, returned) in fields {
-                let mut rule = type_rule(&parent);
-                rule.and(&field_rule(&parent, &field));
-                rule.and(&type_rule(&returned));
+                let mut rule = type_rule(parent);
+                rule.and(&field_rule(parent, field));
+                rule.and(&type_rule(returned));
                 if matches!(
-                    state.definitions.get(&parent),
+                    state.definitions.get(parent),
                     Some(SupergraphDefinition::Interface(_))
                 ) {
-                    for implementation in possible_types.get(&parent).into_iter().flatten() {
+                    for implementation in possible_types.get(parent).into_iter().flatten() {
                         rule.and(&type_rule(implementation));
-                        rule.and(&field_rule(implementation, &field));
-                        if let Some(returned) = nested
-                            .return_types
+                        rule.and(&field_rule(implementation, field));
+                        if let Some(returned) = return_types
                             .get(implementation)
-                            .and_then(|fields| fields.get(&field))
+                            .and_then(|fields| fields.get(field))
                         {
                             rule.and(&type_rule(returned));
                         }
@@ -230,7 +272,7 @@ impl NestedAuthorization {
                         .fields
                         .entry(parent.clone())
                         .or_default()
-                        .insert(field, index);
+                        .insert(field.clone(), index);
                 }
             }
         }
@@ -247,6 +289,7 @@ impl NestedAuthorization {
                 nested.fragments.insert(name.clone(), index);
             }
         }
+        nested.return_types = return_types;
         nested.guarded = guarded_types(state, &nested, &possible_types);
         Ok(nested)
     }
@@ -474,7 +517,7 @@ fn requirement<'a>(
             RouterError::new(
                 RouterErrorKind::AuthorizationMetadata,
                 format!(
-                    "@requiresScopes on `{site}` must be a non-empty list of scope lists of strings"
+                    "@requiresScopes on `{site}` must be a non-empty list of non-empty scope lists of strings"
                 ),
             )
         };
@@ -494,7 +537,14 @@ fn requirement<'a>(
                 let Value::String(scope) = scope else {
                     return Err(invalid());
                 };
+                if scope.is_empty() {
+                    return Err(invalid());
+                }
                 set.insert(scope.clone());
+            }
+            // An empty set would be satisfied by every caller.
+            if set.is_empty() {
+                return Err(invalid());
             }
             sets.insert(set.into_iter().collect::<Vec<_>>());
         }
@@ -505,6 +555,80 @@ fn requirement<'a>(
         }
     }
     Ok(rule)
+}
+
+/// The rule of one composed site, with each subgraph's `@requiresScopes`
+/// declaration as its own entry, so that all of them must hold. Composition
+/// merged the declarations into one list of alternatives; the declarations
+/// must account for exactly that list, or the graph is refused.
+fn site_requirement<'a>(
+    authenticated: bool,
+    composed: impl Iterator<Item = &'a Value>,
+    site: &ScopeSite,
+    declared: &SubgraphScopeRequirements,
+) -> Result<Requirement, RouterError> {
+    let label = match site {
+        (type_name, Some(field)) => format!("{type_name}.{field}"),
+        (type_name, None) => type_name.clone(),
+    };
+    let composed = requirement(authenticated, composed, &label)?;
+    let declared = declared.sites.get(site).cloned().unwrap_or_default();
+    let composed_sets = composed.scopes.iter().flatten().collect::<BTreeSet<_>>();
+    let declared_sets = declared.iter().flatten().collect::<BTreeSet<_>>();
+    if composed_sets != declared_sets {
+        return Err(unmapped(&site.0, site.1.as_deref()));
+    }
+    Ok(Requirement {
+        authenticated: composed.authenticated || !declared.is_empty(),
+        scopes: declared,
+    })
+}
+
+fn unmapped(type_name: &str, field: Option<&str>) -> RouterError {
+    let site = match field {
+        Some(field) => format!("{type_name}.{field}"),
+        None => type_name.to_owned(),
+    };
+    RouterError::new(
+        RouterErrorKind::AuthorizationMetadata,
+        format!(
+            "@requiresScopes on `{site}` cannot be matched to the subgraph declarations it was composed from"
+        ),
+    )
+}
+
+/// Interfaces each object or interface implements, transitively.
+fn implemented_interfaces(state: &SupergraphState) -> HashMap<String, BTreeSet<String>> {
+    let direct = state
+        .definitions
+        .values()
+        .filter_map(|definition| {
+            let implements = match definition {
+                SupergraphDefinition::Object(object) => &object.join_implements,
+                SupergraphDefinition::Interface(interface) => &interface.join_implements,
+                _ => return None,
+            };
+            Some((
+                definition.name().to_owned(),
+                implements
+                    .iter()
+                    .map(|implemented| implemented.interface.clone())
+                    .collect::<BTreeSet<_>>(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut closed = HashMap::new();
+    for name in direct.keys() {
+        let mut reached = BTreeSet::new();
+        let mut pending = direct[name].iter().cloned().collect::<Vec<_>>();
+        while let Some(interface) = pending.pop() {
+            if reached.insert(interface.clone()) {
+                pending.extend(direct.get(&interface).into_iter().flatten().cloned());
+            }
+        }
+        closed.insert(name.clone(), reached);
+    }
+    closed
 }
 
 /// Object types each interface or union may resolve to.
@@ -1053,8 +1177,264 @@ mod tests {
             )])
             .unwrap()
             .load();
-        let nested = NestedAuthorization::build(&graph.hive.snapshot().planner.supergraph).unwrap();
+        let nested = NestedAuthorization::build(
+            &graph.hive.snapshot().planner.supergraph,
+            &graph.scope_requirements,
+        )
+        .unwrap();
         assert!(nested.is_empty());
         assert!(nested.guarded.is_empty());
+    }
+
+    fn graph_of(subgraphs: &[(&str, &str)]) -> std::sync::Arc<ActiveGraph> {
+        let inputs = subgraphs
+            .iter()
+            .map(|(name, sdl)| {
+                crate::federation::CandidateSubgraph::new(
+                    name,
+                    &format!("http://{name}.test/graphql"),
+                    sdl,
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::federation::GraphStore::new(&inputs).unwrap().load()
+    }
+
+    /// A catalogue whose root fields are all public, so only composed
+    /// directives can refuse.
+    fn public_catalog(graph: &ActiveGraph) -> Result<AuthorizationCatalog, RouterError> {
+        let operations = super::super::graph_root_contract(graph)?
+            .into_iter()
+            .map(|((root_type, field_name), arguments)| OperationDescriptor {
+                root_type,
+                field_name,
+                arguments: arguments
+                    .into_iter()
+                    .map(|(name, graphql_type)| ArgumentDescriptor {
+                        name,
+                        required: graphql_type.ends_with('!'),
+                        graphql_type,
+                    })
+                    .collect(),
+                authorization: AuthorizationRequirement::Public,
+            })
+            .collect();
+        AuthorizationCatalog::build(graph, &[descriptor(operations)])
+    }
+
+    fn check_graph(
+        graph: &ActiveGraph,
+        query: &str,
+        scopes: Option<&[&str]>,
+    ) -> Vec<AuthorizationDenial> {
+        let catalog = public_catalog(graph).unwrap();
+        let document = hive_router::query_planner::utils::parsing::parse_operation(query);
+        let operation = hive_router::query_planner::ast::normalization::normalize_operation(
+            &graph.hive.snapshot().planner.supergraph,
+            &document,
+            None,
+        )
+        .unwrap()
+        .operation;
+        let principal = scopes.map(|scopes| {
+            AuthenticatedPrincipal::new("subject", scopes.iter().copied(), None).unwrap()
+        });
+        let mut results = [VariableResolution::Preflight, VariableResolution::Complete]
+            .map(|resolution| {
+                catalog.authorize_operation(
+                    &operation,
+                    &HashMap::new(),
+                    principal.as_ref(),
+                    &ExactScopeMatcher,
+                    resolution,
+                )
+            })
+            .into_iter();
+        let preflight = results.next().unwrap();
+        let complete = results.next().unwrap();
+        assert_eq!(preflight, complete, "{query}");
+        complete
+    }
+
+    const SHARED_A: &str = r#"
+        extend schema @link(
+            url: "https://specs.apollo.dev/federation/v2.7"
+            import: ["@key", "@shareable", "@requiresScopes"]
+        )
+        type Query { item: Item, secret: Secret }
+        type Item @key(fields: "id") {
+            id: ID!
+            name: String @shareable @requiresScopes(scopes: [["a"]])
+        }
+        type Secret @shareable @requiresScopes(scopes: [["a"]]) { id: ID! }
+    "#;
+
+    const SHARED_B: &str = r#"
+        extend schema @link(
+            url: "https://specs.apollo.dev/federation/v2.7"
+            import: ["@key", "@shareable", "@requiresScopes"]
+        )
+        type Item @key(fields: "id") {
+            id: ID!
+            name: String @shareable @requiresScopes(scopes: [["b"]])
+        }
+        type Secret @shareable @requiresScopes(scopes: [["b"]]) { id: ID! }
+    "#;
+
+    #[test]
+    fn per_subgraph_scope_requirements_are_combined_with_and_semantics() {
+        let graph = graph_of(&[("alpha", SHARED_A), ("beta", SHARED_B)]);
+        for scopes in [&["a"][..], &["b"]] {
+            assert_eq!(
+                check_graph(&graph, "{ item { id name } }", Some(scopes)),
+                vec![refused("FORBIDDEN", &["item", "name"])],
+                "{scopes:?}"
+            );
+            assert_eq!(
+                check_graph(&graph, "{ secret { id } }", Some(scopes)),
+                vec![
+                    refused("FORBIDDEN", &["secret"]),
+                    refused("FORBIDDEN", &["secret", "id"]),
+                ],
+                "{scopes:?}"
+            );
+        }
+        assert_eq!(
+            check_graph(&graph, "{ item { name } }", None),
+            vec![refused("UNAUTHENTICATED", &["item", "name"])]
+        );
+        for query in ["{ item { id name } }", "{ secret { id } }"] {
+            assert!(
+                check_graph(&graph, query, Some(&["a", "b"])).is_empty(),
+                "{query}"
+            );
+        }
+    }
+
+    const MEDIA_OWNER: &str = r#"
+        extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
+        type Query { book: Book, media: Media }
+        interface Media @key(fields: "id") { id: ID! }
+        type Book implements Media @key(fields: "id") { id: ID!, title: String }
+    "#;
+
+    const MEDIA_OBJECT: &str = r#"
+        extend schema @link(
+            url: "https://specs.apollo.dev/federation/v2.7"
+            import: ["@key", "@interfaceObject", "@authenticated", "@requiresScopes"]
+        )
+        type Media @key(fields: "id") @interfaceObject {
+            id: ID!
+            reviews: String @authenticated
+            audit: String @requiresScopes(scopes: [["audit"]])
+        }
+    "#;
+
+    #[test]
+    fn interface_object_rules_apply_to_every_implementation() {
+        let graph = graph_of(&[("owner", MEDIA_OWNER), ("annotations", MEDIA_OBJECT)]);
+        assert_eq!(
+            check_graph(&graph, "{ book { title reviews } }", None),
+            vec![refused("UNAUTHENTICATED", &["book", "reviews"])]
+        );
+        assert!(check_graph(&graph, "{ book { title reviews } }", Some(&[])).is_empty());
+        let spread = "{ book { r: reviews ...F } } fragment F on Book { audit }";
+        let narrowed = "{ media { ... on Book { reviews audit } } }";
+        for (query, reviews, audit) in [
+            (spread, ["book", "r"], ["book", "audit"]),
+            (narrowed, ["media", "reviews"], ["media", "audit"]),
+        ] {
+            assert_eq!(
+                check_graph(&graph, query, None),
+                vec![
+                    refused("UNAUTHENTICATED", &reviews),
+                    refused("UNAUTHENTICATED", &audit),
+                ],
+                "{query}"
+            );
+            assert_eq!(
+                check_graph(&graph, query, Some(&[])),
+                vec![refused("FORBIDDEN", &audit)],
+                "{query}"
+            );
+            assert!(
+                check_graph(&graph, query, Some(&["audit"])).is_empty(),
+                "{query}"
+            );
+        }
+        // The interface field itself keeps its rule.
+        assert_eq!(
+            check_graph(&graph, "{ media { audit } }", Some(&[])),
+            vec![refused("FORBIDDEN", &["media", "audit"])]
+        );
+    }
+
+    #[test]
+    fn empty_or_non_string_scope_sets_fail_graph_construction() {
+        for scopes in ["[[]]", "[[\"a\"], []]", "[[1]]", "[]"] {
+            let sdl = format!(
+                r#"
+                extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@requiresScopes"])
+                type Query {{ status: String @requiresScopes(scopes: {scopes}) }}
+                "#
+            );
+            let built =
+                crate::federation::GraphStore::new(&[crate::federation::CandidateSubgraph::new(
+                    "bad",
+                    "http://bad.test/graphql",
+                    &sdl,
+                )]);
+            assert!(
+                matches!(
+                    built,
+                    Err(crate::federation::FederationError::SourceSdl { .. })
+                ),
+                "{scopes}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaration_that_cannot_be_matched_refuses_the_graph() {
+        // Composition reads `@other__requiresScopes` as the imported directive,
+        // which the router does not recognize; the composed site then has no
+        // matching declaration.
+        let graph = graph_of(&[(
+            "odd",
+            r#"
+            extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@requiresScopes"])
+            type Query { status: String @other__requiresScopes(scopes: [["a"]]) }
+            "#,
+        )]);
+        assert!(graph.supergraph_sdl.contains("@requiresScopes"));
+        assert_eq!(
+            public_catalog(&graph).unwrap_err().kind(),
+            RouterErrorKind::AuthorizationMetadata
+        );
+    }
+
+    #[test]
+    fn deferred_and_streamed_selections_are_walked() {
+        assert_eq!(
+            both(
+                "{ zone(id: \"z1\") { id ... @defer { owner { id } } } }",
+                None
+            ),
+            vec![refused("UNAUTHENTICATED", &["zone", "owner"])]
+        );
+        assert_eq!(
+            both(
+                "{ zone(id: \"z1\") { ... on Zone @defer(label: \"later\") { audit } } }",
+                Some(&[])
+            ),
+            vec![refused("FORBIDDEN", &["zone", "audit"])]
+        );
+        assert_eq!(
+            both(
+                "{ search @stream(initialCount: 0) { ... on Zone { owner { id } } } }",
+                None
+            ),
+            vec![refused("UNAUTHENTICATED", &["search", "owner"])]
+        );
     }
 }

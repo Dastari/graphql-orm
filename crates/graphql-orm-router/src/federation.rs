@@ -1,4 +1,7 @@
 mod declaration_order;
+mod scope_sites;
+
+pub(crate) use scope_sites::{ScopeSite, SubgraphScopeRequirements};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -143,6 +146,7 @@ struct ComposedCandidate {
     document: hive_router::graphql_tools::static_graphql::schema::Document,
     sdl: Arc<str>,
     warnings: Vec<CompositionDiagnostic>,
+    scope_requirements: SubgraphScopeRequirements,
 }
 
 pub(crate) struct ActiveGraph {
@@ -154,6 +158,9 @@ pub(crate) struct ActiveGraph {
     pub(crate) hive: Arc<Supergraph>,
     /// The router-hosted `Node` implementations, when node lookup is composed.
     pub(crate) node_lookup: Option<Arc<NodeLookup>>,
+    /// Each subgraph's own `@requiresScopes` declarations, which composition
+    /// merges into one list of alternatives.
+    pub(crate) scope_requirements: Arc<SubgraphScopeRequirements>,
 }
 
 #[cfg(test)]
@@ -234,6 +241,7 @@ pub(crate) fn build_active_graph_with_options(
         warnings: composed.warnings.into(),
         hive: Arc::new(hive),
         node_lookup: node_lookup_graph,
+        scope_requirements: Arc::new(composed.scope_requirements),
     }))
 }
 
@@ -281,6 +289,7 @@ fn compose_candidate(inputs: &[CandidateSubgraph]) -> Result<ComposedCandidate, 
     })?;
     // Inputs are already sorted by subgraph name. For shared declarations,
     // the first occurrence wins and later subgraphs append unseen members.
+    let mut scope_requirements = SubgraphScopeRequirements::default();
     for input in &inputs {
         let source = cynic_parser::parse_type_system_document(&input.sdl).map_err(|error| {
             FederationError::SourceSdl {
@@ -289,6 +298,7 @@ fn compose_candidate(inputs: &[CandidateSubgraph]) -> Result<ComposedCandidate, 
             }
         })?;
         declaration_order.record(&source);
+        scope_requirements.record(&input.name, &source)?;
     }
     let mut document = adapt_composed_supergraph(&sdl, &root_participation)?;
     declaration_order.restore(&mut document);
@@ -298,6 +308,7 @@ fn compose_candidate(inputs: &[CandidateSubgraph]) -> Result<ComposedCandidate, 
         document,
         sdl: normalized_sdl,
         warnings: diagnostics.warnings(),
+        scope_requirements,
     })
 }
 

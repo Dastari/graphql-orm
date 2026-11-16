@@ -400,7 +400,7 @@ impl AuthorizationCatalog {
             graph_fingerprint: graph.fingerprint.clone(),
             operations,
             root_types,
-            nested: NestedAuthorization::build(state)?,
+            nested: NestedAuthorization::build(state, &graph.scope_requirements)?,
         })
     }
 

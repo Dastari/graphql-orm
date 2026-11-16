@@ -632,7 +632,6 @@ struct TrustedInternalSubscription;
 /// external authority snapshot. Kept in memory only, never formatted.
 struct RetainedConnectionBearer(String);
 
-/// Why an operation's principal could not be confirmed.
 /// A refusal names its code and, for a refused selection, only its response
 /// path by response key. It never names the rule or the missing scope.
 fn authorization_denial_error(denial: crate::auth::AuthorizationDenial) -> GraphQLError {
@@ -650,6 +649,7 @@ fn authorization_denial_error(denial: crate::auth::AuthorizationDenial) -> Graph
     error
 }
 
+/// Why an operation's principal could not be confirmed.
 fn authority_unavailable() -> GraphQLError {
     GraphQLError::from_message_and_code("authentication service unavailable", "UNAUTHENTICATED")
 }

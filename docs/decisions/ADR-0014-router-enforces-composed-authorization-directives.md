@@ -34,10 +34,17 @@ operation, at the root and below it, before any downstream request opens.
 
 - A field `P.f` returning named type `R` requires the rules on `P`, `P.f` and
   `R`. A field selected on an interface also requires the rules of every
-  implementation of that field and of its type. An inline fragment, or a
-  normalized fragment spread, requires the rule on its type condition.
-  `@requiresScopes` is an OR of AND sets, uses the router's scope matcher, and
-  implies authentication.
+  implementation of that field and of its type, and a field of an
+  implementation requires the rules declared on the same interface field and
+  on the interface, including through `@interfaceObject`. An inline
+  fragment, or a normalized fragment spread, requires the rule on its type
+  condition. `@requiresScopes` is an OR of AND sets, uses the router's scope
+  matcher, and implies authentication.
+- Composition merges the `@requiresScopes` sets of several subgraphs into one
+  list of alternatives. The router instead keeps each subgraph's declaration,
+  read from its SDL, and requires all of them. A malformed declaration, or a
+  composed set the declarations do not account for, refuses the graph, so
+  the last-known-good graph stays active.
 - A refused selection refuses the whole operation, with `UNAUTHENTICATED` or
   `FORBIDDEN` errors that name only the response path. The router does not
   trim the operation or return partial data for it.
@@ -63,6 +70,9 @@ operation, at the root and below it, before any downstream request opens.
   even when composition does not propagate implementation rules onto the
   interface. It can refuse an interface field that one implementation
   protects, for a caller that would only ever receive another implementation.
+- Reading each subgraph's declarations duplicates part of composition's
+  directive-name resolution. The cross-check against the composed sets turns
+  any disagreement into a refused graph rather than a weaker rule.
 - ORM policies without an SDL directive (row and entity policies, templated
   scopes, custom guards) are still enforced only by their subgraph.
 
