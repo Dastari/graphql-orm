@@ -20,7 +20,30 @@ below, when you take the release.
 
 Placeholder versions: ORM and macros 0.160.0, operation catalogue 0.9.0, AI
 tool profiles 0.24.0, AI 0.146.0 (AI schema module `0.82.0`). Upgrade them
-together.
+together. The router is released on its own line as 0.16.0.
+
+### Router 0.16.0: nested `@authenticated` and `@requiresScopes` are enforced
+
+- **Action needed** for authenticated `graphql-orm-router` hosts whose
+  subgraph SDL carries `@authenticated` or `@requiresScopes` below the root,
+  on a field or a type, and whose clients select those fields without the
+  authority they name. The router now evaluates the composed directives on
+  every selected field (nested object fields, joined entity fields, interface
+  and union members, fragments and aliases) and refuses the whole operation
+  before any subgraph request, with `UNAUTHENTICATED` or `FORBIDDEN` and the
+  refused selection's response path. It used to evaluate only root fields'
+  descriptors and leave nested fields to the subgraph. Root fields are now
+  also checked against their SDL directives.
+  - Find the directives in each subgraph's SDL and confirm every client that
+    selects such a field presents a bearer and, for `@requiresScopes`, one
+    complete scope set. A field selected through an interface needs the rules
+    of every implementation of it.
+  - A client that should still receive the rest of an operation must move the
+    protected selection into its own operation; the router does not null a
+    refused field.
+  - Keep subgraph guards and policies: the router check grants nothing.
+  See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#0154-to-0160).
+  Anonymous development mode is unchanged.
 
 ### Migration safety and live journal validation
 

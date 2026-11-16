@@ -3,12 +3,44 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.16.0 (unreleased, breaking batch)
+
+- **Breaking: composed `@authenticated` and `@requiresScopes` are enforced on
+  every selected field.** An authenticated router used to evaluate only its
+  protocol descriptors, and only for root fields: the composed directives were
+  kept in the supergraph, with their `SECURITY` links, but nothing below the
+  root evaluated them. Before any downstream request opens, the router now
+  walks the normalized operation against the composed schema, over HTTP and
+  the WebSocket gateway, including subscription admission. For each included
+  field `P.f` returning `R` it requires the rules on `P`, `P.f` and `R`; a
+  field selected on an interface also requires the rules of every
+  implementation of it; an inline fragment requires the rule on its type
+  condition. `@requiresScopes` is an OR of AND sets and implies
+  authentication. Aliases, fragment spreads, inline fragments, interfaces and
+  union members reach the same rules. Root fields are covered too, in
+  addition to their descriptor requirements.
+  ([#729](https://github.com/Dastari/graphql-orm/issues/729))
+- A refused selection refuses the whole operation with no `data`, as a refused
+  root field does. Each error is `UNAUTHENTICATED` (no caller) or `FORBIDDEN`
+  (missing scope), names only the selection's response path by response key,
+  and at most 32 are reported. The router never trims a selection or returns
+  partial data for it. Subgraph guards and policies stay authoritative: the
+  router may deny early but grants nothing.
+- `__typename` is never refused at any depth. `__schema` and `__type` keep
+  the introspection policy. Anonymous development mode, which has no
+  authorization catalogue, enforces nothing, as before.
+- A malformed composed `@requiresScopes` argument fails graph construction, so
+  the last-known-good graph stays active.
+- Each distinct rule is evaluated once per operation, and selection sets that
+  cannot reach a rule are not walked. A graph with no composed directives
+  skips the walk.
 
 ## 0.15.4 (unreleased)
 

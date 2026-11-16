@@ -14,8 +14,9 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - breaking batch (ORM/macros 0.166.0, backup 0.27.0 on `next/breaking`)
+## Unreleased - breaking batch (ORM/macros 0.166.0, backup 0.27.0, router 0.16.0 on `next/breaking`)
 
+- **Breaking (router 0.16.0): composed `@authenticated` and `@requiresScopes` are enforced on every selected field (#729).** An authenticated router evaluates the directives on nested object fields, joined entity fields, interface and union members, fragments and aliases, as well as on root fields, and refuses the whole operation before any subgraph request with `UNAUTHENTICATED` or `FORBIDDEN` and the response path. It used to check only root fields' protocol descriptors. `__typename` is never refused, and the router still grants nothing. See the [router changelog](crates/graphql-orm-router/CHANGELOG.md#0160-unreleased-breaking-batch) and the [migration guide](MIGRATION.md#router-0160-nested-authenticated-and-requiresscopes-are-enforced).
 - **Breaking: migration plans no longer drop undeclared tables by default (#441).** `PlanOptions::default()` is `managed_tables_only()`. A plan drops a live table the target does not declare only when the caller plans with `PlanOptions::strict()`. Schema stages and ABI upgrades drop only tables that a stage declared.
 - **Breaking: lossy column type changes are `Destructive` (#568).** A type change is `Risky` only when it is a known lossless widening; every other type change needs `ApplyOptions::allow_destructive`.
 - **Breaking: integrity-removing steps are `Destructive` (#569).** `SetAppendOnly { enabled: false }`, `DropIndex`, `DropForeignKey`, and `SetCompositeUniques`/`SetCheckConstraints` steps that remove or change a constraint need `allow_destructive`. No new option was added.

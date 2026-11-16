@@ -72,7 +72,9 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-Breaking batch, collected on `next/breaking` (ORM/macros 0.166.0, backup 0.27.0, AI 0.147.0, catalogue 0.9.0, AI tool profiles 0.24.0; versions are placeholders):
+Breaking batch, collected on `next/breaking` (ORM/macros 0.166.0, backup 0.27.0, AI 0.147.0, catalogue 0.9.0, AI tool profiles 0.24.0, router 0.16.0; versions are placeholders):
+
+- **Action needed — router 0.16.0:** composed `@authenticated` and `@requiresScopes` are enforced on nested fields, fragments, aliases, interfaces and unions; a refused selection refuses the whole operation before any subgraph request. [Migration](../../MIGRATION.md#router-0160-nested-authenticated-and-requiresscopes-are-enforced) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0154-to-0160)
 
 - **Action needed — AI 0.147.0:** upgrading an AI store with a legacy webhook-receipt index now needs `AiSchemaModule::admit_index_replacements` or explicit destructive admission. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01470)
 
