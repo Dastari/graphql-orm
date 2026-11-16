@@ -10,11 +10,20 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.161.0 (breaking batch) makes migration planning safer by default:
+Version 0.163.0 (breaking batch) makes migration planning safer by default:
 plans no longer drop tables the target does not declare, lossy column type
 changes and integrity-removing steps need `allow_destructive`, and the
 PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
+resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its
+continuation with a service-owned key under a server-authored
+`AuthorizedPageBinding`, refuses a continuation from a different context
+before any row is read, and resolves entity, row and field authorization again
+on every page. The API is additive and needs no action. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages) and the
+[reference](../../docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
 
 Version 0.160.0 restores a snapshot in one transaction on PostgreSQL and
 SQLite, adds `SchemaManager::reset_runtime_search` and a restore-in-progress

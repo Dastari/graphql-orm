@@ -12,7 +12,7 @@ supersedes: []
 
 ## To 0.25.0: result and error types, target clear on journaled databases
 
-Upgrade backup and, for the optional ORM adapter, ORM/macros to 0.161.0 on
+Upgrade backup and, for the optional ORM adapter, ORM/macros to 0.163.0 on
 the same reviewed revision.
 
 - **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
@@ -27,7 +27,7 @@ the same reviewed revision.
   matched the refusal of a revoked or unlisted snapshot as
   `ManifestAuthenticationFailed`: match the new variant, or call
   `is_snapshot_not_admitted()`, which is unchanged.
-- **Target clear. No action.** ORM 0.161.0 makes journaled PostgreSQL tables
+- **Target clear. No action.** ORM 0.163.0 makes journaled PostgreSQL tables
   refuse `TRUNCATE`; `OrmBackupAdapter::clear_restore_target` now turns the
   journal setting off in its own transaction, which the guard admits. Hosts
   that clear a restore target with their own `TRUNCATE` must do the same, or

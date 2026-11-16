@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - breaking batch (ORM/macros 0.161.0, backup 0.25.0 on `next/breaking`)
+## Unreleased - breaking batch (ORM/macros 0.163.0, backup 0.25.0 on `next/breaking`)
 
 - **Breaking: migration plans no longer drop undeclared tables by default (#441).** `PlanOptions::default()` is `managed_tables_only()`. A plan drops a live table the target does not declare only when the caller plans with `PlanOptions::strict()`. Schema stages and ABI upgrades drop only tables that a stage declared.
 - **Breaking: lossy column type changes are `Destructive` (#568).** A type change is `Risky` only when it is a known lossless widening; every other type change needs `ApplyOptions::allow_destructive`.
@@ -22,6 +22,13 @@ for historical context.
 - **Breaking: the PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades (#592).** Journaled tables carry a `BEFORE TRUNCATE` guard that refuses the statement unless the transaction set `graphql_orm.change_journal` to `off`. A foreign key that changes rows of a table without a recorder when a journaled row is deleted is refused when the recorder is planned, installed or validated (`ChangeJournalCascadeGap`). `CHANGE_JOURNAL_SETTING` is public. Backup's `clear_restore_target` turns the setting off for its truncate.
 - **Breaking: backup result and error types.** `PruneResult` and `DeleteSnapshotResult` gain `deleted_snapshot_ids`, an unadmitted snapshot is refused with `BackupError::SnapshotNotAdmitted`, and all three types are `#[non_exhaustive]`.
 - See the [migration guide](MIGRATION.md#breaking-release-unreleased).
+
+## Unreleased - ORM/macros 0.162.0
+
+- Add context-bound authorized pages for handwritten GraphQL resolvers and query builders ([#169](https://github.com/Dastari/graphql-orm/issues/169)). `EntityQuery::fetch_authorized_page` runs the bounded, re-authorized scan of `fetch_authorized_scan` and seals its continuation with a service-owned key under a server-authored `AuthorizedPageBinding` that the resolver supplies on every request. A continuation issued under a different binding, entity, order, filter or key, or one that was altered, truncated, is oversized or has expired, is refused with `CURSOR_INVALID` before any row is read. Entity, row and field authorization are resolved again on every page, and `PAGE_FULL`, `BUDGET_EXHAUSTED` and `EXHAUSTED` keep their meanings. Additive: generated pagination, `fetch_authorized_scan` and their cursors are unchanged. No action is needed; see the [migration guide](MIGRATION.md#01620-context-bound-authorized-pages) and the [reference](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
+  - New public API: `AuthorizedPageBinding`, `AuthorizedPageBindingBuilder`, `AuthorizedPageBindingError`, `AuthorizedPageKeys`, `AuthorizedPageConfig`, `AuthorizedPageConfigError`, `AuthorizedPageRequest`, `Database::with_authorized_page_config`, `Database::authorized_page_config` and the `AUTHORIZED_PAGE_*` bounds and reason constants.
+  - The codec is version 1 (`gomp1`), XChaCha20-Poly1305 over the existing `chacha20poly1305` dependency, with key identifiers for rotation and a per-cursor lifetime (1 hour by default). Bounds cover cursor bytes, binding bytes, page size and scanned rows; a `limit` above the page bound is refused with `PAGE_LIMIT_EXCEEDED`.
+  - `CURSOR_INVALID` gains the optional `reason` values `AUTHORIZED_PAGE_CURSOR_EXPIRED` and `AUTHORIZED_PAGE_CURSOR_KEY_UNAVAILABLE` for this API only.
 
 ## Unreleased - ORM/macros 0.160.0, backup 0.24.0
 
@@ -31,6 +38,7 @@ for historical context.
 - **An ignored field-write denial no longer clears the stored value on upsert (#688).** With `FieldPolicy::ignore_denied_field_write`, a GraphQL upsert onto an existing row leaves a denied optional column out of the conflict update, on SQLite, PostgreSQL and SQL Server. It used to write `NULL`. Mutation hooks no longer see the column among the upsert's changes.
 - **Backup 0.24.0: host-held snapshot records (#610).** `ManifestAuthenticator::with_known_snapshots` and `with_revoked_snapshots` refuse a snapshot the host's records do not admit (`BackupError::is_snapshot_not_admitted`), so a pruned snapshot that is put back into the repository no longer verifies. `prune_observed` and `delete_snapshot_observed` report each snapshot id to a `SnapshotDeletionObserver` before deleting it, so the host has every deleted id even when the call fails. No existing backup type changed. See the [backup changelog](crates/graphql-orm-backup/CHANGELOG.md).
 - See the [migration guide](MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
 
 ## Unreleased - ORM/macros 0.159.0
 
