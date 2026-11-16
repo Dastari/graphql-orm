@@ -1596,6 +1596,57 @@ impl OrmAiRunService {
         Ok(())
     }
 
+    /// Records a response the provider retains in the stored-response ledger
+    /// as soon as the turn returns.
+    ///
+    /// The response exists at the provider whatever happens to the turn next
+    /// (a rule or budget refusal, cancellation, lease loss or a failed write),
+    /// so this needs no live lease: it checks only that the run belongs to the
+    /// lease's session. Recording is idempotent.
+    pub(crate) async fn record_retained_provider_response(
+        &self,
+        lease: &AiRunLease,
+        result: &crate::AiProviderCallResult,
+    ) -> Result<(), AiError> {
+        let (Some(profile), Some(response_id)) = (
+            result.retained_response_profile(),
+            result.provider_response_id().map(str::to_owned),
+        ) else {
+            return Ok(());
+        };
+        let provider_kind = result.provider_kind().as_str().to_owned();
+        let run_id = lease.run_id.0;
+        let session_id = lease.session_id.0;
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let profile = profile.clone();
+            let response_id = response_id.clone();
+            let provider_kind = provider_kind.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if run.session_id != session_id {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        crate::orm_session_retention::record_retained_provider_response(
+                            tx,
+                            session_id,
+                            &provider_kind,
+                            &profile,
+                            &response_id,
+                        )
+                        .await
+                    })
+                })
+        })
+        .await
+        .map_err(map_transaction)
+    }
+
     pub(crate) async fn append_provider_output(
         &self,
         lease: &AiRunLease,
@@ -9082,6 +9133,62 @@ mod tests {
                 .requeued,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_returned_retained_response_is_recorded_even_after_the_lease_is_lost() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-retained")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let ledger = || async {
+            fixture
+                .database
+                .transaction(TransactionMode::Default, |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiStoredProviderResponseRecord>()
+                            .limit(4)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .expect("ledger should load")
+        };
+        // A provider that did not store the response records nothing.
+        let unstored = crate::AiProviderCallResult::test_result(&lease, None, "resp_kept", vec![]);
+        fixture
+            .service
+            .record_retained_provider_response(&lease, &unstored)
+            .await
+            .expect("nothing to record");
+        assert!(ledger().await.is_empty());
+
+        // The lease expires and is recovered before the coordinator records.
+        fixture.clock.advance_seconds(61);
+        fixture.service.recover_expired_leases().await.unwrap();
+        let stored = unstored.with_test_provider_retains_responses(true);
+        fixture
+            .service
+            .record_retained_provider_response(&lease, &stored)
+            .await
+            .expect("recording needs no live lease");
+        // Idempotent.
+        fixture
+            .service
+            .record_retained_provider_response(&lease, &stored)
+            .await
+            .unwrap();
+        let rows = ledger().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, lease.session_id().0);
+        assert_eq!(rows[0].provider_response_id, "resp_kept");
+        assert_eq!(rows[0].cleanup_state, "retained");
     }
 
     #[tokio::test]

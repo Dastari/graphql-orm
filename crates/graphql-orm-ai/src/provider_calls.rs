@@ -2124,6 +2124,10 @@ pub struct AiProviderCallResult {
     provider_session_claim: Option<crate::AiProviderSessionClaim>,
     static_offering_reset_receipt:
         Option<Arc<crate::provider_session::AiStaticOfferingResetReceipt>>,
+    /// Whether the dispatching provider declared that it retains responses
+    /// (`ProviderCapabilities::provider_retained_continuation`; for OpenAI the
+    /// `store` flag it sent). Read from the registered provider at dispatch.
+    provider_retains_responses: bool,
 }
 
 /// Authoritative completed provider-hosted tool counts for one turn.
@@ -2701,6 +2705,7 @@ impl DynamicToolResponder {
                 None => None,
             },
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         };
         let requires_source = self
             .runtime
@@ -3019,10 +3024,12 @@ impl AiProviderCallResult {
     }
 
     /// Logical profile of the response when the provider retains it: an
-    /// OpenAI response continued through provider-retained state, which the
-    /// adapter requests only with `store_responses = true`.
+    /// OpenAI response from a provider that sent `store: true`
+    /// (`store_responses = true`, declared as
+    /// `ProviderCapabilities::provider_retained_continuation`).
     pub(crate) fn retained_response_profile(&self) -> Option<String> {
         (self.provider_kind == ProviderKind::OpenAi
+            && self.provider_retains_responses
             && self.request_snapshot.continuation_mode == ModelContinuationMode::ProviderRetained
             && self.provider_response_id.is_some())
         .then(|| self.model_inference_manifest.provider_profile_id.clone())
@@ -3333,6 +3340,12 @@ impl AiProviderCallResult {
         }
     }
 
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn with_test_provider_retains_responses(mut self, retains: bool) -> Self {
+        self.provider_retains_responses = retains;
+        self
+    }
+
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_result(
         lease: &AiRunLease,
@@ -3417,6 +3430,7 @@ impl AiProviderCallResult {
             native_control_receipts: Vec::new(),
             provider_session_claim: None,
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         }
     }
 
@@ -3526,6 +3540,7 @@ impl AiProviderCallResult {
             native_control_receipts: Vec::new(),
             provider_session_claim: None,
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         }
     }
 
@@ -3581,6 +3596,7 @@ impl AiProviderCallResult {
             native_control_receipts: Vec::new(),
             provider_session_claim: None,
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         }
     }
 }
@@ -4908,6 +4924,12 @@ impl AiProviderCallExecutor {
             .runtime
             .resolve_dispatch_request(current.principal(), &plan.budget.scope, plan.request)
             .await;
+        // Read from the same registered provider that sends the request: the
+        // OpenAI adapter sends `store` equal to this declaration.
+        let provider_retains_responses = self
+            .runtime
+            .provider_capabilities(&plan.provider_kind)
+            .is_some_and(|capabilities| capabilities.provider_retained_continuation);
         let dispatch = if let Some(responder) = &dynamic_responder {
             let responder: Arc<dyn ProviderDynamicToolResponder> = responder.clone();
             self.runtime
@@ -5405,6 +5427,7 @@ impl AiProviderCallExecutor {
             native_control_receipts,
             provider_session_claim: None,
             static_offering_reset_receipt: plan.static_offering_reset_receipt,
+            provider_retains_responses,
         })
     }
 
@@ -11717,6 +11740,69 @@ mod tests {
         assert!(matches!(error, AiError::PreTransportBudgetDenied));
         assert_eq!(fixture.mock.request_count(), 0);
         assert_eq!(reservation_count(&fixture.database).await, 0);
+    }
+
+    #[tokio::test]
+    async fn only_a_provider_that_stores_responses_feeds_the_stored_response_ledger() {
+        // The default plan mode is provider-retained even with
+        // `store_responses = false`; that alone must not record a response
+        // OpenAI never stored.
+        let fixture = fixture(Vec::new()).await;
+        let mut result = AiProviderCallResult::test_result(&fixture.lease, None, "resp_1", vec![]);
+        assert_eq!(result.provider_kind, ProviderKind::OpenAi);
+        assert_eq!(
+            result.request_snapshot.continuation_mode,
+            ModelContinuationMode::ProviderRetained
+        );
+        assert_eq!(result.retained_response_profile(), None);
+        result.provider_retains_responses = true;
+        assert_eq!(
+            result.retained_response_profile().as_deref(),
+            Some(result.model_inference_manifest.provider_profile_id.as_str())
+        );
+
+        // The executor reads the declaration from the provider that sends
+        // the request.
+        for retains in [false, true] {
+            let mock = MockProvider::new(vec![
+                ProviderEvent::ResponseStarted {
+                    response_id: Some("resp_store_check".to_owned()),
+                },
+                ProviderEvent::TextDelta {
+                    text: "done".to_owned(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some("resp_store_check".to_owned()),
+                },
+            ])
+            .with_capabilities(ProviderCapabilities {
+                streaming: true,
+                structured_output: true,
+                provider_retained_continuation: retains,
+                local: true,
+                ..ProviderCapabilities::default()
+            });
+            let fixture = fixture_with_provider(mock).await;
+            let executor = AiProviderCallExecutor::new(
+                fixture.runtime.clone(),
+                fixture.budget_service.clone(),
+                fixture.audit.clone(),
+                Arc::new(TestUsageAccounting),
+                Arc::new(SystemClock),
+                AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                    .expect("test provider limits should validate"),
+            );
+            let result = executor
+                .execute(&fixture.lease, plan(&fixture))
+                .await
+                .expect("provider call should complete");
+            assert_eq!(result.provider_retains_responses, retains);
+        }
     }
 
     #[tokio::test]

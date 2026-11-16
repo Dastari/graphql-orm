@@ -37,6 +37,12 @@ GraphQL SDL is unchanged.
   not in the ledger; delete them by identifier with
   `OpenAiStoredResponseDeletionService::delete_and_confirm_absent` if needed.
   See [stored provider responses](docs/session-retention.md#stored-provider-responses).
+- **Custom run control. Action needed** only for hosts that implement
+  `AiAgentRunControl` themselves instead of using `OrmAiRunService`. The new
+  provided method `record_retained_provider_response` defaults to recording
+  nothing, so stored responses of turns that fail after returning are not
+  tracked; delegate it to `OrmAiRunService` to track them. Checkpoints, final
+  outputs and background completions still record.
 - **Provider-file 404. No action.** A 404 to an OpenAI file `DELETE` no longer
   proves absence after the recorded provider expiry. An artifact whose file
   is really gone now retries and ends `cleanup_unconfirmed` instead of being
@@ -52,8 +58,9 @@ GraphQL SDL is unchanged.
   OpenAI-compatible routes) and chat completions accept a response naming a
   dated snapshot of the requested model. Budgets, pricing and usage stay keyed
   by the requested identifier, so price an alias at the rate of the snapshot
-  it resolves to. `AnthropicProvider::with_model_snapshot` mappings keep
-  working.
+  it resolves to. An `AnthropicProvider::with_model_snapshot` pin stays exact:
+  with a pin, only the requested identifier or the pinned snapshot is
+  accepted, as before. Pin an alias whose rate must not change silently.
 
 ## ORM/macros 0.166.0: guarded dependent deletes
 

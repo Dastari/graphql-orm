@@ -763,6 +763,13 @@ impl ChunkNormalizer {
                         if dropped {
                             text.push_str(DROPPED_TOOL_NOTICE);
                         }
+                        // The notice is visible text and counts against the
+                        // same bound.
+                        self.visible_bytes = self
+                            .visible_bytes
+                            .checked_add(text.len())
+                            .filter(|bytes| *bytes <= MAXIMUM_VISIBLE_TEXT_BYTES)
+                            .ok_or(ProviderError::Rejected)?;
                         events.push(ProviderEvent::TextDelta { text });
                         continue;
                     }

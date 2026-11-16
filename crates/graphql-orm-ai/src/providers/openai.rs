@@ -517,7 +517,10 @@ impl crate::AiStoredProviderResponseDeletionService for OpenAiStoredResponseDele
         if request.provider_kind() != &ProviderKind::OpenAi
             || self.provider_profile_id.as_deref() != Some(request.provider_profile_id())
         {
-            return Err(AiError::ProviderFailed);
+            // Nothing is sent: this adapter does not own the request.
+            return Err(AiError::InvalidConfiguration(
+                "stored-response deletion boundary does not own this profile".to_owned(),
+            ));
         }
         match Self::delete_and_confirm_absent(self, request.provider_response_id()).await? {
             OpenAiStoredResponseDeletion::DeletedAndConfirmedAbsent => Ok(()),
@@ -3487,6 +3490,23 @@ mod tests {
     }
 
     #[test]
+    fn the_retention_declaration_matches_the_store_flag_sent() {
+        let reference = SecretRef::parse("openai/store-declaration-test").unwrap();
+        let secrets: Arc<dyn AiSecretStore> =
+            Arc::new(TestSecrets(reference.clone(), "not-a-real-key".to_owned()));
+        let default = OpenAiProvider::new(
+            OpenAiProviderConfig::new(reference.clone()),
+            secrets.clone(),
+        )
+        .expect("default provider should build");
+        assert!(!default.capabilities().provider_retained_continuation);
+        let mut config = OpenAiProviderConfig::new(reference);
+        config.store_responses = true;
+        let storing = OpenAiProvider::new(config, secrets).expect("storing provider should build");
+        assert!(storing.capabilities().provider_retained_continuation);
+    }
+
+    #[test]
     fn stateless_replay_maps_the_conversation_without_storage() {
         let reference =
             SecretRef::parse("openai/stateless-test").expect("test secret reference should parse");
@@ -4162,11 +4182,10 @@ mod tests {
         };
         // Unbound, or bound to another profile: refused before any request.
         let unbound = stored_response_service("http://127.0.0.1:9/v1/files");
-        assert!(
-            ledger_delete(unbound, request("profile-openai"))
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            ledger_delete(unbound, request("profile-openai")).await,
+            Err(AiError::InvalidConfiguration(_))
+        ));
         assert!(
             ledger_delete(
                 bound("http://127.0.0.1:9/v1/files"),

@@ -90,18 +90,20 @@ requested identifier, the requested identifier followed by a date
 before `-latest` followed by such a date. A response that names any other
 model, including another model that shares a prefix, is refused.
 
-When an alias resolves to an identifier that does not follow that pattern,
-declare it:
+To pin an alias to one snapshot, declare it:
 
 ```rust
 let provider = AnthropicProvider::new(config, secrets)?
-    .with_model_snapshot("example-alias", "example-snapshot")?;
+    .with_model_snapshot("example-alias", "example-alias-20250101")?;
 ```
 
-The mapping accepts exactly one extra response identifier for one requested
-identifier. Budget reservations, pricing and usage stay keyed by the requested
-identifier, so a host that requests an alias prices it at the rate of the
-snapshot the alias resolves to.
+A pin is exact and replaces the dated-snapshot rule for that requested
+identifier: the response must name the requested identifier or the pinned
+snapshot. A newer snapshot the alias later moves to is refused until the pin
+is updated. Without a pin, a request is not tied to one snapshot. Budget
+reservations, pricing and usage stay keyed by the requested identifier, so a
+host that requests an alias prices it at the rate of the snapshot it resolves
+to; pin the alias when that rate must not change silently.
 
 The following remain deliberately unsupported and fail closed:
 

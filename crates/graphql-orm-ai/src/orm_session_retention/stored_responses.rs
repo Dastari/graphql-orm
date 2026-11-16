@@ -129,6 +129,20 @@ fn retry_at(attempts: i64, now: i64) -> Result<i64, AiError> {
     now.checked_add(delay).ok_or(AiError::PersistenceFailed)
 }
 
+/// What the deletion boundary reported for one claimed response.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeletionResult {
+    /// Acknowledged and confirmed absent.
+    Confirmed,
+    /// Sent but absence was not confirmed.
+    Unconfirmed,
+    /// The boundary does not own this kind or profile and sent nothing.
+    Unrouted,
+}
+
+/// Delay before a row the installed boundary does not own is offered again.
+const UNROUTED_RETRY_SECONDS: i64 = 3_600;
+
 enum StoredResponseClaim {
     /// Claimed with intent recorded; send the deletion request.
     Send(Box<AiStoredProviderResponseRecord>, bool),
@@ -294,20 +308,25 @@ impl OrmAiSessionRetentionService {
                         claimed.provider_response_id.clone(),
                         previous,
                     );
-                    let confirmed = service.delete_and_confirm_absent(&request).await.is_ok();
+                    let result = match service.delete_and_confirm_absent(&request).await {
+                        Ok(()) => DeletionResult::Confirmed,
+                        Err(AiError::InvalidConfiguration(_)) => DeletionResult::Unrouted,
+                        Err(_) => DeletionResult::Unconfirmed,
+                    };
                     let counter = match self
-                        .finish_stored_response(&claimed, confirmed, now, limits)
+                        .finish_stored_response(&claimed, result, now, limits)
                         .await?
                     {
                         None => &mut report.deferred,
-                        Some(true) => &mut report.deleted,
-                        Some(false)
+                        Some(DeletionResult::Confirmed) => &mut report.deleted,
+                        Some(DeletionResult::Unrouted) => &mut report.unrouted,
+                        Some(DeletionResult::Unconfirmed)
                             if claimed.provider_delete_attempts
                                 >= i64::from(limits.maximum_delete_attempts()) =>
                         {
                             &mut report.unconfirmed
                         }
-                        Some(false) => &mut report.retried,
+                        Some(DeletionResult::Unconfirmed) => &mut report.retried,
                     };
                     *counter = counter.saturating_add(1);
                 }
@@ -490,20 +509,33 @@ impl OrmAiSessionRetentionService {
     }
 
     /// Settles one claimed deletion. Returns `None` when the claim was
-    /// superseded, otherwise whether the response was confirmed absent.
+    /// superseded, otherwise the settled result.
     async fn finish_stored_response(
         &self,
         claimed: &AiStoredProviderResponseRecord,
-        confirmed: bool,
+        result: DeletionResult,
         now: i64,
         limits: AiStoredResponseCleanupLimits,
-    ) -> Result<Option<bool>, AiError> {
+    ) -> Result<Option<DeletionResult>, AiError> {
         let id = claimed.id;
         let version = claimed.row_version;
         let generation = claimed.cleanup_generation;
-        let terminal = !confirmed
+        let confirmed = result == DeletionResult::Confirmed;
+        let unrouted = result == DeletionResult::Unrouted;
+        let terminal = result == DeletionResult::Unconfirmed
             && claimed.provider_delete_attempts >= i64::from(limits.maximum_delete_attempts());
-        let next_attempt_at = retry_at(claimed.provider_delete_attempts, now)?;
+        let next_attempt_at = if unrouted {
+            now.checked_add(UNROUTED_RETRY_SECONDS)
+                .ok_or(AiError::PersistenceFailed)?
+        } else {
+            retry_at(claimed.provider_delete_attempts, now)?
+        };
+        // Nothing was sent for an unrouted row, so its attempt is returned.
+        let attempts_after = if unrouted {
+            claimed.provider_delete_attempts.saturating_sub(1).max(0)
+        } else {
+            claimed.provider_delete_attempts
+        };
         let correlation_id = format!("stored-response-cleanup:{id}:{generation}");
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -531,7 +563,7 @@ impl OrmAiSessionRetentionService {
                             return Ok(None);
                         }
                         insert_cleanup_audit(tx, id, "succeeded", correlation_id).await?;
-                        return Ok(Some(true));
+                        return Ok(Some(DeletionResult::Confirmed));
                     }
                     let update = if terminal {
                         UpdateAiStoredProviderResponseRecordInput {
@@ -545,6 +577,7 @@ impl OrmAiSessionRetentionService {
                             cleanup_state: Some(BACKOFF.to_owned()),
                             cleanup_lease_expires_at: Some(None),
                             cleanup_next_attempt_at: Some(Some(next_attempt_at)),
+                            provider_delete_attempts: Some(attempts_after),
                             ..Default::default()
                         }
                     };
@@ -563,11 +596,17 @@ impl OrmAiSessionRetentionService {
                     insert_cleanup_audit(
                         tx,
                         id,
-                        if terminal { "unconfirmed" } else { "failed" },
+                        if terminal {
+                            "unconfirmed"
+                        } else if unrouted {
+                            "unrouted"
+                        } else {
+                            "failed"
+                        },
                         correlation_id,
                     )
                     .await?;
-                    Ok(Some(false))
+                    Ok(Some(result))
                 })
             })
             .await
@@ -584,6 +623,7 @@ async fn insert_cleanup_audit(
     let reason_code = match outcome {
         "succeeded" => "stored_response_deleted",
         "unconfirmed" => "stored_response_cleanup_attempts_exhausted",
+        "unrouted" => "stored_response_boundary_not_configured",
         _ => "stored_response_cleanup_unconfirmed",
     };
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {

@@ -168,13 +168,12 @@ impl AnthropicProvider {
     /// Declares the one pinned snapshot a requested model identifier may
     /// resolve to.
     ///
-    /// By default the model named in a response must equal the requested
-    /// string byte for byte. Anthropic answers a request for a model alias
-    /// with the dated snapshot the alias currently points at, so such a
-    /// request is refused after the tokens were spent. This mapping accepts
-    /// exactly one extra response identifier for one requested identifier.
-    /// Any other returned model is still refused, including a newer snapshot
-    /// the alias moved to.
+    /// Without a pin, a response may name the requested identifier or a dated
+    /// snapshot of it (`-YYYYMMDD` or `-YYYY-MM-DD`, or the base of a
+    /// `-latest` alias followed by such a date). Declaring a pin replaces that
+    /// rule for this requested identifier: a response must then name exactly
+    /// the requested identifier or the pinned one. Any other returned model is
+    /// refused, including a newer dated snapshot the alias moved to.
     ///
     /// Budget reservations, pricing and usage stay keyed by the requested
     /// identifier. Declaring a mapping asserts that the host prices the
@@ -755,9 +754,11 @@ impl AnthropicEventNormalizer {
     }
 
     fn accepts_model(&self, model: Option<&str>) -> bool {
-        model.is_some_and(|model| {
-            super::http::echoed_model_matches(&self.expected_model, model)
-                || self.pinned_snapshot.as_deref() == Some(model)
+        model.is_some_and(|model| match self.pinned_snapshot.as_deref() {
+            // A declared pin is exact: the requested identifier or the pinned
+            // one, never another snapshot the alias later moves to.
+            Some(pinned) => model == self.expected_model || model == pinned,
+            None => super::http::echoed_model_matches(&self.expected_model, model),
         })
     }
 
@@ -1019,6 +1020,12 @@ impl AnthropicEventNormalizer {
             if !pending.is_empty() {
                 text.push_str(DROPPED_TOOL_NOTICE);
             }
+            // The notice is visible text and counts against the same bound.
+            self.visible_text_bytes = self
+                .visible_text_bytes
+                .checked_add(text.len())
+                .filter(|bytes| *bytes <= self.maximum_visible_text_bytes)
+                .ok_or(ProviderError::Rejected)?;
             return Ok(vec![ProviderEvent::TextDelta { text }]);
         }
         let mut events = Vec::new();
@@ -1722,10 +1729,17 @@ mod tests {
         assert!(start_with_model(&mut latest(), "model-20250101").is_ok());
         assert!(start_with_model(&mut latest(), "model-latest").is_ok());
 
-        let pinned = || exact().with_pinned_snapshot(Some("pinned-snapshot".to_owned()));
+        // A declared pin is exact: only the requested identifier or the pinned
+        // one, never another dated snapshot the alias moves to.
+        let pinned = || exact().with_pinned_snapshot(Some("model-alias-20250101".to_owned()));
         assert!(start_with_model(&mut pinned(), "model-alias").is_ok());
-        assert!(start_with_model(&mut pinned(), "pinned-snapshot").is_ok());
-        assert!(start_with_model(&mut pinned(), "model-alias-20260101").is_ok());
+        assert!(start_with_model(&mut pinned(), "model-alias-20250101").is_ok());
+        assert!(matches!(
+            start_with_model(&mut pinned(), "model-alias-20260101"),
+            Err(ProviderError::Rejected)
+        ));
+        // Unpinned, the same newer snapshot is accepted.
+        assert!(start_with_model(&mut exact(), "model-alias-20260101").is_ok());
         // Another family, a prefix-sharing model or a malformed date is refused.
         for other in [
             "model-alias-2025010",
@@ -1938,6 +1952,25 @@ mod tests {
         values.extend(stopped("max_tokens"));
         let events = frames(&mut tool_normalizer(), values).expect("accepted");
         assert!(!visible_text(&events).starts_with('\n'));
+    }
+
+    #[test]
+    fn the_notice_counts_against_the_visible_text_bound() {
+        // One output token allows 64 visible bytes; the notice is longer.
+        let mut tight = AnthropicEventNormalizer::new("test-model".into(), BTreeMap::new(), 1);
+        let mut values = vec![started()];
+        values.extend(stopped("max_tokens"));
+        // `stopped` reports five output tokens, above this bound, so use one.
+        values[1]["usage"]["output_tokens"] = json!(1);
+        assert!(matches!(
+            frames(&mut tight, values),
+            Err(ProviderError::Rejected)
+        ));
+        let mut roomy = tool_normalizer();
+        let mut values = vec![started()];
+        values.extend(stopped("max_tokens"));
+        let events = frames(&mut roomy, values).expect("the notice fits");
+        assert_eq!(roomy.visible_text_bytes, visible_text(&events).len());
     }
 
     #[test]

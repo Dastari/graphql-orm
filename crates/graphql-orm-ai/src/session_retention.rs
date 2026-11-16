@@ -226,11 +226,15 @@ pub trait AiStoredProviderResponseDeletionService: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error whenever absence is not confirmed, including a
-    /// not-found answer to the delete itself, a request for a provider kind or
-    /// profile this boundary does not own, and any transport failure. The
-    /// ledger retries with backoff and finally records the response as
-    /// unconfirmed; it never treats an error as deletion.
+    /// Return [`AiError::InvalidConfiguration`] only when this boundary does
+    /// not own the request's provider kind or profile and sent nothing; the
+    /// ledger then keeps the row without spending an attempt and counts it in
+    /// [`AiStoredResponseCleanupReport::unrouted`]. Return any other error
+    /// whenever absence is not confirmed, including a not-found answer to the
+    /// delete itself, an acknowledged delete whose follow-up retrieval fails,
+    /// and any transport failure. The ledger retries those with backoff and
+    /// finally records the response as unconfirmed; it never treats an error
+    /// as deletion.
     async fn delete_and_confirm_absent(
         &self,
         request: &AiStoredProviderResponseDeletionRequest,
@@ -331,4 +335,10 @@ pub struct AiStoredResponseCleanupReport {
     pub unconfirmed: u32,
     /// Candidates another worker claimed or changed first.
     pub deferred: u32,
+    /// Responses the installed deletion boundary does not own (another
+    /// provider kind, or a profile it is not bound to). Nothing was sent, no
+    /// attempt was spent, and the row is offered again an hour later. A
+    /// nonzero count is a configuration problem: bind or install a boundary
+    /// for that profile.
+    pub unrouted: u32,
 }

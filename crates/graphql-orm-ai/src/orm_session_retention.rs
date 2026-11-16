@@ -9751,6 +9751,53 @@ mod tests {
         }
     }
 
+    /// A boundary that owns no profile.
+    struct UnboundResponseDeletion;
+
+    #[async_trait]
+    impl crate::AiStoredProviderResponseDeletionService for UnboundResponseDeletion {
+        async fn delete_and_confirm_absent(
+            &self,
+            _: &crate::AiStoredProviderResponseDeletionRequest,
+        ) -> Result<(), AiError> {
+            Err(AiError::InvalidConfiguration("not bound".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unbound_profile_is_reported_without_spending_attempts() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        record_response(&database, session_id, "openai", "resp_unbound").await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let clock = Arc::new(FixedClock::new(now()));
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        )
+        .with_stored_response_deletion_service(Arc::new(UnboundResponseDeletion))
+        .with_stored_response_cleanup_limits(
+            crate::AiStoredResponseCleanupLimits::default()
+                .with_maximum_delete_attempts(1)
+                .unwrap(),
+        );
+        service.prune_session_content(None).await.unwrap();
+        for _ in 0..3 {
+            let report = service.delete_stored_provider_responses().await.unwrap();
+            assert_eq!(
+                (report.unrouted, report.unconfirmed, report.retried),
+                (1, 0, 0)
+            );
+            let rows = ledger(&database).await;
+            assert_eq!(rows[0].cleanup_state, "cleanup_backoff");
+            assert_eq!(rows[0].provider_delete_attempts, 0);
+            clock.advance_seconds(3_600);
+        }
+    }
+
     async fn record_response(
         database: &Database<SqliteBackend>,
         session_id: Uuid,
