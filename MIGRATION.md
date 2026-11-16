@@ -115,6 +115,16 @@ reclassified step, because the hash covers each step's risk.
   of the above, for planned migrations, schema targets, schema stages, ABI
   upgrades and owned (runtime) migrations.
 
+### AI 0.146.0: webhook-receipt index replacement admission
+
+- **Action needed** for hosts that compose `AiSchemaModule` and upgrade a
+  store whose webhook-receipt table still has a legacy AI index. The upgrade
+  drops that index and creates the current composite one, and the drop is now
+  `Destructive`. Pass the plan's options through
+  `AiSchemaModule::admit_index_replacements(&plan, options)`, which admits
+  destructive steps only when every one is that known index replacement. See
+  the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-webhook-receipt-index-replacement-admission).
+
 ### PostgreSQL change journal: TRUNCATE and unjournaled cascades are refused
 
 Only hosts that build with the `change-journal` feature on PostgreSQL are

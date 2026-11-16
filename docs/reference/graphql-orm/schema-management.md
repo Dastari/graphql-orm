@@ -131,6 +131,10 @@ to `Risky` and refuses `Destructive` steps until `allow_destructive` is set.
   removes a guarantee that later writes depended on, so it needs the same explicit opt-in as a
   data-losing step. A changed index or foreign key is planned as a drop and a create, and so is
   `Destructive` as well.
+- **Known limitation: SQL Server collation.** SQL Server's `ALTER COLUMN` without `COLLATE` resets
+  the column to the database default collation, which can change a code-page column's code page.
+  `ColumnModel` does not record collation, so the classifier does not detect this; review
+  `ALTER COLUMN` steps on non-default-collation text columns yourself.
 - PostgreSQL and SQL Server plans drop a removed table's own foreign keys first, so that table's
   first step is a `DropForeignKey` and the `DropTable` follows; both are `Destructive`.
 

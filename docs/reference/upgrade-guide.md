@@ -72,7 +72,9 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.163.0, `graphql-orm-macros` 0.163.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-Breaking batch (ORM/macros 0.164.0, backup 0.25.0):
+Breaking batch (ORM/macros 0.164.0, backup 0.25.0, AI 0.146.0):
+
+- **Action needed — AI 0.146.0:** upgrading an AI store with a legacy webhook-receipt index now needs `AiSchemaModule::admit_index_replacements` or explicit destructive admission. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-webhook-receipt-index-replacement-admission) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 
 - **Action needed — ORM/macros 0.164.0:** column constraint removal and retention-purge relaxation require destructive admission, widening is backend-aware, and live journal validation detects host-added cascade gaps. Avoid role/database journal-off defaults. [Safety follow-up](../../MIGRATION.md#migration-safety-and-live-journal-validation).
 

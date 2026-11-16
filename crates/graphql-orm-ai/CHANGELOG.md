@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.146.0
+
+- **Added:** `AiSchemaModule::admit_index_replacements(&plan, options)` admits an upgrade that only replaces an AI-owned webhook-receipt index. ORM 0.164.0 classifies every index drop as `Destructive`, so `ApplyOptions::default()` now refuses the upgrade from a store created before `provider_kind` joined the receipt primary key, or before module 0.72.0's composite index was renamed (including the 63-byte name PostgreSQL stored). The method sets `allow_destructive` only when every destructive step in the plan drops one of those known, non-unique legacy index names and the same plan creates the current composite index; any other destructive step leaves the options unchanged, and the gate refuses the plan.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.81.0`. See the migration guide.
+
 ## Unreleased - 0.145.0
 
 - **Added:** per-message structured entity references (#397). `SendAiMessageInput.references` takes a bounded list of `{kind, id}` pairs. A host `AiEntityReferenceRegistry` declares the accepted kinds and the `AiEntityReferenceResolver` hook; install it with `AiRuntimeBuilder::entity_references` and `OrmAiSessionService::with_entity_references`. Only the handle is stored. The hook is called again, with the principal acting at that moment, when a client reads the transcript and at every provider dispatch. A reference never grants access, an unknown kind is rejected, and a missing, denied, revoked, failed, oversized or over-cap reference becomes one fixed unavailable marker, so a reference is not an existence oracle. Resolved data reaches the model as a provenance-tagged envelope marked as data, not instructions. See [entity references](docs/entity-references.md).

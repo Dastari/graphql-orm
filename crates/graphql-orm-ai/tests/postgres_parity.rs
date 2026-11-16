@@ -714,6 +714,13 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
         .schema()
         .apply_migration(&upgrade, ApplyOptions::default())
         .await
+        .expect_err("the default gate refuses the index drop");
+    let options = module.admit_index_replacements(&upgrade, ApplyOptions::default());
+    assert!(options.allow_destructive);
+    database
+        .schema()
+        .apply_migration(&upgrade, options)
+        .await
         .expect("upgrade should apply");
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
