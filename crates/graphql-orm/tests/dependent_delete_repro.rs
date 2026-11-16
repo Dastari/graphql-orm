@@ -410,6 +410,16 @@ async fn run_case(
     deny_entity: bool,
     deny_field: bool,
 ) -> (Pool, async_graphql::Response, Hook) {
+    run_guarded_case(label, rows, depth, deny_entity, deny_field, None).await
+}
+async fn run_guarded_case(
+    label: &str,
+    rows: usize,
+    depth: usize,
+    deny_entity: bool,
+    deny_field: bool,
+    guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
+) -> (Pool, async_graphql::Response, Hook) {
     let pool = fixture(label).await;
     let hook = Hook::default();
     let mut db = Database::with_mutation_hook(pool.clone(), hook.clone());
@@ -443,9 +453,12 @@ async fn run_case(
         .data(AuthSubject::new("test-principal"))
         .data(registry)
         .finish();
-    let response = schema
-        .execute("mutation { deleteDeleteParent(id: \"parent\") { success } }")
-        .await;
+    let mut request =
+        async_graphql::Request::new(r#"mutation { deleteDeleteParent(id: "parent") { success } }"#);
+    if let Some(guard) = guard {
+        request = request.data(guard);
+    }
+    let response = schema.execute(request).await;
     if !response.errors.is_empty() {
         assert!(child_changes.try_recv().is_err());
     }
@@ -2212,5 +2225,55 @@ async fn dependent_delete_gate_reads_catalog_objects_under_any_search_path() {
             .await
             .unwrap();
         assert_eq!(n, 1, "{table}");
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn transaction_effect_guard_checks_the_physical_plan_and_row_bounds() {
+    use graphql_orm::graphql::orm::{DependentDeleteEffect as Effect, DependentDeleteGuard};
+    use std::collections::BTreeMap;
+    let correct = BTreeMap::from([
+        (Effect::Delete("DeleteChild".into()), Some(1)),
+        (Effect::Delete("DeleteLeaf".into()), Some(1)),
+        (
+            Effect::SetNull("DeleteNull".into(), "parentId".into()),
+            Some(1),
+        ),
+    ]);
+    for (label, effects, succeeds) in [
+        ("effect_undeclared", BTreeMap::new(), false),
+        (
+            "effect_wrong",
+            BTreeMap::from([(Effect::Delete("DeleteNull".into()), Some(1))]),
+            false,
+        ),
+        (
+            "effect_bound",
+            {
+                let mut effects = correct.clone();
+                effects.insert(Effect::Delete("DeleteChild".into()), Some(0));
+                effects
+            },
+            false,
+        ),
+        ("effect_correct", correct, true),
+    ] {
+        let guard = DependentDeleteGuard::new("DeleteParent".into(), effects);
+        let (pool, response, _) =
+            run_guarded_case(label, 10, 10, false, false, Some(guard.clone())).await;
+        assert_eq!(
+            response.errors.is_empty(),
+            succeeds,
+            "{label}: {:?}",
+            response.errors
+        );
+        assert_eq!(guard.was_committed(), succeeds);
+        if !succeeds {
+            assert_intact(&pool).await;
+        }
     }
 }

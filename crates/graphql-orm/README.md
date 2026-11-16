@@ -16,7 +16,13 @@ fixes SQL Server details: a `DECIMAL(38,38)` value is a decode error instead
 of a driver panic, introspection reads indexes, key `String` columns are
 indexable `NVARCHAR(450)`, rendered `ALTER COLUMN` keeps the column's
 collation, and the restore marker checks its key and constraint. See the
-[migration guide](../../MIGRATION.md#01650-to-01680-sql-server-correctness-and-a-client-offset-bound).
+[migration guide](../../MIGRATION.md#01660-to-01680-sql-server-correctness-and-a-client-offset-bound).
+
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
+`DependentDeleteGuard` compares declarations with the introspected delete plan
+and enforces dependent row limits before writes. Generated physical opt-out and
+bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
 
 Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.

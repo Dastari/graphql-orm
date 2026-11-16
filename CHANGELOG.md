@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.168.0
 
-SQL Server correctness follow-ups and an opt-in client offset bound. Generated SDL, operation catalogues and fingerprints are unchanged. See the [migration guide](MIGRATION.md#01650-to-01680-sql-server-correctness-and-a-client-offset-bound).
+SQL Server correctness follow-ups and an opt-in client offset bound. Generated SDL, operation catalogues and fingerprints are unchanged. See the [migration guide](MIGRATION.md#01660-to-01680-sql-server-correctness-and-a-client-offset-bound).
 
 - **A `DECIMAL(38,38)` value is a decode error, not a panic (#452).** The SQL Server driver asserts while it reads a non-NULL value in a column declared with scale 38, before the ORM sees the value. Every pooled, restore and transaction statement, and a notification registration, now catches that panic and fails with `sqlx::Error::Decode`; the connection is closed, a transaction fails, and the pool keeps serving. The process's panic hook still prints the assertion, and a binary built with `panic = "abort"` still aborts. Values beyond `rust_decimal` in other scales were already decode errors (0.151.0).
 - **Opt-in client offset bound on every backend (#456).** `DatabaseBuilder::max_page_offset(Some(n))` or `Database::with_max_page_offset(Some(n))` refuses a client page offset above `n` with `PAGE_LIMIT_EXCEEDED`, the code of a refused page limit, with the message `requested offset N exceeds the maximum page offset M`. It covers the pages the limit refusal covers: generated list roots, to-many relation pages and search pages, custom resolvers through `ClientPaginationConfig::resolve_client_page`, and Rust reads that take a `PageInput` (`EntityQuery::paginate`, `EntitySearchQuery::paginate`). The new `ClientPaginationConfig::admit_client_offset`, `admit_client_page`, `with_max_offset` and `max_offset` are public. The default is unbounded, as before; `PaginationConfig::RECOMMENDED_MAX_OFFSET` (10,000) documents a recommended maximum. The repository builders' `offset(n)` is not bounded. `limit: 0` already renders valid T-SQL (`SELECT TOP (0)`, since 0.151.0).
@@ -25,6 +25,16 @@ SQL Server correctness follow-ups and an opt-in client offset bound. Generated S
 - **`ALTER COLUMN` keeps a SQL Server column's collation (#742).** Rendered SQL Server `ALTER COLUMN` to a character type reads the column's live collation when it runs and adds `COLLATE <collation>` when it differs from the database default; without it SQL Server resets the column to the default, which can change a non-Unicode column's code page. Other target types render as before.
 - **Deterministic SQL Server pool test (#734).** `pool_bounds_acquire_and_statements_and_resets_idle_sessions` no longer opens connections inside the 500 ms acquire bound it tests, and its busy and timed-out statements wait on application locks the test holds instead of a fixed 200 ms head start and `WAITFOR DELAY`. Test-only.
 - **Restore marker follow-ups (#744).** A statement refused because a restore holds the lock stays `RestoreInProgress` (with an empty identifier) when the follow-up marker read fails, instead of `RestoreStateUnavailable`, whose message said no restore was running. The session reset also releases the marker install lock. `install_restore_marker` refuses a hand-made table whose primary key is not exactly `marker_key` or that lacks the `marker_key = 1` check. The `resume_restore` documentation lists `RestoreStateUnavailable`.
+
+## Unreleased - ORM/macros 0.166.0
+
+- Add request-local `DependentDeleteGuard`: compare admitted effects with the
+  introspected dependent-delete graph and enforce row bounds inside the write
+  transaction. Unknown and unsupported effect paths refuse. No default change.
+
+## Unreleased - AI 0.146.0, tool profiles 0.24.0
+
+- AI capability scale (part of #551): reviewed static read tools can sit behind the fixed broker instead of the provider surface, fixed-broker `describe` defines each repeated input type once, capability search no longer re-tokenises the catalogue, one oversized generated root no longer fails its target, large surfaces can opt into the fixed broker over native deferred loading, and a startup benchmark is published from CI. Also adds an opt-in host-held epoch anchor that keeps a file-level database restore closed (#572), an opt-in dependent-effect policy for generated deletes (#389), and opt-in strict query roots (#463). No schema change, and no fingerprint changes for a host that changes nothing. Opting into the delivery preference requires rebinding; see the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460) and [migration guidance](MIGRATION.md#ai-01450-to-01460-and-tool-profiles-0230-to-0240-capability-scale).
 
 ## Unreleased - ORM/macros 0.165.0, backup 0.26.0
 

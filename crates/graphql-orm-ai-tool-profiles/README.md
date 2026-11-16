@@ -20,6 +20,11 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version `0.24.0` adds a shared type dictionary rendering of plan schemas,
+precomputed capability search terms, per-root exclusion of oversized schemas,
+an opt-in strict query-root list and a startup benchmark example. See the
+[changelog](CHANGELOG.md).
+
 Version `0.23.0` requires operation catalogue 0.8.0 and ORM/macros 0.149.0
 producer metadata. It closes handwritten input objects by default. Every input object
 outside canonical generated entity and service inputs and their proved filter,

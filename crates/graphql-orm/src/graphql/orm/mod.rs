@@ -1,3 +1,5 @@
+mod delete_effect_guard;
+pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
 #[doc(hidden)]
 pub use generated_filter::*;
