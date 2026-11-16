@@ -68,16 +68,17 @@ changelog to decide.
 
 ### Unreleased
 
-- **No action** — ORM/macros 0.163.0: opt-in page-limit refusal and declared maxima with schema-local complexity bounds; existing `PaginationConfig` literals remain valid. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
-- **No action** — ORM/macros 0.163.0: per-read keyset and authorized-scan maxima through `EntityQuery::with_max_limit`. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
-- **No action** — ORM/macros 0.163.0: opt-in runtime 64-bit identity strings. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
-- **No action** — ORM/macros 0.163.0: cursor-key refusal details preserve exhaustive error-enum matches. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
-- **Action needed** — ORM/macros 0.163.0: clients expecting immediate subscription lag termination must allow termination at the next authority tick. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.164.0: opt-in page-limit refusal and declared maxima with schema-local complexity bounds; existing `PaginationConfig` literals remain valid. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.164.0: per-read keyset and authorized-scan maxima through `EntityQuery::with_max_limit`. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.164.0: opt-in runtime 64-bit identity strings. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **Action needed** — ORM/macros 0.164.0: only if you match the codes for a cursor key that is too long: runtime GraphQL returns `cursor_key_too_large` instead of `invalid_request` or `invalid_cursor`, and host errors return `ResourceLimit` with `detail() == Some("cursor_key_too_large")` instead of `InvalidRequest`; error enums stay source-compatible. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **Action needed** — ORM/macros 0.164.0: clients expecting immediate subscription lag termination must allow termination at the next authority tick. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.162.0, `graphql-orm-macros` 0.162.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.164.0, `graphql-orm-macros` 0.164.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
+- **No action** — ORM/macros 0.163.0: hand-emitted wrapper objects reduce compile cost; generated SDL, catalogues and fingerprints are unchanged [migration](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
 - **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)
 #### Breaking integration release (version provisional)
 

@@ -108,7 +108,7 @@ Upgrade runtime and macros together.
   `read_policy` ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
 
 
-## 0.162.0 to 0.163.0: page limits, 64-bit identities, cursor keys and subscription lag
+## 0.163.0 to 0.164.0: page limits, 64-bit identities, cursor keys and subscription lag
 
 Upgrade runtime and macros together. No schema or data migration is needed.
 Generated SDL, operation catalogues and fingerprints are unchanged unless you
@@ -126,16 +126,25 @@ turn on one of the new settings.
   refetch. A runtime live client must now treat `authorization_denied` as a
   terminal frame. Source closure, host continuity signals and schema-revision
   changes still end at once.
-- **Runtime cursor keys that are too long. No action.** Runtime GraphQL returns
-  `cursor_key_too_large`. Host errors retain the existing `ResourceLimit` category
-  and expose `Some("cursor_key_too_large")` through `detail()`. The public enums
+- **Runtime cursor keys that are too long. Action needed** only if you match
+  those codes. A runtime page whose row has order values too long for a cursor
+  used to fail through runtime GraphQL with `invalid_request` (above
+  `max_cursor_bytes`) or `invalid_cursor` (above the cursor protection bounds),
+  and a host `RuntimeRelationError::code()` returned `InvalidRequest`. Runtime
+  GraphQL now returns `cursor_key_too_large`. Host `RuntimeQueryError` and
+  `RuntimeRelationError` both return `ResourceLimit` with
+  `detail() == Some("cursor_key_too_large")`; match that pair instead of
+  `invalid_request`, `invalid_cursor` or `InvalidRequest`. The public enums
   and existing `PaginationConfig` struct literals remain source-compatible.
   Dedicated enum variants (and any `#[non_exhaustive]` change) belong to
   `next/breaking`, in `breaking/orm-contract`.
 - **Refusing oversized page limits. No action.** Off by default. To let a
   client tell a reduced page from a last page, set
   `DatabaseBuilder::refuse_oversized_page_limit(true)`: an explicit GraphQL
-  page limit above the maximum then fails with `PAGE_LIMIT_EXCEEDED`.
+  page limit above the maximum then fails with `PAGE_LIMIT_EXCEEDED`. So does
+  a Rust `EntityQuery::paginate(page)` connection read (`fetch_connection`,
+  `fetch_connection_with_auth`, `fetch_connection_selected_with_auth`), which
+  is no longer reduced.
 - **Declared maximum page limit. No action.** Optional
   `schema_roots!(max_page_limit: N)` publishes `N` in the semantic catalogue
   and the complexity estimate and refuses a `Database` configured differently.
@@ -161,6 +170,17 @@ turn on one of the new settings.
 - **Keyset cursor documentation. No action.** Static keyset cursors were never
   tamper-evident; the documentation now says so. Do not treat a cursor as
   proof of anything: authorization is applied to every page.
+
+## 0.159.0 to 0.163.0: wrapper object compile cost
+
+- **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
+  together. The generated edge, connection, mutation result, change event,
+  bulk delete and bulk update result, and authorized scan page types no longer
+  derive `async_graphql::SimpleObject`; the macros emit the equivalent output
+  impls. Generated SDL, operation and semantic catalogues and fingerprints are
+  byte-identical, and the types keep their fields, derives other than
+  `SimpleObject`, and `async fn` field getters. The new hidden
+  `graphql_orm::graphql::wrapper_object` module is for generated code only.
 
 ## 0.162.0: context-bound authorized pages
 

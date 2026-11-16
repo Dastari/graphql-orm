@@ -202,6 +202,7 @@ mod repository;
 mod schema_export;
 mod schema_roots;
 mod semantic_object;
+mod wrapper_object;
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
 compile_error!("Enable at least one database backend feature: sqlite, postgres, or mssql.");
