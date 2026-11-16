@@ -39,7 +39,11 @@ fingerprints are unchanged.
   unique member, or a foreign-key source is now `NVARCHAR(450)` (indexable)
   instead of `NVARCHAR(MAX)`, and a Rust type with no mapping is
   `NVARCHAR(MAX)` instead of `TEXT`. Recompile entities. Reads and writes are
-  unchanged.
+  unchanged. A plan against a live table now compares those columns with
+  `NVARCHAR(450)`: a live `NVARCHAR(MAX)` column (which SQL Server cannot
+  have indexed) plans an `AlterColumn` to `NVARCHAR(450)`, classified
+  `Risky` because it changes the column type; a live column of another length
+  plans one as before, with the new target.
 - **SQL Server `ALTER COLUMN`. No action.** A rendered alteration to a
   character type is now an `EXEC sys.sp_executesql` batch that keeps the
   column's live collation, instead of a plain `ALTER COLUMN` that reset it to

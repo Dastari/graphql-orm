@@ -286,8 +286,10 @@ pages as the limit refusal: list roots, to-many relations and search
 connections, custom resolvers that use
 `ClientPaginationConfig::resolve_client_page` (or `admit_client_offset`), and
 the Rust reads that take a `PageInput` (`EntityQuery::paginate(page)` through
-`fetch_connection*`, and `EntitySearchQuery::paginate(page)`). The
-repository builders' own `offset(n)` is trusted code and is not bounded.
+`fetch_connection*`, and `EntitySearchQuery::paginate(page)`). An
+offset that trusted code sets with a builder's own `offset(n)`, including
+`search_db(...).offset(n)` and `EntitySearchQuery::offset`, is not bounded;
+`paginate` after `offset` makes the page's offset a client offset again.
 Keyset connections take no offset.
 
 ### What a keyset cursor is bound to

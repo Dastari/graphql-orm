@@ -2270,8 +2270,9 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// their page through
     /// [`ClientPaginationConfig::resolve_client_page`](crate::graphql::orm::ClientPaginationConfig::resolve_client_page),
     /// and to Rust reads that take a `PageInput` (`EntityQuery::paginate`,
-    /// `EntitySearchQuery::paginate`). The repository builders' own
-    /// `offset(n)` is trusted code and is not bounded.
+    /// `EntitySearchQuery::paginate`). An offset set with a builder's own
+    /// `offset(n)`, including the search builders', is trusted code and is
+    /// not bounded.
     pub fn max_page_offset(mut self, max_offset: Option<i64>) -> Self {
         self.database.max_page_offset = max_offset;
         self

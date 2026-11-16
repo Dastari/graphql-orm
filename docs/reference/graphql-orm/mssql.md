@@ -158,8 +158,8 @@ restore.finish().await?;
   external-writable pool, is idempotent and race-safe (replicas may install at
   the same time; it serialises on an application lock, accepts a table another
   installer created, and verifies the table's shape: its three columns and
-  types, a primary key of exactly `marker_key`, and the `marker_key = 1`
-  check). A missing table or
+  types, a primary key of exactly `marker_key`, and an enabled
+  `CHECK (marker_key = 1)`, declared on the column or on the table). A missing table or
   denied access fails closed as unavailable restore state, even when no marker
   is visible. See the
   [migration guide](../../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
@@ -290,7 +290,10 @@ credentials cross the network in clear. The driver cannot report a `Config`'s
 level, so the ORM cannot refuse it, and it cannot raise the level to at least
 login-only without downgrading a caller who set `Required`. Only combine
 `insecure_allow_login_only_encryption()` with a caller-built `Config` whose
-level you set yourself. A connection string cannot ask for plaintext. The
+level you set yourself. Such a `Config` at `EncryptionLevel::On` ("encrypt if
+the server allows it") is refused with `sqlx::Error::Configuration` before
+any connection is opened: the driver panics when that level meets a server
+that declines encryption. Use `Required`, or `Off` for login-only TLS. A connection string cannot ask for plaintext. The
 driver also cannot report whether
 a `Config` trusts every certificate, so a caller that calls `Config::trust_cert`
 has chosen that in code. Build pools from connection strings to have
@@ -800,7 +803,8 @@ it, for review or for a host's own tooling.
   its code page and stored characters. The model does not record collations,
   so the rendered statement is an `EXEC sys.sp_executesql` batch that reads
   the live collation when it runs and adds `COLLATE` when it differs from
-  the database default.
+  the database default. It fails, rather than alter the column, when that
+  name is not listed by `sys.fn_helpcollations()`.
 - Search metadata statements are T-SQL. SQL Server full-text indexes are not
   created; the plan renders a comment for them.
 

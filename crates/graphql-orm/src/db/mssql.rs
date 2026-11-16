@@ -973,9 +973,8 @@ const CREATE_RESTORE_MARKER: &str = "\
             WHERE i.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND i.is_primary_key = 1 \
               AND c.name = N'marker_key') \
         OR NOT EXISTS (SELECT 1 FROM sys.check_constraints AS k \
-            JOIN sys.columns AS c ON c.object_id = k.parent_object_id AND c.column_id = k.parent_column_id \
             WHERE k.parent_object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') \
-              AND k.is_disabled = 0 AND c.name = N'marker_key' \
+              AND k.is_disabled = 0 \
               AND REPLACE(REPLACE(REPLACE(k.definition, N' ', N''), N'(', N''), N')', N'') = N'[marker_key]=1') \
          THROW 50000, N'dbo.__graphql_orm_restore_marker exists but does not have the documented shape', 1;";
 
@@ -1880,6 +1879,33 @@ fn needs_instance_lookup(config: &Config) -> bool {
     rest.starts_with(", port: None,")
 }
 
+/// Whether `config` asks for `EncryptionLevel::On`, "encrypt if the server
+/// allows it".
+///
+/// The driver panics during prelogin when such a configuration meets a
+/// server that declines encryption, so the ORM refuses it before connecting.
+/// Only a caller-built `Config` under
+/// [`MssqlTransportPolicy::insecure_allow_login_only_encryption`] can carry
+/// it: every other policy raises the level to `Required`, and connection
+/// strings never produce `On`. The driver has no getter for the level, so it
+/// is read from the configuration's `Debug` form outside quoted values,
+/// which hides the password.
+fn requests_optional_encryption(config: &Config) -> bool {
+    let debug = format!("{config:?}");
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in debug.char_indices() {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted && debug[index..].starts_with(", encryption: On,") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Open the TCP stream for `config`.
 ///
 /// A named instance given without a port (`server=host\\INSTANCE`) has no
@@ -1909,6 +1935,14 @@ async fn open_tcp(config: &Config, redirected: bool) -> crate::Result<TcpStream>
 /// same transport policy against the redirected host name. A second redirect
 /// is an error.
 async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
+    if requests_optional_encryption(&config) {
+        return Err(sqlx::Error::Configuration(
+            "SQL Server EncryptionLevel::On is not supported: the driver panics when the \
+             server declines encryption. Use EncryptionLevel::Required, or Off with the \
+             login-only opt-in"
+                .into(),
+        ));
+    }
     let mut redirected = false;
     loop {
         let tcp = open_tcp(&config, redirected).await?;
@@ -2167,6 +2201,51 @@ mod tests {
         let mut config = config();
         follow_route(&mut config, "node7.worker.database.example", 11042);
         assert_eq!(config.get_addr(), "node7.worker.database.example:11042");
+    }
+
+    /// The driver panics when `EncryptionLevel::On` meets a server that
+    /// declines encryption; the pool refuses that configuration before it
+    /// opens a connection.
+    #[tokio::test]
+    async fn optional_encryption_is_refused_before_connecting() {
+        use std::sync::atomic::Ordering;
+        let (port, logins, task) = fake_tds_endpoint(FakeLogin::Accept).await;
+        let mut config = Config::new();
+        config.host("127.0.0.1");
+        config.port(port);
+        config.authentication(tiberius::AuthMethod::sql_server("owned", "owned"));
+        for (level, refused) in [
+            (tiberius::EncryptionLevel::On, true),
+            (tiberius::EncryptionLevel::Off, false),
+            (tiberius::EncryptionLevel::NotSupported, false),
+            (tiberius::EncryptionLevel::Required, false),
+        ] {
+            config.encryption(level);
+            assert_eq!(requests_optional_encryption(&config), refused, "{level:?}");
+        }
+        // A value cannot imitate the field.
+        let mut odd = config.clone();
+        odd.host("a\", encryption: On, \"");
+        odd.encryption(tiberius::EncryptionLevel::Required);
+        assert!(!requests_optional_encryption(&odd));
+
+        config.encryption(tiberius::EncryptionLevel::On);
+        let pool = MssqlPool::with_options(
+            config,
+            MssqlPoolOptions::new()
+                .transport(MssqlTransportPolicy::verified().insecure_allow_login_only_encryption()),
+        );
+        let error = pool
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&error, sqlx::Error::Configuration(message) if message.to_string().contains("EncryptionLevel::On")),
+            "{error:?}"
+        );
+        assert_eq!(logins.load(Ordering::SeqCst), 0, "nothing was sent");
+        task.abort();
     }
 
     /// What a fake TDS endpoint answers a login with.

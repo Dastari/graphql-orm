@@ -52,7 +52,7 @@ run_sqlite() {
     --test runtime_many_to_many --test runtime_relation_bind_limit \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test page_limit_contract --locked
+    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test page_limit_contract --test repository_explicit_limits --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked
   cargo test --manifest-path \

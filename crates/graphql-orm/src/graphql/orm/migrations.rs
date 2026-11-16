@@ -3706,8 +3706,10 @@ pub(super) fn render_migration_step_view(
 /// which for a non-Unicode column can change its code page and the stored
 /// characters (#742). The model does not record collations, so a character
 /// target type reads the column's live collation when the statement runs and
-/// names it when it differs from the database default. A target type that
-/// holds no characters takes no collation.
+/// names it when it differs from the database default, after checking that
+/// the name is one `sys.fn_helpcollations()` lists, so the statement never
+/// splices anything else into the dynamic SQL. A target type that holds no
+/// characters takes no collation.
 fn render_mssql_alter_column(
     table_name: &str,
     before: &ColumnModel,
@@ -3729,6 +3731,9 @@ fn render_mssql_alter_column(
     let batch = format!(
         "DECLARE @gorm_collation sysname = (SELECT c.collation_name FROM sys.columns AS c \
          WHERE c.object_id = OBJECT_ID(N{}) AND c.name = N{}); \
+         IF @gorm_collation IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.fn_helpcollations() AS h \
+         WHERE h.name = @gorm_collation) \
+         THROW 50000, N'the column''s collation is not a known collation name', 1; \
          DECLARE @gorm_alter nvarchar(max) = N{} + CASE WHEN @gorm_collation IS NOT NULL \
          AND @gorm_collation <> CONVERT(sysname, DATABASEPROPERTYEX(DB_NAME(), 'Collation')) \
          THEN N' COLLATE ' + @gorm_collation ELSE N'' END + N' {nullability}'; \

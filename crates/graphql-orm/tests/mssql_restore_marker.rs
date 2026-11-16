@@ -736,6 +736,16 @@ async fn a_marker_table_needs_its_key_and_check() -> Result<(), Box<dyn std::err
             "{shape}: {error}"
         );
     }
+    // A table-level form of the same check is accepted too.
+    execute_batch(
+        &server.connection_string,
+        "DROP TABLE dbo.__graphql_orm_restore_marker; \
+         CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL, \
+         restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL, \
+         CONSTRAINT PK_gorm_marker PRIMARY KEY (marker_key), CONSTRAINT CK_gorm_marker CHECK (marker_key = 1))",
+    )
+    .await?;
+    pool.install_restore_marker().await?;
     // The documented DDL, written by hand, is accepted.
     execute_batch(
         &server.connection_string,
