@@ -55,18 +55,6 @@ pub enum BackupError {
     #[error("manifest authentication failed for {key}: {reason}")]
     ManifestAuthenticationFailed { key: String, reason: String },
 
-    /// The host's snapshot records do not admit this snapshot: it is on the
-    /// revocation list, or missing from the known-snapshot list, of the
-    /// repository's [`crate::ManifestAuthenticator`]. Its seal may be valid;
-    /// a deleted snapshot that was put back into the repository fails here.
-    #[error("snapshot {snapshot_id} is not admitted by the host's snapshot records: {reason}")]
-    SnapshotNotAdmitted {
-        /// Snapshot that was refused.
-        snapshot_id: uuid::Uuid,
-        /// Which record refused it.
-        reason: String,
-    },
-
     /// An unauthenticated legacy manifest was refused by the configured
     /// [`crate::LegacyManifestPolicy`].
     #[error("unauthenticated legacy manifest for snapshot {snapshot_id} refused by policy")]
@@ -277,6 +265,34 @@ impl From<graphql_orm_storage::StorageError> for BackupError {
             graphql_orm_storage::StorageError::MissingBlob { key } => Self::MissingBlob { key },
             graphql_orm_storage::StorageError::Io { path, source } => Self::Io { path, source },
             source => Self::Storage { source },
+        }
+    }
+}
+
+/// Start of the `reason` of the [`BackupError::ManifestAuthenticationFailed`]
+/// that refuses a snapshot the host's snapshot records do not admit.
+pub(crate) const SNAPSHOT_NOT_ADMITTED: &str =
+    "snapshot is not admitted by the host's snapshot records";
+
+impl BackupError {
+    /// Whether this error refuses a snapshot because the host's snapshot
+    /// records do not admit it: it is on the revocation list, or missing from
+    /// the known-snapshot list, of the repository's
+    /// [`crate::ManifestAuthenticator`]. Its seal may be valid; a deleted
+    /// snapshot that was put back into the repository fails this way.
+    ///
+    /// The refusal is a [`BackupError::ManifestAuthenticationFailed`] whose
+    /// `key` is the snapshot's manifest key. A restore reports it as the
+    /// `source` of [`BackupError::RestoreStageFailed`]; this looks through
+    /// that wrapper.
+    #[must_use]
+    pub fn is_snapshot_not_admitted(&self) -> bool {
+        match self {
+            Self::ManifestAuthenticationFailed { reason, .. } => {
+                reason.starts_with(SNAPSHOT_NOT_ADMITTED)
+            }
+            Self::RestoreStageFailed { source, .. } => source.is_snapshot_not_admitted(),
+            _ => false,
         }
     }
 }

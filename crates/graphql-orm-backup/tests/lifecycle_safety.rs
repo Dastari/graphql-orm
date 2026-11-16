@@ -12,16 +12,17 @@ use graphql_orm_backup::{
     BackupByteLimit, BackupCancellation, BackupCapacityLimitKind, BackupCapacityLimits,
     BackupChangeAction, BackupChangeExport, BackupError, BackupExecutionOptions, BackupObjectIndex,
     BackupObjectRef, BackupRepository, BackupRow, BackupTableExport, BreakRepositoryLockRequest,
-    CompactChainRequest, FullBackupRequest, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema,
-    IncrementalBackupRequest, KeepPolicy, LocalBackupRepository, ManifestAuthenticator,
-    ManifestKey, PruneResult, REPOSITORY_LOCK_KEY, RepositoryLock, RepositoryLockMode,
-    RepositoryLockOptions, RepositoryLockStatus, RestoreContext, RestoreObjectSink, RestoreOptions,
-    VerificationOptions, break_repository_lock, bytes_sha256_hex, compact_chain,
-    create_full_backup, create_full_backup_with_options, create_incremental_backup, load_manifest,
-    object_content_key, prune, read_repository_lock, restore_objects, restore_objects_with_options,
-    restore_snapshot, restore_snapshot_with_options, snapshot_manifest_key,
-    verify_manifest_and_objects, verify_manifest_and_objects_with_options, verify_object_checksums,
-    write_manifest,
+    CompactChainRequest, DeletedSnapshotLog, FullBackupRequest, GraphqlOrmBackupAdapter,
+    GraphqlOrmBackupSchema, IncrementalBackupRequest, KeepPolicy, LocalBackupRepository,
+    ManifestAuthenticator, ManifestKey, PruneResult, REPOSITORY_LOCK_KEY, RepositoryLock,
+    RepositoryLockMode, RepositoryLockOptions, RepositoryLockStatus, RestoreContext,
+    RestoreObjectSink, RestoreOptions, SnapshotDeletionObserver, VerificationOptions,
+    break_repository_lock, bytes_sha256_hex, compact_chain, create_full_backup,
+    create_full_backup_with_options, create_incremental_backup, delete_snapshot_observed,
+    load_manifest, object_content_key, prune, prune_observed, read_repository_lock,
+    restore_objects, restore_objects_with_options, restore_snapshot, restore_snapshot_with_options,
+    snapshot_manifest_key, verify_manifest_and_objects, verify_manifest_and_objects_with_options,
+    verify_object_checksums, write_manifest,
 };
 use graphql_orm_storage::StorageByteStream;
 use serde_json::{Map, Value};
@@ -766,6 +767,126 @@ async fn cancelled_backup_releases_the_lock_and_removes_its_payloads() {
     assert!(matches!(error, BackupError::Cancelled));
     assert_unlocked(&repository).await;
     assert!(snapshot_blobs(&repository, id(2)).await.is_empty());
+}
+
+/// The host is told about each expired snapshot before it is deleted, so a
+/// prune that fails after its first deletion has already reported every
+/// snapshot it removed.
+#[tokio::test]
+async fn a_prune_that_fails_partway_has_reported_every_deleted_snapshot() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = Hooked::new(repository(&temp));
+    for (snapshot, created_at) in [(1, 1), (2, 2), (3, 3)] {
+        full(
+            &repository.inner,
+            id(snapshot),
+            created_at,
+            &Database::with_rows("users", 1),
+        )
+        .await;
+    }
+    // Snapshots 1 and 2 expire, in that order. Deleting snapshot 2 fails.
+    *repository.fail_delete_under.lock().expect("hook") = Some(format!("snapshots/{}/", id(2)));
+
+    let deleted = DeletedSnapshotLog::new();
+    let error = prune_observed(&repository, &KeepPolicy::default(), &deleted)
+        .await
+        .expect_err("the second deletion fails");
+    assert!(
+        matches!(&error, BackupError::Database { message } if message == "injected delete failure"),
+        "{error:?}"
+    );
+    assert!(
+        snapshot_blobs(&repository.inner, id(1)).await.is_empty(),
+        "the first expired snapshot was deleted before the failure"
+    );
+    assert!(!snapshot_blobs(&repository.inner, id(2)).await.is_empty());
+    let reported = deleted.snapshot_ids();
+    assert!(
+        reported.contains(&id(1)),
+        "the deleted snapshot was reported although prune failed: {reported:?}"
+    );
+    assert_eq!(
+        reported,
+        vec![id(1), id(2)],
+        "each snapshot is reported before its deletion starts"
+    );
+    assert_unlocked(&repository.inner).await;
+
+    // A snapshot the host could not record is not deleted at all.
+    struct Refusing;
+    #[async_trait]
+    impl SnapshotDeletionObserver for Refusing {
+        async fn snapshot_will_be_deleted(&self, _: Uuid) -> Result<(), BackupError> {
+            Err(BackupError::Database {
+                message: "host record is unavailable".to_string(),
+            })
+        }
+    }
+    *repository.fail_delete_under.lock().expect("hook") = None;
+    let before = snapshot_blobs(&repository.inner, id(2)).await;
+    prune_observed(&repository, &KeepPolicy::default(), &Refusing)
+        .await
+        .expect_err("the observer refused");
+    assert_eq!(snapshot_blobs(&repository.inner, id(2)).await, before);
+}
+
+/// A prune or delete that completes but cannot release the repository lock
+/// returns an error instead of its result. The deleted ids were reported
+/// before that.
+#[tokio::test]
+async fn a_failed_lock_release_does_not_lose_the_deleted_snapshot_ids() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = Hooked::new(repository(&temp));
+    for (snapshot, created_at) in [(1, 1), (2, 2), (3, 3)] {
+        full(
+            &repository.inner,
+            id(snapshot),
+            created_at,
+            &Database::with_rows("users", 1),
+        )
+        .await;
+    }
+    repository.fail_lock_release.store(true, Ordering::SeqCst);
+
+    let deleted = DeletedSnapshotLog::new();
+    let error = prune_observed(&repository, &KeepPolicy::default(), &deleted)
+        .await
+        .expect_err("the lock release fails");
+    assert!(
+        matches!(error, BackupError::LockReleaseFailed { .. }),
+        "{error:?}"
+    );
+    assert_eq!(deleted.snapshot_ids(), vec![id(1), id(2)]);
+    for snapshot in [1, 2] {
+        assert!(
+            snapshot_blobs(&repository.inner, id(snapshot))
+                .await
+                .is_empty()
+        );
+    }
+
+    // The same holds for a single deletion. The stale lock is broken first.
+    repository
+        .inner
+        .delete_blob(REPOSITORY_LOCK_KEY)
+        .await
+        .expect("clear the lock the failed release left");
+    let deleted = DeletedSnapshotLog::new();
+    let error = delete_snapshot_observed(
+        &repository,
+        id(3),
+        &RepositoryLockOptions::default(),
+        &deleted,
+    )
+    .await
+    .expect_err("the lock release fails");
+    assert!(
+        matches!(error, BackupError::LockReleaseFailed { .. }),
+        "{error:?}"
+    );
+    assert_eq!(deleted.snapshot_ids(), vec![id(3)]);
+    assert!(snapshot_blobs(&repository.inner, id(3)).await.is_empty());
 }
 
 #[tokio::test]
@@ -1960,6 +2081,8 @@ struct Hooked {
     prune_outcome: Mutex<Option<Result<PruneResult, BackupError>>>,
     hidden: Mutex<Option<String>>,
     fail_lock_release: AtomicBool,
+    /// Fails every deletion of a key with this prefix.
+    fail_delete_under: Mutex<Option<String>>,
     /// Serves these bytes for a key from its second read on.
     grown: Mutex<Option<(String, Bytes, usize)>>,
     /// Holds this many conditional object-content creates until all of them
@@ -1981,6 +2104,7 @@ impl Hooked {
             prune_outcome: Mutex::new(None),
             hidden: Mutex::new(None),
             fail_lock_release: AtomicBool::new(false),
+            fail_delete_under: Mutex::new(None),
             grown: Mutex::new(None),
             content_race: AtomicUsize::new(0),
             content_creates_started: AtomicUsize::new(0),
@@ -2124,6 +2248,17 @@ impl BackupRepository for Hooked {
     }
 
     async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        if self
+            .fail_delete_under
+            .lock()
+            .expect("hook")
+            .as_deref()
+            .is_some_and(|prefix| key.starts_with(prefix))
+        {
+            return Err(BackupError::Database {
+                message: "injected delete failure".to_string(),
+            });
+        }
         self.inner.delete_blob(key).await
     }
 }

@@ -98,13 +98,16 @@ payloads, by anyone who can write the repository, verifies again unless the
 host keeps a record that says otherwise. `ManifestAuthenticator` takes two
 such records, both held outside the repository:
 
-- `with_revoked_snapshots`: the ids the host deleted. `prune` and
-  `delete_snapshot` report them in `deleted_snapshot_ids`.
+- `with_revoked_snapshots`: the ids the host deleted. `prune_observed` and
+  `delete_snapshot_observed` report each one to a `SnapshotDeletionObserver`
+  before deleting it, so a failure after the first deletion, or a repository
+  lock that cannot be released, never loses an id.
 - `with_known_snapshots`: the ids that are live. It also refuses a snapshot
   the host never recorded, and needs updating after every backup.
 
-Every manifest read refuses a snapshot the records do not admit with
-`SnapshotNotAdmitted`, after its seal verified, and a revoked id is never
+Every manifest read refuses a snapshot the records do not admit, after its
+seal verified, with a `ManifestAuthenticationFailed` error for which
+`BackupError::is_snapshot_not_admitted` is true, and a revoked id is never
 sealed again. `prune` refuses to run while such a snapshot is listed;
 `delete_snapshot` removes it by id without reading its manifest. Without
 either record a pruned snapshot can still be replayed. The records are as

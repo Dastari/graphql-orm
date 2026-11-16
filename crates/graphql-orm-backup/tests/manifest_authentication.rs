@@ -8,11 +8,12 @@ use bytes::Bytes;
 use graphql_orm_backup::{
     BackupByteLimit, BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef,
     BackupRepository, BackupRow, BackupSnapshotManifest, BackupTableExport,
-    BlobStoreRestoreObjectSink, FullBackupRequest, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema,
-    KeepPolicy, LEGACY_BACKUP_FORMAT_VERSION, LegacyManifestPolicy, LocalBackupRepository,
-    ManifestAuthenticator, ManifestKey, RestoreContext, RestoreKeyScope, authenticate_manifest,
-    bytes_sha256_hex, collect_backup_stream, compress_payload, create_full_backup, load_manifest,
-    prune, restore_objects, restore_snapshot, set_manifest_checksum, snapshot_manifest_key,
+    BlobStoreRestoreObjectSink, DeletedSnapshotLog, FullBackupRequest, GraphqlOrmBackupAdapter,
+    GraphqlOrmBackupSchema, KeepPolicy, LEGACY_BACKUP_FORMAT_VERSION, LegacyManifestPolicy,
+    LocalBackupRepository, ManifestAuthenticator, ManifestKey, RestoreContext, RestoreKeyScope,
+    authenticate_manifest, bytes_sha256_hex, collect_backup_stream, compress_payload,
+    create_full_backup, delete_snapshot_observed, load_manifest, prune, prune_observed,
+    restore_objects, restore_snapshot, set_manifest_checksum, snapshot_manifest_key,
     verify_manifest_and_objects,
 };
 use graphql_orm_backup::{
@@ -1587,10 +1588,11 @@ async fn prune_then_replay(temp: &TempDir) -> (Uuid, Uuid) {
         .expect("kept backup");
     let copied = copy_out(&repository).await;
 
-    let pruned = prune(&repository, &KeepPolicy::default())
+    let deleted = DeletedSnapshotLog::new();
+    let pruned = prune_observed(&repository, &KeepPolicy::default(), &deleted)
         .await
         .expect("prune");
-    assert_eq!(pruned.deleted_snapshot_ids, vec![old.snapshot_id]);
+    assert_eq!(deleted.snapshot_ids(), vec![old.snapshot_id]);
     assert_eq!(pruned.deleted_snapshots, 1);
     assert!(load_manifest(&repository, old.snapshot_id).await.is_err());
 
@@ -1607,7 +1609,8 @@ async fn prune_then_replay(temp: &TempDir) -> (Uuid, Uuid) {
 }
 
 fn not_admitted(error: &BackupError, snapshot_id: Uuid) -> bool {
-    matches!(error, BackupError::SnapshotNotAdmitted { snapshot_id: refused, .. } if *refused == snapshot_id)
+    error.is_snapshot_not_admitted()
+        && matches!(error, BackupError::ManifestAuthenticationFailed { key, .. } if *key == snapshot_manifest_key(snapshot_id))
 }
 
 #[tokio::test]
@@ -1620,17 +1623,16 @@ async fn a_pruned_snapshot_put_back_is_refused_by_the_revocation_record() {
         .await
         .expect_err("revoked snapshot is refused");
     assert!(not_admitted(&error, replayed), "{error}");
-    let error = restore_source(
-        restore_snapshot(
-            &repository,
-            &MockDatabase::default(),
-            replayed,
-            RestoreContext::empty_database(),
-        )
-        .await
-        .expect_err("a revoked snapshot is never restored"),
-    );
-    assert!(not_admitted(&error, replayed), "{error}");
+    let error = restore_snapshot(
+        &repository,
+        &MockDatabase::default(),
+        replayed,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("a revoked snapshot is never restored");
+    assert!(error.is_snapshot_not_admitted(), "{error}");
+    assert!(not_admitted(&restore_source(error), replayed));
     load_manifest(&repository, kept)
         .await
         .expect("the retained snapshot is unaffected");
@@ -1648,10 +1650,16 @@ async fn a_pruned_snapshot_put_back_is_refused_by_the_revocation_record() {
     );
 
     // Deleting it by id removes it without trusting its manifest.
-    let deleted = delete_snapshot(&repository, replayed, &RepositoryLockOptions::default())
-        .await
-        .expect("delete the replayed snapshot");
-    assert_eq!(deleted.deleted_snapshot_ids, vec![replayed]);
+    let log = DeletedSnapshotLog::new();
+    let deleted = delete_snapshot_observed(
+        &repository,
+        replayed,
+        &RepositoryLockOptions::default(),
+        &log,
+    )
+    .await
+    .expect("delete the replayed snapshot");
+    assert_eq!(log.snapshot_ids(), vec![replayed]);
     assert_eq!(deleted.retained_snapshots, 1);
     assert!(
         repository
@@ -1664,7 +1672,7 @@ async fn a_pruned_snapshot_put_back_is_refused_by_the_revocation_record() {
         .await
         .expect("prune runs again");
     assert_eq!(pruned.retained_snapshots, 1);
-    assert!(pruned.deleted_snapshot_ids.is_empty());
+    assert_eq!(pruned.deleted_snapshots, 0);
     load_manifest(&repository, kept).await.expect("still there");
 }
 

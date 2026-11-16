@@ -56,7 +56,9 @@ impl MssqlWriteResult {
 const SESSION_RESET: &str = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
     SET TRANSACTION ISOLATION LEVEL READ COMMITTED; \
     SET NOCOUNT OFF; \
-    SET IMPLICIT_TRANSACTIONS OFF;";
+    SET IMPLICIT_TRANSACTIONS OFF; \
+    WHILE APPLOCK_MODE('public', N'graphql_orm_restore', 'Session') <> 'NoLock' \
+    EXEC sp_releaseapplock @Resource = N'graphql_orm_restore', @LockOwner = 'Session';";
 
 /// Ends an ORM transaction. A `COMMIT` that leaves `@@TRANCOUNT` above zero
 /// only decremented a nested transaction; nothing is durable yet. Roll back
@@ -514,7 +516,24 @@ impl MssqlPool {
         &self.inner.options
     }
 
+    /// Fetch rows in autocommit. The statement holds the shared restore lock
+    /// while it runs and is refused with
+    /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) during a
+    /// host-run restore; see [`MssqlRestore`].
     pub async fn fetch_rows(&self, sql: &str, values: &[SqlValue]) -> crate::Result<Vec<MssqlRow>> {
+        let result = self
+            .fetch_rows_ungated(&restore_gated(sql, true), values)
+            .await;
+        self.typed_restore_refusal(result).await
+    }
+
+    /// Fetch rows without taking the restore lock: for the restore machinery
+    /// itself, which must work while a restore is in progress.
+    async fn fetch_rows_ungated(
+        &self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<MssqlRow>> {
         let mut lease = self.acquire().await?;
         let result = self
             .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
@@ -528,11 +547,111 @@ impl MssqlPool {
         values: &[SqlValue],
     ) -> crate::Result<MssqlWriteResult> {
         self.require_external_writable()?;
+        // The statement must be the last of its batch: its row count is the
+        // batch's last one. The shared lock is therefore released by a
+        // control batch that follows it, before the connection is reused.
+        let gated = restore_gated(sql, false);
         let mut lease = self.acquire().await?;
         let result = self
-            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .bounded(execute_with_client(&mut lease.client, &gated, values))
             .await;
-        self.finish(lease, result).await
+        if result.is_ok()
+            && let Err(failure) = self
+                .bounded(execute_control_statement(
+                    &mut lease.client,
+                    RELEASE_SESSION_RESTORE_LOCK,
+                ))
+                .await
+        {
+            // The write is done, but this session may still hold the lock:
+            // close it rather than return it to the pool.
+            drop((lease, failure));
+            return result.map_err(|failure| failure.error);
+        }
+        // A refused or failed statement goes through the session reset in
+        // `finish`, which releases the lock.
+        let result = self.finish(lease, result).await;
+        self.typed_restore_refusal(result).await
+    }
+
+    /// Replace the server's refusal of the restore gate with the typed
+    /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) error.
+    async fn typed_restore_refusal<T>(&self, result: crate::Result<T>) -> crate::Result<T> {
+        match result {
+            Err(error) if is_restore_refusal(&error) => Err(self.restore_in_progress_error().await),
+            other => other,
+        }
+    }
+
+    async fn restore_in_progress_error(&self) -> sqlx::Error {
+        // A restore that holds the lock but has not recorded its marker yet
+        // has no identifier to report.
+        let marker = self.read_restore_marker().await.ok().flatten();
+        let (restore_id, started_at) = marker.unwrap_or_default();
+        crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
+    }
+
+    /// The restore marker row, if the marker table exists and holds one.
+    pub(crate) async fn read_restore_marker(&self) -> crate::Result<Option<(String, i64)>> {
+        let rows = self.fetch_rows_ungated(READ_RESTORE_MARKER, &[]).await?;
+        rows.first().map(restore_marker_from_row).transpose()
+    }
+
+    /// Take the exclusive restore lock on a dedicated connection and record
+    /// (or, with `resume`, re-adopt) the marker of `restore_id`.
+    pub(crate) async fn begin_restore(
+        &self,
+        restore_id: &str,
+        wait: Duration,
+        resume: bool,
+    ) -> crate::Result<MssqlRestore> {
+        self.require_external_writable()?;
+        let mut lease = self.acquire().await?;
+        let wait_ms = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
+        let lock = format!(
+            "EXEC sp_getapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = {wait_ms}; \
+             IF APPLOCK_MODE('public', N'{RESTORE_LOCK_RESOURCE}', 'Session') <> 'Exclusive' BEGIN \
+             RAISERROR(N'{RESTORE_REFUSAL}: open transactions or another restore hold the restore lock', 16, 1); RETURN; END;"
+        );
+        // The lock wait is the caller's bound, not the pool's query timeout.
+        // On any failure the lease is dropped, which closes the connection
+        // and with it releases whatever the session held.
+        let locked = tokio::time::timeout(
+            wait + self.inner.options.connect_timeout,
+            execute_control_statement(&mut lease.client, &lock),
+        )
+        .await
+        .map_err(|_| timed_out("SQL Server restore lock was not granted in time"))?;
+        if let Err(failure) = locked {
+            drop(lease);
+            return self.typed_restore_refusal(Err(failure.error)).await;
+        }
+        let claimed = async {
+            execute_with_client(&mut lease.client, CREATE_RESTORE_MARKER, &[]).await?;
+            let id = [SqlValue::String(restore_id.to_string())];
+            if !resume {
+                execute_with_client(&mut lease.client, INSERT_RESTORE_MARKER, &id).await?;
+            }
+            fetch_rows_with_client(&mut lease.client, READ_RESTORE_MARKER, &[]).await
+        };
+        let rows = self
+            .bounded(claimed)
+            .await
+            .map_err(|failure| failure.error)?;
+        match rows.first().map(restore_marker_from_row).transpose()? {
+            Some((present, _)) if present == restore_id => Ok(MssqlRestore {
+                pool: self.clone(),
+                lease: Some(lease),
+                restore_id: restore_id.to_string(),
+            }),
+            // Another restore's marker: one that crashed, or was abandoned.
+            Some((present, started_at)) => {
+                Err(crate::graphql::orm::RestoreInProgress::new(present, started_at).into_error())
+            }
+            None => Err(sqlx::Error::Protocol(format!(
+                "no restore marker is present for restore {restore_id}"
+            ))),
+        }
     }
 
     pub(crate) async fn begin_transaction(
@@ -547,14 +666,22 @@ impl MssqlPool {
         };
         // Never nest inside a transaction raw SQL left open on this session:
         // its COMMIT would only decrement the count and nothing would be durable.
+        // The transaction takes the shared restore lock in the batch that
+        // begins it and holds it until it ends, so a restore cannot start
+        // under it and it cannot start under a restore.
         let begin = format!(
             "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
-             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;"
+             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION; {}",
+            restore_gate("Transaction", "ROLLBACK TRANSACTION;")
         );
         // A failed begin may have changed the isolation level; never reuse it.
-        self.bounded(execute_control_statement(&mut lease.client, &begin))
-            .await
-            .map_err(|failure| failure.error)?;
+        let begun = self
+            .bounded(execute_control_statement(&mut lease.client, &begin))
+            .await;
+        if let Err(failure) = begun {
+            drop(lease);
+            return self.typed_restore_refusal(Err(failure.error)).await;
+        }
         Ok(MssqlTransaction {
             pool: self.clone(),
             lease: Some(lease),
@@ -727,6 +854,218 @@ impl MssqlPool {
         }
         // Release the permit only once the connection is back in the idle list.
         drop(permit);
+    }
+}
+
+/// Application lock every ORM transaction and autocommit statement takes in
+/// shared mode, and a restore takes exclusively.
+const RESTORE_LOCK_RESOURCE: &str = "graphql_orm_restore";
+
+/// How long an ORM statement waits for the shared restore lock, in
+/// milliseconds, before it is refused. Shared holders never block each other,
+/// so the wait only occurs while a restore holds or is waiting for the lock.
+const RESTORE_LOCK_WAIT_MS: u32 = 250;
+
+/// Prefix of the message the restore gate raises.
+const RESTORE_REFUSAL: &str = "graphql-orm restore in progress";
+
+const READ_RESTORE_MARKER: &str = "IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NOT NULL \
+     SELECT restore_id, started_at FROM [__graphql_orm_restore_marker] \
+     ELSE SELECT CAST(NULL AS NVARCHAR(200)) AS restore_id, CAST(NULL AS BIGINT) AS started_at WHERE 1 = 0";
+
+const CREATE_RESTORE_MARKER: &str = "IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NULL \
+     CREATE TABLE [__graphql_orm_restore_marker] (\
+     marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), \
+     restore_id NVARCHAR(200) NOT NULL, \
+     started_at BIGINT NOT NULL)";
+
+const INSERT_RESTORE_MARKER: &str = "INSERT INTO [__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
+     SELECT 1, @P1, DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()) \
+     WHERE NOT EXISTS (SELECT 1 FROM [__graphql_orm_restore_marker])";
+
+fn restore_marker_from_row(row: &MssqlRow) -> crate::Result<(String, i64)> {
+    Ok((row.try_get("restore_id")?, row.try_get("started_at")?))
+}
+
+/// T-SQL that takes the shared restore lock for `owner` (`Session` or
+/// `Transaction`) and refuses, after running `undo`, when the lock is not
+/// granted or a restore marker is present.
+///
+/// The lock makes the check race-free: a restore holds the lock exclusively,
+/// so it waits for every holder of the shared lock to finish, and nothing
+/// takes the shared lock while it runs. The marker covers a restore whose
+/// session died: its lock is gone, its partial rows are not.
+fn restore_gate(owner: &str, undo: &str) -> String {
+    let release = if owner == "Session" {
+        format!(
+            "EXEC sp_releaseapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockOwner = 'Session';"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "EXEC sp_getapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockMode = 'Shared', @LockOwner = '{owner}', @LockTimeout = {RESTORE_LOCK_WAIT_MS}; \
+         IF APPLOCK_MODE('public', N'{RESTORE_LOCK_RESOURCE}', '{owner}') = 'NoLock' BEGIN {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: the restore lock is held', 16, 1); RETURN; END; \
+         IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NOT NULL BEGIN \
+         IF EXISTS (SELECT 1 FROM [__graphql_orm_restore_marker]) BEGIN {release} {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END; END;"
+    )
+}
+
+/// Wrap an autocommit statement so it holds the shared restore lock while it
+/// runs. The lock is session-owned. A session that still holds one from a
+/// batch that ended early releases it first, and so does the session reset.
+///
+/// With `release_inline` the batch releases the lock after the statement.
+/// That makes the release the batch's last statement, whose row count SQL
+/// Server then reports, so a write leaves the release to its caller.
+///
+/// A statement that must be the first of its batch (`CREATE VIEW` and the
+/// like) reads and writes no rows and runs as it is.
+fn restore_gated(sql: &str, release_inline: bool) -> String {
+    if requires_own_batch(sql) {
+        return sql.to_string();
+    }
+    let gate = restore_gate("Session", "");
+    if release_inline {
+        format!(
+            "{RELEASE_SESSION_RESTORE_LOCK} {gate}\n{sql}\n;EXEC sp_releaseapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockOwner = 'Session';"
+        )
+    } else {
+        format!("{RELEASE_SESSION_RESTORE_LOCK} {gate}\n{sql}")
+    }
+}
+
+/// Releases every shared restore lock the session still owns.
+const RELEASE_SESSION_RESTORE_LOCK: &str = "WHILE APPLOCK_MODE('public', N'graphql_orm_restore', 'Session') <> 'NoLock' \
+     EXEC sp_releaseapplock @Resource = N'graphql_orm_restore', @LockOwner = 'Session';";
+
+/// Whether SQL Server requires the statement to be the only one in its batch.
+fn requires_own_batch(sql: &str) -> bool {
+    let mut words = sql
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_uppercase);
+    if !matches!(words.next().as_deref(), Some("CREATE" | "ALTER")) {
+        return false;
+    }
+    let mut object = words.next();
+    if object.as_deref() == Some("OR") {
+        // CREATE OR ALTER <object>
+        words.next();
+        object = words.next();
+    }
+    matches!(
+        object.as_deref(),
+        Some(
+            "PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER" | "VIEW" | "SCHEMA" | "DEFAULT" | "RULE"
+        )
+    )
+}
+
+/// Whether `error` is the restore gate's refusal.
+fn is_restore_refusal(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|database| database.message().starts_with(RESTORE_REFUSAL))
+}
+
+/// A host-run restore of a SQL Server database, in progress.
+///
+/// Created by `Database::begin_restore` (or `resume_restore`). It owns one
+/// connection that holds the restore lock exclusively: while it lives, every
+/// ORM transaction and autocommit statement, in every process, is refused
+/// with [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) before
+/// it reads or writes. Run the restore's statements through
+/// [`Self::execute`] and [`Self::fetch_rows`], then call [`Self::finish`].
+///
+/// Dropping it without `finish`, or losing its connection, releases the lock
+/// but leaves the marker row, so statements stay refused until the restore
+/// is resumed and finished.
+pub struct MssqlRestore {
+    pool: MssqlPool,
+    lease: Option<Lease>,
+    restore_id: String,
+}
+
+impl MssqlRestore {
+    /// The identifier recorded in the marker.
+    pub fn restore_id(&self) -> &str {
+        &self.restore_id
+    }
+
+    fn connection(&mut self) -> crate::Result<&mut Lease> {
+        self.lease.as_mut().ok_or_else(|| {
+            sqlx::Error::Protocol(
+                "the restore connection was lost; its marker remains, resume the restore"
+                    .to_string(),
+            )
+        })
+    }
+
+    fn keep_if_reusable<T>(&mut self, result: Result<T, StatementFailure>) -> crate::Result<T> {
+        result.map_err(|failure| {
+            if !failure.reusable {
+                self.lease.take();
+            }
+            failure.error
+        })
+    }
+
+    /// Execute a restore statement on the connection that holds the lock.
+    /// Returns the statement's affected-row count.
+    pub async fn execute(&mut self, sql: &str, values: &[SqlValue]) -> crate::Result<u64> {
+        let pool = self.pool.clone();
+        let lease = self.connection()?;
+        let result = pool
+            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .await;
+        self.keep_if_reusable(result)
+            .map(MssqlWriteResult::rows_affected)
+    }
+
+    /// Fetch rows on the connection that holds the lock.
+    pub async fn fetch_rows(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<MssqlRow>> {
+        let pool = self.pool.clone();
+        let lease = self.connection()?;
+        let result = pool
+            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .await;
+        self.keep_if_reusable(result)
+    }
+
+    /// Clear the marker and release the lock: the restore is complete, or its
+    /// partial rows were removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails, leaving the marker, when the connection still has an open
+    /// transaction (commit or roll it back first) or was lost.
+    pub async fn finish(mut self) -> crate::Result<()> {
+        let pool = self.pool.clone();
+        let id = [SqlValue::String(self.restore_id.clone())];
+        let lease = self.connection()?;
+        let cleared = pool
+            .bounded(execute_with_client(
+                &mut lease.client,
+                "IF @@TRANCOUNT > 0 BEGIN RAISERROR(N'the restore connection has an open transaction; commit or roll it back before finishing the restore', 16, 1); RETURN; END; \
+                 DELETE FROM [__graphql_orm_restore_marker] WHERE restore_id = @P1",
+                &id,
+            ))
+            .await;
+        self.keep_if_reusable(cleared)?;
+        // The reset releases the session's restore lock.
+        if let Some(mut lease) = self.lease.take()
+            && pool.reset(&mut lease.client).await
+        {
+            pool.release(lease);
+        }
+        Ok(())
     }
 }
 

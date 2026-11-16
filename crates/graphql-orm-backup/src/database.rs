@@ -65,9 +65,9 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
     /// rolls back its own work, and require a fresh staging target otherwise.
     /// [`crate::OrmBackupAdapter`] restores all tables in one transaction on
     /// PostgreSQL and SQLite. An adapter that cannot (a host-written SQL
-    /// Server adapter, for example) should record a restore-in-progress
-    /// marker before its first write and clear it after its last, and the
-    /// host should refuse to start while the marker is present.
+    /// Server adapter, for example) should exclude readers and writers for
+    /// the duration of the restore and leave a marker that survives a crash;
+    /// `graphql-orm` provides both for SQL Server.
     ///
     /// # Errors
     ///

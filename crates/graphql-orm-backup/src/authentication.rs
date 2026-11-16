@@ -181,12 +181,12 @@ impl ManifestAuthenticator {
     /// can write the repository can put back the sealed manifest and payloads
     /// of a snapshot that was pruned, and they verify again. With this list,
     /// every manifest read refuses a snapshot id that is not on it with
-    /// [`BackupError::SnapshotNotAdmitted`], whatever its seal says.
+    /// an error for which [`BackupError::is_snapshot_not_admitted`] is true,
+    /// whatever its seal says.
     ///
     /// Keep the record outside the repository. Add each snapshot id a backup
-    /// or compaction returns, and remove the ids
-    /// [`crate::PruneResult::deleted_snapshot_ids`] and
-    /// [`crate::DeleteSnapshotResult::deleted_snapshot_ids`] report. Writing a
+    /// or compaction returns, and remove the ids a
+    /// [`crate::SnapshotDeletionObserver`] is told about. Writing a
     /// new snapshot does not need its id on the list; reading it back does.
     /// Calling this again replaces the list.
     #[must_use]
@@ -199,11 +199,10 @@ impl ManifestAuthenticator {
     /// deleted from this repository.
     ///
     /// This is the smaller record to keep when a full list of live snapshots
-    /// (see [`Self::with_known_snapshots`]) is not practical: append the ids
-    /// [`crate::PruneResult::deleted_snapshot_ids`] and
-    /// [`crate::DeleteSnapshotResult::deleted_snapshot_ids`] report, outside
-    /// the repository. Every manifest read then refuses a listed snapshot
-    /// with [`BackupError::SnapshotNotAdmitted`], and no new manifest is
+    /// (see [`Self::with_known_snapshots`]) is not practical: append, outside
+    /// the repository, every id a [`crate::SnapshotDeletionObserver`] is told
+    /// about. Every manifest read then refuses a listed snapshot (see
+    /// [`BackupError::is_snapshot_not_admitted`]), and no new manifest is
     /// sealed under a listed id. It cannot refuse a snapshot the host never
     /// recorded as deleted. Calling this again adds to the list; both lists
     /// may be configured together.
@@ -227,20 +226,17 @@ impl ManifestAuthenticator {
             .as_ref()
             .is_some_and(|known| !known.contains(&snapshot_id))
         {
-            return Err(BackupError::SnapshotNotAdmitted {
+            return Err(not_admitted(
                 snapshot_id,
-                reason: "it is not in the host's known-snapshot record".into(),
-            });
+                "it is not in the host's known-snapshot record",
+            ));
         }
         Ok(())
     }
 
     pub(crate) fn check_snapshot_not_revoked(&self, snapshot_id: Uuid) -> Result<(), BackupError> {
         if self.revoked_snapshots.contains(&snapshot_id) {
-            return Err(BackupError::SnapshotNotAdmitted {
-                snapshot_id,
-                reason: "the host revoked it".into(),
-            });
+            return Err(not_admitted(snapshot_id, "the host revoked it"));
         }
         Ok(())
     }
@@ -335,6 +331,13 @@ impl ManifestAuthenticator {
         repository_mac(key, canonical, seal.repository_id)
             .verify_slice(&tag)
             .map_err(|_| "MAC does not match manifest contents".to_string())
+    }
+}
+
+fn not_admitted(snapshot_id: Uuid, why: &str) -> BackupError {
+    BackupError::ManifestAuthenticationFailed {
+        key: crate::snapshot_manifest_key(snapshot_id),
+        reason: format!("{}: {why}", crate::error::SNAPSHOT_NOT_ADMITTED),
     }
 }
 

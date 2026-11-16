@@ -398,7 +398,11 @@ writer can put a pruned snapshot back. Keep a record of deleted (or of live)
 snapshot ids outside the repository and give it to the authenticator:
 
 ```rust
-use graphql_orm_backup::{BackupRepository, KeepPolicy, ManifestAuthenticator, prune};
+use async_trait::async_trait;
+use graphql_orm_backup::{
+    BackupError, BackupRepository, KeepPolicy, ManifestAuthenticator, SnapshotDeletionObserver,
+    prune_observed,
+};
 use uuid::Uuid;
 
 fn authenticator(base: ManifestAuthenticator, revoked: Vec<Uuid>) -> ManifestAuthenticator {
@@ -406,22 +410,35 @@ fn authenticator(base: ManifestAuthenticator, revoked: Vec<Uuid>) -> ManifestAut
     base.with_revoked_snapshots(revoked)
 }
 
-async fn prune_and_record(
-    repository: &dyn BackupRepository,
-    revoked: &mut Vec<Uuid>,
-) -> Result<(), graphql_orm_backup::BackupError> {
-    let result = prune(repository, &KeepPolicy::default()).await?;
-    // Persist these before the next start.
-    revoked.extend(result.deleted_snapshot_ids);
+struct RevocationRecord; // the host's durable store
+
+#[async_trait]
+impl SnapshotDeletionObserver for RevocationRecord {
+    async fn snapshot_will_be_deleted(&self, snapshot_id: Uuid) -> Result<(), BackupError> {
+        // Persist `snapshot_id` here, before returning.
+        let _ = snapshot_id;
+        Ok(())
+    }
+}
+
+async fn prune_and_record(repository: &dyn BackupRepository) -> Result<(), BackupError> {
+    prune_observed(repository, &KeepPolicy::default(), &RevocationRecord).await?;
     Ok(())
 }
 ```
 
+The observer is called under the repository lock, before each snapshot's
+first blob is deleted, so the record is complete whether the call succeeds,
+fails after its first deletion, or completes and then fails to release the
+lock. An error from the observer aborts before that snapshot is touched.
+`DeletedSnapshotLog` is a ready-made observer that collects the ids in memory.
+
 `with_known_snapshots` takes the opposite record, the ids that are live, and
 also refuses snapshots the host never recorded. Every manifest read refuses a
-snapshot the records do not admit with `BackupError::SnapshotNotAdmitted`.
-`prune` refuses to run while such a snapshot is listed; remove it with
-`delete_snapshot`, which then deletes it without reading its manifest. See the
+snapshot the records do not admit with a `ManifestAuthenticationFailed` error
+for which `BackupError::is_snapshot_not_admitted()` is true. `prune` refuses
+to run while such a snapshot is listed; remove it with `delete_snapshot`,
+which then deletes it without reading its manifest. See the
 [trust model](architecture.md#trust-model).
 
 `delete_snapshot` removes one snapshot under the repository writer lock. It

@@ -39,13 +39,29 @@ fingerprints are unchanged.
   `backfill_runtime_search` for those collections before serving search.
   Hosts that import runtime rows another way should call the new
   `SchemaManager::reset_runtime_search` afterwards.
-- **SQL Server restore marker. No action** unless you restore SQL Server
-  databases with host statements: then bracket the restore with
-  `Database::begin_restore_marker` and `finish_restore_marker`, and call
-  `Database::ensure_no_restore_in_progress` (or validate the schema) at
-  start. The first `begin_restore_marker` creates
-  `__graphql_orm_restore_marker` in the login's default schema; create it
-  beforehand as the schema owner when the runtime login may not run DDL:
+- **SQL Server restore lock. No action** for hosts that do not restore SQL
+  Server databases with their own statements. Every SQL Server ORM
+  transaction and autocommit statement now takes a shared application lock
+  (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
+  it, and checks for a restore marker. Transactions and autocommit reads pay
+  no extra round trip; an autocommit write (a raw statement outside a
+  transaction) pays one short batch to release the lock. The login
+  needs no new permission: `sp_getapplock` is granted to `public`. Raw
+  statements sent through the ORM run inside that wrapper batch; a statement
+  that must be alone in its batch (`CREATE VIEW`, `CREATE PROCEDURE`,
+  `CREATE TRIGGER` and similar) is sent unwrapped.
+- **Restoring a SQL Server database. Action needed** to get the exclusion:
+  call `Database::begin_restore(restore_id, wait)`, run the restore's
+  statements through the returned `MssqlRestore` guard (`execute`,
+  `fetch_rows`), then `finish()`. Statements a host runs on its own
+  connections are not covered by the lock. While the restore runs, and after
+  a restore whose process died, ORM work fails with an error carrying
+  `RestoreInProgress` (`RestoreInProgress::from_error`); after a crash, call
+  `Database::resume_restore(restore_id, wait)`, complete the restore or
+  remove its partial rows through the guard, and `finish()`. The first
+  `begin_restore` creates `__graphql_orm_restore_marker` in the login's
+  default schema; create it beforehand as the schema owner when the runtime
+  login may not run DDL:
   `CREATE TABLE __graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
 - Backup users also upgrade to
   [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).

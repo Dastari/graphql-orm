@@ -16,28 +16,35 @@ Upgrade backup to 0.24.0 and, when using the optional ORM adapter, ORM/macros
 to 0.160.0 on the same reviewed revision. Existing manifests, keys and
 repository identities need no conversion.
 
-- **`PruneResult` and `DeleteSnapshotResult` gained `deleted_snapshot_ids`,
-  and `BackupError` gained `SnapshotNotAdmitted`. Action needed** only for
-  code that builds or destructures those structs field by field, or matches
-  `BackupError` without a wildcard arm: add the field or the arm.
+- **Source compatible. No action** to keep compiling: no existing type,
+  field, variant or function signature changed.
 - **Snapshot records are opt-in. Action needed** to close the replay gap:
   until a record is configured, a pruned snapshot that is put back into the
   repository still verifies. Keep one of these outside the repository and
   pass it to the authenticator on every start:
-  1. a revocation list: append the ids in `deleted_snapshot_ids` after every
-     `prune` and `delete_snapshot`, and configure
-     `with_revoked_snapshots(ids)`; or
+  1. a revocation list: record every id your `SnapshotDeletionObserver` is
+     told about and configure `with_revoked_snapshots(ids)`; or
   2. a known-snapshot list: add the id of every snapshot a backup or
-     compaction returns, remove the ids in `deleted_snapshot_ids`, and
+     compaction returns, remove the ids the observer is told about, and
      configure `with_known_snapshots(ids)`. This also refuses a snapshot the
      host never wrote down, at the cost of updating the record on every
      backup.
-  Record the deleted ids before the next process start; a crash between a
-  prune and the record leaves those ids replayable under a revocation list.
-  With a known-snapshot list, remove ids before pruning instead, so a crash
-  errs toward refusal.
-- **Removing a replayed snapshot.** `prune` fails with `SnapshotNotAdmitted`
-  while one is listed. Delete it with `delete_snapshot(repository, id, ..)`.
+- **Use `prune_observed` and `delete_snapshot_observed`** in place of `prune`
+  and `delete_snapshot` to learn the ids. The observer is called under the
+  repository lock before each snapshot's first blob is deleted, and its error
+  aborts before that snapshot is touched. Make the id durable inside the
+  callback: the host then has every deleted id when the call fails after its
+  first deletion, is cancelled, or finishes but cannot release the lock
+  (`LockReleaseFailed`). It may also hold the id of a snapshot whose deletion
+  then failed; revoking a snapshot that is still stored is safe, and the next
+  prune removes it. `DeletedSnapshotLog` is an in-memory observer for hosts
+  that persist right after the call instead.
+- **Detecting a refused snapshot.** The refusal is
+  `BackupError::ManifestAuthenticationFailed`; `error.is_snapshot_not_admitted()`
+  tells it apart from a bad seal, also through a restore's
+  `RestoreStageFailed`.
+- **Removing a replayed snapshot.** `prune` fails with such an error while
+  one is listed. Delete it with `delete_snapshot(repository, id, ..)`.
 - **ORM adapter restore is one transaction. No action.** A failed
   `restore_full` on PostgreSQL or SQLite now leaves the target empty. Hosts
   that restore the tables of searchable runtime collections must backfill
