@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
+per-entity wrapper objects (edges, connections, mutation results, change
+events, bulk results and authorized scan pages) carry hand-emitted output
+impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
+fingerprints are byte-identical; no action is needed. See the
+[migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
+
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,
 reads/writes, RLS and search helpers resolve the same table while declared

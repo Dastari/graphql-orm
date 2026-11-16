@@ -14,6 +14,10 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.163.0
+
+- Lower the compile cost of `GraphQLOperations` (part of [#677](https://github.com/Dastari/graphql-orm/issues/677)). The seven per-entity wrapper objects (`…Edge`, `…Connection`, `…Result`, `…ChangedEvent`, `Delete…Result`, `Update…Result` and `…AuthorizedScanPage`) no longer derive `async_graphql::SimpleObject`. The macros emit their `OutputType`, `ContainerType` and `ObjectType` impls directly over shared helpers in the hidden `graphql_orm::graphql::wrapper_object` module, so the per-field resolver glue is type-checked once in the runtime crate instead of once per entity in the host crate. Generated SDL, operation and semantic catalogues and fingerprints are byte-identical; the structs, their fields and the derive's public `async fn` field getters are unchanged; no authorization or visibility check moved. No action; see the [migration guide](MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
+
 ## Unreleased - ORM/macros 0.159.0
 
 - Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).

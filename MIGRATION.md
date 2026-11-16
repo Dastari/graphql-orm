@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.159.0 to 0.163.0: wrapper object compile cost
+
+- **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
+  together. The generated edge, connection, mutation result, change event,
+  bulk delete and bulk update result, and authorized scan page types no longer
+  derive `async_graphql::SimpleObject`; the macros emit the equivalent output
+  impls. Generated SDL, operation and semantic catalogues and fingerprints are
+  byte-identical, and the types keep their fields, derives other than
+  `SimpleObject`, and `async fn` field getters. The new hidden
+  `graphql_orm::graphql::wrapper_object` module is for generated code only.
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree
