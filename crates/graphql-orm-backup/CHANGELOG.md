@@ -32,9 +32,9 @@ supersedes: []
 - `prune` refuses to run while a snapshot the records do not admit is listed.
   `delete_snapshot` removes such a snapshot by id without reading its
   manifest; every other manifest must still verify.
-- With ORM 0.160.0 the ORM adapter's `restore_full` restores all tables in one
+- With ORM 0.163.0 the ORM adapter's `restore_full` restores all tables in one
   transaction on PostgreSQL and SQLite and resets the runtime search index of
-  every restored table (#574, #280). Requires ORM 0.160.0 for the optional
+  every restored table (#574, #280). Requires ORM 0.163.0 for the optional
   ORM adapter.
 
 ## 0.23.0 (unreleased)

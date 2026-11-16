@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.163.0 preserves the stored value of an optional field when its
+write policy denies an upsert update and the host opts to ignore that denial.
+Recompile entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01620-to-01630-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
 Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
 context-bound authorized pages for handwritten resolvers. The macros are
 unchanged. See the

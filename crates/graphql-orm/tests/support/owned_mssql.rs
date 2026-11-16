@@ -348,9 +348,11 @@ impl OwnedSqlServer {
             "server=tcp:127.0.0.1,{port};database=master;user id=sa;password={password};{tls_settings}"
         );
         for _ in 0..180 {
-            if let Ok(pool) =
+            if let Ok(_pool) =
                 graphql_orm::db::mssql::MssqlPool::connect_ado(&master_connection).await
-                && pool.fetch_rows("SELECT 1 AS ready", &[]).await.is_ok()
+                && execute_batch(&master_connection, "SELECT 1 AS ready")
+                    .await
+                    .is_ok()
             {
                 let database_name = format!("graphql_orm_{}", owned.owner_token);
                 execute_batch(
@@ -361,6 +363,9 @@ impl OwnedSqlServer {
                 owned.connection_string = format!(
                     "server=tcp:127.0.0.1,{port};database={database_name};user id=sa;password={password};{tls_settings}"
                 );
+                let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(&owned.connection_string)
+                    .await?;
+                pool.install_restore_marker().await?;
                 return Ok(owned);
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;

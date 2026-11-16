@@ -591,9 +591,29 @@ impl MssqlPool {
         crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
     }
 
-    /// The restore marker row, if the marker table exists and holds one.
+    /// Install the canonical infrastructure table as the schema owner, before
+    /// using the ORM. Runtime roles need SELECT; restore roles also need INSERT
+    /// and DELETE. This does not clear an existing marker.
+    pub async fn install_restore_marker(&self) -> crate::Result<()> {
+        let mut lease = self.acquire().await?;
+        let result = self
+            .bounded(execute_with_client(
+                &mut lease.client,
+                CREATE_RESTORE_MARKER,
+                &[],
+            ))
+            .await;
+        self.finish(lease, result).await.map(|_| ())
+    }
+
+    /// The restore marker row. Unreadable or missing infrastructure fails closed.
     pub(crate) async fn read_restore_marker(&self) -> crate::Result<Option<(String, i64)>> {
-        let rows = self.fetch_rows_ungated(READ_RESTORE_MARKER, &[]).await?;
+        let rows = self
+            .fetch_rows_ungated(READ_RESTORE_MARKER, &[])
+            .await
+            .map_err(|_| {
+                crate::graphql::orm::RestoreInProgress::new(String::new(), 0).into_error()
+            })?;
         rows.first().map(restore_marker_from_row).transpose()
     }
 
@@ -627,7 +647,6 @@ impl MssqlPool {
             return self.typed_restore_refusal(Err(failure.error)).await;
         }
         let claimed = async {
-            execute_with_client(&mut lease.client, CREATE_RESTORE_MARKER, &[]).await?;
             let id = [SqlValue::String(restore_id.to_string())];
             if !resume {
                 execute_with_client(&mut lease.client, INSERT_RESTORE_MARKER, &id).await?;
@@ -869,19 +888,18 @@ const RESTORE_LOCK_WAIT_MS: u32 = 250;
 /// Prefix of the message the restore gate raises.
 const RESTORE_REFUSAL: &str = "graphql-orm restore in progress";
 
-const READ_RESTORE_MARKER: &str = "IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NOT NULL \
-     SELECT restore_id, started_at FROM [__graphql_orm_restore_marker] \
-     ELSE SELECT CAST(NULL AS NVARCHAR(200)) AS restore_id, CAST(NULL AS BIGINT) AS started_at WHERE 1 = 0";
+const READ_RESTORE_MARKER: &str =
+    "SELECT restore_id, started_at FROM [dbo].[__graphql_orm_restore_marker]";
 
-const CREATE_RESTORE_MARKER: &str = "IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NULL \
-     CREATE TABLE [__graphql_orm_restore_marker] (\
+const CREATE_RESTORE_MARKER: &str = "IF OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') IS NULL \
+     CREATE TABLE [dbo].[__graphql_orm_restore_marker] (\
      marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), \
      restore_id NVARCHAR(200) NOT NULL, \
      started_at BIGINT NOT NULL)";
 
-const INSERT_RESTORE_MARKER: &str = "INSERT INTO [__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
+const INSERT_RESTORE_MARKER: &str = "INSERT INTO [dbo].[__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
      SELECT 1, @P1, DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()) \
-     WHERE NOT EXISTS (SELECT 1 FROM [__graphql_orm_restore_marker])";
+     WHERE NOT EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker])";
 
 fn restore_marker_from_row(row: &MssqlRow) -> crate::Result<(String, i64)> {
     Ok((row.try_get("restore_id")?, row.try_get("started_at")?))
@@ -907,9 +925,13 @@ fn restore_gate(owner: &str, undo: &str) -> String {
         "EXEC sp_getapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockMode = 'Shared', @LockOwner = '{owner}', @LockTimeout = {RESTORE_LOCK_WAIT_MS}; \
          IF APPLOCK_MODE('public', N'{RESTORE_LOCK_RESOURCE}', '{owner}') = 'NoLock' BEGIN {undo} \
          RAISERROR(N'{RESTORE_REFUSAL}: the restore lock is held', 16, 1); RETURN; END; \
-         IF OBJECT_ID(N'__graphql_orm_restore_marker', N'U') IS NOT NULL BEGIN \
-         IF EXISTS (SELECT 1 FROM [__graphql_orm_restore_marker]) BEGIN {release} {undo} \
-         RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END; END;"
+         DECLARE @gorm_restore_present BIT; BEGIN TRY \
+         EXEC sp_executesql N'SELECT @present = CASE WHEN EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker]) THEN 1 ELSE 0 END', \
+         N'@present BIT OUTPUT', @present = @gorm_restore_present OUTPUT; \
+         END TRY BEGIN CATCH {release} {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: restore state unknown; check marker installation and SELECT permission', 16, 1); RETURN; END CATCH; \
+         IF @gorm_restore_present IS NULL OR @gorm_restore_present <> 0 BEGIN {release} {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END;"
     )
 }
 
@@ -1054,7 +1076,7 @@ impl MssqlRestore {
             .bounded(execute_with_client(
                 &mut lease.client,
                 "IF @@TRANCOUNT > 0 BEGIN RAISERROR(N'the restore connection has an open transaction; commit or roll it back before finishing the restore', 16, 1); RETURN; END; \
-                 DELETE FROM [__graphql_orm_restore_marker] WHERE restore_id = @P1",
+                 DELETE FROM [dbo].[__graphql_orm_restore_marker] WHERE restore_id = @P1",
                 &id,
             ))
             .await;

@@ -286,3 +286,93 @@ async fn a_crashed_restore_leaves_a_marker_that_keeps_statements_refused()
     server.cleanup()?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn marker_visibility_is_independent_of_principal_and_permission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(&server.connection_string,
+        "CREATE TABLE dbo.GraphqlOrmRestoredRecords (id NVARCHAR(100) NOT NULL PRIMARY KEY, value BIGINT NOT NULL);
+         EXEC(N'CREATE SCHEMA other_schema');
+         CREATE TABLE other_schema.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY, restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL);"
+    ).await?;
+    for (login, schema) in [
+        ("marker_a", "dbo"),
+        ("marker_b", "other_schema"),
+        ("marker_denied", "other_schema"),
+    ] {
+        execute_batch(
+            &server.connection_string,
+            &format!(
+            "CREATE LOGIN [{login}] WITH PASSWORD = 'Owned-marker-test-93!', CHECK_POLICY = OFF;
+             CREATE USER [{login}] FOR LOGIN [{login}] WITH DEFAULT_SCHEMA = [{schema}];
+             GRANT SELECT, INSERT ON dbo.GraphqlOrmRestoredRecords TO [{login}];"
+        ),
+        )
+        .await?;
+    }
+    let owner = writable(&server.connection_string).await?;
+    let restore = owner
+        .begin_restore("stale", Duration::from_secs(10))
+        .await?;
+    drop(restore);
+    execute_batch(
+        &server.connection_string,
+        "GRANT SELECT ON dbo.__graphql_orm_restore_marker TO marker_a;
+         GRANT SELECT ON dbo.__graphql_orm_restore_marker TO marker_b;
+         GRANT SELECT ON other_schema.__graphql_orm_restore_marker TO marker_b;
+         DENY SELECT ON dbo.__graphql_orm_restore_marker TO marker_denied;",
+    )
+    .await?;
+    let mut clients = Vec::new();
+    for login in ["marker_a", "marker_b", "marker_denied"] {
+        let connection = server
+            .connection_string
+            .split(';')
+            .map(|part| {
+                if part.starts_with("user id=") {
+                    format!("user id={login}")
+                } else if part.starts_with("password=") {
+                    "password=Owned-marker-test-93!".into()
+                } else {
+                    part.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let db = writable(&connection).await?;
+        assert_refused(
+            &db,
+            if login == "marker_denied" {
+                ""
+            } else {
+                "stale"
+            },
+        )
+        .await;
+        clients.push(db);
+    }
+    owner
+        .resume_restore("stale", Duration::from_secs(10))
+        .await?
+        .finish()
+        .await?;
+    for (expected, db) in clients[..2].iter().enumerate() {
+        assert_eq!(count(db).await?, expected as i64);
+        insert(db, &graphql_orm::uuid::Uuid::new_v4().to_string()).await?;
+        let tx = MutationContext::begin(db, TransactionMode::Default).await?;
+        tx.commit_and_emit().await?;
+    }
+    assert_refused(&clients[2], "").await;
+    execute_batch(
+        &server.connection_string,
+        "DROP TABLE dbo.__graphql_orm_restore_marker",
+    )
+    .await?;
+    assert_refused(&owner, "").await;
+    owner.pool().install_restore_marker().await?;
+    assert_eq!(count(&owner).await?, 2);
+    server.cleanup()?;
+    Ok(())
+}

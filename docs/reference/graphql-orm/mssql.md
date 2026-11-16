@@ -148,18 +148,22 @@ restore.finish().await?;
   cannot race: a transaction that began before the restore holds the shared
   lock until it ends, and one that begins later cannot obtain it.
 - **The marker.** `begin_restore` also records one row in
-  `__graphql_orm_restore_marker`. The gate that takes the shared lock refuses
+  `dbo.__graphql_orm_restore_marker`. The gate that takes the shared lock refuses
   while that row exists. This covers a restore whose process died: its lock
-  is released with its session, its partial rows remain. The table is created
-  in the login's default schema when it is missing; create it beforehand as
-  the schema owner when the runtime login may not run DDL (the statement is
-  in the
-  [migration guide](../../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials)).
+  is released with its session, its partial rows remain. Before runtime access, the schema owner must call
+  `MssqlPool::install_restore_marker()` as part of schema installation.
+  MSSQL schemas are externally managed; install this infrastructure even on
+  hosts that never restore. Runtime roles need SELECT on the table; restore
+  roles also need INSERT and DELETE. A missing table or denied access fails
+  closed as unknown restore state, even when no marker is visible. See the
+  [migration guide](../../../MIGRATION.md#01620-to-01630-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 - **The refusal.** A refused transaction or statement fails before it reads
   or writes, with an error carrying `RestoreInProgress` (read it with
   `RestoreInProgress::from_error`). `restore_id` is empty in the short window
-  where the restore holds the lock and has not recorded its marker yet.
-  `Database::restore_in_progress` reads the marker without failing, and
+  where the restore holds the lock and has not recorded its marker yet, or
+  when marker state is unknown (started_at is then zero).
+  `Database::restore_in_progress` reads the marker during a restore, failing
+  closed when it cannot read the table;
   `Database::ensure_no_restore_in_progress`,
   `SchemaManager::validate_against_entities` and `validate_target` refuse on
   it, for a service that wants one check at start.

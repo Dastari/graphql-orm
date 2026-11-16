@@ -20,7 +20,7 @@
 use super::backend::OrmBackend;
 
 /// Table that holds the marker row while a host-run restore is in progress.
-pub const RESTORE_MARKER_TABLE: &str = "__graphql_orm_restore_marker";
+pub const RESTORE_MARKER_TABLE: &str = "dbo.__graphql_orm_restore_marker";
 
 /// A host-run restore started and has not finished.
 ///
@@ -33,7 +33,8 @@ pub const RESTORE_MARKER_TABLE: &str = "__graphql_orm_restore_marker";
 pub struct RestoreInProgress {
     /// The identifier the host gave the restore, for example a snapshot id.
     /// Empty when the restore holds its lock but has not recorded its marker
-    /// yet.
+    /// yet, or when marker state cannot be read (missing table or permission).
+    /// In that case, started_at is zero.
     pub restore_id: String,
     /// When the restore started, as UTC Unix seconds on the database clock.
     pub started_at: i64,
@@ -74,7 +75,7 @@ impl RestoreInProgress {
 }
 
 /// Read the marker. Backends that restore transactionally have none, and a
-/// database without the marker table has no restore in progress.
+/// SQL Server database with missing or unreadable infrastructure fails closed.
 pub(crate) async fn read_restore_marker<B: OrmBackend>(
     pool: &B::Pool,
 ) -> crate::Result<Option<RestoreInProgress>> {
@@ -140,10 +141,10 @@ impl crate::db::Database<super::MssqlBackend> {
     /// the marker stays: statements remain refused until
     /// [`Self::resume_restore`] adopts the marker and the restore is finished.
     ///
-    /// The marker is one row in `__graphql_orm_restore_marker`, which this
-    /// call creates in the connection's default schema when it is missing.
-    /// It needs an external-writable pool whose login may create that table,
-    /// or a table created beforehand by the schema owner.
+    /// The marker is one row in `dbo.__graphql_orm_restore_marker`.
+    /// Before runtime use, the schema owner must install this infrastructure
+    /// with `MssqlPool::install_restore_marker`. Runtime roles need SELECT;
+    /// the restore role additionally needs INSERT and DELETE.
     ///
     /// # Errors
     ///

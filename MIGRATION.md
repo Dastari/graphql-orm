@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.159.0 to 0.160.0: atomic restore, search reset and kept values on ignored denials
+## 0.162.0 to 0.163.0: atomic restore, search reset and kept values on ignored denials
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and
 fingerprints are unchanged.
@@ -39,14 +39,20 @@ fingerprints are unchanged.
   `backfill_runtime_search` for those collections before serving search.
   Hosts that import runtime rows another way should call the new
   `SchemaManager::reset_runtime_search` afterwards.
-- **SQL Server restore lock. No action** for hosts that do not restore SQL
-  Server databases with their own statements. Every SQL Server ORM
+- **SQL Server infrastructure. Action needed** for every MSSQL host.
+  As schema owner, run `MssqlPool::install_restore_marker()` during schema
+  installation, before runtime work. It creates the fixed
+  `dbo.__graphql_orm_restore_marker` table without clearing existing rows.
+  Grant the runtime role `SELECT` on that table; the restore role also needs
+  `INSERT` and `DELETE`. A missing or unreadable table means restore state
+  unknown and fails closed with `RestoreInProgress` (empty id, time zero).
+  Every SQL Server ORM
   transaction and autocommit statement now takes a shared application lock
   (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
   it, and checks for a restore marker. Transactions and autocommit reads pay
   no extra round trip; an autocommit write (a raw statement outside a
-  transaction) pays one short batch to release the lock. The login
-  needs no new permission: `sp_getapplock` is granted to `public`. Raw
+  transaction) pays one short batch to release the lock. `sp_getapplock` is
+  granted to `public`. Raw
   statements sent through the ORM run inside that wrapper batch; a statement
   that must be alone in its batch (`CREATE VIEW`, `CREATE PROCEDURE`,
   `CREATE TRIGGER` and similar) is sent unwrapped.
@@ -58,11 +64,14 @@ fingerprints are unchanged.
   a restore whose process died, ORM work fails with an error carrying
   `RestoreInProgress` (`RestoreInProgress::from_error`); after a crash, call
   `Database::resume_restore(restore_id, wait)`, complete the restore or
-  remove its partial rows through the guard, and `finish()`. The first
-  `begin_restore` creates `__graphql_orm_restore_marker` in the login's
-  default schema; create it beforehand as the schema owner when the runtime
-  login may not run DDL:
-  `CREATE TABLE __graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
+  remove its partial rows through the guard, and `finish()`. The marker must
+  exist before runtime work begins; it is never
+  created lazily by a restore. For SQL-only schema installation use:
+  `CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
+  Then `GRANT SELECT ON OBJECT::dbo.__graphql_orm_restore_marker TO [runtime_role]`.
+  If upgrading an unreleased build with an unqualified marker, quiesce all
+  access and reconcile any old marker into the canonical table before restarting;
+  do not clear a stale marker until its partial restore has been recovered.
 - Backup users also upgrade to
   [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).
 
