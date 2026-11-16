@@ -5,7 +5,7 @@ title: Using graphql-orm
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -622,9 +622,10 @@ See [strict authorization](../../docs/reference/graphql-orm/strict-authorization
   The registry only knows what it was built from: add runtime roots with
   `RuntimeGraphqlComposer::register_assurance_operations` and check static schemas with
   `AssuranceEnforcement::finish_schema`. An unregistered mutation still gets the default policy.
-- **The router doesn't protect joined fields.** Its gate covers root fields. A joined entity is
-  authorized only by the subgraph that owns it, so an entity that isn't universally readable needs its
-  own policy there.
+- **The router doesn't grant joined fields.** Its descriptor gate covers root fields; since router
+  0.16.0 it also refuses any field whose composed `@authenticated` or `@requiresScopes` the caller does
+  not meet. A joined entity is still authorized by the subgraph that owns it, so an entity that isn't
+  universally readable needs its own policy there.
 - **PostgreSQL RLS is defence in depth.** Keep resolver, row and field policy as well.
 
 ### In-process writes

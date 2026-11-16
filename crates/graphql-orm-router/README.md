@@ -3,12 +3,20 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
+
+Version 0.16.0 (breaking batch) enforces the composed `@authenticated` and
+`@requiresScopes` directives on every selected field, not only root fields,
+before any downstream request: nested object fields, interface and union
+members, fragments and aliases. A refused selection refuses the whole
+operation with `UNAUTHENTICATED` or `FORBIDDEN` and its response path. See
+[MIGRATION.md](MIGRATION.md#0154-to-0160) and
+[nested directive authorization](docs/configuration.md#nested-directive-authorization).
 
 Version 0.15.4 changes only the wire tests, which now complete the WebSocket
 closing handshake before reconnecting. Router behavior, configuration and

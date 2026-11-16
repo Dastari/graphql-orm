@@ -632,6 +632,23 @@ struct TrustedInternalSubscription;
 /// external authority snapshot. Kept in memory only, never formatted.
 struct RetainedConnectionBearer(String);
 
+/// A refusal names its code and, for a refused selection, only its response
+/// path by response key. It never names the rule or the missing scope.
+fn authorization_denial_error(denial: crate::auth::AuthorizationDenial) -> GraphQLError {
+    let mut error = GraphQLError::from_message_and_code(denial.message, denial.code);
+    if let Some(path) = denial.path {
+        let mut segments =
+            hive_router::executor::response::graphql_error::GraphQLErrorPath::with_capacity(
+                path.len(),
+            );
+        for key in &path {
+            segments.push_field(key);
+        }
+        error.path = Some(segments);
+    }
+    error
+}
+
 /// Why an operation's principal could not be confirmed.
 fn authority_unavailable() -> GraphQLError {
     GraphQLError::from_message_and_code("authentication service unavailable", "UNAUTHENTICATED")
@@ -1119,7 +1136,7 @@ impl RouterPlugin for StaticGraphPlugin {
             .authorization_denied(denials.len());
         let errors = denials
             .into_iter()
-            .map(|denial| GraphQLError::from_message_and_code(denial.message, denial.code))
+            .map(authorization_denial_error)
             .collect::<Vec<_>>();
         OnGraphqlAnalysisHookResult::EndWithResponse(
             PlanExecutionOutput::from_graphql_errors_to_response(
@@ -1176,9 +1193,7 @@ impl RouterPlugin for StaticGraphPlugin {
             .metrics()
             .authorization_denied(denials.len());
         payload.end_with_graphql_errors(
-            denials
-                .into_iter()
-                .map(|denial| GraphQLError::from_message_and_code(denial.message, denial.code)),
+            denials.into_iter().map(authorization_denial_error),
             hive_router::http::StatusCode::OK,
         )
     }

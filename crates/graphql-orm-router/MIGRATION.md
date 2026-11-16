@@ -3,12 +3,49 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.15.4 to 0.16.0
+
+**Action needed** for authenticated routers whose subgraph SDL carries
+`@authenticated` or `@requiresScopes` below the root, on a field or on a type,
+and whose clients select those fields without the authority the directives
+name. The router now refuses such an operation before any subgraph request,
+where it used to forward it and leave the decision to the subgraph. A refused
+operation returns no `data`, only errors with `UNAUTHENTICATED` or
+`FORBIDDEN` codes and the refused selection's response path.
+
+1. List the `@authenticated` and `@requiresScopes` directives in every
+   subgraph's SDL. Root fields are now checked against them too, in addition
+   to their descriptors.
+2. For each, confirm the clients that select it present a bearer and, for
+   `@requiresScopes`, one complete scope set. A field selected through an
+   interface needs the rules of every implementation of that field, and a
+   type-level rule applies to every field of the type and to fragments on it.
+3. Fix any `@requiresScopes` argument that is an empty list, contains an
+   empty set, or contains a scope that is not a non-empty string; any
+   directive named `requiresScopes` or `authenticated` (or an import alias of
+   either), with or without a `<prefix>__`, that is not Federation's
+   directive; and either directive on an argument, input field, enum value,
+   union, input object or the schema. The router now refuses such a graph
+   when it is built. Where several subgraphs declare
+   scopes on one shared type or field, a caller needs a set from every one of
+   them, and a field of an interface implementation also needs the rules
+   declared on the interface or an `@interfaceObject` type.
+4. Where a client should keep reading the rest of an operation, move the
+   protected selection into its own operation, or remove the directive from
+   the subgraph SDL and keep the subgraph's own guard. Do not rely on the
+   router to null a refused field: it refuses the operation.
+5. Keep subgraph resolver guards and policies. The router check is defence in
+   depth and grants nothing.
+
+Anonymous development mode is unchanged. No configuration or public API
+changes.
 
 ## 0.15.3 to 0.15.4
 

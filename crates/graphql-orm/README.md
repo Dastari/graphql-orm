@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.166.0 (placeholder for the breaking batch) fixes each schema's
+Version 0.167.0 (placeholder for the breaking batch) fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side
 keyset pages and host `paginate(PageInput)` reads
@@ -23,7 +23,7 @@ adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
 items need action.
 
-Version 0.164.0 (breaking batch) makes migration planning safer by default:
+Version 0.166.0 (breaking batch) makes migration planning safer by default:
 plans no longer drop tables the target does not declare, lossy column type
 changes and integrity-removing steps need `allow_destructive`, and the
 PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
@@ -42,7 +42,6 @@ uniqueness when creating the index instead of running the preflight. Predicate
 dependencies come from metadata, not SQL text; predicates that cannot be
 analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
-
 Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
@@ -850,8 +849,10 @@ README remains project-neutral.
 - **Federation entities:** `federation_key` opts an entity into a resolvable
   Apollo Federation v2 `@key`, generating a batched entity resolver that runs
   the same authorization chain as the single-row read. A joined field is
-  authorized only by the subgraph that owns the entity; the router's contract
-  covers root fields.
+  authorized by the subgraph that owns the entity. The router's descriptor
+  contract covers root fields; since router 0.16.0 it also refuses fields whose
+  composed `@authenticated` or `@requiresScopes` the caller does not meet, but
+  it grants nothing.
 - **Checked calendar filters:** generated date predicates use half-open
   calendar ranges and recursively reject invalid spans, offsets, and ranges
   before database work. PostgreSQL uses session `CURRENT_DATE`, SQL Server uses

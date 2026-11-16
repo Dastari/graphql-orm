@@ -10,6 +10,25 @@ supersedes: []
 
 # Changelog
 
+## 0.27.0 (unreleased, breaking batch)
+
+- **Breaking:** `PruneResult` and `DeleteSnapshotResult` gain
+  `deleted_snapshot_ids`, the ids whose deletion completed, in ascending
+  order. Both structs and `BackupError` are now `#[non_exhaustive]`, so later
+  additions are not breaking. The `SnapshotDeletionObserver` of
+  `prune_observed` and `delete_snapshot_observed` remains the record to rely
+  on: it has the ids on every failure path, where no result is returned.
+- **Breaking:** a snapshot the host's snapshot records do not admit is
+  refused with the dedicated `BackupError::SnapshotNotAdmitted { snapshot_id,
+  reason }` instead of `ManifestAuthenticationFailed`.
+  `BackupError::is_snapshot_not_admitted()` keeps working.
+- `OrmBackupAdapter::clear_restore_target` clears a PostgreSQL target in a
+  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.166.0
+  installs a `TRUNCATE` guard on journaled tables (#592) that admits only
+  such a transaction; without this the clear would be refused on a journaled
+  database. The clear is not journaled, as before. Requires ORM 0.166.0 for
+  the optional ORM adapter. SQLite is unchanged.
+
 ## 0.26.0 (unreleased)
 
 - Host-held snapshot records (#610). A seal proves the host once wrote a
@@ -36,25 +55,6 @@ supersedes: []
   transaction on PostgreSQL and SQLite and resets the runtime search index of
   every restored table (#574, #280). Requires ORM 0.165.0 for the optional
   ORM adapter.
-
-## 0.25.0 (unreleased, breaking batch)
-
-- **Breaking:** `PruneResult` and `DeleteSnapshotResult` gain
-  `deleted_snapshot_ids`, the ids whose deletion completed, in ascending
-  order. Both structs and `BackupError` are now `#[non_exhaustive]`, so later
-  additions are not breaking. The `SnapshotDeletionObserver` of
-  `prune_observed` and `delete_snapshot_observed` remains the record to rely
-  on: it has the ids on every failure path, where no result is returned.
-- **Breaking:** a snapshot the host's snapshot records do not admit is
-  refused with the dedicated `BackupError::SnapshotNotAdmitted { snapshot_id,
-  reason }` instead of `ManifestAuthenticationFailed`.
-  `BackupError::is_snapshot_not_admitted()` keeps working.
-- `OrmBackupAdapter::clear_restore_target` clears a PostgreSQL target in a
-  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.163.0
-  installs a `TRUNCATE` guard on journaled tables (#592) that admits only
-  such a transaction; without this the clear would be refused on a journaled
-  database. The clear is not journaled, as before. Requires ORM 0.163.0 for
-  the optional ORM adapter. SQLite is unchanged.
 
 ## 0.25.0 (unreleased)
 
