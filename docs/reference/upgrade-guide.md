@@ -33,6 +33,9 @@ assigned when the breaking batch reaches main. See the authoritative
   mismatched or unbounded database. Internal repository, transaction and keyset
   reads above their maximum fail with `PAGE_LIMIT_EXCEEDED`; page with cursors
   or raise the maximum for one trusted read with `with_max_limit(n)`.
+- **Action needed — #580:** Add `CursorKeyTooLarge` to exhaustive matches on
+  `RuntimeQueryErrorCode` and `RuntimeRelationErrorCode`. The enum additions
+  are part of this breaking release.
 - **Action needed — #528 (4):** Runtime `RecordVersion` and integer live keys
   use decimal strings and `RuntimeInt64` by default. Update clients and regenerate
   descriptors and approvals. `with_legacy_int_identities()` allows transition.

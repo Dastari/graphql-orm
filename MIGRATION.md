@@ -18,6 +18,12 @@ Upgrade runtime and macros together.
 
 ### ORM and macros: page limits, identities, subscriptions, preloads and callback errors
 
+- **Runtime cursor error enums gain a variant. Action needed** for exhaustive
+  matches on `RuntimeQueryErrorCode` or `RuntimeRelationErrorCode`: handle
+  `CursorKeyTooLarge`. A stored order value that cannot fit a cursor refuses
+  the page with `cursor_key_too_large`. The public enum additions ship only
+  in this breaking release; PR #733 keeps its main-branch Rust API compatible
+  ([#580](https://github.com/Dastari/graphql-orm/issues/580)).
 - **A schema's maximum page limit is fixed at compile time. Action needed** if
   the `Database` a generated schema serves sets a maximum page limit other
   than 100 (`DatabaseBuilder::max_page_limit`, `PaginationConfig::max_limit`,
