@@ -1434,7 +1434,11 @@ where
         if self.query.requires_in_memory_filtering() {
             return Err(invalid());
         }
-        // A client page: its offset is bounded like any other.
+        // A client page: the opt-in limit refusal and the offset bound apply
+        // before either path reads a row, the native index included.
+        db.client_pagination_config()
+            .admit_client_page(page.as_ref())
+            .map_err(|error| error.into_graphql_error())?;
         self.query.page = page.clone();
         self.builder_offset = false;
         if matches!(

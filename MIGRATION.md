@@ -23,6 +23,11 @@ fingerprints are unchanged.
   unbounded. Each backend scans the rows an offset skips, so public services
   should set a bound, for example `PaginationConfig::RECOMMENDED_MAX_OFFSET`
   (10,000), and page deeper with keyset cursors.
+- **Search page limit refusal. No action**, unless clients of a service with
+  `refuse_oversized_page_limit(true)` relied on a generated GraphQL search
+  over a native SQLite or PostgreSQL index reducing an oversized
+  `page.limit`: such a search is now refused with `PAGE_LIMIT_EXCEEDED`, as
+  the other generated pages and the scan path already were since 0.164.0.
 - **SQL Server `DECIMAL(38,38)`. No action.** A non-NULL value in a column
   declared with scale 38 used to panic inside the driver while the row was
   read. The statement now fails with `sqlx::Error::Decode` and its connection

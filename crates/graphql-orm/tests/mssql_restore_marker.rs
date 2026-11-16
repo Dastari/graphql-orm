@@ -724,6 +724,13 @@ async fn a_marker_table_needs_its_key_and_check() -> Result<(), Box<dyn std::err
             "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key > 0), \
              restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)",
         ),
+        (
+            "a check added WITH NOCHECK, which existing rows need not satisfy",
+            "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY, \
+             restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL); \
+             ALTER TABLE dbo.__graphql_orm_restore_marker WITH NOCHECK \
+             ADD CONSTRAINT CK_gorm_marker_untrusted CHECK (marker_key = 1)",
+        ),
     ] {
         execute_batch(
             &server.connection_string,

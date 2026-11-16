@@ -158,8 +158,9 @@ restore.finish().await?;
   external-writable pool, is idempotent and race-safe (replicas may install at
   the same time; it serialises on an application lock, accepts a table another
   installer created, and verifies the table's shape: its three columns and
-  types, a primary key of exactly `marker_key`, and an enabled
-  `CHECK (marker_key = 1)`, declared on the column or on the table). A missing table or
+  types, a primary key of exactly `marker_key`, and an enabled,
+  trusted `CHECK (marker_key = 1)` (not added `WITH NOCHECK`), declared on the
+  column or on the table). A missing table or
   denied access fails closed as unavailable restore state, even when no marker
   is visible. See the
   [migration guide](../../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).

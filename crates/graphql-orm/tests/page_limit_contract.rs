@@ -112,6 +112,8 @@ struct LimitBoard {
         keyset = "id asc"
     )
 )]
+// A native search index on SQLite and PostgreSQL; SQL Server searches by scan.
+#[graphql_orm(search(index = true))]
 struct LimitCard {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -119,6 +121,7 @@ struct LimitCard {
     #[sortable]
     id: String,
     #[filterable(type = "string")]
+    #[graphql_orm(searchable(weight = "A"))]
     board_id: String,
 }
 
@@ -231,6 +234,14 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         #[cfg(feature = "mssql")]
         owned_mssql::execute_batch(&owner.connection_string, &insert).await?;
     }
+    // Rows inserted with SQL reach the native search index on a rebuild.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    LimitCard::rebuild_search_index(&db).await?;
+    // SQL Server has no native index: a search scans candidates in batches.
+    #[cfg(feature = "mssql")]
+    let db = db.with_authorized_scan_config(graphql_orm::graphql::orm::AuthorizedScanConfig::new(
+        [7; 32], 10, 100,
+    ));
     Ok(Fixture {
         db,
         #[cfg(feature = "mssql")]
@@ -246,7 +257,7 @@ async fn execute(db: &Database, query: &str) -> async_graphql::Response {
 }
 
 /// The pages a client can ask for, with the path of each page's edges.
-const PAGES: [(&str, &str, &[&str]); 3] = [
+const PAGES: [(&str, &str, &[&str]); 4] = [
     (
         "list root",
         "{ limitCards(page: { limit: LIMIT }) { edges { node { id } } } }",
@@ -261,6 +272,11 @@ const PAGES: [(&str, &str, &[&str]); 3] = [
         "to-many relation",
         "{ limitBoard(id: \"board\") { cards(page: { limit: LIMIT }) { edges { node { id } } } } }",
         &["limitBoard", "cards"],
+    ),
+    (
+        "search connection",
+        "{ limitCardsSearch(search: { query: \"board\" }, page: { limit: LIMIT }) { edges { node { id } } } }",
+        &["limitCardsSearch"],
     ),
 ];
 
@@ -312,7 +328,7 @@ async fn oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(
 }
 
 /// The offset pages a client can ask for, with the path of each page's edges.
-const OFFSET_PAGES: [(&str, &str, &[&str]); 2] = [
+const OFFSET_PAGES: [(&str, &str, &[&str]); 3] = [
     (
         "list root",
         "{ limitCards(page: { limit: 2, offset: OFFSET }) { edges { node { id } } } }",
@@ -322,6 +338,12 @@ const OFFSET_PAGES: [(&str, &str, &[&str]); 2] = [
         "to-many relation",
         "{ limitBoard(id: \"board\") { cards(page: { limit: 2, offset: OFFSET }) { edges { node { id } } } } }",
         &["limitBoard", "cards"],
+    ),
+    // The native index path on SQLite and PostgreSQL, the scan on SQL Server.
+    (
+        "search connection",
+        "{ limitCardsSearch(search: { query: \"board\" }, page: { limit: 2, offset: OFFSET }) { edges { node { id } } } }",
+        &["limitCardsSearch"],
     ),
 ];
 

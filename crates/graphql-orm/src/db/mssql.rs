@@ -974,7 +974,7 @@ const CREATE_RESTORE_MARKER: &str = "\
               AND c.name = N'marker_key') \
         OR NOT EXISTS (SELECT 1 FROM sys.check_constraints AS k \
             WHERE k.parent_object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') \
-              AND k.is_disabled = 0 \
+              AND k.is_disabled = 0 AND k.is_not_trusted = 0 \
               AND REPLACE(REPLACE(REPLACE(k.definition, N' ', N''), N'(', N''), N')', N'') = N'[marker_key]=1') \
          THROW 50000, N'dbo.__graphql_orm_restore_marker exists but does not have the documented shape', 1;";
 
