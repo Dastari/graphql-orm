@@ -424,6 +424,39 @@ async fn host_keyset_reads_take_a_per_read_maximum(db: &Database) -> TestResult 
         .await
         .map_err(|error| error.message)?;
     assert_eq!(at_maximum.edges.len() as i64, MAXIMUM);
+    // Authorized scans have the same exact-or-refused host contract, including
+    // the per-read override. They do not silently truncate overflow checks.
+    let scanning = db
+        .clone()
+        .with_authorized_scan_config(AuthorizedScanConfig::new([71; 32], 8, 64));
+    let refused = EntityQuery::<LimitCard, Backend>::new()
+        .fetch_authorized_scan(
+            &scanning,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(MAXIMUM + 1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("an authorized scan above the maximum is refused");
+    assert_eq!(code(&refused), exceeded);
+    let scan = EntityQuery::<LimitCard, Backend>::new()
+        .with_max_limit(bound + 1)
+        .fetch_authorized_scan(
+            &scanning,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(bound + 1),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| error.message)?;
+    assert_eq!(scan.nodes.len() as i64, bound + 1);
+
     // An omitted limit is not a request for more than the maximum.
     let omitted = LimitCard::keyset_page(
         db,
