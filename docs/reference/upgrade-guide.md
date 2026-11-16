@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -68,9 +68,17 @@ changelog to decide.
 
 ### Unreleased
 
-Merged to main, not yet in a workspace release. The next workspace release publishes these versions.
+Changes merged to main after the latest workspace release.
 
-Versions on main (changed in bold): **`graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0**; `graphql-orm-operation-catalog` 0.8.0; **`graphql-orm-storage` 0.15.0**; **`graphql-orm-backup` 0.23.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; **`graphql-orm-router` 0.15.4**.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+No unreleased entries yet. Add new entries here.
+
+### workspace-2026.11.15.6
+
+Commit `5cf776710c8e` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.15.6)
+
+Packages (changed in bold): **`graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0**; `graphql-orm-operation-catalog` 0.8.0; **`graphql-orm-storage` 0.15.0**; **`graphql-orm-backup` 0.23.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; **`graphql-orm-router` 0.15.4**.
 
 - **Action needed** — ORM/macros 0.159.0: PostgreSQL table-name case [migration](../../MIGRATION.md#01580-to-01590-postgresql-table-name-case) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01590)
 - **No action** — Storage 0.15.0: bounded SMB destructor cleanup [migration](../../crates/graphql-orm-storage/MIGRATION.md#0140-to-0150-bounded-smb-destructor-cleanup) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0150-unreleased)
