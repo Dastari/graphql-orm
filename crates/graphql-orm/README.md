@@ -10,13 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.164.0 makes snapshot restore atomic on SQLite and PostgreSQL,
+Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
 `MssqlPool::install_restore_marker()` and grant runtime roles SELECT before
 serving ORM work. Missing or unreadable restore state fails closed with
 `RestoreStateUnavailable`, whose reason names the fix. See the
-[migration guide](../../MIGRATION.md#01630-to-01640-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
 per-entity wrapper objects (edges, connections, mutation results, change

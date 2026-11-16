@@ -13,7 +13,7 @@ supersedes: []
 Version 0.24.0 adds host-held snapshot records: a known-snapshot list or a
 revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is
 put back into the repository, and `prune_observed` and
-`delete_snapshot_observed` report each snapshot id before deleting it. With ORM 0.164.0 the ORM adapter restores all tables
+`delete_snapshot_observed` report each snapshot id before deleting it. With ORM 0.165.0 the ORM adapter restores all tables
 in one transaction. See [MIGRATION.md](MIGRATION.md).
 
 Version 0.23.0 fixes PostgreSQL ORM restore for mixed-case entity table names.

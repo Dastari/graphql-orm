@@ -10,10 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.164.0 preserves the stored value of an optional field when its
+Version 0.165.0 preserves the stored value of an optional field when its
 write policy denies an upsert update and the host opts to ignore that denial.
 Recompile entities with aligned ORM/macros versions. See the
-[migration guide](../../MIGRATION.md#01630-to-01640-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
 per-entity wrapper objects (edges, connections, mutation results, change

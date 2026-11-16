@@ -160,7 +160,7 @@ restore.finish().await?;
   installer created, and verifies the table's shape). A missing table or
   denied access fails closed as unavailable restore state, even when no marker
   is visible. See the
-  [migration guide](../../../MIGRATION.md#01630-to-01640-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+  [migration guide](../../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 - **The refusal.** A refused transaction or statement fails before it reads
   or writes, with an error carrying `RestoreInProgress` (read it with
   `RestoreInProgress::from_error`). `restore_id` is empty, with `started_at`
