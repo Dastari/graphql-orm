@@ -384,5 +384,22 @@ async fn a_cascade_into_a_table_without_a_recorder_is_refused()
             installed.unwrap_or_else(|error| panic!("{action}: {error}"));
         }
     }
+    // A disabled lookalike recorder does not close the catalog gap.
+    sqlx::raw_sql(
+        "DROP TABLE trunc_host_links; \
+         CREATE TABLE trunc_host_links (parent_id text REFERENCES trunc_parents(id) ON DELETE CASCADE); \
+         CREATE TRIGGER graphql_orm_change_journal AFTER INSERT OR UPDATE OR DELETE ON trunc_host_links FOR EACH ROW EXECUTE FUNCTION graphql_orm.record_change_journal_entry(); \
+         ALTER TABLE trunc_host_links DISABLE TRIGGER graphql_orm_change_journal",
+    )
+    .execute(&owner)
+    .await?;
+    let error = database
+        .ensure_change_journal_recorder(&entities)
+        .await
+        .expect_err("a disabled trigger cannot journal a cascade");
+    assert!(
+        error.to_string().contains("cannot record table trunc_host_links"),
+        "{error}"
+    );
     Ok(())
 }
