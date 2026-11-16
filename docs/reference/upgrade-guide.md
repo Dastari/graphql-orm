@@ -68,11 +68,12 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action — ORM/macros 0.161.0:** opt-in pagination and 64-bit identities, cursor refusal details, and schema-local complexity bounds preserve existing Rust configuration literals and exhaustive error matches; see [migration details](../../MIGRATION.md#01590-to-01610-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
 Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-No unreleased entries yet. Add new entries here.
 
 ### workspace-2026.11.15.6
 

@@ -234,7 +234,7 @@ computes page counts from `totalCount` and the size it asked for then gets
 them wrong, and cannot tell a reduced page from a last page.
 
 Set `DatabaseBuilder::refuse_oversized_page_limit(true)` (or
-`PaginationConfig::with_oversized_limit_refusal(true)`) to refuse instead.
+`Database::with_oversized_page_limit_refusal(true)`) to refuse instead.
 An explicit `page.limit` on a list root, to-many relation or search
 connection, or an explicit `limit`, `first` or `last` on a keyset connection,
 above the maximum then fails with `PAGE_LIMIT_EXCEEDED` before any row is
@@ -242,7 +242,7 @@ read. The message names the limit asked for and the maximum. A limit at the
 maximum and an omitted limit are served as before. The setting is off by
 default, so existing responses do not change. A custom resolver that takes a
 client `PageInput` should resolve it with
-`PaginationConfig::resolve_client_page` so the setting covers it too.
+`Database::client_pagination_config().resolve_client_page` so the setting covers it too.
 
 `schema_roots!(max_page_limit: N, ...)` declares the maximum at compile time.
 The generated module then exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
@@ -252,7 +252,7 @@ complexity estimate caps a requested page at `N`, and building the schema
 panics when the `Database` applies a different maximum or none. Without the
 declaration nothing changes: the catalogue and the complexity estimate use
 100 whatever the database is configured with. With several declaring schemas
-in one process the complexity estimate uses the largest declared maximum.
+in one process each complexity estimate uses its own schema data; undeclared schemas retain the default estimate of 100.
 
 Rust repository reads are separate. `limit(n)` on a repository or transaction
 builder is exact or refused, and `with_max_limit(n)` gives one trusted read

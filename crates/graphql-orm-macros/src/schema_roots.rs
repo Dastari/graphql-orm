@@ -572,6 +572,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     #readonly_subscription_value,
                 )
                 .data(database.clone())
+            .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
+            .extension(::graphql_orm::graphql::orm::PageMaximumValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
             ));
@@ -786,6 +788,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 #subscription_root_value,
             )
             .data(database.clone())
+            .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
+            .extension(::graphql_orm::graphql::orm::PageMaximumValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
             ));

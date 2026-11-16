@@ -1158,7 +1158,9 @@ where
         base.order_values.clear();
         // A per-read maximum set with `with_max_limit` replaces the
         // database's for this page, as it does for `fetch_all`.
-        let page_config = db.pagination_config().with_read_maximum(base.max_limit);
+        let page_config = db
+            .client_pagination_config()
+            .with_read_maximum(base.max_limit);
         page_config
             .admit_client_limit(requested_limit)
             .map_err(|error| error.into_graphql_error())?;
@@ -1280,7 +1282,7 @@ where
         base.order_clauses = T::KEYSET_ORDER.iter().map(|c| c.order_sql()).collect();
         base.order_values.clear();
         let limit = db
-            .pagination_config()
+            .client_pagination_config()
             .with_read_maximum(base.max_limit)
             .resolve_client_page(
                 Some(&PageInput {
