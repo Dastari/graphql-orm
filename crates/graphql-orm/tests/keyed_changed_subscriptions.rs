@@ -782,6 +782,10 @@ async fn a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters(
     db: &Database,
 ) -> TestResult {
     use graphql_orm::graphql::subscriptions::SUBSCRIPTION_CONTINUITY_LOST;
+    // The shortest authority tick: a lagging stream ends on its next tick.
+    let db = &db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
     parent(db, "p1", "alice").await?;
     parent(db, "p2", "alice").await?;
     let filter = argument_name("filter");
@@ -836,6 +840,15 @@ async fn a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters(
             )
             .await?;
         }
+    }
+    // Lag is not reported when it is detected (#387): every stream stays
+    // open until its next authority tick, whatever it filters.
+    for (name, stream) in &mut streams {
+        poll_fn(|cx| match stream.poll_next_unpin(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(other) => panic!("{name}: lag ended the stream at once: {other:?}"),
+        })
+        .await;
     }
     for (name, stream) in &mut streams {
         println!("lag scenario: {name}");

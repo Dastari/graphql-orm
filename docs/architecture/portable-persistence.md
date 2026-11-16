@@ -3,7 +3,7 @@ title: "Portable Persistence Primitives"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -169,7 +169,9 @@ let page = Job::keyset_page(
 The same opt-in adds a generated `jobsKeyset` GraphQL connection. Page limits are resolved and
 capped before execution, the query requests only `limit + 1`, and total count runs only when
 `includeTotalCount` is true. Cursors start with `gomk1.`, contain a version/order fingerprint and
-checksum, and strictly reject malformed, tampered, order-mismatched, and legacy offset cursors.
+checksum, and strictly reject malformed, corrupted, order-mismatched, and legacy offset cursors.
+The checksum uses no secret and is not authentication: a rewritten cursor with a recomputed checksum
+is accepted and only changes the resume position, while row policy applies to every page.
 Nullable ordering is explicit in generated SQL. Legacy offset connections remain available; migrate
 clients by switching fields and discarding stored numeric cursors rather than decoding them as
 keysets.

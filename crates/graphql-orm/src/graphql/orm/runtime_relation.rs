@@ -68,15 +68,28 @@ impl RuntimeRelationErrorCode {
 /// Safe runtime relation error. SQL, identifiers, key values, cursors, and rows are redacted.
 pub struct RuntimeRelationError {
     code: RuntimeRelationErrorCode,
+    detail: Option<&'static str>,
     relation: Option<RelationId>,
     collection: Option<CollectionId>,
     source: Option<Box<dyn StdError + Send + Sync + 'static>>,
 }
 
 impl RuntimeRelationError {
+    /// Stable public detail, when a more specific refusal is available.
+    pub const fn detail(&self) -> Option<&'static str> {
+        self.detail
+    }
+
+    fn cursor_key_too_large() -> Self {
+        let mut error = Self::new(RuntimeRelationErrorCode::ResourceLimit);
+        error.detail = Some("cursor_key_too_large");
+        error
+    }
+
     fn new(code: RuntimeRelationErrorCode) -> Self {
         Self {
             code,
+            detail: None,
             relation: None,
             collection: None,
             source: None,
@@ -144,7 +157,11 @@ impl From<RuntimeRecordError> for RuntimeRelationError {
 
 impl From<RuntimeQueryError> for RuntimeRelationError {
     fn from(error: RuntimeQueryError) -> Self {
-        Self::new(RuntimeRelationErrorCode::InvalidRequest).source(error)
+        if error.detail() == Some("cursor_key_too_large") {
+            Self::cursor_key_too_large().source(error)
+        } else {
+            Self::new(RuntimeRelationErrorCode::InvalidRequest).source(error)
+        }
     }
 }
 
@@ -1108,10 +1125,7 @@ fn encode_relation_cursor(
         RuntimeRelationError::new(RuntimeRelationErrorCode::CursorInvalid).source(error)
     })?;
     if bytes.len() > request.limits.max_cursor_bytes {
-        return Err(
-            RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
-                .for_relation(&request.relation),
-        );
+        return Err(RuntimeRelationError::cursor_key_too_large().for_relation(&request.relation));
     }
     Ok(format!("{RELATION_CURSOR_PREFIX}{}", hex(&bytes)))
 }

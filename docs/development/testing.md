@@ -293,6 +293,11 @@ scripts/run-owned-database-lanes.sh mssql
 scripts/run-owned-database-lanes.sh ai-postgres
 ```
 
+`scripts/run-owned-database-lanes.sh page-limit-contract` runs
+`page_limit_contract` (the opt-in oversized page refusal, the declared
+`schema_roots!` maximum and host keyset maxima) on SQLite, an owned PostgreSQL
+container and an owned SQL Server container.
+
 `scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
 authorized page regressions (`authorized_page_context_binding`) on SQLite,
 PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
