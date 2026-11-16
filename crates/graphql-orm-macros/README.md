@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.160.0 (placeholder, **breaking fingerprints**) uses operation
+catalogue 0.9.0: generated-operation fingerprints no longer include the Rust
+module path, so moving an entity keeps them and every fingerprint changes once
+at this upgrade. `stable_type_id` is still accepted and no longer affects
+fingerprints. Applying a planned migration now refuses, before any statement
+runs, a new unique index whose key existing rows repeat
+(`UniqueIndexDuplicates`). Upgrade ORM/macros together; see the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,
 reads/writes, RLS and search helpers resolve the same table while declared

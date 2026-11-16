@@ -283,9 +283,9 @@ pub fn prepare_capability_delivery_surface(
             })
             .collect(),
         AiCapabilityDeliveryMode::ClientDeferred => {
-            vec![discovery_definition(index_fingerprint)]
+            vec![discovery_definition(Some(index_fingerprint))]
         }
-        AiCapabilityDeliveryMode::FixedBroker => fixed_broker_definitions(index_fingerprint),
+        AiCapabilityDeliveryMode::FixedBroker => fixed_broker_definitions(),
     };
     Ok(AiCapabilityDeliverySurface {
         mode: decision.mode,
@@ -339,7 +339,11 @@ pub fn prepare_client_deferred_continuation(
     Ok(exact_definitions)
 }
 
-fn discovery_definition(index_fingerprint: &str) -> ModelToolDefinition {
+/// `index_fingerprint` is `Some` only for client-deferred delivery, whose
+/// installed definitions are catalogue-derived. The fixed broker passes `None`:
+/// its three definitions depend on the broker protocol version alone, so a
+/// catalogue change never alters the retained provider surface.
+fn discovery_definition(index_fingerprint: Option<&str>) -> ModelToolDefinition {
     broker_definition(
         AI_CAPABILITY_DISCOVER_TOOL_ID,
         "graphql_capabilities_discover",
@@ -360,7 +364,8 @@ fn discovery_definition(index_fingerprint: &str) -> ModelToolDefinition {
     )
 }
 
-fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition> {
+fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
+    let index_fingerprint = None;
     let discover = discovery_definition(index_fingerprint);
     let describe = broker_definition(
         AI_CAPABILITY_DESCRIBE_TOOL_ID,
@@ -466,18 +471,27 @@ fn broker_definition(
     tool_id: &str,
     provider_name: &str,
     description: &str,
-    index_fingerprint: &str,
+    index_fingerprint: Option<&str>,
     parameters: serde_json::Value,
 ) -> ModelToolDefinition {
-    ModelToolDefinition {
-        tool_id: tool_id.to_owned(),
-        provider_name: provider_name.to_owned(),
-        fingerprint: hash_json(&json!({
+    let fingerprint = match index_fingerprint {
+        Some(index_fingerprint) => hash_json(&json!({
             "version": 1,
             "tool_id": tool_id,
             "index_fingerprint": index_fingerprint,
             "parameters": parameters.clone(),
         })),
+        None => hash_json(&json!({
+            "version": 2,
+            "tool_id": tool_id,
+            "broker_version": AI_CAPABILITY_BROKER_VERSION,
+            "parameters": parameters.clone(),
+        })),
+    };
+    ModelToolDefinition {
+        tool_id: tool_id.to_owned(),
+        provider_name: provider_name.to_owned(),
+        fingerprint,
         description: description.to_owned(),
         parameters,
         strict: true,
@@ -534,8 +548,9 @@ pub fn select_capability_delivery_mode(
 pub struct AiProviderCapabilitySessionBinding {
     /// Selected delivery mode.
     delivery_mode: AiCapabilityDeliveryMode,
-    /// Canonical capability-index-set fingerprint.
-    capability_index_fingerprint: String,
+    /// Canonical capability-index-set fingerprint for catalogue-derived
+    /// modes; `None` for the fixed broker.
+    capability_index_fingerprint: Option<String>,
     /// Stable fingerprints of frozen static bootstrap tools.
     static_bootstrap_tool_fingerprints: BTreeSet<String>,
     /// Reviewed provider projection algorithm version.
@@ -552,6 +567,19 @@ pub struct AiProviderCapabilitySessionBinding {
 
 impl AiProviderCapabilitySessionBinding {
     /// Creates one immutable provider-session binding.
+    ///
+    /// `EagerExact`, `ProviderDeferred` and `ClientDeferred` definitions are
+    /// derived from the catalogue, so their binding includes
+    /// `capability_index_fingerprint` and rotates when the catalogue changes.
+    ///
+    /// A `FixedBroker` binding covers the broker protocol version
+    /// ([`AI_CAPABILITY_BROKER_VERSION`]), the static bootstrap surface, the
+    /// delivery mode and the provider identity only. The supplied index
+    /// fingerprint is validated and then dropped: it is neither stored nor
+    /// hashed, so a schema or catalogue change keeps the retained session.
+    /// Describe and execute remain authoritative: each revalidates the current
+    /// index, schema, entry and policy fingerprints and refuses a drifted
+    /// selection with the recoverable [`AI_CAPABILITY_STALE`] outcome.
     ///
     /// # Errors
     ///
@@ -590,16 +618,32 @@ impl AiProviderCapabilitySessionBinding {
                 "provider bootstrap tool binding is invalid".to_owned(),
             ));
         }
-        let fingerprint = hash_json(&json!({
-            "version": 1,
-            "delivery_mode": delivery_mode,
-            "capability_index_fingerprint": capability_index_fingerprint,
-            "static_bootstrap_tool_fingerprints": static_bootstrap_tool_fingerprints,
-            "provider_projection_version": provider_projection_version,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "registration_identity": registration_identity,
-        }));
+        let (capability_index_fingerprint, fingerprint) =
+            if delivery_mode == AiCapabilityDeliveryMode::FixedBroker {
+                let fingerprint = hash_json(&json!({
+                    "version": 2,
+                    "delivery_mode": delivery_mode,
+                    "broker_version": AI_CAPABILITY_BROKER_VERSION,
+                    "static_bootstrap_tool_fingerprints": static_bootstrap_tool_fingerprints,
+                    "provider_projection_version": provider_projection_version,
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "registration_identity": registration_identity,
+                }));
+                (None, fingerprint)
+            } else {
+                let fingerprint = hash_json(&json!({
+                    "version": 1,
+                    "delivery_mode": delivery_mode,
+                    "capability_index_fingerprint": capability_index_fingerprint,
+                    "static_bootstrap_tool_fingerprints": static_bootstrap_tool_fingerprints,
+                    "provider_projection_version": provider_projection_version,
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "registration_identity": registration_identity,
+                }));
+                (Some(capability_index_fingerprint), fingerprint)
+            };
         Ok(Self {
             delivery_mode,
             capability_index_fingerprint,
@@ -617,17 +661,21 @@ impl AiProviderCapabilitySessionBinding {
         self.delivery_mode
     }
 
-    /// Exact canonical capability-index-set fingerprint.
-    pub fn capability_index_fingerprint(&self) -> &str {
-        &self.capability_index_fingerprint
+    /// Exact canonical capability-index-set fingerprint bound into a
+    /// catalogue-derived delivery mode.
+    ///
+    /// Returns `None` for [`AiCapabilityDeliveryMode::FixedBroker`], whose
+    /// binding does not depend on the catalogue.
+    pub fn capability_index_fingerprint(&self) -> Option<&str> {
+        self.capability_index_fingerprint.as_deref()
     }
 
     /// Exact canonical capability-index-set fingerprint.
     ///
     /// This is the explicit multi-target name for
     /// [`Self::capability_index_fingerprint`].
-    pub fn capability_index_set_fingerprint(&self) -> &str {
-        &self.capability_index_fingerprint
+    pub fn capability_index_set_fingerprint(&self) -> Option<&str> {
+        self.capability_index_fingerprint.as_deref()
     }
 
     /// Exact frozen static bootstrap tool fingerprints.
@@ -1186,8 +1234,15 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// # Errors
     ///
-    /// Fails closed on expiry, revocation, drift, or any cross-run/provider/
-    /// target/kind substitution.
+    /// Fails closed with [`AiError::Forbidden`] on expiry, revocation, or any
+    /// cross-run/provider/principal substitution. Drift of the capability,
+    /// entry, index, schema, catalogue, target-policy or host-policy
+    /// fingerprint since the handle was loaded also fails closed, with
+    /// [`AiError::InvalidInput`] carrying [`AI_CAPABILITY_STALE`]: nothing
+    /// executes and the caller must describe the capability again. Drift is
+    /// checked only after the handle is proven to belong to this principal
+    /// and run, and a current denial is never reported as drift when the
+    /// fingerprints are unchanged.
     pub async fn authorize_execution(
         &self,
         principal_reference: &PrincipalReference,
@@ -1210,9 +1265,11 @@ impl AiCapabilityDiscoveryBroker {
         let indexes = self.current_indexes.current_index_set(run)?;
         let (index, entry) = indexes
             .entry(&loaded.capability_id)
-            .ok_or(AiError::Forbidden)?;
-        if loaded.capability_kind != entry.kind
-            || loaded.capability_fingerprint != entry.capability_fingerprint
+            .ok_or_else(stale_capability)?;
+        if loaded.capability_kind != entry.kind {
+            return Err(AiError::Forbidden);
+        }
+        if loaded.capability_fingerprint != entry.capability_fingerprint
             || loaded.entry_fingerprint != entry.fingerprint
             || loaded.index_set_fingerprint != indexes.fingerprint()
             || loaded.index_fingerprint != index.fingerprint()
@@ -1220,14 +1277,17 @@ impl AiCapabilityDiscoveryBroker {
             || loaded.semantic_catalogue_fingerprint != index.semantic_catalogue_fingerprint()
             || loaded.target_policy_fingerprint != index.target_policy_fingerprint()
         {
-            return Err(AiError::Forbidden);
+            return Err(stale_capability());
         }
         let decision = self
             .authority
             .authorize(&principal, index, entry, run)
             .await?;
-        if !decision.allowed || decision.policy_fingerprint != loaded.policy_fingerprint {
+        if !decision.allowed {
             return Err(AiError::Forbidden);
+        }
+        if decision.policy_fingerprint != loaded.policy_fingerprint {
+            return Err(stale_capability());
         }
         Ok(())
     }
@@ -1327,24 +1387,15 @@ impl AiCapabilityBrokerOperation {
     }
 }
 
-/// Returns the three frozen broker definitions for one exact compact index.
+/// Returns the three frozen fixed-broker definitions.
 ///
 /// The definitions are crate-authored and deterministic: a host installs them
 /// verbatim and cannot widen, rename, or re-fingerprint the broker surface.
-///
-/// # Errors
-///
-/// Returns [`AiError::InvalidConfiguration`] for a malformed index
-/// fingerprint.
-pub fn capability_broker_definitions(
-    index_fingerprint: &str,
-) -> Result<Vec<ModelToolDefinition>, AiError> {
-    if !crate::valid_sha256(index_fingerprint) {
-        return Err(AiError::InvalidConfiguration(
-            "capability delivery index fingerprint is invalid".to_owned(),
-        ));
-    }
-    Ok(fixed_broker_definitions(index_fingerprint))
+/// They depend only on [`AI_CAPABILITY_BROKER_VERSION`] and never on a
+/// catalogue or schema fingerprint, so they are identical before and after any
+/// catalogue change.
+pub fn capability_broker_definitions() -> Vec<ModelToolDefinition> {
+    fixed_broker_definitions()
 }
 
 /// Canonical serialized byte cost of one exact definition set.
@@ -1765,8 +1816,34 @@ fn insert_broker_argument_segments(
     }
 }
 
+/// Safe [`AiError::InvalidInput`] message for a broker selection this run does
+/// not hold: an identifier discovery never returned to it, an unknown or
+/// expired `loadedReference`, or lost process-local broker state.
+///
+/// The model-facing code is `selection_stale`
+/// ([`crate::AiApplicationToolFailureCode::SelectionStale`]). It says nothing
+/// about whether the named capability exists, so it cannot be used to probe
+/// for capabilities the current principal cannot see.
+pub const AI_CAPABILITY_SELECTION_STALE: &str = "broker capability selection is stale";
+
+/// Safe [`AiError::InvalidInput`] message for a selection the run does hold
+/// whose index, schema, catalogue, entry, capability or policy fingerprint no
+/// longer matches the current published state.
+///
+/// The model-facing code is `capability_stale`
+/// ([`crate::AiApplicationToolFailureCode::CapabilityStale`]): the earlier
+/// candidate, planning contract and `loadedReference` are void, and the model
+/// must discover and describe again. It is reported only for a candidate the
+/// current principal was already shown or a capability it already loaded, so
+/// it reveals no capability the principal could not see.
+pub const AI_CAPABILITY_STALE: &str = "broker capability is stale";
+
 fn stale_selection() -> AiError {
-    AiError::InvalidInput("broker capability selection is stale".to_owned())
+    AiError::InvalidInput(AI_CAPABILITY_SELECTION_STALE.to_owned())
+}
+
+fn stale_capability() -> AiError {
+    AiError::InvalidInput(AI_CAPABILITY_STALE.to_owned())
 }
 
 fn malformed_broker_arguments() -> AiError {
@@ -2065,16 +2142,20 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// The candidate must come from discovery retained for this run or, when
     /// enabled, the unexpired cache for this principal and AI session. Its
-    /// fingerprint must still match. A drifted index, an unknown
-    /// identifier, and an identifier never returned by discovery are all
-    /// reported as one bounded retryable stale selection, so describe cannot be
-    /// used to probe for capabilities the current principal cannot see.
+    /// fingerprint must still match. An unknown identifier and an identifier
+    /// never returned to this run by discovery are both reported as one
+    /// bounded retryable [`AI_CAPABILITY_SELECTION_STALE`], so describe cannot
+    /// be used to probe for capabilities the current principal cannot see.
+    /// A candidate this run does hold whose index set has since changed is
+    /// reported as the distinct retryable [`AI_CAPABILITY_STALE`], telling the
+    /// model to discover and describe again.
     ///
     /// # Errors
     ///
-    /// Returns [`AiError::InvalidInput`] for malformed arguments or a stale
-    /// selection, and [`AiError::Forbidden`] when current host policy no
-    /// longer permits the exact candidate.
+    /// Returns [`AiError::InvalidInput`] for malformed arguments, an unheld
+    /// selection ([`AI_CAPABILITY_SELECTION_STALE`]) or a drifted one
+    /// ([`AI_CAPABILITY_STALE`]), and [`AiError::Forbidden`] when current host
+    /// policy no longer permits the exact candidate.
     pub async fn dispatch_describe(
         &self,
         principal_reference: &PrincipalReference,
@@ -2100,11 +2181,13 @@ impl AiCapabilityDiscoveryBroker {
             })
             .ok_or_else(stale_selection)?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        verify_search_binding(&indexes, &search).map_err(|_| stale_selection())?;
+        // The run holds this exact candidate, so reporting catalogue drift
+        // discloses nothing the principal was not already shown.
+        verify_search_binding(&indexes, &search).map_err(|_| stale_capability())?;
         let loaded = self
             .load(principal_reference, run, &search, &capability_id)
             .await?;
-        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_selection)?;
+        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_capability)?;
         let loaded_reference = loaded.audit_reference();
         let expires_in_seconds = (loaded.expires_at - self.clock.now())
             .whole_seconds()
@@ -2132,9 +2215,12 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// # Errors
     ///
-    /// Returns [`AiError::InvalidInput`] for malformed arguments, an unknown
-    /// loaded reference, or an expired binding, and [`AiError::Forbidden`] for
-    /// a non-read capability or any revocation, drift, or substitution.
+    /// Returns [`AiError::InvalidInput`] for malformed arguments, for an
+    /// unknown loaded reference or an expired binding
+    /// ([`AI_CAPABILITY_SELECTION_STALE`]), and for a loaded capability whose
+    /// index, schema, catalogue, entry or policy fingerprint has drifted
+    /// ([`AI_CAPABILITY_STALE`]). Returns [`AiError::Forbidden`] for a non-read
+    /// capability or any revocation or substitution.
     pub async fn authorize_broker_execution(
         &self,
         principal_reference: &PrincipalReference,
@@ -2312,8 +2398,12 @@ impl AiCapabilityDeliveryTurn {
             retained_definitions_frozen,
             session.limits(),
         )?;
+        // A fixed-broker binding carries no index fingerprint: its surface is
+        // catalogue-independent and describe/execute revalidate the index.
         if session_binding.delivery_mode() != surface.mode()
-            || session_binding.capability_index_fingerprint() != index_fingerprint
+            || session_binding
+                .capability_index_fingerprint()
+                .is_some_and(|bound| bound != index_fingerprint)
         {
             return Err(AiError::InvalidConfiguration(
                 "capability session binding does not match the selected surface".to_owned(),
@@ -2465,6 +2555,29 @@ impl AiCapabilityDeliveryTurn {
         Ok(())
     }
 
+    /// Exact crate-authored definition of one broker operation in this
+    /// turn's delivery mode, or `None` when the mode does not offer it.
+    ///
+    /// The fixed broker's definitions are catalogue-independent; the
+    /// client-deferred discovery definition stays bound to the index.
+    #[cfg_attr(feature = "mssql", allow(dead_code))]
+    pub(crate) fn broker_definition(
+        &self,
+        operation: AiCapabilityBrokerOperation,
+    ) -> Option<ModelToolDefinition> {
+        match self.mode {
+            AiCapabilityDeliveryMode::FixedBroker => fixed_broker_definitions()
+                .into_iter()
+                .find(|definition| definition.tool_id == operation.tool_id()),
+            AiCapabilityDeliveryMode::ClientDeferred => (operation
+                == AiCapabilityBrokerOperation::Discover)
+                .then(|| discovery_definition(Some(&self.index_fingerprint))),
+            AiCapabilityDeliveryMode::EagerExact | AiCapabilityDeliveryMode::ProviderDeferred => {
+                None
+            }
+        }
+    }
+
     /// Whether an offered definition set is exactly the crate-owned surface.
     pub fn matches_offered_tools(&self, offered: &[ModelToolDefinition]) -> bool {
         let current = self.current_tools();
@@ -2529,7 +2642,7 @@ impl AiCapabilityDeliveryTurn {
             return Err(AiError::Conflict);
         }
         let generation = current.generation.checked_add(1).ok_or(AiError::Conflict)?;
-        let mut tools = vec![discovery_definition(&self.index_fingerprint)];
+        let mut tools = vec![discovery_definition(Some(&self.index_fingerprint))];
         tools.extend(
             self.static_bootstrap_tools
                 .iter()
@@ -2598,7 +2711,7 @@ mod tests {
 
     #[test]
     fn discovery_optional_filters_match_the_broker_contract() {
-        let definition = discovery_definition("index");
+        let definition = discovery_definition(Some("index"));
         let validator = jsonschema::validator_for(&definition.parameters).unwrap();
         for arguments in [
             json!({"text":"reviewed record", "maximumResults":8}),
@@ -2706,11 +2819,25 @@ mod tests {
         profile_id: &str,
         target_policy: &str,
     ) -> Arc<AiCapabilityIndex> {
-        const SDL: &str = r#"
-            schema { query: Query }
-            type Query { GeneratedRecord(recordId: ID!): Record! }
-            type Record { recordId: ID!, subject: String! }
-        "#;
+        generated_index_with_schema(target_id, profile_id, target_policy, None)
+    }
+
+    /// `added_field` publishes one more `Record` scalar: a real schema change
+    /// with a different schema, catalogue, entry and index fingerprint.
+    fn generated_index_with_schema(
+        target_id: &str,
+        profile_id: &str,
+        target_policy: &str,
+        added_field: Option<&str>,
+    ) -> Arc<AiCapabilityIndex> {
+        let added_sdl = added_field
+            .map(|field| format!(", {field}: String!"))
+            .unwrap_or_default();
+        let sdl = format!(
+            "schema {{ query: Query }}
+            type Query {{ GeneratedRecord(recordId: ID!): Record! }}
+            type Record {{ recordId: ID!, subject: String!{added_sdl} }}"
+        );
         let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
             field_name: field_name.to_owned(),
             description: format!("Reviewed public {field_name}."),
@@ -2736,7 +2863,11 @@ mod tests {
             entity_name: "Record".to_owned(),
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
-            fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
+            fields: [scalar("recordId", "ID"), scalar("subject", "String")]
+                .into_iter()
+                .chain(added_field.map(|field| scalar(field, "String")))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             label_fields: Vec::new(),
             record_version: None,
         };
@@ -2768,7 +2899,7 @@ mod tests {
         let catalogue = crate::AiGraphqlQueryCapabilityCatalog::compile(
             profile_id,
             target.clone(),
-            SDL,
+            &sdl,
             &semantics,
             crate::AiGraphqlQueryCapabilityLimits::default(),
         )
@@ -3711,7 +3842,7 @@ mod tests {
             broker
                 .authorize_execution(&principal_reference, &run, &loaded)
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
 
         *current_index.0.write().expect("index write") = index("target-policy-v1");
@@ -3721,7 +3852,7 @@ mod tests {
             broker
                 .authorize_execution(&principal_reference, &run, &loaded)
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
 
         *authority.policy_fingerprint.write().expect("policy write") =
@@ -3823,7 +3954,7 @@ mod tests {
             broker
                 .authorize_execution(&principal_reference, &run, &loaded)
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
     }
 
@@ -4114,7 +4245,7 @@ mod tests {
 
     #[test]
     fn fixed_broker_execute_admits_the_minimal_schema_aligned_wrapper() {
-        let definitions = fixed_broker_definitions(&"a".repeat(64));
+        let definitions = fixed_broker_definitions();
         let execute = definitions
             .iter()
             .find(|definition| definition.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
@@ -4285,6 +4416,240 @@ mod tests {
                     &DiscoveryCacheFixture::session(),
                     &candidate,
                 )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    fn schema_changed_index() -> Arc<AiCapabilityIndex> {
+        generated_index_with_schema(
+            "generated-read-application",
+            "generated-read",
+            "target-policy-v1",
+            Some("note"),
+        )
+    }
+
+    #[test]
+    fn fixed_broker_binding_and_definitions_survive_a_schema_change() {
+        let before = generated_index("target-policy-v1");
+        let after = schema_changed_index();
+        assert_ne!(before.schema_fingerprint(), after.schema_fingerprint());
+        let before_set = AiCapabilityIndexSet::compile([before]).expect("index set before");
+        let after_set = AiCapabilityIndexSet::compile([after]).expect("index set after");
+        assert_ne!(before_set.fingerprint(), after_set.fingerprint());
+
+        let static_tool = definition("reviewed.records_list");
+        let binding = |mode, indexes: &AiCapabilityIndexSet| {
+            AiProviderCapabilitySessionBinding::new(
+                mode,
+                indexes.fingerprint(),
+                BTreeSet::from([static_tool.fingerprint.clone()]),
+                "provider-projection-v1",
+                "model-test",
+                ModelReasoningEffort::Unspecified,
+                "f".repeat(64),
+            )
+            .expect("session binding")
+        };
+        let retained = binding(AiCapabilityDeliveryMode::FixedBroker, &before_set);
+        let current = binding(AiCapabilityDeliveryMode::FixedBroker, &after_set);
+        assert_eq!(retained, current);
+        assert_eq!(retained.fingerprint(), current.fingerprint());
+        assert_eq!(retained.capability_index_fingerprint(), None);
+        assert_eq!(retained.capability_index_set_fingerprint(), None);
+
+        // Catalogue-derived modes still rotate with the catalogue.
+        for mode in [
+            AiCapabilityDeliveryMode::EagerExact,
+            AiCapabilityDeliveryMode::ProviderDeferred,
+            AiCapabilityDeliveryMode::ClientDeferred,
+        ] {
+            let before = binding(mode, &before_set);
+            assert_eq!(
+                before.capability_index_fingerprint(),
+                Some(before_set.fingerprint())
+            );
+            assert_ne!(
+                before.fingerprint(),
+                binding(mode, &after_set).fingerprint()
+            );
+        }
+        assert_ne!(
+            discovery_definition(Some(before_set.fingerprint())),
+            discovery_definition(Some(after_set.fingerprint()))
+        );
+
+        // The binding retained from before the change selects the surface for
+        // the changed catalogue, and that surface is byte-identical.
+        let capabilities = ProviderCapabilities {
+            custom_tools: true,
+            capability_delivery_modes: BTreeSet::from([AiCapabilityDeliveryMode::FixedBroker]),
+            ..ProviderCapabilities::default()
+        };
+        let select = |indexes: &AiCapabilityIndexSet| {
+            let fixture = DiscoveryCacheFixture::new(1);
+            AiCapabilityDeliveryTurn::select(
+                &capabilities,
+                indexes.fingerprint(),
+                vec![static_tool.clone()],
+                true,
+                retained.clone(),
+                Arc::new(fixture.broker),
+                DiscoveryCacheFixture::session(),
+            )
+            .expect("retained fixed-broker binding should select")
+        };
+        let before_turn = select(&before_set);
+        let after_turn = select(&after_set);
+        assert_eq!(before_turn.current_tools(), after_turn.current_tools());
+        assert!(after_turn.matches_offered_tools(&before_turn.current_tools()));
+        let mut broker_tools = capability_broker_definitions();
+        broker_tools.push(static_tool.clone());
+        broker_tools.sort_by(|left, right| left.tool_id.cmp(&right.tool_id));
+        assert_eq!(after_turn.current_tools(), broker_tools);
+        for operation in [
+            AiCapabilityBrokerOperation::Discover,
+            AiCapabilityBrokerOperation::Describe,
+            AiCapabilityBrokerOperation::Execute,
+        ] {
+            assert_eq!(
+                before_turn.broker_definition(operation),
+                after_turn.broker_definition(operation)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_change_is_a_recoverable_capability_stale_distinct_from_an_unheld_selection() {
+        use crate::AiApplicationToolFailureCode as Code;
+        let code = |error: &AiError| crate::classify_safe_application_tool_error(error);
+        let fixture = DiscoveryCacheFixture::new(4);
+        let candidate = fixture.discover(&fixture.run).await;
+        let session = DiscoveryCacheFixture::session();
+        let described = fixture
+            .broker
+            .dispatch_describe(&fixture.principal, &fixture.run, &session, &candidate)
+            .await
+            .expect("candidate describes before the schema change");
+        let execute =
+            json!({"loadedReference": described.loaded_reference(), "selections": ["recordId"]});
+        fixture
+            .broker
+            .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+            .await
+            .expect("loaded capability executes before the schema change");
+
+        // A selection the run never held is the generic outcome, before and
+        // after the change, whether or not the identifier exists.
+        let unknown = json!({"loadedReference": "e".repeat(64), "selections": ["recordId"]});
+        let mut forged = candidate.clone();
+        forged["candidateFingerprint"] = json!("f".repeat(64));
+        let mut absent = candidate.clone();
+        absent["capabilityId"] = json!("generated.never_published");
+        let assert_unheld = |error: AiError| {
+            assert!(
+                matches!(&error, AiError::InvalidInput(message)
+                    if message == AI_CAPABILITY_SELECTION_STALE),
+                "{error:?}"
+            );
+            assert_eq!(code(&error), Some(Code::SelectionStale));
+        };
+        let unheld = || async {
+            assert_unheld(
+                fixture
+                    .broker
+                    .authorize_broker_execution(
+                        &fixture.principal,
+                        &fixture.run,
+                        &session,
+                        &unknown,
+                    )
+                    .await
+                    .expect_err("an unknown loaded reference is refused"),
+            );
+            for selection in [&forged, &absent] {
+                assert_unheld(
+                    fixture
+                        .broker
+                        .dispatch_describe(&fixture.principal, &fixture.run, &session, selection)
+                        .await
+                        .expect_err("an unheld candidate is refused"),
+                );
+            }
+        };
+        unheld().await;
+
+        *fixture.index.0.write().expect("index") = schema_changed_index();
+
+        let assert_stale = |error: AiError| {
+            assert!(
+                matches!(&error, AiError::InvalidInput(message) if message == AI_CAPABILITY_STALE),
+                "{error:?}"
+            );
+            assert_eq!(code(&error), Some(Code::CapabilityStale));
+        };
+        assert_stale(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+                .await
+                .expect_err("a loaded capability is stale after the schema change"),
+        );
+        assert_stale(
+            fixture
+                .broker
+                .dispatch_describe(&fixture.principal, &fixture.run, &session, &candidate)
+                .await
+                .expect_err("a held candidate is stale after the schema change"),
+        );
+        unheld().await;
+        assert!(Code::CapabilityStale.retryable() && Code::SelectionStale.retryable());
+        assert_ne!(
+            Code::CapabilityStale.as_str(),
+            Code::SelectionStale.as_str()
+        );
+
+        // The same run and provider-session binding recover by discovering
+        // and describing again; nothing is rebound.
+        let candidate = fixture.discover(&fixture.run).await;
+        let described = fixture
+            .broker
+            .dispatch_describe(&fixture.principal, &fixture.run, &session, &candidate)
+            .await
+            .expect("the changed capability describes again");
+        let execute =
+            json!({"loadedReference": described.loaded_reference(), "selections": ["note"]});
+        fixture
+            .broker
+            .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+            .await
+            .expect("the re-described capability executes under the same binding");
+
+        // A changed host-policy fingerprint that still allows the capability
+        // is drift; a denial is never reported as drift.
+        *fixture
+            .authority
+            .policy_fingerprint
+            .write()
+            .expect("policy") = "current-policy-v2".to_owned();
+        assert_stale(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+                .await
+                .expect_err("a changed policy fingerprint voids the loaded contract"),
+        );
+        *fixture
+            .authority
+            .policy_fingerprint
+            .write()
+            .expect("policy") = "current-policy-v1".to_owned();
+        fixture.authority.allowed.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
                 .await,
             Err(AiError::Forbidden)
         ));

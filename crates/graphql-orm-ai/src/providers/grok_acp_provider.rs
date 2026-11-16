@@ -208,9 +208,7 @@ impl AiGrokAcpRegistration {
         {
             return Err(rejected());
         }
-        let canonical_broker =
-            crate::capability_broker_definitions(binding.capability_index_fingerprint())
-                .map_err(|_| rejected())?;
+        let canonical_broker = crate::capability_broker_definitions();
         if !canonical_broker
             .iter()
             .all(|tool| self.tools.contains(tool))
@@ -1123,7 +1121,7 @@ pub(super) mod tests {
     #[test]
     fn registration_fences_alias_effort_and_capability_overlay() {
         let mut registration = registration();
-        registration.tools = crate::capability_broker_definitions(&"b".repeat(64)).unwrap();
+        registration.tools = crate::capability_broker_definitions();
         assert!(
             registration
                 .provider_session_fingerprint(ModelReasoningEffort::High)

@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.23.0 to 0.24.0: operation fingerprint algorithm v2
+
+**Action needed.** Upgrade together with operation catalogue 0.9.0 and
+ORM/macros 0.160.0. Generated-operation fingerprints no longer include the
+Rust module path, so every operation and catalogue fingerprint changes once.
+Regenerate tool manifests and operation contracts from the upgraded catalogue;
+ones bound under `graphql-orm-sha256-len-v1` are refused as stale. No Rust API
+or data change. Host steps are in the root
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 
 Generated aggregate roots accept their canonical `groupLimit` or `group_limit`

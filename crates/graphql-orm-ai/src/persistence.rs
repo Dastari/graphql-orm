@@ -1498,7 +1498,9 @@ pub(crate) struct AiSubscriptionWaitAdoptionRecord {
     table = "graphql_orm_ai_run_attempts",
     plural = "GraphqlOrmAiRunAttempts",
     default_sort = "claimed_at ASC",
-    append_only = true
+    append_only = true,
+    // One attempt per fencing generation of a run.
+    unique_index = "run_id, lease_generation"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -1876,7 +1878,9 @@ impl std::fmt::Debug for AiNativeApprovalCandidateRecord {
     table = "graphql_orm_ai_approvals",
     plural = "GraphqlOrmAiApprovals",
     default_sort = "created_at ASC",
-    keyset = "created_at asc, id asc"
+    keyset = "created_at asc, id asc",
+    // One approval per tool call.
+    unique_index = "tool_call_id"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2069,7 +2073,9 @@ pub(crate) struct AiProposalItemRecord {
     table = "graphql_orm_ai_context_checkpoints",
     plural = "GraphqlOrmAiContextCheckpoints",
     default_sort = "through_sequence DESC",
-    keyset = "through_sequence desc, id desc"
+    keyset = "through_sequence desc, id desc",
+    // One checkpoint per compacted session position.
+    unique_index = "session_id, through_sequence"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2569,7 +2575,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.81.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.82.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

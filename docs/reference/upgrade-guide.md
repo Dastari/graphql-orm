@@ -72,7 +72,12 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-No unreleased entries yet. Add new entries here.
+Breaking release, collected on `next/breaking`. Versions are placeholders.
+
+- **Action needed** — ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.24.0: generated-operation fingerprints no longer include the Rust module path; every operation, catalogue and router-export fingerprint changes once [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../CHANGELOG.md#unreleased---breaking-release-ormmacros-01600-catalogue-090-ai-tool-profiles-0240-ai-01460)
+- **Action needed** — AI 0.146.0: fixed-broker provider sessions rebind once, then survive catalogue changes; `capability_stale` and `selection_stale` are separate codes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **Action needed** — AI 0.146.0: `HighImpact` approvals always require recent MFA; approval lifetime cap has a 7-day ceiling [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **Action needed** — AI 0.146.0 (schema module `0.82.0`), ORM/macros 0.160.0: three AI unique indexes; applying a migration refuses repeated unique keys before any DDL [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 
 ### workspace-2026.11.15.6
 
