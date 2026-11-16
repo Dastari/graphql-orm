@@ -62,7 +62,7 @@ run_sqlite() {
 
 run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test postgres_table_case --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
+    --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --test runtime_many_to_many -- --test-threads=1
