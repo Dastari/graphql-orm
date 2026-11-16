@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - breaking batch (ORM/macros 0.162.0 placeholder)
+
+- ORM and macros, **breaking**; see the [migration guide](MIGRATION.md#breaking-release-unreleased). The release number is assigned when the batch merges.
+  - **Breaking:** every `schema_roots!` schema has a compile-time maximum page limit (`max_page_limit: N`, 100 when omitted). The schema builders panic for a `Database` that applies another maximum or none, so the semantic catalogue and the relation complexity estimate always agree with the database ([#674](https://github.com/Dastari/graphql-orm/issues/674), [#667](https://github.com/Dastari/graphql-orm/issues/667)).
+  - **Breaking:** a keyset or authorized-scan read without a GraphQL context (`Record::keyset_page`, `keyset_connection_page`, `tx.keyset_page`, `fetch_authorized_keyset*`, `fetch_authorized_scan`) refuses a limit above the maximum page limit with `PAGE_LIMIT_EXCEEDED` instead of returning fewer rows than asked for (#667).
+  - **Breaking:** runtime GraphQL serves `RecordVersion` and integer live keys as `RuntimeInt64` strings by default. `RuntimeGraphqlOptions::with_legacy_int_identities()` keeps the `Int` form ([#528](https://github.com/Dastari/graphql-orm/issues/528), item 4).
+  - **Breaking (security default):** an entity-policy, row-policy, write-transform or mutation-hook error with no `code` extension is reported as `INTERNAL_ERROR` with the default message on every surface; its text is logged, not sent. `graphql::errors::expose_uncoded_callback_messages(true)` restores the old rendering process-wide ([#682](https://github.com/Dastari/graphql-orm/issues/682)).
+  - **Breaking (removal):** the `graphql::orm::RelationLoader` trait and its generated `load_relations` / `bulk_load_relations` / `*_with_auth` implementations are removed. They preloaded relations without entity, row or field policy ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
+  - **Added (opt-in per entity):** `#[graphql_entity(key_only_deletes)]` sends a key-only `DELETED` event to `Key`/`Keys` subscribers of the exact key when a delete releases no row. It is refused at compile time when a primary-key field declares a `read_policy` ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
+
 ## Unreleased - ORM/macros 0.161.0
 
 - ORM and macros 0.161.0: opt-in contract settings for page limits and 64-bit identities, a stable code for cursor keys that are too long, and deferred subscription lag. Defaults are unchanged except for the timing of a lag end. See the [migration guide](MIGRATION.md#01590-to-01610-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).

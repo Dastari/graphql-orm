@@ -10,6 +10,94 @@ supersedes: []
 
 # Migration Guide
 
+## Breaking release (unreleased)
+
+Every breaking change waiting for the next breaking release is listed here.
+The coordinator assigns the release number when the batch merges to main.
+Upgrade runtime and macros together.
+
+### ORM and macros: page limits, identities, subscriptions, preloads and callback errors
+
+- **A schema's maximum page limit is fixed at compile time. Action needed** if
+  the `Database` a generated schema serves sets a maximum page limit other
+  than 100 (`DatabaseBuilder::max_page_limit`, `PaginationConfig::max_limit`,
+  `PaginationConfig::unbounded()` or `legacy()`). Every `schema_roots!` schema
+  now has a maximum: the one declared with `max_page_limit: N`, or 100. The
+  schema builders panic at start-up for a `Database` that applies another
+  maximum or none. Declare the maximum the database uses:
+  `schema_roots!(max_page_limit: 250, ...)`. The semantic catalogue then
+  publishes it for pageable relationship lists and the complexity estimate
+  uses it, so a schema that declares a maximum other than 100 gets a new
+  semantic fingerprint. `GRAPHQL_ORM_MAX_PAGE_LIMIT` is always `Some`.
+  A database without a page maximum can no longer back a generated schema;
+  give trusted reads their own maximum with `with_max_limit` instead
+  ([#674](https://github.com/Dastari/graphql-orm/issues/674),
+  [#667](https://github.com/Dastari/graphql-orm/issues/667)).
+- **Host-side keyset pages refuse a limit above the maximum. Action needed**
+  if Rust code calls `Record::keyset_page`, `keyset_connection_page`,
+  `keyset_page_ordered`, `tx.keyset_page`, `tx.keyset_connection_page`,
+  `fetch_authorized_keyset*` or `fetch_authorized_scan` without a GraphQL
+  context and with a limit above the maximum page limit. These calls used to
+  return the maximum number of rows without saying so; they now fail with
+  `PAGE_LIMIT_EXCEEDED`, like repository `limit(n)` since 0.128.0. Page with
+  the cursor at or below the maximum, give the read its own maximum with
+  `EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(...)`,
+  or call the helper on a handle with a raised maximum. An omitted limit still
+  uses the default limit, reduced to the maximum. GraphQL clients are
+  unaffected: their oversized limits are reduced, or refused when
+  `refuse_oversized_page_limit` is set. `paginate(PageInput)` on the
+  pool-bound `EntityQuery` and on search queries keeps GraphQL page semantics
+  and still reduces (#667).
+- **Runtime `RecordVersion` and integer live keys are strings. Action needed**
+  for runtime GraphQL modules with a node identity or live subscriptions on an
+  integer key. `RecordVersion`, the `…Changed` `keys` argument, the members of
+  `…KeyInput` and the event `id` and `key` members are now typed
+  `RuntimeInt64`: sent as decimal strings and accepted only as strings. The
+  SDL, the semantic catalogue and their fingerprints change, so router
+  descriptors must be regenerated and stored approvals bound to the old
+  fingerprint re-approved. Clients must send and compare these values as
+  strings. To keep the old SDL while clients move, compile the module with
+  `RuntimeGraphqlOptions::with_legacy_int_identities()`. Static (derived)
+  entities are unchanged
+  ([#528](https://github.com/Dastari/graphql-orm/issues/528), item 4).
+- **Uncoded callback errors are internal errors. Action needed** if an entity
+  policy, row policy, write-input transform or mutation hook returns a refusal
+  as plain text with no `code` extension, such as
+  `async_graphql::Error::new("seat taken")`, and clients are meant to read
+  that text. Generated GraphQL operations and `graphql_error_from_sqlx` used
+  to return the text as written; they now return `INTERNAL_ERROR` with the
+  default message and log the text. Give each deliberate refusal a public
+  code, for example
+  `OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken").into_graphql_error()`
+  (or return the `OrmPublicError` with `?`); it then keeps its code and
+  message on every surface. An error with an application-defined `code`
+  extension is still rendered as written by GraphQL. To restore the old
+  behaviour for the whole process, call
+  `graphql_orm::graphql::errors::expose_uncoded_callback_messages(true)` once
+  at start-up ([#682](https://github.com/Dastari/graphql-orm/issues/682)).
+- **The policy-free relation preload API is removed. Action needed** if code
+  calls `load_relations`, `bulk_load_relations`, `load_relations_with_auth` or
+  `bulk_load_relations_with_auth`, or implements
+  `graphql_orm::graphql::orm::RelationLoader`. The trait and its generated
+  implementations are gone: they filled relation fields without entity, row
+  or field policy. Read related rows through the generated relation resolvers,
+  the repository builders, or `tx.query::<T>()`, which apply policy. Delete
+  any handwritten implementation; nothing calls it. The
+  `graphql::loaders::RelationLoader` data loader is a different type and is
+  unchanged ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
+- **Key-only delete signals are available per entity. Action needed** only to
+  adopt them. `#[graphql_entity(key_only_deletes)]` sends a `DELETED` event
+  with the key and a null entity to a `Changed` subscriber whose `Key` or
+  `Keys` argument names the deleted row's complete key, when the delete
+  releases no row because the row policy grants no deleted preimage. Unkeyed
+  subscribers get nothing, as before. The subscriber's resolver
+  authentication, scopes, assurance and entity access are checked; row policy
+  cannot be, because the row is gone. A subscriber with entity access who
+  names a key therefore learns that a row with that key was deleted, whether
+  or not it could read the row. Opt in only where that is acceptable. The
+  attribute is a compile error when a primary-key field declares a
+  `read_policy` ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
+
 ## 0.159.0 to 0.161.0: page limits, 64-bit identities, cursor keys and subscription lag
 
 Upgrade runtime and macros together. No schema or data migration is needed.

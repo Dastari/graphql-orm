@@ -163,23 +163,19 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         })
         .collect::<Vec<_>>();
-    // A declared maximum page limit replaces the compile-time default in the
-    // catalogue's pageable relationship lists, is checked against the
-    // `Database` when the schema is built, and bounds the relation
-    // complexity estimate.
-    let declared_page_maximum = match args.max_page_limit {
-        Some(maximum) => quote! {
-            ::std::option::Option::<u32>::Some(#maximum)
-        },
-        None => quote! { ::std::option::Option::<u32>::None },
-    };
+    // The schema's maximum page limit is fixed at compile time: the declared
+    // `max_page_limit`, or the default of 100. The catalogue's pageable
+    // relationship lists publish it, the `Database` is checked against it
+    // when the schema is built, and it bounds the relation complexity
+    // estimate.
+    let declared_page_maximum = args.max_page_limit.unwrap_or(100);
     let page_maximum_const = quote! {
-        /// The maximum page limit this schema declares with
-        /// `schema_roots!(max_page_limit: ...)`, or `None` when it declares
-        /// none. A declared maximum is the one the semantic catalogue
-        /// publishes, and the schema refuses a `Database` configured with a
-        /// different one.
-        pub const GRAPHQL_ORM_MAX_PAGE_LIMIT: ::std::option::Option<u32> = #declared_page_maximum;
+        /// The maximum page limit of this schema: the one declared with
+        /// `schema_roots!(max_page_limit: ...)`, or 100. The semantic
+        /// catalogue publishes it, and the schema refuses a `Database`
+        /// configured with a different one.
+        pub const GRAPHQL_ORM_MAX_PAGE_LIMIT: ::std::option::Option<u32> =
+            ::std::option::Option::Some(#declared_page_maximum);
     };
     let page_maximum_check = quote! {
         ::graphql_orm::graphql::orm::admit_declared_page_maximum(

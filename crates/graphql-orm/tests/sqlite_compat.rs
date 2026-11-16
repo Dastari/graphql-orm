@@ -113,6 +113,16 @@ schema_roots! {
     entities: [User, Post],
 }
 
+/// The same entities for a database whose maximum page limit is 2.
+mod capped {
+    use super::*;
+    schema_roots! {
+        max_page_limit: 2,
+        query_custom_ops: [],
+        entities: [User, Post],
+    }
+}
+
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 async fn setup_pool() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
@@ -305,7 +315,7 @@ async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
     let database = graphql_orm::db::Database::builder(pool)
         .max_page_limit(Some(2))
         .build();
-    let schema: TestSchema = schema_builder(database)
+    let schema = capped::schema_builder(database)
         .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 

@@ -528,6 +528,21 @@ invalidation metadata and refresh separately authorized queries for richer data.
 
 Repository-only entities cannot authorize GraphQL subscription provenance for creates or updates, so such a source suppresses those events even for a public target. Delete invalidations instead start authority at the current parent. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
 
+`#[graphql_entity(key_only_deletes)]` adds a key-only delete signal. When a
+generated delete releases no row to a subscriber (the row policy grants no
+deleted preimage, or SQL visibility cannot authorize a missing row), a
+subscriber whose `Key` or `Keys` argument names the deleted row's complete key
+receives `DELETED` with `id` (and `key` for a composite key) and a null entity.
+Unkeyed subscribers, and subscribers of other keys, receive nothing, as
+without the attribute. The subscriber's resolver authentication, scopes,
+assurance and entity access are checked before and after the payload is
+prepared. Row and field policy are not, because there is no row: a subscriber
+with entity access who names a key learns that a row with that key was
+deleted, whether or not it could read that row. Use the attribute only where
+that is acceptable. It is a compile error when a primary-key field declares a
+`read_policy`, and it applies to direct deletes only, not to propagated
+events.
+
 Direct generated deleted preimages default to suppression. They require an
 explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or
 unrestricted ORM visibility, plus current entity/row/selected-field policies.

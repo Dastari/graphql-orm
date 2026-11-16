@@ -244,21 +244,26 @@ default, so existing responses do not change. A custom resolver that takes a
 client `PageInput` should resolve it with
 `PaginationConfig::resolve_client_page` so the setting covers it too.
 
-`schema_roots!(max_page_limit: N, ...)` declares the maximum at compile time.
-The generated module then exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
-semantic catalogue publishes `N` as the ceiling of every pageable
-relationship list (in place of the compile-time default of 100), the relation
-complexity estimate caps a requested page at `N`, and building the schema
-panics when the `Database` applies a different maximum or none. Without the
-declaration nothing changes: the catalogue and the complexity estimate use
-100 whatever the database is configured with. With several declaring schemas
-in one process the complexity estimate uses the largest declared maximum.
+A schema's maximum page limit is fixed at compile time:
+`schema_roots!(max_page_limit: N, ...)`, or 100 when the declaration is
+omitted. The generated module exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
+semantic catalogue publishes it as the ceiling of every pageable relationship
+list, the relation complexity estimate caps a requested page at it, and
+building the schema panics when the `Database` applies a different maximum or
+none. The published bound and the estimate therefore always agree with what
+the database applies. With several schemas in one process the complexity
+estimate uses the largest of their maxima.
 
-Rust repository reads are separate. `limit(n)` on a repository or transaction
-builder is exact or refused, and `with_max_limit(n)` gives one trusted read
-its own maximum (see the 0.128.0 migration note). The keyset helpers
-(`Record::keyset_page`, `keyset_connection_page`, `tx.keyset_page`) keep GraphQL
-page semantics and reduce an oversized limit. To read more rows a page from
+Rust repository reads are separate: trusted code gets the rows it asked for
+or an error. `limit(n)` on a repository or transaction builder is exact or
+refused, and `with_max_limit(n)` gives one trusted read its own maximum (see
+the 0.128.0 migration note). The keyset helpers (`Record::keyset_page`,
+`keyset_connection_page`, `tx.keyset_page`, and `fetch_authorized_keyset*` or
+`fetch_authorized_scan` called without a GraphQL context) follow the same
+rule: an explicit limit above the maximum fails with `PAGE_LIMIT_EXCEEDED`,
+and an omitted limit uses the default limit, reduced to the maximum. Only
+`paginate(PageInput)` on the pool-bound `EntityQuery` and on search queries
+keeps GraphQL page semantics and reduces. To read more rows a page from
 trusted code, page with
 `EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(&db, None, None, page)`,
 or call the helper on a handle with a raised maximum:

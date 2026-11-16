@@ -525,9 +525,9 @@ fn assert_failure(error: &OrmPublicError, failure: Failure, label: &str) {
     );
 }
 
-/// The code and message a GraphQL client sees. An authored refusal without an
-/// allow-listed code keeps its existing GraphQL rendering; only repository
-/// callers see it sanitized.
+/// The code and message a GraphQL client sees. A refusal with an
+/// application-defined code keeps its GraphQL rendering, and only repository
+/// callers see it sanitized. An error with no code is internal everywhere.
 fn graphql_rendering(failure: Failure) -> (Option<&'static str>, &'static str) {
     match failure {
         Failure::Public(OrmErrorCode::InternalError)
@@ -537,7 +537,8 @@ fn graphql_rendering(failure: Failure) -> (Option<&'static str>, &'static str) {
         Failure::Public(code) | Failure::PublicPropagated(code) => {
             (Some(code.as_str()), "refused by hook policy")
         }
-        Failure::Uncoded => (None, SECRET),
+        // #682: an error with no code is not a public refusal anywhere.
+        Failure::Uncoded => (Some("INTERNAL_ERROR"), "internal error"),
         Failure::UnknownCode => (Some("PRIVATE"), SECRET),
         Failure::Propagated => (Some("INTERNAL_ERROR"), "internal error"),
     }
@@ -702,8 +703,9 @@ async fn entity_write_denial_reports_forbidden() {
 }
 
 /// A hook's refused nested write reaches GraphQL and repository callers with
-/// its public code when propagated, and as safe text when stringified: the
-/// carried refusal's text never exposes the internal transport token.
+/// its public code when propagated, and as an internal error when
+/// stringified: the carried refusal's text never exposes the internal
+/// transport token.
 async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
     for mode in [NestedRefusal::Propagated, NestedRefusal::Stringified] {
         let (mut db, mut owner, _hook) = fixture().await;
@@ -728,7 +730,6 @@ async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
             !error.message.contains("graphql-orm-public"),
             "{label}: {error:?}"
         );
-        assert!(error.message.contains("forbidden"), "{label}: {error:?}");
         let code = error.extensions.as_ref().and_then(|ext| ext.get("code"));
         match mode {
             NestedRefusal::Propagated => {
@@ -739,8 +740,16 @@ async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
                     "{label}"
                 );
             }
-            // An uncoded authored refusal keeps its GraphQL rendering.
-            NestedRefusal::Stringified => assert_eq!(code, None, "{label}"),
+            // Stringifying drops the code, and an uncoded error is internal
+            // on every surface (#682).
+            NestedRefusal::Stringified => {
+                assert_eq!(error.message, "internal error", "{label}");
+                assert_eq!(
+                    code,
+                    Some(&async_graphql::Value::from("INTERNAL_ERROR")),
+                    "{label}"
+                );
+            }
         }
 
         let id = existing.id;

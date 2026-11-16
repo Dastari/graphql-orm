@@ -1159,9 +1159,19 @@ where
         // A per-read maximum set with `with_max_limit` replaces the
         // database's for this page, as it does for `fetch_all`.
         let page_config = db.pagination_config().with_read_maximum(base.max_limit);
-        page_config
-            .admit_client_limit(requested_limit)
-            .map_err(|error| error.into_graphql_error())?;
+        match (ctx, requested_limit) {
+            // A trusted Rust caller: a limit above the maximum is an error,
+            // never a shorter page than the caller asked for.
+            (None, Some(requested)) => {
+                page_config
+                    .checked_explicit_limit(requested)
+                    .map_err(|error| error.into_graphql_error())?;
+            }
+            // A GraphQL client: reduced, or refused when the host opted in.
+            _ => page_config
+                .admit_client_limit(requested_limit)
+                .map_err(|error| error.into_graphql_error())?,
+        }
         let limit = page_config
             .resolve_page(
                 Some(&PageInput {
@@ -1279,9 +1289,14 @@ where
         base.page = None;
         base.order_clauses = T::KEYSET_ORDER.iter().map(|c| c.order_sql()).collect();
         base.order_values.clear();
-        let limit = db
-            .pagination_config()
-            .with_read_maximum(base.max_limit)
+        let page_config = db.pagination_config().with_read_maximum(base.max_limit);
+        if let (None, Some(requested)) = (ctx, page.limit) {
+            // A trusted Rust caller's limit is honoured exactly or refused.
+            page_config
+                .checked_explicit_limit(requested)
+                .map_err(|error| error.into_graphql_error())?;
+        }
+        let limit = page_config
             .resolve_client_page(
                 Some(&PageInput {
                     limit: page.limit,

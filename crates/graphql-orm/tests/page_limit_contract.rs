@@ -11,8 +11,10 @@
 //! By default a client page limit above the database's maximum is reduced to
 //! it. With `PaginationConfig::refuse_oversized_limit` the request fails with
 //! `PAGE_LIMIT_EXCEEDED` instead, on list roots, to-many relations and keyset
-//! connections. Trusted Rust code gives one keyset read its own maximum with
-//! `EntityQuery::with_max_limit`.
+//! connections. A schema's maximum is fixed at compile time and a `Database`
+//! that applies another is refused. Trusted Rust code gives one keyset read
+//! its own maximum with `EntityQuery::with_max_limit`; an over-limit host
+//! request is an error, never a shorter page.
 //!
 //! SQLite runs directly. PostgreSQL and SQL Server use a test-owned container:
 //!
@@ -144,6 +146,22 @@ schema_roots! {
     max_page_limit: 2,
     query_custom_ops: [],
     entities: [LimitBoard, LimitCard],
+}
+
+/// The same entities in a schema that declares no maximum page limit.
+mod undeclared {
+    use super::*;
+    #[cfg(feature = "sqlite")]
+    schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "postgres")]
+    schema_roots! { backend: "postgres", query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "mssql")]
+    schema_roots! {
+        backend: "mssql",
+        schema_policy: "external_writable",
+        query_custom_ops: [],
+        entities: [LimitBoard, LimitCard],
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -356,20 +374,43 @@ async fn host_keyset_reads_take_a_per_read_maximum(db: &Database) -> TestResult 
     }
     assert_eq!(seen.len(), CARDS);
 
-    // The per-read maximum still bounds the page: with the refusal enabled a
-    // limit above it fails rather than being reduced.
-    let refusing = db
-        .clone()
-        .with_pagination_config(db.pagination_config().with_oversized_limit_refusal(true));
+    // An over-limit request from trusted Rust code is an error, never a
+    // shorter page: above the per-read maximum, above the database maximum on
+    // the generated repository helper, and inside a transaction.
+    let code = |error: &async_graphql::Error| {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code"))
+            .cloned()
+    };
+    let exceeded = Some(async_graphql::Value::from("PAGE_LIMIT_EXCEEDED"));
     let refused = EntityQuery::<LimitCard, Backend>::new()
         .with_max_limit(bound)
-        .fetch_authorized_keyset(&refusing, None, None, page(bound + 1))
+        .fetch_authorized_keyset(db, None, None, page(bound + 1))
         .await
         .expect_err("a limit above the per-read maximum is refused");
+    assert_eq!(code(&refused), exceeded);
+    let refused = LimitCard::keyset_page(db, LimitCardWhereInput::default(), page(MAXIMUM + 1))
+        .await
+        .expect_err("a limit above the database maximum is refused");
     assert_eq!(
-        refused.extensions.as_ref().and_then(|ext| ext.get("code")),
-        Some(&async_graphql::Value::from("PAGE_LIMIT_EXCEEDED"))
+        refused.code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
     );
+    let at_maximum = LimitCard::keyset_page(db, LimitCardWhereInput::default(), page(MAXIMUM))
+        .await
+        .map_err(|error| error.message)?;
+    assert_eq!(at_maximum.edges.len() as i64, MAXIMUM);
+    // An omitted limit is not a request for more than the maximum.
+    let omitted = LimitCard::keyset_page(
+        db,
+        LimitCardWhereInput::default(),
+        KeysetPageInput::default(),
+    )
+    .await
+    .map_err(|error| error.message)?;
+    assert_eq!(omitted.edges.len() as i64, MAXIMUM);
     Ok(())
 }
 
@@ -406,6 +447,27 @@ fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Datab
     let _ = schema_builder(db.clone()).finish();
     assert_eq!(page_complexity_maximum(), MAXIMUM);
 
+    // A schema that declares no maximum has the default of 100 and refuses
+    // this fixture's database, whose maximum is 2.
+    assert_eq!(undeclared::GRAPHQL_ORM_MAX_PAGE_LIMIT, Some(100));
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = undeclared::schema_builder(db.clone());
+    }))
+    .expect_err("an undeclared schema refuses a database with another maximum");
+    let message = refused
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("this schema's maximum page limit is 100"),
+        "{message}"
+    );
+    let _ = undeclared::schema_builder(
+        db.clone()
+            .with_pagination_config(PaginationConfig::secure()),
+    )
+    .finish();
+
     // A database with the default maximum (100), or none, is refused.
     for mismatched in [
         db.clone()
@@ -422,7 +484,7 @@ fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Datab
             .cloned()
             .unwrap_or_default();
         assert!(
-            message.contains("schema_roots! declares `max_page_limit: 2`"),
+            message.contains("this schema's maximum page limit is 2"),
             "{message}"
         );
     }

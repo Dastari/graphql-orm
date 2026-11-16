@@ -10,6 +10,17 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.162.0 (placeholder for the breaking batch) fixes each schema's
+maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
+when omitted) and refuses a `Database` configured differently; host-side
+keyset pages refuse a limit above the maximum instead of returning fewer
+rows; runtime GraphQL serves `RecordVersion` and integer live keys as
+`RuntimeInt64` strings; an uncoded host callback error reads as
+`INTERNAL_ERROR` unless the host opts in; and the policy-free relation preload
+API is removed. `#[graphql_entity(key_only_deletes)]` adds an opt-in key-only
+delete signal for `Key`/`Keys` subscribers. Every item needs action; see the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 Version 0.161.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
 of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and

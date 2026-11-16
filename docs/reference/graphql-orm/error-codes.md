@@ -90,9 +90,12 @@ refusal:
 | authored error without a code, or with a host-specific code | `INTERNAL_ERROR`, default message | `FORBIDDEN`; no message |
 | propagated error (it has a source) | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message | the same failure class; no message |
 
-The text of an uncoded callback error is a server-side diagnostic only on
-these paths, also when a custom resolver maps a repository error with
-`graphql_error_from_sqlx`. The rule is stated once in
+The text of an uncoded callback error is a server-side diagnostic only, on
+these paths and for every other callback family (entity policy, row policy,
+write-input transform and mutation hook), also when a custom resolver maps a
+repository error with `graphql_error_from_sqlx`. Generated GraphQL operations
+report it as `INTERNAL_ERROR` with the default message unless the host called
+`expose_uncoded_callback_messages(true)`. The rule is stated once in
 [policy callback errors](strict-authorization.md#policy-callback-errors). A missing field policy provider for a declared key
 is `AUTHORIZATION_MISCONFIGURED` in both strict modes.
 

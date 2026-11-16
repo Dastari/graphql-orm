@@ -1870,9 +1870,10 @@ pub fn page_complexity_maximum() -> i64 {
     }
 }
 
-/// Check, when a generated schema is built, that its declared maximum page
-/// limit is the one `database` applies, and record it for
-/// [`page_complexity_maximum`]. A schema that declares none is not checked.
+/// Check, when a generated schema is built, that its compile-time maximum
+/// page limit (declared with `schema_roots!(max_page_limit: ...)`, 100
+/// otherwise) is the one `database` applies, and record it for
+/// [`page_complexity_maximum`].
 ///
 /// # Panics
 ///
@@ -1890,9 +1891,9 @@ pub fn admit_declared_page_maximum<B: OrmBackend>(
     let configured = database.pagination_config().max_limit;
     assert!(
         configured == Some(declared),
-        "schema_roots! declares `max_page_limit: {declared}`, but the Database applies {}; \
-         configure it with `DatabaseBuilder::max_page_limit(Some({declared}))` or declare the \
-         maximum the Database uses",
+        "this schema's maximum page limit is {declared} (`schema_roots!(max_page_limit: ...)`, \
+         100 when it declares none), but the Database applies {}; declare the maximum the \
+         Database uses, or configure it with `DatabaseBuilder::max_page_limit(Some({declared}))`",
         match configured {
             Some(maximum) => format!("a maximum page limit of {maximum}"),
             None => "no maximum page limit".to_owned(),
@@ -2712,44 +2713,6 @@ impl<B: OrmBackend> PoolProvider<B> for crate::db::Database<B> {
 }
 
 impl<B: OrmBackend> DatabaseExecutor<B> for crate::db::Database<B> {}
-
-#[allow(async_fn_in_trait)]
-pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
-    async fn load_relations(
-        &mut self,
-        pool: &B::Pool,
-        selection: &[async_graphql::context::SelectionField<'_>],
-    ) -> crate::Result<()>;
-
-    async fn bulk_load_relations(
-        entities: &mut [Self],
-        pool: &B::Pool,
-        selection: &[async_graphql::context::SelectionField<'_>],
-    ) -> crate::Result<()>
-    where
-        Self: Sized;
-
-    async fn load_relations_with_auth(
-        &mut self,
-        pool: &B::Pool,
-        selection: &[async_graphql::context::SelectionField<'_>],
-        _auth: Option<&DbAuthContext>,
-    ) -> crate::Result<()> {
-        self.load_relations(pool, selection).await
-    }
-
-    async fn bulk_load_relations_with_auth(
-        entities: &mut [Self],
-        pool: &B::Pool,
-        selection: &[async_graphql::context::SelectionField<'_>],
-        _auth: Option<&DbAuthContext>,
-    ) -> crate::Result<()>
-    where
-        Self: Sized,
-    {
-        Self::bulk_load_relations(entities, pool, selection).await
-    }
-}
 
 /// Small deterministic substring scorer used by fallback query paths.
 pub struct FuzzyMatcher {

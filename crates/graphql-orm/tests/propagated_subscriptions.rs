@@ -200,32 +200,6 @@ schema_roots! {
     entities: [Collection, Record, Note, RecordRelationship, Node],
 }
 
-macro_rules! impl_noop_relation_loader {
-    ($($entity:ty),* $(,)?) => {
-        $(
-            impl graphql_orm::graphql::orm::RelationLoader for $entity {
-                async fn load_relations(
-                    &mut self,
-                    _pool: &graphql_orm::DbPool,
-                    _selection: &[graphql_orm::async_graphql::context::SelectionField<'_>],
-                ) -> Result<(), sqlx::Error> {
-                    Ok(())
-                }
-
-                async fn bulk_load_relations(
-                    _entities: &mut [Self],
-                    _pool: &graphql_orm::DbPool,
-                    _selection: &[graphql_orm::async_graphql::context::SelectionField<'_>],
-                ) -> Result<(), sqlx::Error> {
-                    Ok(())
-                }
-            }
-        )*
-    };
-}
-
-impl_noop_relation_loader!(Record, Note, RecordRelationship, Node);
-
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 fn test_mutex() -> &'static tokio::sync::Mutex<()> {

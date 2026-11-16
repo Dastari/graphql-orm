@@ -151,10 +151,50 @@ struct KeyedSlot {
     label: String,
 }
 
+/// Opted in to key-only delete signals (#666).
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "keyed_tickets",
+        plural = "KeyedTickets",
+        key_only_deletes
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "keyed_tickets",
+        plural = "KeyedTickets",
+        key_only_deletes
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "keyed_tickets",
+        plural = "KeyedTickets",
+        key_only_deletes
+    )
+)]
+struct KeyedTicket {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    id: String,
+    owner: String,
+    label: String,
+}
+
 #[cfg(feature = "sqlite")]
-schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [KeyedParent, KeyedChild, KeyedSlot], }
+schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket], }
 #[cfg(feature = "postgres")]
-schema_roots! { backend: "postgres", query_custom_ops: [], entities: [KeyedParent, KeyedChild, KeyedSlot], }
+schema_roots! { backend: "postgres", query_custom_ops: [], entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket], }
 // SQL Server generates no GraphQL mutations for composite keys; the test writes
 // slots through the repository on every backend.
 #[cfg(feature = "mssql")]
@@ -162,7 +202,7 @@ schema_roots! {
     backend: "mssql",
     schema_policy: "external_writable",
     query_custom_ops: [],
-    entities: [KeyedParent, KeyedChild, KeyedSlot],
+    entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket],
     generated_mutations: "denylist",
     generated_mutation_denylist: [KeyedSlot],
 }
@@ -203,7 +243,11 @@ impl RowPolicy for OwnerRowPolicy {
             let owner = row
                 .downcast_ref::<KeyedParent>()
                 .map(|row| row.owner.clone())
-                .or_else(|| row.downcast_ref::<KeyedSlot>().map(|row| row.owner.clone()));
+                .or_else(|| row.downcast_ref::<KeyedSlot>().map(|row| row.owner.clone()))
+                .or_else(|| {
+                    row.downcast_ref::<KeyedTicket>()
+                        .map(|row| row.owner.clone())
+                });
             Ok(match owner {
                 Some(owner) => subject.as_deref() == Some(owner.as_str()),
                 None => true,
@@ -225,7 +269,12 @@ impl RowPolicy for OwnerRowPolicy {
 }
 
 #[cfg(not(feature = "sqlite"))]
-const TABLES: [&str; 3] = ["keyed_children", "keyed_parents", "keyed_slots"];
+const TABLES: [&str; 4] = [
+    "keyed_children",
+    "keyed_parents",
+    "keyed_slots",
+    "keyed_tickets",
+];
 
 struct Fixture {
     db: Database,
@@ -262,6 +311,7 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
                     KeyedParent::metadata(),
                     KeyedChild::metadata(),
                     KeyedSlot::metadata(),
+                    KeyedTicket::metadata(),
                 ],
             )
             .await?;
@@ -279,7 +329,9 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
              CREATE TABLE keyed_children (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
              parent_id NVARCHAR(64) NOT NULL, body NVARCHAR(64) NOT NULL); \
              CREATE TABLE keyed_slots (site NVARCHAR(64) NOT NULL, name NVARCHAR(64) NOT NULL, \
-             owner NVARCHAR(64) NOT NULL, label NVARCHAR(64) NOT NULL, PRIMARY KEY (site, name));",
+             owner NVARCHAR(64) NOT NULL, label NVARCHAR(64) NOT NULL, PRIMARY KEY (site, name)); \
+             CREATE TABLE keyed_tickets (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
+             owner NVARCHAR(64) NOT NULL, label NVARCHAR(64) NOT NULL);",
         )
         .await?;
         let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
@@ -671,6 +723,7 @@ async fn unkeyed_subscriptions_are_unchanged(db: &Database) -> TestResult {
         KeyedParent::generated_graphql_operations(),
         KeyedChild::generated_graphql_operations(),
         KeyedSlot::generated_graphql_operations(),
+        KeyedTicket::generated_graphql_operations(),
     ];
     for operation in descriptors
         .into_iter()
@@ -974,6 +1027,103 @@ async fn aliased_roots_cannot_multiply_the_key_budget(db: &Database) -> TestResu
     Ok(())
 }
 
+fn ticket_subscription(arguments: &str) -> String {
+    let changed = resolver_name("keyedTicketChanged");
+    let id = field_name("id");
+    let entity = field_name("keyedTicket");
+    let label = field_name("label");
+    let action = field_name("action");
+    format!("subscription {{ {changed}{arguments} {{ {action} {id} {entity} {{ {label} }} }} }}")
+}
+
+/// No item is ready on the stream.
+async fn quiet(stream: &mut Events, name: &str) {
+    for _ in 0..20 {
+        poll_fn(|cx| match stream.poll_next_unpin(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(other) => panic!("{name}: unexpected item: {other:?}"),
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// #666: the row policy grants no deleted preimage, so a delete releases no
+/// row. With `key_only_deletes`, a subscriber whose `Key`/`Keys` filter names
+/// the deleted key still gets `DELETED` with the key and no entity. Unkeyed
+/// subscribers, other keys, and entities without the opt-in get nothing.
+async fn key_only_deletes_reach_exact_key_subscribers_only(db: &Database) -> TestResult {
+    for id in ["t1", "t2"] {
+        KeyedTicket::insert(
+            db,
+            CreateKeyedTicketInput {
+                id: id.to_string(),
+                owner: "alice".to_string(),
+                label: "created".to_string(),
+            },
+        )
+        .await?;
+    }
+    parent(db, "p1", "alice").await?;
+    let key = argument_name("key");
+    let changed = resolver_name("keyedTicketChanged");
+    let mut by_keys = open(db, ticket_subscription(&keys_argument(&["t1"])), "alice");
+    let mut by_key = open(
+        db,
+        ticket_subscription(&format!("({key}: \"t1\")")),
+        "alice",
+    );
+    let mut other_key = open(db, ticket_subscription(&keys_argument(&["t2"])), "alice");
+    let mut unkeyed = open(db, ticket_subscription(""), "alice");
+    // Not opted in: a keyed subscriber of a deleted parent gets nothing.
+    let mut not_opted_in = open(db, parent_subscription(&keys_argument(&["p1"])), "alice");
+    for stream in [
+        &mut by_keys,
+        &mut by_key,
+        &mut other_key,
+        &mut unkeyed,
+        &mut not_opted_in,
+    ] {
+        admitted(stream).await;
+    }
+
+    assert!(KeyedTicket::delete_by_id(db, &"t1".to_string()).await?);
+    assert!(KeyedParent::delete_by_id(db, &"p1".to_string()).await?);
+
+    for (name, stream) in [("keys", &mut by_keys), ("key", &mut by_key)] {
+        let event = next_event(stream, changed).await;
+        assert_eq!(event[field_name("action")], "DELETED", "{name}: {event}");
+        assert_eq!(id_of(&event), "t1", "{name}");
+        // The key only: no row content is released.
+        assert!(
+            event[field_name("keyedTicket")].is_null(),
+            "{name}: {event}"
+        );
+    }
+    quiet(&mut other_key, "another key").await;
+    quiet(&mut unkeyed, "unkeyed").await;
+    quiet(&mut not_opted_in, "entity without key_only_deletes").await;
+
+    // A later write to another listed key is still delivered with its row.
+    KeyedTicket::update_by_id(
+        db,
+        &"t2".to_string(),
+        UpdateKeyedTicketInput {
+            label: Some("after".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("ticket exists");
+    let event = next_event(&mut other_key, changed).await;
+    assert_eq!(id_of(&event), "t2");
+    assert_eq!(
+        event[field_name("keyedTicket")][field_name("label")],
+        "after"
+    );
+    Ok(())
+}
+
 macro_rules! scenarios {
     ($($scenario:ident),* $(,)?) => {
         #[cfg(feature = "sqlite")]
@@ -1019,4 +1169,5 @@ scenarios![
     unkeyed_subscriptions_are_unchanged,
     a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters,
     a_replaced_event_channel_ends_its_subscribers,
+    key_only_deletes_reach_exact_key_subscribers_only,
 ];

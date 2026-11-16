@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -374,8 +374,11 @@ or an `OrmPublicError` returned with `?`. Any other hook error, including one
 with an application-defined code, reads as `INTERNAL_ERROR` with the default
 message, and its text stays a server-side diagnostic. GraphQL clients of
 generated mutations see a deliberate public refusal with the same code and
-message. They still see an application-defined refusal as the hook wrote it,
-as does `into_graphql_error()` on the repository error. `INTERNAL_ERROR`
+message. They still see a refusal with an application-defined `code` as the
+hook wrote it, as does `into_graphql_error()` on the repository error. A
+refusal with no `code` extension reads as `INTERNAL_ERROR` with the default
+message for GraphQL clients too, unless the host called
+`expose_uncoded_callback_messages(true)`. `INTERNAL_ERROR`
 always has the default message, on every surface. Entity and row policy refusals
 on repository paths keep their public code in the same way, so an entity write
 denial reads as `FORBIDDEN`.

@@ -445,12 +445,47 @@ pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
 /// A callback's code and message are kept when it carries an allow-listed ORM
 /// public `code` extension, or is a typed [`OrmPublicError`] propagated with `?`,
 /// on both repository and GraphQL surfaces. `INTERNAL_ERROR`, by either route,
-/// always has the default message. Any other authored error reads as
-/// `INTERNAL_ERROR` with the default message for repository callers, while
-/// [`OrmPublicError::into_graphql_error`] still renders it as the callback wrote
-/// it, matching generated GraphQL mutations.
+/// always has the default message.
+///
+/// An error with no `code` extension is not a deliberate public refusal: it
+/// reads as `INTERNAL_ERROR` with the default message on every surface, and
+/// its text is kept as a server-side diagnostic, unless the host opted in
+/// with [`expose_uncoded_callback_messages`]. An error with an
+/// application-defined code reads as `INTERNAL_ERROR` with the default
+/// message for repository callers, while
+/// [`OrmPublicError::into_graphql_error`] renders it as the callback wrote it.
 #[doc(hidden)]
 pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
+    classify_callback_error(
+        error,
+        EXPOSE_UNCODED_CALLBACK_MESSAGES.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+static EXPOSE_UNCODED_CALLBACK_MESSAGES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Let the text of an uncoded host callback error reach GraphQL clients.
+///
+/// By default an error that an entity policy, row policy, write-input
+/// transform or mutation hook returns with a plain message and no `code`
+/// extension (for example `async_graphql::Error::new(text)`) is reported to
+/// clients as `INTERNAL_ERROR` with the default message, and the text is only
+/// logged. A deliberate refusal carries a public code, for example
+/// `OrmPublicError::with_message(OrmErrorCode::Forbidden, text)`, and always
+/// keeps its code and message.
+///
+/// `true` restores the earlier contract, in which generated GraphQL
+/// operations and [`graphql_error_from_sqlx`] render an uncoded error as the
+/// callback wrote it. The setting is process-wide: set it once at start-up,
+/// before serving requests, and only when every callback's uncoded text is
+/// safe for clients. Repository callers reading `OrmPublicError::message`
+/// see the default message either way.
+pub fn expose_uncoded_callback_messages(expose: bool) {
+    EXPOSE_UNCODED_CALLBACK_MESSAGES.store(expose, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn classify_callback_error(error: async_graphql::Error, expose_uncoded: bool) -> sqlx::Error {
     let category = error
         .extensions
         .as_ref()
@@ -496,10 +531,15 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
             // An explicit `INTERNAL_ERROR` is internal on every surface.
             return sqlx_error_from_public(public);
         }
+        if category.is_none() && !expose_uncoded {
+            // No code at all: not a deliberate public refusal. Its text stays
+            // a server-side diagnostic unless the host opted in.
+            return sqlx_error_from_public(public);
+        }
     } else {
         public.message = error.message.clone();
     }
-    // The GraphQL boundary still renders an authored refusal as written.
+    // The GraphQL boundary renders a coded refusal as written.
     public.application_refusal = Some(Box::new(ApplicationRefusal {
         message: error.message,
         extensions: error.extensions,
@@ -509,8 +549,10 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
 
 /// Apply the bulk callback refusal classifier at a GraphQL callback boundary.
 ///
-/// Source-bearing failures without a string `code` extension receive a safe ORM
-/// category. Authored refusals retain their message and all extensions. Internal
+/// Failures without a string `code` extension receive a safe ORM category and
+/// the default message, unless the host called
+/// [`expose_uncoded_callback_messages`]. Coded refusals retain their message
+/// and all extensions. Internal
 /// diagnostics use the same opt-in server reporting path as repository failures.
 #[doc(hidden)]
 pub fn graphql_error_from_callback(error: impl Into<async_graphql::Error>) -> async_graphql::Error {
@@ -731,10 +773,27 @@ mod tests {
                 Some(&async_graphql::Value::from("INTERNAL_ERROR"))
             );
         }
-        let plain = graphql_error_from_sqlx(sqlx_error_from_graphql(async_graphql::Error::new(
-            "uncoded refusal",
-        )));
-        assert_eq!(plain.message, "uncoded refusal");
+        // #682: an uncoded error is not a public refusal unless the host opts in.
+        let plain = graphql_error_from_sqlx(classify_callback_error(
+            async_graphql::Error::new("uncoded refusal"),
+            false,
+        ));
+        assert_eq!(plain.message, "internal error");
+        assert_eq!(
+            plain.extensions.unwrap().get("code"),
+            Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+        );
+        let exposed = graphql_error_from_sqlx(classify_callback_error(
+            async_graphql::Error::new("uncoded refusal"),
+            true,
+        ));
+        assert_eq!(exposed.message, "uncoded refusal");
+        // A refusal with a public code keeps its code and message either way.
+        let public = graphql_error_from_sqlx(classify_callback_error(
+            OrmPublicError::with_message(OrmErrorCode::Forbidden, "not yours").into_graphql_error(),
+            false,
+        ));
+        assert_eq!(public.message, "not yours");
         let coded = async_graphql::Error::from(std::io::Error::other("explicit refusal"))
             .extend_with(|_, ext| ext.set("code", "CUSTOM_REFUSAL"));
         let coded = graphql_error_from_sqlx(sqlx_error_from_graphql(coded));
@@ -755,7 +814,10 @@ mod tests {
         struct HostRefusal;
         impl From<HostRefusal> for async_graphql::Error {
             fn from(_: HostRefusal) -> Self {
-                Self::new("host refusal").extend_with(|_, ext| ext.set("detail", "preserved"))
+                Self::new("host refusal").extend_with(|_, ext| {
+                    ext.set("code", "HOST_REFUSAL");
+                    ext.set("detail", "preserved");
+                })
             }
         }
         let converted: async_graphql::Result<()> = (|| {

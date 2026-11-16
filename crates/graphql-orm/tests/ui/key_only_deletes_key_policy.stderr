@@ -1,0 +1,11 @@
+error: key_only_deletes cannot be combined with a read_policy on a primary-key field: a key-only DELETED event would release the key without evaluating that policy
+ --> tests/ui/key_only_deletes_key_policy.rs:6:57
+  |
+6 | #[graphql_entity(table = "tickets", plural = "Tickets", key_only_deletes)]
+  |                                                         ^^^^^^^^^^^^^^^^
+
+error: this primary-key field declares a read_policy
+  --> tests/ui/key_only_deletes_key_policy.rs:11:5
+   |
+11 |     id: String,
+   |     ^^

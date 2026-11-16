@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -272,7 +272,7 @@ policy callback, on every generated path:
 
 | Where the error surfaces | Authored refusal | Propagated or declared failure |
 | --- | --- | --- |
-| Generated GraphQL field or root | rendered as written, with its code | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
+| Generated GraphQL field or root | rendered as written, with its code, when it carries a `code` extension; an uncoded refusal is `INTERNAL_ERROR` with the default message | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
 | Relation boundary | `FORBIDDEN`, or `UNAUTHENTICATED` / `AUTHORIZATION_MISCONFIGURED` when it carries that code; no text | the failure class; no text |
 | `Changed` subscription event | the event is dropped; a timer refusal ends the stream with `FORBIDDEN` | the stream ends with a continuity-loss error |
 | Repository field policy callbacks | its code and message when the code is an ORM public code; otherwise `INTERNAL_ERROR`, default message | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
@@ -461,8 +461,14 @@ single-row read checks and default propagating `notify_with` errors use
 that same classifier. An error whose own `async_graphql::Error.source` field is
 `Some` without a string `code` is masked; the wrapped error need not have a nested
 `std::error::Error::source()`. The exception is a typed `OrmPublicError` returned
-with `?`, which keeps its code and message. Use `Error::new` or set a string `code`
-for an authored refusal. `INTERNAL_ERROR`, whether set as a string `code` or on a
+with `?`, which keeps its code and message. Set a string `code` for an authored
+refusal: an error with no `code` extension, such as a plain
+`async_graphql::Error::new(text)`, is not a public refusal and renders as
+`INTERNAL_ERROR` with the default message, its text logged only. A host whose
+uncoded callback text is safe for clients can restore the earlier rendering
+for the whole process with
+`graphql_orm::graphql::errors::expose_uncoded_callback_messages(true)`, called
+once at start-up. `INTERNAL_ERROR`, whether set as a string `code` or on a
 typed `OrmPublicError`, always renders the default message. Custom `From` conversions leaving that field empty preserve their text
 and extensions. Direct SQLx sources retain their safe bulk category; other
 sources become `INTERNAL_ERROR`. Internal details use the existing opt-in
