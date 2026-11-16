@@ -1,7 +1,7 @@
 use graphql_orm::graphql::auth::{AuthAssurance, AuthSubject};
 use graphql_orm::graphql::loaders::{
     CompositeRelationQueryKey, FederationEntityKey, RelationKey, RelationKeyPartKind,
-    RelationLoader, RelationQueryKey,
+    RelationQueryKey,
 };
 use graphql_orm::graphql::orm::{DbAuthContext, SqlValue};
 use std::collections::HashSet;
@@ -292,7 +292,7 @@ mod sqlite_batch {
             .await
             .unwrap();
         let loader = async_graphql::dataloader::DataLoader::new(
-            RelationLoader::<Child, graphql_orm::SqliteBackend>::__generated(
+            graphql_orm::graphql::loaders::RelationLoader::<Child, graphql_orm::SqliteBackend>::__generated(
                 graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool.clone()),
             ),
             tokio::spawn,
@@ -380,7 +380,7 @@ mod postgres_batch {
             .connect(&owned.url)
             .await?;
         let loader = async_graphql::dataloader::DataLoader::new(
-            RelationLoader::<Child, graphql_orm::PostgresBackend>::__generated(
+            graphql_orm::graphql::loaders::RelationLoader::<Child, graphql_orm::PostgresBackend>::__generated(
                 graphql_orm::db::Database::<graphql_orm::PostgresBackend>::new(pool.clone()),
             ),
             tokio::spawn,
