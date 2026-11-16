@@ -3,9 +3,7 @@ use super::core::{
     MigrationApplicationMetadata, PlannedSchemaStage, SchemaPolicy, SchemaStage, SqlValue,
     record_executed_query,
 };
-use super::migrations::{
-    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
-};
+use super::migrations::{build_migration_plan, validate_migration_step_capabilities};
 use super::owned_schema::StepRef;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::runtime_migration::{OwnedPlannedMigration, RuntimeMigrationError};
@@ -267,7 +265,7 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
 
 /// Run the shared migration risk gate over one planned stage.
 fn admit_schema_stage(stage: &PlannedSchemaStage, options: &ApplyOptions) -> crate::Result<()> {
-    let steps = classify_migration_steps(&stage.plan.steps);
+    let steps = stage.steps();
     reject_migration_risks(
         &stage.version,
         steps

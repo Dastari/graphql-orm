@@ -1425,10 +1425,15 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             .into_iter()
             .map(|step| {
                 let prior = match &step {
-                    OwnedMigrationStep::SetAppendOnly { table_name, .. } => scoped.tables.iter().find(|table| &table.table_name == table_name).map(|table| (table.append_only, table.retention_purge)),
+                    OwnedMigrationStep::SetAppendOnly { table_name, .. } => scoped
+                        .tables
+                        .iter()
+                        .find(|table| &table.table_name == table_name)
+                        .map(|table| (table.append_only, table.retention_purge)),
                     _ => None,
                 };
-                let (risk, reason) = classify_migration_step_context(Some(B::DIALECT), &StepRef::from(&step), prior);
+                let (risk, reason) =
+                    classify_migration_step_context(Some(B::DIALECT), &StepRef::from(&step), prior);
                 OwnedPlannedMigrationStep {
                     step,
                     risk,

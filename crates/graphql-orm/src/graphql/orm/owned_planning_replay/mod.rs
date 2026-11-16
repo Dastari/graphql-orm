@@ -523,12 +523,25 @@ fn compute_after_target(
     for step in &steps {
         let z = size(step, l, cap)?;
         classification = classification.add(Cost::new(add(mul(64, z.n)?, mul(2, z.b)?)?, 0))?;
+        if matches!(step, OwnedMigrationStep::SetAppendOnly { .. }) {
+            let tables = size(&scoped.tables, l, cap)?;
+            classification = classification.add(Cost::new(mul(64, tables.m()?)?, 0))?;
+        }
     }
     l.reserve(classification)?;
     let steps = steps
         .into_iter()
         .map(|step| {
-            let (risk, reason) = classify_migration_step_context(Some(backend), &StepRef::from(&step), None);
+            let prior = match &step {
+                OwnedMigrationStep::SetAppendOnly { table_name, .. } => scoped
+                    .tables
+                    .iter()
+                    .find(|table| &table.table_name == table_name)
+                    .map(|table| (table.append_only, table.retention_purge)),
+                _ => None,
+            };
+            let (risk, reason) =
+                classify_migration_step_context(Some(backend), &StepRef::from(&step), prior);
             OwnedPlannedMigrationStep {
                 step,
                 risk,

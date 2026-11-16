@@ -123,13 +123,9 @@ fn lossy_type_changes_are_destructive_and_lossless_widenings_are_not() {
     for (before, after) in [
         ("SMALLINT", "INTEGER"),
         ("integer", "BIGINT"),
-
-
-
         ("REAL", "DOUBLE PRECISION"),
         ("NUMERIC(10,2)", "NUMERIC(12,2)"),
         ("NUMERIC(10,2)", "NUMERIC(14,4)"),
-
         ("character varying(20)", "VARCHAR(50)"),
         ("VARCHAR(20)", "TEXT"),
         ("INT", "BIGINT"),
@@ -555,7 +551,9 @@ async fn column_primary_key_removal_is_refused() -> Result<(), Box<dyn std::erro
 }
 
 #[cfg(feature = "sqlite")]
-async fn column_constraint_removal_is_refused(primary: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn column_constraint_removal_is_refused(
+    primary: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     {
         let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
         let manager = db.schema();
@@ -565,15 +563,29 @@ async fn column_constraint_removal_is_refused(primary: bool) -> Result<(), Box<d
             current.tables[0].columns[0].is_primary_key = false;
             current.tables[0].columns[1].is_primary_key = true;
         }
-        let empty = SchemaModel { extensions: vec![], tables: vec![] };
+        let empty = SchemaModel {
+            extensions: vec![],
+            tables: vec![],
+        };
         let initial = manager.plan_migration("c1", "initial", &empty, &current)?;
-        manager.apply_migration(&initial, ApplyOptions::default()).await?;
+        manager
+            .apply_migration(&initial, ApplyOptions::default())
+            .await?;
         let mut target = current.clone();
         target.tables[0].columns[1].is_unique = false;
         target.tables[0].columns[1].is_primary_key = false;
         let plan = manager.plan_migration("c2", "remove constraint", &current, &target)?;
-        assert!(plan.steps.iter().any(|s| s.risk == MigrationRisk::Destructive), "{:?}", plan.steps);
-        let error = manager.apply_migration(&plan, ApplyOptions::default()).await.expect_err("constraint removal refused");
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.risk == MigrationRisk::Destructive),
+            "{:?}",
+            plan.steps
+        );
+        let error = manager
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .expect_err("constraint removal refused");
         assert!(error.to_string().contains("destructive"), "{error}");
     }
     Ok(())
@@ -581,7 +593,10 @@ async fn column_constraint_removal_is_refused(primary: bool) -> Result<(), Box<d
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[tokio::test]
-#[cfg_attr(feature = "postgres", ignore = "requires test-owned PostgreSQL container")]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn enabling_retention_purge_is_destructive() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "sqlite")]
     let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
@@ -592,18 +607,47 @@ async fn enabling_retention_purge_is_destructive() -> Result<(), Box<dyn std::er
     let manager = db.schema();
     let mut current = SchemaModel::from_entities(&[SafetyRecord::metadata()]);
     current.tables[0].append_only = true;
-    let empty = SchemaModel { extensions: vec![], tables: vec![] };
+    let empty = SchemaModel {
+        extensions: vec![],
+        tables: vec![],
+    };
     let initial = manager.plan_migration("r1", "initial", &empty, &current)?;
-    manager.apply_migration(&initial, ApplyOptions::default()).await?;
+    manager
+        .apply_migration(&initial, ApplyOptions::default())
+        .await?;
     // Use the catalog, including the installed enforcement, as the source.
     let current = introspect_schema(&db).await?;
     let mut target = current.clone();
-    target.tables.iter_mut().find(|t| t.table_name == "safety_records").unwrap().retention_purge = true;
+    target
+        .tables
+        .iter_mut()
+        .find(|t| t.table_name == "safety_records")
+        .unwrap()
+        .retention_purge = true;
     let plan = manager.plan_migration("r2", "enable purge", &current, &target)?;
-    assert!(plan.steps.iter().any(|s| s.risk == MigrationRisk::Destructive), "{:?}", plan.steps);
-    let error = manager.apply_migration(&plan, ApplyOptions::default()).await.expect_err("purge relaxation refused");
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| s.risk == MigrationRisk::Destructive),
+        "{:?}",
+        plan.steps
+    );
+    let error = manager
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect_err("purge relaxation refused");
     assert!(error.to_string().contains("destructive"), "{error}");
-    manager.apply_migration(&plan, ApplyOptions { allow_destructive: true, additive_only: true, ..ApplyOptions::default() }).await.expect_err("additive-only refuses purge relaxation even with destructive admission");
+    manager
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                additive_only: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await
+        .expect_err("additive-only refuses purge relaxation even with destructive admission");
     #[cfg(feature = "postgres")]
     server.cleanup()?;
     Ok(())

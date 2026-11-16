@@ -5004,7 +5004,14 @@ impl PlannedSchemaStage {
     ///
     /// Stage application refuses these steps according to [`ApplyOptions`].
     pub fn steps(&self) -> Vec<PlannedMigrationStep> {
-        super::migrations::classify_migration_steps(&self.plan.steps)
+        super::migrations::classify_migration_steps_for_backend(
+            self.plan.backend,
+            &self.plan.steps,
+            &SchemaModel {
+                extensions: Vec::new(),
+                tables: Vec::new(),
+            },
+        )
     }
 
     /// The highest step risk in this stage, or `None` when it has no steps.
