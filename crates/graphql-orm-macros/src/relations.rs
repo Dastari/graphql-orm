@@ -739,22 +739,22 @@ pub(crate) fn generate_graphql_relations(
                 } else {
                     None
                 };
-            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
-                relation: #relation_loader_identity,
-                parent_key: relation_loader_key.clone(),
-                parent_values: relation_sql_values.clone(),
-                fk_columns: vec![#(#fk_columns_sql),*],
-                key_part_kinds: vec![#(#key_part_kind_tokens),*],
-                where_signature: where_input
+            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey::__generated(
+                #relation_loader_identity,
+                relation_loader_key.clone(),
+                relation_sql_values.clone(),
+                vec![#(#fk_columns_sql),*],
+                vec![#(#key_part_kind_tokens),*],
+                where_input
                     .as_ref()
                     .and_then(|filter| filter.to_filter_expression().map(|expr| format!("{expr:?}"))),
-                order_signature: order_by
+                order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression().map(|expr| expr.clause)),
-                page_signature: __gom_relation_pagination
+                __gom_relation_pagination
                     .as_ref()
                     .map(|page| format!("limit={:?};offset={}", page.limit, page.offset)),
-                filter: {
+                {
                     let supplied = where_input
                         .as_ref()
                         .and_then(|filter| filter.to_filter_expression());
@@ -766,31 +766,31 @@ pub(crate) fn generate_graphql_relations(
                         (None, supplied) => supplied,
                     }
                 },
-                sorts: order_by
+                order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression())
                     .into_iter()
                     .collect(),
-                pagination: __gom_relation_pagination,
-                auth_context: auth_context.clone(),
-            }
+                __gom_relation_pagination,
+                auth_context.clone(),
+            )
         }};
 
         let single_relation_query_key = quote! {
-            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
-                relation: #relation_loader_identity,
-                parent_key: relation_loader_key.clone(),
-                parent_values: relation_sql_values.clone(),
-                fk_columns: vec![#(#fk_columns_sql),*],
-                key_part_kinds: vec![#(#key_part_kind_tokens),*],
-                where_signature: None,
-                order_signature: None,
-                page_signature: None,
-                filter: #target_condition_filter,
-                sorts: Vec::new(),
-                pagination: None,
-                auth_context: auth_context.clone(),
-            }
+            ::graphql_orm::graphql::loaders::CompositeRelationQueryKey::__generated(
+                #relation_loader_identity,
+                relation_loader_key.clone(),
+                relation_sql_values.clone(),
+                vec![#(#fk_columns_sql),*],
+                vec![#(#key_part_kind_tokens),*],
+                None,
+                None,
+                None,
+                #target_condition_filter,
+                Vec::new(),
+                None,
+                auth_context.clone(),
+            )
         };
         let fallback_predicate_parts = fk_columns_sql
             .iter()
@@ -888,10 +888,10 @@ pub(crate) fn generate_graphql_relations(
                         // Loaded with its own outcome: another caller's
                         // failing group in the same batch does not fail this one.
                         ::graphql_orm::graphql::loaders::isolated_load_result(loader
-                            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::SelectedRelationQueryKey {
-                                query: ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
-                                selection: ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
-                            }))
+                            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::SelectedRelationQueryKey::__generated(
+                                ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
+                                ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
+                            )))
                             .await)
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {

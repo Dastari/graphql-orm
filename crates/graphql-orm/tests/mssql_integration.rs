@@ -187,25 +187,25 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
         use graphql_orm::graphql::orm::{PaginationRequest, SqlValue};
         let keys = [10, 20].map(|id| {
             let values = vec![SqlValue::Int(id)];
-            CompositeRelationQueryKey {
-                relation: "paged_customers",
-                parent_key: RelationKey::from_sql_values(&values),
-                parent_values: values,
-                fk_columns: vec!["[CustomerId]"],
-                key_part_kinds: vec![RelationKeyPartKind::Int],
-                where_signature: None,
-                order_signature: None,
-                page_signature: Some("first".into()),
-                filter: None,
-                sorts: vec![],
-                pagination: Some(PaginationRequest {
+            CompositeRelationQueryKey::__generated(
+                "paged_customers",
+                RelationKey::from_sql_values(&values),
+                values,
+                vec!["[CustomerId]"],
+                vec![RelationKeyPartKind::Int],
+                None,
+                None,
+                Some("first".into()),
+                None,
+                vec![],
+                Some(PaginationRequest {
                     limit: Some(1),
                     offset: 0,
                 }),
-                auth_context: None,
-            }
+                None,
+            )
         });
-        let loader = RelationLoader::<MssqlCustomer, MssqlBackend>::new(database.clone());
+        let loader = RelationLoader::<MssqlCustomer, MssqlBackend>::__generated(database.clone());
         let results = loader.load(&keys).await?;
         for (key, id) in keys.iter().zip([10, 20]) {
             let page = &results[key];

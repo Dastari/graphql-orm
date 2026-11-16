@@ -526,10 +526,7 @@ mod tests {
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"));
         if loader {
             builder
-                .data(DataLoader::new(
-                    RelationLoader::<Endpoint, DefaultBackend>::new(db),
-                    tokio::spawn,
-                ))
+                .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, DefaultBackend>(db))
                 .finish()
         } else {
             builder.finish()
@@ -554,27 +551,27 @@ mod tests {
         };
         let (db, allowed, _, mut owner) = authorized_db(false, 20).await?;
         let loader = DataLoader::with_cache(
-            RelationLoader::<Endpoint, DefaultBackend>::new(db.clone()),
+            RelationLoader::<Endpoint, DefaultBackend>::__generated(db.clone()),
             tokio::spawn,
             HashMapCache::default(),
         );
         let values = vec![SqlValue::String("a".into()), SqlValue::String("one".into())];
         loader
             .feed_one(
-                CompositeRelationQueryKey {
-                    relation: "Session::endpoint",
-                    parent_key: RelationKey::from_sql_values(&values),
-                    parent_values: values,
-                    fk_columns: vec!["\"id\"", "\"tenant_id\""],
-                    key_part_kinds: vec![RelationKeyPartKind::String; 2],
-                    where_signature: None,
-                    order_signature: None,
-                    page_signature: None,
-                    filter: None,
-                    sorts: vec![],
-                    pagination: None,
-                    auth_context: None,
-                },
+                CompositeRelationQueryKey::__generated(
+                    "Session::endpoint",
+                    RelationKey::from_sql_values(&values),
+                    values,
+                    vec!["\"id\"", "\"tenant_id\""],
+                    vec![RelationKeyPartKind::String; 2],
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    None,
+                ),
                 RelationLoadResult {
                     entities: vec![preloaded("a", "two", "private cached target")],
                     total_count: 1,
@@ -964,10 +961,7 @@ mod tests {
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(identity("fixture-user"))
-        .data(DataLoader::new(
-            RelationLoader::<Endpoint, DefaultBackend>::new(db),
-            tokio::spawn,
-        ))
+        .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, DefaultBackend>(db))
         .finish();
         #[cfg(feature = "sqlite")]
         {
@@ -1063,10 +1057,7 @@ mod tests {
         )
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
-        .data(DataLoader::new(
-            RelationLoader::<Endpoint, DefaultBackend>::new(db),
-            tokio::spawn,
-        ))
+        .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, DefaultBackend>(db))
         .finish();
         let response = schema.execute("{ sessions { id link: endpoint { ...Target } } } fragment Target on Endpoint { id name }").await;
         let data = response.data.into_json()?;

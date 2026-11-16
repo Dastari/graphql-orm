@@ -440,7 +440,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 quote! {
                     let builder = builder.data(
                         ::graphql_orm::async_graphql::dataloader::DataLoader::new(
-                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
+                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::__generated(database.clone()),
                             ::graphql_orm::tokio::spawn,
                         )
                     );
@@ -672,7 +672,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! {
                 let builder = builder.data(
                     ::graphql_orm::async_graphql::dataloader::DataLoader::new(
-                    ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
+                    ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::__generated(database.clone()),
                         ::graphql_orm::tokio::spawn,
                     )
                 );

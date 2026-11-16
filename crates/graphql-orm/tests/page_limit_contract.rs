@@ -622,9 +622,9 @@ async fn schema_complexity_bounds_are_isolated(db: &Database) -> TestResult {
     Ok(())
 }
 
-/// #667: a trusted `EntityQuery::paginate` connection read is exact or
-/// refused, never reduced, with or without the client refusal opt-in. A
-/// per-read `with_max_limit` admits a larger exact page.
+/// #667: a trusted `EntityQuery::paginate` read (connection or `fetch_all*`)
+/// is exact or refused, never reduced, with or without the client refusal
+/// opt-in. A per-read `with_max_limit` admits a larger exact page.
 async fn host_connection_reads_are_exact_or_refused(db: &Database) -> TestResult {
     use graphql_orm::graphql::pagination::ConnectionSelection;
     let oversized = PageInput {
@@ -684,6 +684,58 @@ async fn host_connection_reads_are_exact_or_refused(db: &Database) -> TestResult
                 .fetch_connection(&handle)
                 .await,
             "per-read maximum",
+        );
+
+        // `fetch_all*` reads of the page follow the same rule.
+        let refused_rows = |result: graphql_orm::Result<Vec<LimitCard>>, name: &str| {
+            let error = OrmPublicError::from(result.expect_err(name));
+            assert_eq!(
+                error.code,
+                OrmErrorCode::PageLimitExceeded,
+                "{name}: {error:?}"
+            );
+        };
+        refused_rows(query().fetch_all(&handle).await, "fetch_all");
+        refused_rows(
+            query().fetch_all_with_auth(&handle, None).await,
+            "fetch_all_with_auth",
+        );
+        assert!(
+            query().fetch_one(&handle).await.is_err(),
+            "fetch_one reads the same page"
+        );
+        for (name, rows) in [
+            ("fetch_all", exact().fetch_all(&handle).await?),
+            (
+                "fetch_all_with_auth",
+                exact().fetch_all_with_auth(&handle, None).await?,
+            ),
+        ] {
+            assert_eq!(rows.len() as i64, MAXIMUM + 1, "{name}");
+        }
+    }
+
+    // `fetch_all_on` cannot see the database's maximum, so it checks the
+    // default maximum: exact up to it, refused above it, never reduced.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    {
+        let page = |limit: i64| PageInput {
+            limit: Some(limit),
+            offset: Some(0),
+        };
+        let rows = EntityQuery::<LimitCard, Backend>::new()
+            .paginate(&page(3))
+            .fetch_all_on(db.pool())
+            .await?;
+        assert_eq!(rows.len(), 3, "fetch_all_on within the default maximum");
+        let over = EntityQuery::<LimitCard, Backend>::new()
+            .paginate(&page(PaginationConfig::DEFAULT_MAX_LIMIT + 1))
+            .fetch_all_on(db.pool())
+            .await
+            .expect_err("fetch_all_on above the default maximum");
+        assert_eq!(
+            OrmPublicError::from(over).code,
+            OrmErrorCode::PageLimitExceeded
         );
     }
     Ok(())

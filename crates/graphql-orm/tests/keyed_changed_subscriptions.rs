@@ -1124,8 +1124,9 @@ async fn key_only_deletes_reach_exact_key_subscribers_only(db: &Database) -> Tes
     Ok(())
 }
 
-/// Key-only delete authority: `mallory` loses entity access after admission
-/// and `eve` may not read the key field. Neither gets a key-only event.
+/// Key-only delete authority: `mallory` loses entity access after admission,
+/// `eve` may not read the key field, and the field policy fails for `erin`.
+/// None of them gets a key-only event.
 struct KeyOnlyAuthority(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 fn actor_of(ctx: &async_graphql::Context<'_>) -> Option<String> {
@@ -1162,9 +1163,14 @@ impl FieldPolicy for KeyOnlyAuthority {
         _: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            Ok(!(entity == KeyedTicket::metadata().entity_name
-                && field.eq_ignore_ascii_case("id")
-                && actor_of(ctx).as_deref() == Some("eve")))
+            let key_field =
+                entity == KeyedTicket::metadata().entity_name && field.eq_ignore_ascii_case("id");
+            match actor_of(ctx).as_deref() {
+                // A failing field policy denies, as a refusal does.
+                Some("erin") if key_field => Err(async_graphql::Error::new("policy store down")),
+                Some("eve") if key_field => Ok(false),
+                _ => Ok(true),
+            }
         })
     }
 
@@ -1216,7 +1222,17 @@ async fn key_only_deletes_require_entity_and_key_field_access(db: &Database) -> 
         ticket_subscription(&format!("({key}: \"t3\")")),
         "eve",
     );
-    for stream in [&mut allowed, &mut without_access, &mut without_key_field] {
+    let mut failing_field_policy = open(
+        &restricted,
+        ticket_subscription(&format!("({key}: \"t3\")")),
+        "erin",
+    );
+    for stream in [
+        &mut allowed,
+        &mut without_access,
+        &mut without_key_field,
+        &mut failing_field_policy,
+    ] {
         admitted(stream).await;
     }
     revoked.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1230,6 +1246,11 @@ async fn key_only_deletes_require_entity_and_key_field_access(db: &Database) -> 
     assert!(event[field_name("keyedTicket")].is_null(), "{event}");
     quiet(&mut without_access, "subscriber without entity access").await;
     quiet(&mut without_key_field, "subscriber denied the key field").await;
+    quiet(
+        &mut failing_field_policy,
+        "subscriber whose field policy fails",
+    )
+    .await;
     Ok(())
 }
 

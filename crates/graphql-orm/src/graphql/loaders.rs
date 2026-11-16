@@ -189,35 +189,110 @@ where
 {
 }
 
+/// A single-column relation batch key. Only generated code constructs it.
 #[derive(Clone, Debug)]
 pub struct RelationQueryKey {
-    pub relation: &'static str,
-    pub parent_key: String,
-    pub parent_value: crate::graphql::orm::SqlValue,
-    pub fk_column: &'static str,
-    pub where_signature: Option<String>,
-    pub order_signature: Option<String>,
-    pub page_signature: Option<String>,
-    pub filter: Option<crate::graphql::orm::FilterExpression>,
-    pub sorts: Vec<crate::graphql::orm::SortExpression>,
-    pub pagination: Option<crate::graphql::orm::PaginationRequest>,
-    pub auth_context: Option<DbAuthContext>,
+    pub(crate) relation: &'static str,
+    pub(crate) parent_key: String,
+    pub(crate) parent_value: crate::graphql::orm::SqlValue,
+    pub(crate) fk_column: &'static str,
+    pub(crate) where_signature: Option<String>,
+    pub(crate) order_signature: Option<String>,
+    pub(crate) page_signature: Option<String>,
+    pub(crate) filter: Option<crate::graphql::orm::FilterExpression>,
+    pub(crate) sorts: Vec<crate::graphql::orm::SortExpression>,
+    pub(crate) pagination: Option<crate::graphql::orm::PaginationRequest>,
+    pub(crate) auth_context: Option<DbAuthContext>,
 }
 
+impl RelationQueryKey {
+    /// Generated relation resolvers build this key; hosts cannot. A key
+    /// carries the relation's authorized read visibility in its `filter`, and
+    /// the loader applies nothing beyond what the key carries.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn __generated(
+        relation: &'static str,
+        parent_key: String,
+        parent_value: crate::graphql::orm::SqlValue,
+        fk_column: &'static str,
+        where_signature: Option<String>,
+        order_signature: Option<String>,
+        page_signature: Option<String>,
+        filter: Option<crate::graphql::orm::FilterExpression>,
+        sorts: Vec<crate::graphql::orm::SortExpression>,
+        pagination: Option<crate::graphql::orm::PaginationRequest>,
+        auth_context: Option<DbAuthContext>,
+    ) -> Self {
+        Self {
+            relation,
+            parent_key,
+            parent_value,
+            fk_column,
+            where_signature,
+            order_signature,
+            page_signature,
+            filter,
+            sorts,
+            pagination,
+            auth_context,
+        }
+    }
+}
+
+/// A relation batch key over a complete parent key. Only generated code
+/// constructs it.
 #[derive(Clone, Debug)]
 pub struct CompositeRelationQueryKey {
-    pub relation: &'static str,
-    pub parent_key: RelationKey,
-    pub parent_values: Vec<crate::graphql::orm::SqlValue>,
-    pub fk_columns: Vec<&'static str>,
-    pub key_part_kinds: Vec<RelationKeyPartKind>,
-    pub where_signature: Option<String>,
-    pub order_signature: Option<String>,
-    pub page_signature: Option<String>,
-    pub filter: Option<crate::graphql::orm::FilterExpression>,
-    pub sorts: Vec<crate::graphql::orm::SortExpression>,
-    pub pagination: Option<crate::graphql::orm::PaginationRequest>,
-    pub auth_context: Option<DbAuthContext>,
+    pub(crate) relation: &'static str,
+    pub(crate) parent_key: RelationKey,
+    pub(crate) parent_values: Vec<crate::graphql::orm::SqlValue>,
+    pub(crate) fk_columns: Vec<&'static str>,
+    pub(crate) key_part_kinds: Vec<RelationKeyPartKind>,
+    pub(crate) where_signature: Option<String>,
+    pub(crate) order_signature: Option<String>,
+    pub(crate) page_signature: Option<String>,
+    pub(crate) filter: Option<crate::graphql::orm::FilterExpression>,
+    pub(crate) sorts: Vec<crate::graphql::orm::SortExpression>,
+    pub(crate) pagination: Option<crate::graphql::orm::PaginationRequest>,
+    pub(crate) auth_context: Option<DbAuthContext>,
+}
+
+impl CompositeRelationQueryKey {
+    /// Generated relation resolvers build this key; hosts cannot. A key
+    /// carries the relation's authorized read visibility in its `filter`, and
+    /// the loader applies nothing beyond what the key carries.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn __generated(
+        relation: &'static str,
+        parent_key: RelationKey,
+        parent_values: Vec<crate::graphql::orm::SqlValue>,
+        fk_columns: Vec<&'static str>,
+        key_part_kinds: Vec<RelationKeyPartKind>,
+        where_signature: Option<String>,
+        order_signature: Option<String>,
+        page_signature: Option<String>,
+        filter: Option<crate::graphql::orm::FilterExpression>,
+        sorts: Vec<crate::graphql::orm::SortExpression>,
+        pagination: Option<crate::graphql::orm::PaginationRequest>,
+        auth_context: Option<DbAuthContext>,
+    ) -> Self {
+        Self {
+            relation,
+            parent_key,
+            parent_values,
+            fk_columns,
+            key_part_kinds,
+            where_signature,
+            order_signature,
+            page_signature,
+            filter,
+            sorts,
+            pagination,
+            auth_context,
+        }
+    }
 }
 
 /// Structural equality that stays reflexive for a bound `NaN`: values that
@@ -1370,25 +1445,47 @@ where
     Ok(results)
 }
 
-/// The relation data loader that generated schemas register.
+/// The relation data loader that generated relation resolvers use.
 ///
-/// It loads [`RelationQueryKey`] and [`CompositeRelationQueryKey`] batches.
-/// Generated relation resolvers authorize the relation and attach its read
-/// visibility to each key's `filter` before loading. A key built by hand is
-/// a trusted query and applies nothing beyond what it carries. There is no
-/// load by a bare key string.
+/// It loads [`RelationQueryKey`], [`CompositeRelationQueryKey`] and
+/// [`SelectedRelationQueryKey`] batches, applying nothing beyond what a key
+/// carries. Only generated relation resolvers can build those keys: they
+/// authorize the relation and attach its read visibility to each key before
+/// loading. Generated `schema_builder`s register the loader; a handwritten
+/// schema whose objects use generated relation resolvers registers it with
+/// [`relation_data_loader`]. Hosts cannot build a key, so a host holding the
+/// loader cannot read through it.
 pub struct RelationLoader<T, B: OrmBackend = DefaultBackend> {
     db: crate::db::Database<B>,
     _marker: PhantomData<(T, B)>,
 }
 
 impl<T, B: OrmBackend> RelationLoader<T, B> {
-    pub fn new(db: crate::db::Database<B>) -> Self {
+    /// Generated schema builders register the loader through this; hosts use
+    /// [`relation_data_loader`].
+    #[doc(hidden)]
+    pub fn __generated(db: crate::db::Database<B>) -> Self {
         Self {
             db,
             _marker: PhantomData,
         }
     }
+}
+
+/// The data loader a handwritten GraphQL schema registers, with
+/// `SchemaBuilder::data`, for each relation target whose generated relation
+/// resolvers it serves. Generated `schema_builder`s register it themselves.
+///
+/// The loader serves only the authorized relation keys those resolvers build;
+/// it has no load a host can call.
+pub fn relation_data_loader<T, B>(
+    db: crate::db::Database<B>,
+) -> async_graphql::dataloader::DataLoader<RelationLoader<T, B>>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    async_graphql::dataloader::DataLoader::new(RelationLoader::__generated(db), tokio::spawn)
 }
 
 impl<T, B> Loader<RelationQueryKey> for RelationLoader<T, B>
@@ -2155,9 +2252,23 @@ mod relation_page_tests {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SelectedRelationQueryKey {
     /// Existing relation query and authorization partition.
-    pub query: CompositeRelationQueryKey,
+    pub(crate) query: CompositeRelationQueryKey,
     /// Selected connection components.
-    pub selection: crate::graphql::pagination::ConnectionSelection,
+    pub(crate) selection: crate::graphql::pagination::ConnectionSelection,
+}
+
+impl SelectedRelationQueryKey {
+    /// Generated relation resolvers build this key; hosts cannot. A key
+    /// carries the relation's authorized read visibility in its `filter`, and
+    /// the loader applies nothing beyond what the key carries.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn __generated(
+        query: CompositeRelationQueryKey,
+        selection: crate::graphql::pagination::ConnectionSelection,
+    ) -> Self {
+        Self { query, selection }
+    }
 }
 
 impl<T, B> Loader<SelectedRelationQueryKey> for RelationLoader<T, B>

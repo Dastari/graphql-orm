@@ -22,7 +22,7 @@ impl BatchLoadEntity for Board {
 // The policy-free `Loader<String>` form of the relation data loader is gone
 // (#445): it read rows without entity, row or field policy.
 async fn load(db: graphql_orm::db::Database) {
-    let loader = RelationLoader::<Board>::new(db);
+    let loader = graphql_orm::graphql::loaders::RelationLoader::<Board>::__generated(db);
     let _ = loader.load(&["board-1".to_string()]).await;
 }
 

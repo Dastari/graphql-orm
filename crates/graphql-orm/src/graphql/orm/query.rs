@@ -4987,12 +4987,15 @@ where
 
     /// Read the offset/limit page `page`.
     ///
-    /// A trusted connection read (`fetch_connection`,
+    /// Every trusted read of the page (`fetch_all`, `fetch_all_with_auth`,
+    /// `fetch_all_on`, `fetch_one`, `fetch_one_with_auth`, `fetch_one_on`,
+    /// `fetch_connection`,
     /// `fetch_connection_with_auth`, `fetch_connection_selected_with_auth`)
     /// honours `page.limit` exactly, or fails with
     /// `PAGE_LIMIT_EXCEEDED` when the limit is above the maximum page limit
     /// (or this query's [`Self::with_max_limit`]); it never reduces the limit.
-    /// An omitted limit uses the default limit. To apply GraphQL client page
+    /// An omitted limit uses the default limit on a connection read; a
+    /// `fetch_all*` read without one reads every row. To apply GraphQL client page
     /// semantics to a client-supplied page, resolve it first with
     /// [`ClientPaginationConfig::resolve_client_page`] and paginate with the
     /// result.
@@ -5185,11 +5188,17 @@ where
         query.fetch_all_with_auth(provider, auth).await
     }
 
+    /// Read every row of this query, or the [`Self::paginate`] page exactly.
+    ///
+    /// An explicit `page.limit` above the provider's maximum page limit (or
+    /// this query's [`Self::with_max_limit`]) fails with
+    /// `PAGE_LIMIT_EXCEEDED`; it is never reduced. Without a page the read
+    /// is unbounded.
     pub async fn fetch_all<P>(&self, provider: &P) -> crate::Result<Vec<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
-        let pagination_config = provider.pagination_config();
+        let pagination_config = self.exact_page_config(provider.pagination_config())?;
         let rendered = render_select_query(
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, false)?,
@@ -5207,7 +5216,8 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
-        let pagination_config = provider.pagination_config();
+        // Exact or refused, as for `fetch_all`.
+        let pagination_config = self.exact_page_config(provider.pagination_config())?;
         let rendered = render_select_query(
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, false)?,
@@ -5301,12 +5311,17 @@ where
         self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
+    /// [`Self::fetch_all`] on an executor. It cannot see a `Database`
+    /// configuration, so an explicit page limit is checked against
+    /// [`PaginationConfig::DEFAULT_MAX_LIMIT`] (or [`Self::with_max_limit`]):
+    /// exact or refused, never reduced.
     pub async fn fetch_all_on<'e, E>(&self, executor: E) -> crate::Result<Vec<T>>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
-        self.fetch_all_on_with_pagination(executor, PaginationConfig::default())
+        let pagination = self.exact_page_config(PaginationConfig::default())?;
+        self.fetch_all_on_with_pagination(executor, pagination)
             .await
     }
 
@@ -5871,9 +5886,15 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
-        let config = provider
-            .pagination_config()
-            .with_read_maximum(self.max_limit);
+        self.exact_page_config(provider.pagination_config())
+    }
+
+    /// `config` with this query's [`Self::with_max_limit`] maximum, after
+    /// checking an explicit [`Self::paginate`] limit against it: the limit is
+    /// honoured exactly or refused with `PAGE_LIMIT_EXCEEDED` (a negative one
+    /// with `INVALID_INPUT`), so resolving the page never reduces it.
+    fn exact_page_config(&self, config: PaginationConfig) -> crate::Result<PaginationConfig> {
+        let config = config.with_read_maximum(self.max_limit);
         if let Some(limit) = self.page.as_ref().and_then(|page| page.limit) {
             config
                 .checked_explicit_limit(limit)

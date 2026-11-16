@@ -97,8 +97,11 @@ provides generated resolver selection requirements.
 
 When rows and count are both required, the existing paired fetch retains its
 pinned database auth transaction. Keyset connections and authorized scans keep
-their explicit count opt-in. Repository `fetch_all` remains intentionally
-unbounded for trusted internal use.
+their explicit count opt-in. `EntityQuery::fetch_all` without a page reads
+every row, for trusted internal use. With a `paginate(page)` page, `fetch_all`,
+`fetch_all_with_auth`, `fetch_all_on` and `fetch_one*` honour `page.limit`
+exactly or fail with `PAGE_LIMIT_EXCEEDED`, like the connection reads (see
+[page size](#page-size-reduced-by-default-refused-on-request)).
 
 ## Authorization-aware pagination (0.33.0)
 
@@ -269,7 +272,8 @@ and an omitted limit uses the default limit, reduced to the maximum. Called
 with a GraphQL context, `fetch_authorized_keyset*` and `fetch_authorized_scan`
 treat the limit as a client's: it is reduced, or refused when
 `refuse_oversized_page_limit` is set. `paginate(PageInput)` follows the same
-host rule: `EntityQuery::paginate(page)` read through `fetch_connection`,
+host rule: `EntityQuery::paginate(page)` read through `fetch_all`,
+`fetch_all_with_auth`, `fetch_all_on`, `fetch_one*`, `fetch_connection`,
 `fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and
 `EntitySearchQuery::paginate(page)` read through any fetch, honour
 `page.limit` exactly or fail with `PAGE_LIMIT_EXCEEDED` (a negative limit with

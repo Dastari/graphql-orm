@@ -410,8 +410,13 @@ where
             offset: Some(0),
         });
     let auth = ctx.data_opt::<DbAuthContext>();
+    // An internal two-row uniqueness probe, independent of the maximum.
     let mut rows = query
-        .fetch_all_with_auth(db, auth)
+        .fetch_all_with_auth_and_pagination(
+            db,
+            auth,
+            crate::graphql::orm::PaginationConfig::unbounded(),
+        )
         .await
         .map_err(graphql_error_from_sqlx)?;
     if rows.len() > 1 {

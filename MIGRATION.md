@@ -235,14 +235,18 @@ detect accidental divergence only; see
   `refuse_oversized_page_limit` is set (#667).
 - **Host-side `paginate(PageInput)` reads refuse a limit above the maximum.
   Action needed** if Rust code calls `EntityQuery::paginate(page)` followed by
+  `fetch_all`, `fetch_all_with_auth`, `fetch_one`, `fetch_one_with_auth`,
   `fetch_connection`, `fetch_connection_with_auth` or
   `fetch_connection_selected_with_auth`, or `EntitySearchQuery::paginate(page)`
-  followed by any fetch, with `page.limit` above the maximum page limit. These
-  reads used to return the maximum number of rows without saying so, whether
-  or not `refuse_oversized_page_limit` was set; they now fail with
+  followed by any fetch, with `page.limit` above the maximum page limit, or
+  `EntityQuery::paginate(page)` followed by `fetch_all_on`/`fetch_one_on` with
+  `page.limit` above `PaginationConfig::DEFAULT_MAX_LIMIT` (100; those executor
+  reads cannot see the database's maximum). These reads used to return the
+  maximum number of rows without saying so, whether or not
+  `refuse_oversized_page_limit` was set; they now fail with
   `PAGE_LIMIT_EXCEEDED`, and a negative limit with `INVALID_INPUT`. A limit at
-  or below the maximum is honoured exactly. Give one connection read a larger
-  maximum with `EntityQuery::with_max_limit(n)`, and one search with
+  or below the maximum is honoured exactly. Give one read a larger maximum
+  with `EntityQuery::with_max_limit(n)`, and one search with
   `.pagination_config(config.with_max_limit(Some(n)))`. A custom resolver that
   passes a client-supplied `PageInput` to `paginate` must resolve it first,
   as generated resolvers now do:
@@ -295,15 +299,29 @@ detect accidental divergence only; see
   or field policy. Read related rows through the generated relation resolvers,
   the repository builders, or `tx.query::<T>()`, which apply policy. Delete
   any handwritten implementation; nothing calls it.
-  The `graphql::loaders::RelationLoader` data loader (also in the prelude) is
-  a different type. It keeps its relation-key loads, which generated relation
-  resolvers authorize before loading, but loses its `Loader<String>` impl:
-  that load by a bare batch-column string ran `SELECT … WHERE column IN (…)`
-  with no entity, row or field policy. Code that calls `load_one`/`load_many`
-  with string keys on a `DataLoader<RelationLoader<T>>` no longer compiles;
-  read related rows through the generated relation resolvers, the repository
-  builders or `tx.query::<T>()`. `BatchLoadEntity` is no longer used by the
-  ORM; existing implementations still compile and can be deleted
+  ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
+- **The relation data loader is generated-resolver plumbing only. Action
+  needed** if code uses `graphql::loaders::RelationLoader` directly. It loaded
+  whatever key it was given with no entity, row or field policy; generated
+  relation resolvers attach the authorized read to each key before loading.
+  Hosts can no longer build the loader or its keys:
+  - `RelationLoader` is no longer in the prelude, and `RelationLoader::new`
+    is gone.
+  - `RelationQueryKey`, `CompositeRelationQueryKey` and
+    `SelectedRelationQueryKey` have private fields, so a struct literal no
+    longer compiles.
+  - The `Loader<String>` impl (a bare batch-column `SELECT … WHERE column IN
+    (…)`) is removed, so `load_one`/`load_many` with string keys no longer
+    compiles.
+
+  A handwritten schema whose objects use generated relation resolvers
+  registers the loader with
+  `.data(graphql_orm::graphql::loaders::relation_data_loader::<Target, Backend>(db))`
+  in place of `DataLoader::new(RelationLoader::new(db), tokio::spawn)`;
+  generated `schema_builder`s register it themselves. Read related rows
+  through the generated relation resolvers, the repository builders or
+  `tx.query::<T>()`, which apply policy. `BatchLoadEntity` is no longer used by
+  the ORM; existing implementations still compile and can be deleted
   ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
 - **Key-only delete signals are available per entity. No action**; this is
   an opt-in. `#[graphql_entity(key_only_deletes)]` sends a `DELETED` event

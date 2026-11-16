@@ -913,7 +913,9 @@ alias/path; providers may be evaluated again during ordinary field resolution. A
 and execution-pruned skip/include selections retain their field identities.
 
 The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its default
-`NoCache` storage. It batches concurrent loads without reusing results across
+`NoCache` storage. The loader and its keys are generated-resolver plumbing:
+hosts cannot construct a key, and a handwritten schema registers the loader
+with `graphql::loaders::relation_data_loader::<T, B>(db)`. It batches concurrent loads without reusing results across
 requests; other cache types are not accepted as authoritative targets and the
 resolver falls back to a fresh typed query. Current visibility predicates and
 structural `DbAuthContext::partition_key()` values participate in SQL batch grouping. A cursor, snapshot,
