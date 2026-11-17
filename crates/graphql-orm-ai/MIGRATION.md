@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.149.0 to 0.150.0: index-replacement admission documentation
+
+**No action.** Documentation only: `AiSchemaModule::admit_index_replacements`
+matches a dropped legacy webhook-receipt index by table and name, without
+checking that the live index is non-unique. If your host created its own
+index under one of those names, review the upgrade plan before applying it.
+No SDL, persistent schema or data migration; `AI_SCHEMA_MODULE_VERSION` stays
+`0.82.0`.
+
 ## 0.148.0 to 0.149.0: capability broker version 2
 
 **Action needed.** Part of the single breaking release; upgrade together with

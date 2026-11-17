@@ -42,9 +42,13 @@ impl AiSchemaModule {
     /// returned unchanged, so the migration gate refuses any other
     /// destructive step, including one that a host's own schema contributes.
     ///
-    /// The legacy indexes are non-unique, so dropping them removes no
-    /// constraint. This checks the plan's steps only: apply the same plan it
-    /// inspected, and review host-owned destructive steps separately.
+    /// The check matches a dropped index by table and name only, because a
+    /// drop step carries no index definition. Earlier module versions created
+    /// these names as non-unique indexes, but the check does not verify that
+    /// the live index with that name is non-unique: a host that created its
+    /// own index under one of these names must review the plan itself. This
+    /// checks the plan's steps only: apply the same plan it inspected, and
+    /// review host-owned destructive steps separately.
     #[must_use]
     pub fn admit_index_replacements(
         &self,

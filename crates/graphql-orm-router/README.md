@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.18.0 (breaking batch) changes a code comment only: the composed
+scope-set cross-check is a secondary defence behind the name-based refusal.
+Router behavior is unchanged from 0.16.0.
+
 Version 0.16.0 (breaking batch) enforces the composed `@authenticated` and
 `@requiresScopes` directives on every selected field, not only root fields,
 before any downstream request: nested object fields, interface and union

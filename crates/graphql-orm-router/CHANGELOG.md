@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.18.0 (unreleased, breaking batch)
+
+- **Docs (code comment):** the comparison of the composed scope sets with
+  the per-subgraph declarations is documented as a secondary defence.
+  Composition deduplicates alternatives, so a declaration that repeats
+  another's scope sets leaves the composed union unchanged; the name-based
+  refusal of any authorization directive application that does not resolve to
+  a recorded site is the primary defence. No behavior, configuration or
+  public API change. Version 0.17.0 on the integration branch only carried
+  0.15.5's wire-test change above 0.16.0.
+
 ## 0.16.0 (unreleased, breaking batch)
 
 - **Breaking: composed `@authenticated` and `@requiresScopes` are enforced on

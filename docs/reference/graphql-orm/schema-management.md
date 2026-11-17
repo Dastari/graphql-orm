@@ -329,11 +329,15 @@ database
 - Every pending stage is planned, classified and risk-checked before any stage
   SQL runs. A refusal names the stage version and step, and leaves all pending
   stages unapplied.
-- The first pending stage is planned from the live schema, limited to the
-  tables that some stage declares. A table or column of those that is absent
-  from the stage target, such as a newer release's schema after a rollback,
-  appears as a destructive step and is refused by default. A live table that
-  no stage declares is not the stages' to drop and is left alone.
+- When no stage is recorded as applied, the first pending stage is planned
+  from the live schema, limited to the tables that some stage declares. A
+  table or column of those that is absent from the stage target, such as a
+  newer release's schema after a rollback, appears as a destructive step and
+  is refused by default. A live table that no stage declares is not the
+  stages' to drop and is left alone. When earlier stages are recorded, the
+  first pending stage is planned from the target of the last applied stage,
+  not from the live schema; each later stage is planned from the previous
+  stage's target (`PlannedSchemaStage::source_schema`).
 - `additive_only` refuses any step that is not additive.
 - `dry_run` returns one report per pending stage without running stage SQL;
   planning may still prepare the migration ledger table.

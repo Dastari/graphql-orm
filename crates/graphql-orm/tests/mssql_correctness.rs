@@ -1366,3 +1366,390 @@ async fn rendered_schema_round_trips(connection: &str, pool: &MssqlPool) -> Test
     );
     Ok(())
 }
+
+/// A parent with a `String` primary key and unique, indexed and referencing
+/// `String` columns: SQL Server cannot index `NVARCHAR(MAX)` (#524).
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.GomKeyedParents",
+    index(name = "IX_GomKeyedParents_Label", columns = ["label"])
+)]
+struct GomKeyedParent {
+    #[primary_key]
+    #[graphql_orm(db_column = "Code", auto_generated = false)]
+    code: String,
+    #[unique]
+    #[graphql_orm(db_column = "Slug")]
+    slug: String,
+    #[graphql_orm(db_column = "Label")]
+    label: String,
+    #[graphql_orm(db_column = "Notes")]
+    notes: Option<String>,
+}
+
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(backend = "mssql", table = "dbo.GomKeyedChildren")]
+struct GomKeyedChild {
+    #[primary_key]
+    #[graphql_orm(db_column = "Id")]
+    id: i64,
+    #[graphql_orm(db_column = "ParentCode")]
+    parent_code: String,
+    #[graphql(skip)]
+    #[relation(target = "GomKeyedParent", from = "parent_code", to = "code")]
+    parent: Option<GomKeyedParent>,
+}
+
+/// #452: a non-NULL value in a `DECIMAL(38,38)` column trips an assertion in
+/// the driver while it reads the row, before the ORM sees the value. The
+/// statement fails with a decode error instead of panicking, its connection
+/// is closed, and the pool goes on serving.
+#[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
+async fn a_scale_38_decimal_is_a_decode_error_not_a_panic() -> TestResult {
+    use graphql_orm::graphql::orm::WriteBackend;
+    let mut server = OwnedSqlServer::start().await?;
+    let connection = server.connection_string.clone();
+    let pool = MssqlPool::connect_ado(&connection).await?;
+    let deep = "SELECT CAST(0.5 AS DECIMAL(38, 38)) AS deep";
+    let read = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.fetch_rows(deep, &[]).await.map(|rows| rows.len()) }
+    });
+    let error = read
+        .await
+        .map_err(|join| format!("the read panicked: {join}"))?
+        .expect_err("the driver cannot represent the value");
+    assert!(matches!(error, sqlx::Error::Decode(_)), "{error:?}");
+    assert!(error.to_string().contains("could not decode"), "{error}");
+
+    // NULL in such a column, and the pool itself, are unaffected.
+    let rows = pool
+        .fetch_rows("SELECT CAST(NULL AS DECIMAL(38, 38)) AS deep", &[])
+        .await?;
+    assert_eq!(rows[0].try_get::<Option<Decimal>, _>("deep")?, None);
+
+    // The same holds for a write path that drains a result, and inside a
+    // transaction, which the failure ends.
+    let writable = MssqlPool::connect_ado_external_writable(&connection).await?;
+    let error = <MssqlBackend as WriteBackend>::execute_with_binds(&writable, deep, &[])
+        .await
+        .expect_err("the drained row cannot be decoded either");
+    assert!(matches!(error, sqlx::Error::Decode(_)), "{error:?}");
+    let mut tx = <MssqlBackend as WriteBackend>::begin_write_transaction(
+        &writable,
+        TransactionMode::Default,
+    )
+    .await?;
+    let error = <MssqlBackend as WriteBackend>::fetch_rows_in_transaction(&mut tx, deep, &[])
+        .await
+        .err()
+        .expect("not inside a transaction either");
+    assert!(matches!(error, sqlx::Error::Decode(_)), "{error:?}");
+    assert!(
+        <MssqlBackend as WriteBackend>::fetch_rows_in_transaction(&mut tx, "SELECT 1 AS one", &[])
+            .await
+            .is_err(),
+        "the failure ends the transaction"
+    );
+    <MssqlBackend as WriteBackend>::rollback_write_transaction(tx).await?;
+    assert_eq!(
+        writable.fetch_rows("SELECT 1 AS one", &[]).await?.len(),
+        1,
+        "the pool serves after the failure"
+    );
+    server.cleanup()?;
+    Ok(())
+}
+
+/// #524: indexes and non-constraint unique indexes are read back, so an
+/// applied schema with them plans no change; a table without a primary key
+/// reports none instead of an invented `[id]`; `String` key columns render
+/// as an indexable `NVARCHAR(450)`; and the search metadata statements are
+/// T-SQL.
+#[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
+async fn indexes_keys_and_search_metadata_round_trip() -> TestResult {
+    use graphql_orm::graphql::orm::{
+        Entity, IndexDef, IndexDirection, IndexPredicateDef, SchemaModel, TableModel,
+        diff_schema_models_for_backend,
+    };
+    let mut server = OwnedSqlServer::start().await?;
+    let connection = server.connection_string.clone();
+    let pool = MssqlPool::connect_ado(&connection).await?;
+
+    // Entity-declared `String` keys render as DDL SQL Server accepts.
+    let entities =
+        SchemaModel::from_entities(&[GomKeyedParent::metadata(), GomKeyedChild::metadata()]);
+    let table = |name: &str| {
+        entities
+            .tables
+            .iter()
+            .find(|table| table.entity_name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    let (parent, child) = (table("GomKeyedParent"), table("GomKeyedChild"));
+    let sql_type = |table: &TableModel, name: &str| {
+        table
+            .columns
+            .iter()
+            .find(|column| column.name == name)
+            .map(|column| column.sql_type.clone())
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    assert_eq!(sql_type(&parent, "Code"), "NVARCHAR(450)");
+    assert_eq!(sql_type(&parent, "Slug"), "NVARCHAR(450)");
+    assert_eq!(sql_type(&parent, "Label"), "NVARCHAR(450)");
+    assert_eq!(sql_type(&parent, "Notes"), "NVARCHAR(MAX)");
+    assert_eq!(sql_type(&child, "ParentCode"), "NVARCHAR(450)");
+    let empty = SchemaModel {
+        extensions: Vec::new(),
+        tables: Vec::new(),
+    };
+    for step in &diff_schema_models_for_backend(DatabaseBackend::Mssql, &empty, &entities).steps {
+        for statement in render_migration_step(DatabaseBackend::Mssql, step) {
+            execute_batch(&connection, &statement)
+                .await
+                .map_err(|error| format!("{statement}: {error}"))?;
+        }
+    }
+
+    let key = |name: &str, sql_type: &str| ColumnModel {
+        is_primary_key: true,
+        ..column(name, sql_type, false)
+    };
+    let mut indexed = TableModel {
+        entity_name: "RtIndexed".into(),
+        table_name: "[dbo].[RtIndexed]".into(),
+        primary_key: "[Id]".into(),
+        primary_keys: vec!["[Id]".into()],
+        default_sort: "[Id] ASC".into(),
+        columns: vec![
+            key("[Id]", "BIGINT"),
+            column("[TenantId]", "INT", false),
+            column("[Label]", "NVARCHAR(100)", false),
+            column("[State]", "NVARCHAR(20)", false),
+            column("[Ref]", "NVARCHAR(40)", true),
+        ],
+        indexes: vec![
+            IndexDef::new("IX_RtIndexed_Tenant_Label", &["TenantId", "Label"])
+                .with_directions(&[IndexDirection::Asc, IndexDirection::Desc]),
+            IndexDef::new("UX_RtIndexed_Ref", &["Ref"]).unique(),
+        ],
+        composite_unique_indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        search_indexes: Vec::new(),
+        append_only: false,
+        retention_purge: false,
+        check_constraints: Vec::new(),
+    };
+    let mut open = IndexDef::new("IX_RtIndexed_Open", &["State"]);
+    open.predicate = Some(IndexPredicateDef {
+        column: "State",
+        values: &["new", "it's open"],
+    });
+    indexed.indexes.push(open);
+    let target = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![indexed],
+    };
+    for step in &diff_schema_models_for_backend(DatabaseBackend::Mssql, &empty, &target).steps {
+        for statement in render_migration_step(DatabaseBackend::Mssql, step) {
+            execute_batch(&connection, &statement)
+                .await
+                .map_err(|error| format!("{statement}: {error}"))?;
+        }
+    }
+    execute_batch(
+        &connection,
+        "CREATE TABLE dbo.RtHeap (Value INT NOT NULL); \
+         CREATE TABLE dbo.RtOdd (Id INT NOT NULL PRIMARY KEY, Ref NVARCHAR(20) NULL); \
+         CREATE INDEX IX_RtOdd_Ref ON dbo.RtOdd (Ref) WHERE Ref IS NOT NULL;",
+    )
+    .await?;
+    let schema = introspect_mssql_schema(&pool).await?;
+    let live = |name: &str| {
+        schema
+            .tables
+            .iter()
+            .find(|table| table.table_name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    let replan = diff_schema_models_for_backend(
+        DatabaseBackend::Mssql,
+        &SchemaModel {
+            extensions: Vec::new(),
+            tables: vec![live("[dbo].[RtIndexed]")],
+        },
+        &target,
+    );
+    assert!(
+        replan.steps.is_empty(),
+        "applied indexes must plan no change: {:#?}\nlive: {:#?}",
+        replan.steps,
+        live("[dbo].[RtIndexed]").indexes
+    );
+    let keyed = live("[dbo].[GomKeyedParents]");
+    let mut index_names = keyed
+        .indexes
+        .iter()
+        .map(|index| index.name)
+        .collect::<Vec<_>>();
+    index_names.sort_unstable();
+    assert_eq!(index_names, ["IX_GomKeyedParents_Label"]);
+    // A table without a primary key has none.
+    let heap = live("[dbo].[RtHeap]");
+    assert!(heap.primary_keys.is_empty(), "{:?}", heap.primary_keys);
+    assert!(heap.primary_key.is_empty(), "{}", heap.primary_key);
+    assert!(heap.columns.iter().all(|column| !column.is_primary_key));
+    // A filter the model cannot express never compares equal to a plain index.
+    let odd = live("[dbo].[RtOdd]");
+    let plain = TableModel {
+        indexes: vec![IndexDef::new("IX_RtOdd_Ref", &["Ref"])],
+        ..odd.clone()
+    };
+    let replan = diff_schema_models_for_backend(
+        DatabaseBackend::Mssql,
+        &SchemaModel {
+            extensions: Vec::new(),
+            tables: vec![odd],
+        },
+        &SchemaModel {
+            extensions: Vec::new(),
+            tables: vec![plain],
+        },
+    );
+    assert!(
+        matches!(
+            replan.steps.as_slice(),
+            [
+                MigrationStep::DropIndex { .. },
+                MigrationStep::CreateIndex { .. }
+            ]
+        ),
+        "{:#?}",
+        replan.steps
+    );
+
+    // The search metadata statements a plan renders are T-SQL, and run twice.
+    let search = render_migration_step(
+        DatabaseBackend::Mssql,
+        &MigrationStep::CreateSearchIndex {
+            table_name: "dbo.RtSearchable".into(),
+            index: graphql_orm::graphql::orm::SearchIndexModel {
+                name: "search_rt_searchable".into(),
+                table_name: "dbo.RtSearchable".into(),
+                entity_name: "RtSearchable".into(),
+                primary_key: "Id".into(),
+                strategy: graphql_orm::graphql::orm::SearchIndexStrategy::MssqlFullText,
+                language: "english".into(),
+                tokenizer: "unicode61".into(),
+                min_token_len: 2,
+                fallback_enabled: false,
+                fields: Vec::new(),
+                json_paths: Vec::new(),
+                relations: Vec::new(),
+                readiness_tracked: false,
+            },
+        },
+    );
+    assert!(
+        search
+            .iter()
+            .all(|statement| !statement.contains("OR REPLACE")
+                && !statement.contains("IF NOT EXISTS")),
+        "{search:#?}"
+    );
+    for _ in 0..2 {
+        for statement in &search {
+            execute_batch(&connection, statement)
+                .await
+                .map_err(|error| format!("{statement}: {error}"))?;
+        }
+    }
+    let rows = pool
+        .fetch_rows(
+            "SELECT COUNT(*) AS n FROM dbo.__graphql_orm_search_metadata WHERE entity_name = N'RtSearchable'",
+            &[],
+        )
+        .await?;
+    assert_eq!(rows[0].try_get::<i32, _>("n")?, 1);
+    server.cleanup()?;
+    Ok(())
+}
+
+/// #742: `ALTER COLUMN` without `COLLATE` resets a column to the database
+/// default collation. A rendered alteration keeps the column's own.
+#[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
+async fn altered_columns_keep_their_collation() -> TestResult {
+    let mut server = OwnedSqlServer::start().await?;
+    let connection = server.connection_string.clone();
+    let pool = MssqlPool::connect_ado(&connection).await?;
+    execute_batch(
+        &connection,
+        "CREATE TABLE dbo.GomCollated (Id INT NOT NULL PRIMARY KEY, \
+         Code VARCHAR(20) COLLATE Latin1_General_100_BIN2 NOT NULL, \
+         Plain NVARCHAR(20) NULL, Amount INT NOT NULL, Label NVARCHAR(20) NOT NULL);",
+    )
+    .await?;
+    let alter =
+        |name: &str, before: &str, after: &str, nullable: bool| MigrationStep::AlterColumn {
+            table_name: "dbo.GomCollated".into(),
+            before: column(name, before, nullable),
+            after: column(name, after, nullable),
+        };
+    for step in [
+        alter("Code", "VARCHAR(20)", "VARCHAR(40)", false),
+        alter("Plain", "NVARCHAR(20)", "NVARCHAR(40)", true),
+        // Into and out of a character type: no collation to keep.
+        alter("Amount", "INT", "NVARCHAR(20)", false),
+        alter("Label", "NVARCHAR(20)", "INT", false),
+    ] {
+        for statement in render_migration_step(DatabaseBackend::Mssql, &step) {
+            execute_batch(&connection, &statement)
+                .await
+                .map_err(|error| format!("{statement}: {error}"))?;
+        }
+    }
+    let rows = pool
+        .fetch_rows(
+            "SELECT c.name, c.collation_name, TYPE_NAME(c.user_type_id) AS type_name, \
+             CAST(c.max_length AS int) AS max_length, \
+             CONVERT(sysname, DATABASEPROPERTYEX(DB_NAME(), 'Collation')) AS database_default \
+             FROM sys.columns AS c WHERE c.object_id = OBJECT_ID(N'dbo.GomCollated') ORDER BY c.column_id",
+            &[],
+        )
+        .await?;
+    let column = |name: &str| {
+        rows.iter()
+            .find(|row| row.try_get::<String, _>("name").ok().as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    let default = rows[0].try_get::<String, _>("database_default")?;
+    assert_ne!(
+        default, "Latin1_General_100_BIN2",
+        "the fixture needs a non-default collation"
+    );
+    let code = column("Code");
+    assert_eq!(code.try_get::<i32, _>("max_length")?, 40);
+    assert_eq!(
+        code.try_get::<Option<String>, _>("collation_name")?
+            .as_deref(),
+        Some("Latin1_General_100_BIN2")
+    );
+    assert_eq!(
+        column("Plain").try_get::<Option<String>, _>("collation_name")?,
+        Some(default.clone())
+    );
+    assert_eq!(
+        column("Amount").try_get::<Option<String>, _>("collation_name")?,
+        Some(default)
+    );
+    assert_eq!(column("Label").try_get::<String, _>("type_name")?, "int");
+    server.cleanup()?;
+    Ok(())
+}

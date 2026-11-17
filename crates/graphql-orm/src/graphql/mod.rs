@@ -36,4 +36,5 @@ pub mod wrapper_object;
 #[cfg(feature = "runtime-graphql")]
 pub mod runtime;
 
+pub mod input_validation;
 pub(crate) mod subscription_admission;

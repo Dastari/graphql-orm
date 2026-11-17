@@ -52,7 +52,8 @@ run_sqlite() {
     --test runtime_many_to_many --test runtime_relation_bind_limit \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked
+    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test page_limit_contract --test repository_explicit_limits \
+    --test bulk_write_filter_authority --test static_input_object_shape --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked
   cargo test --manifest-path \
@@ -68,7 +69,7 @@ run_postgres() {
     --test runtime_many_to_many -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter -- --ignored --test-threads=1
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test authorized_page_context_binding -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test authorized_page_context_binding --test page_limit_contract --test bulk_write_filter_authority -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
@@ -167,7 +168,7 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib delivery_is_at_least_once_through_failures_and_cancellation -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_trigger_writes --test mssql_restore_marker --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_trigger_writes --test mssql_restore_marker --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }

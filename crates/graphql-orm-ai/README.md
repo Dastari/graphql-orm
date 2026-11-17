@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.150.0 (placeholder) documents that `AiSchemaModule::admit_index_replacements` matches a dropped legacy index by table and name only. No behavior change; see [migration guidance](MIGRATION.md#01490-to-01500-index-replacement-admission-documentation).
+
 AI 0.149.0 (placeholder, **breaking**) is capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; and large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once. See the [migration guide](MIGRATION.md#01480-to-01490-capability-broker-version-2) and the [capability contract](docs/capability-discovery-and-execution.md).
 
 AI 0.148.0 adopts tool profiles 0.25.0: UUID- and integer-keyed runtime collections with live subscriptions compile as capability catalogues under the ORM's default string identities and the legacy `Int` identities alike. No data migration; see [migration guidance](MIGRATION.md#01470-to-01480-runtime-live-keys-under-default-identities).

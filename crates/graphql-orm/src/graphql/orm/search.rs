@@ -535,6 +535,10 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     pagination_config: super::ClientPaginationConfig,
     /// The limit set through [`Self::limit`], checked rather than clamped.
     explicit_limit: Option<i64>,
+    /// Whether the page offset was set by trusted code through
+    /// [`Self::offset`]. Only a client page offset ([`Self::paginate`] or a
+    /// GraphQL page) is bounded by `ClientPaginationConfig::with_max_offset`.
+    builder_offset: bool,
     _where: PhantomData<W>,
 }
 
@@ -892,6 +896,7 @@ where
             query: EntityQuery::new(),
             pagination_config: PaginationConfig::default().into(),
             explicit_limit: None,
+            builder_offset: false,
             _where: PhantomData,
         }
     }
@@ -910,6 +915,7 @@ where
             query,
             pagination_config,
             explicit_limit: self.explicit_limit,
+            builder_offset: self.builder_offset,
             _where: PhantomData,
         }
     }
@@ -987,11 +993,19 @@ where
     }
 
     fn check_explicit_limit(&self) -> crate::Result<()> {
-        // The opt-in refusal of an oversized client page; see
-        // `ClientPaginationConfig::with_oversized_limit_refusal`.
+        // The opt-in refusals of an oversized client page; see
+        // `ClientPaginationConfig::with_oversized_limit_refusal` and
+        // `ClientPaginationConfig::with_max_offset`. An offset that trusted
+        // code set with `offset(n)` is not a client offset.
+        let page = self.query.page.as_ref();
         self.pagination_config
-            .admit_client_limit(self.query.page.as_ref().and_then(|page| page.limit))
+            .admit_client_limit(page.and_then(|page| page.limit))
             .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        if !self.builder_offset {
+            self.pagination_config
+                .admit_client_offset(page.and_then(|page| page.offset))
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
         if let Some(limit) = self.explicit_limit {
             self.pagination_config
                 .checked_explicit_limit(limit)
@@ -1000,11 +1014,13 @@ where
         Ok(())
     }
 
-    /// Offset the returned hits.
+    /// Offset the returned hits. This is a trusted offset: the client
+    /// offset bound (`DatabaseBuilder::max_page_offset`) does not apply.
     pub fn offset(mut self, offset: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.offset = Some(offset);
         self.query.page = Some(page);
+        self.builder_offset = true;
         self
     }
 
@@ -1013,12 +1029,17 @@ where
     /// Like [`Self::limit`], an explicit `page.limit` is honoured exactly or
     /// refused: a limit above the configured maximum page limit fails with
     /// `PAGE_LIMIT_EXCEEDED`, never a shorter page. Raise the maximum for one
-    /// trusted search with [`Self::pagination_config`]. To apply GraphQL
-    /// client page semantics to a client-supplied page, resolve it first with
+    /// trusted search with [`Self::pagination_config`]. `page.offset` is a
+    /// client offset: one above the configured maximum page offset
+    /// (`DatabaseBuilder::max_page_offset`) is refused with
+    /// `PAGE_LIMIT_EXCEEDED`; set a trusted offset with [`Self::offset`]
+    /// instead. To apply GraphQL client page semantics to a client-supplied
+    /// page, resolve it first with
     /// [`ClientPaginationConfig::resolve_client_page`](super::ClientPaginationConfig::resolve_client_page).
     pub fn paginate(mut self, page: PageInput) -> Self {
         self.query = self.query.paginate(&page);
         self.explicit_limit = page.limit;
+        self.builder_offset = false;
         self
     }
 
@@ -1422,8 +1443,9 @@ where
         if self.query.requires_in_memory_filtering() {
             return Err(invalid());
         }
-        // Client page semantics, before either executor reads: an oversized
-        // limit is reduced, or refused when the host opted in.
+        // A client page, before either executor reads a row, the native
+        // index included: the offset bound applies, and an oversized limit
+        // is reduced, or refused when the host opted in.
         let resolved = db
             .client_pagination_config()
             .resolve_client_page(page.as_ref(), true)
@@ -1434,6 +1456,7 @@ where
         });
         self.query.page = page.clone();
         self.explicit_limit = None;
+        self.builder_offset = false;
         if matches!(
             visibility,
             ReadVisibility::Complete(_) | ReadVisibility::Unrestricted

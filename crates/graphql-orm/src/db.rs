@@ -100,6 +100,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     pagination_config: PaginationConfig,
     refuse_oversized_limit: bool,
     expose_uncoded_callback_messages: bool,
+    max_page_offset: Option<i64>,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
@@ -127,6 +128,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
             expose_uncoded_callback_messages: self.expose_uncoded_callback_messages,
+            max_page_offset: self.max_page_offset,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
             scan_config: self.scan_config.clone(),
@@ -205,6 +207,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -238,6 +241,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -268,6 +272,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -298,6 +303,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -328,6 +334,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -361,6 +368,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -401,6 +409,7 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -439,6 +448,7 @@ impl<B: OrmBackend> Database<B> {
     pub fn client_pagination_config(&self) -> crate::graphql::orm::ClientPaginationConfig {
         self.pagination_config
             .into_client_policy(self.refuse_oversized_limit)
+            .with_max_offset(self.max_page_offset)
     }
 
     /// Set whether oversized GraphQL page limits are refused instead of reduced.
@@ -465,6 +475,13 @@ impl<B: OrmBackend> Database<B> {
     /// `INTERNAL_ERROR` with the default message.
     pub fn with_uncoded_callback_messages_exposed(mut self, expose: bool) -> Self {
         self.expose_uncoded_callback_messages = expose;
+        self
+    }
+
+    /// Set the largest client page offset served, or `None` for unbounded
+    /// client offsets; see [`DatabaseBuilder::max_page_offset`].
+    pub fn with_max_page_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.max_page_offset = max_offset;
         self
     }
 
@@ -2276,6 +2293,27 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// [`Database::with_uncoded_callback_messages_exposed`]. Off by default.
     pub fn expose_uncoded_callback_messages(mut self, expose: bool) -> Self {
         self.database.expose_uncoded_callback_messages = expose;
+        self
+    }
+
+    /// Refuse a client page offset above `max_offset` with
+    /// `PAGE_LIMIT_EXCEEDED`, on every backend.
+    ///
+    /// The default is [`PaginationConfig::DEFAULT_MAX_OFFSET`]
+    /// (`Some(10_000)`). `None` is the explicit opt-out: it leaves client
+    /// offsets unbounded, as before the breaking release. Every backend
+    /// reads and discards the rows an offset skips, so one large offset costs
+    /// a scan of that many rows; page deeper with keyset cursors. The bound
+    /// applies to generated list roots, to-many
+    /// relation pages and search pages, to custom resolvers that resolve
+    /// their page through
+    /// [`ClientPaginationConfig::resolve_client_page`](crate::graphql::orm::ClientPaginationConfig::resolve_client_page),
+    /// and to Rust reads that take a `PageInput` (`EntityQuery::paginate`,
+    /// `EntitySearchQuery::paginate`). An offset set with a builder's own
+    /// `offset(n)`, including the search builders', is trusted code and is
+    /// not bounded.
+    pub fn max_page_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.database.max_page_offset = max_offset;
         self
     }
 

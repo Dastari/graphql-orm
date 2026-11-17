@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.150.0
+
+- **Docs:** `AiSchemaModule::admit_index_replacements` states that it matches a dropped index by table and name only. Earlier module versions created those names as non-unique indexes, but the check does not verify that the live index with that name is non-unique, so a host that created its own index under one of the names must review the plan itself. No behavior, API, SDL or persistent schema change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`.
+
 ## Unreleased - 0.149.0
 
 Capability broker version 2 (#551, asks 2B, 5B and 3B, and the 1A default). Part of the single breaking release, with AI tool profiles 0.26.0; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`.
