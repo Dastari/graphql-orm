@@ -3,12 +3,21 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-17
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.18.0 to 0.19.0
+
+**No action.** The new `refusalOutcome` setting
+(`RouterConfig::with_refusal_outcome`) is off by default, so responses are
+unchanged. A host whose clients need to tell that a refused operation never
+ran may enable it; each error of an operation refused before any subgraph
+request then also carries `extensions.outcome: "refused"`. See
+[refusal outcome](docs/configuration.md#refusal-outcome).
 
 ## 0.16.0 to 0.18.0
 

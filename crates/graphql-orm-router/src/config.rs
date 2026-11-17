@@ -58,6 +58,7 @@ pub struct RouterConfig {
     pub(crate) graphql_path: String,
     pub(crate) anonymous_development_mode: bool,
     pub(crate) introspection: bool,
+    pub(crate) refusal_outcome: bool,
     pub(crate) forwarded_headers: BTreeSet<String>,
     pub(crate) subgraphs: Vec<StaticSubgraph>,
     pub(crate) schema_fetch_timeout: Duration,
@@ -97,6 +98,7 @@ impl RouterConfig {
             graphql_path: "/graphql".to_owned(),
             anonymous_development_mode: false,
             introspection: false,
+            refusal_outcome: false,
             forwarded_headers: BTreeSet::new(),
             subgraphs: Vec::new(),
             node_lookup: None,
@@ -178,6 +180,24 @@ impl RouterConfig {
     #[must_use]
     pub fn with_introspection(mut self, enabled: bool) -> Self {
         self.introspection = enabled;
+        self
+    }
+
+    /// Adds `extensions.outcome: "refused"` to each error of an operation the
+    /// router refused before it sent any subgraph request. It is off by
+    /// default.
+    ///
+    /// The value uses the outcome vocabulary of generated ORM services
+    /// (`refused`, `failed`, `committed`, `unknown`), so a client reads a
+    /// router refusal and a service refusal the same way. The router only
+    /// ever adds `refused`, never replaces an `outcome` it receives, and never
+    /// marks an operation for which any subgraph request started, including
+    /// a request timeout or an execution failure. A client reads an absent
+    /// `outcome` as unknown. Codes, messages, paths and HTTP status are
+    /// unchanged either way.
+    #[must_use]
+    pub fn with_refusal_outcome(mut self, enabled: bool) -> Self {
+        self.refusal_outcome = enabled;
         self
     }
 
@@ -2279,6 +2299,18 @@ mod tests {
             error.kind(),
             RouterErrorKind::InvalidConfiguration,
             "{error}"
+        );
+    }
+
+    #[test]
+    fn refusal_outcome_is_disabled_unless_explicitly_enabled() {
+        assert!(!base().validate().unwrap().refusal_outcome);
+        assert!(
+            base()
+                .with_refusal_outcome(true)
+                .validate()
+                .unwrap()
+                .refusal_outcome
         );
     }
 

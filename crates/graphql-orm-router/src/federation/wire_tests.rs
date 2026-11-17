@@ -66,6 +66,8 @@ const PRODUCTS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_P
 const REVIEWS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_PROTOCOL_ENDPOINT";
 const PROMETHEUS_LISTENER_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PROMETHEUS_LISTENER";
 const OMIT_OPERATION_NAME_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_OMIT_OPERATION_NAME";
+/// Enables the refusal outcome, with a six-field operation limit.
+const REFUSAL_OUTCOME_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REFUSAL_OUTCOME";
 /// A file whose content `stale` makes the `role-events` credential's role
 /// expansion unavailable, as a role-scope catalogue past its maximum staleness.
 const AUTHORITY_CONTROL_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_AUTHORITY_CONTROL";
@@ -308,6 +310,11 @@ fn router_child_entrypoint() {
                 if env::var_os("PERSISTED_INTROSPECTION").is_some() {
                     config = config.with_introspection(true);
                 }
+                if env::var_os(REFUSAL_OUTCOME_ENV).is_some() {
+                    config = config
+                        .with_refusal_outcome(true)
+                        .with_request_limits(RequestLimits::new().with_max_fields(6));
+                }
                 if let Ok(listener) = env::var(PROMETHEUS_LISTENER_ENV) {
                     config = config.with_telemetry(
                         crate::RouterTelemetryConfig::new()
@@ -423,6 +430,7 @@ async fn run_wire_app() {
         listener.local_addr().unwrap(),
         Arc::new(crate::metrics::RouterMetrics::default()),
         None,
+        false,
     );
     let public_path = config.websocket_path().unwrap().to_owned();
     web::HttpServer::new(async move || {
@@ -897,6 +905,9 @@ fn persisted_documents_wire_case(case: &str) {
     if case.ends_with("authorization") {
         command.env("PERSISTED_INTROSPECTION", "true");
     }
+    if case == "refusal_outcome" {
+        command.env(REFUSAL_OUTCOME_ENV, "1");
+    }
     let child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1294,6 +1305,50 @@ fn persisted_documents_wire_case(case: &str) {
                 "persisted errors must not echo document text: {result}"
             );
         }
+        "refusal_outcome" => {
+            let opens = products.opens() + reviews.opens();
+            for (payload, code) in [
+                (
+                    json!({"documentId": hash("unknown")}),
+                    "PERSISTED_DOCUMENT_NOT_FOUND",
+                ),
+                (
+                    json!({"query": protected}),
+                    "PERSISTED_DOCUMENT_ID_REQUIRED",
+                ),
+                (
+                    json!([{"documentId": hash(query)}, {"query": query}]),
+                    "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
+                ),
+            ] {
+                let result = graphql(payload);
+                assert_eq!(result["errors"][0]["extensions"]["code"], code, "{result}");
+                assert_refused(code, &result);
+                assert_eq!(products.opens() + reviews.opens(), opens, "{code}");
+            }
+            let allowed = graphql(json!({"documentId": hash(query)}));
+            assert_eq!(allowed["data"]["__typename"], "Query", "{allowed}");
+            assert!(allowed.get("errors").is_none(), "{allowed}");
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-events");
+            let opens = products.opens() + reviews.opens();
+            socket.subscribe("text", protected);
+            let error = socket.wait_for_operation_message("text", "error");
+            assert_eq!(
+                error["payload"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
+                "{error}"
+            );
+            assert_eq!(error["payload"][0]["extensions"]["outcome"], "refused");
+            socket.send_json(&json!({"id": "unknown", "type": "subscribe", "payload": {"documentId": hash("unknown")}}));
+            let error = socket.wait_for_operation_message("unknown", "error");
+            assert_eq!(
+                error["payload"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{error}"
+            );
+            assert_eq!(error["payload"][0]["extensions"]["outcome"], "refused");
+            assert_eq!(products.opens() + reviews.opens(), opens);
+            socket.close();
+        }
         "unknown" => {
             let result = graphql(json!({"documentId": hash("unknown"), "query": query}));
             assert_eq!(
@@ -1460,6 +1515,11 @@ fn persisted_wire_disabled() {
 #[test]
 fn persisted_wire_post() {
     persisted_documents_wire_case("post");
+}
+
+#[test]
+fn persisted_wire_refusal_outcome() {
+    persisted_documents_wire_case("refusal_outcome");
 }
 
 #[test]
@@ -2716,6 +2776,10 @@ fn authenticated_router_refuses_nested_directive_fields_before_downstream() {
         );
         assert_eq!(refused["errors"][0]["path"], path, "{query}: {refused}");
         assert!(refused["data"].is_null(), "{query}: {refused}");
+        assert!(
+            refused["errors"][0]["extensions"].get("outcome").is_none(),
+            "the refusal outcome is opt-in: {refused}"
+        );
         assert_eq!(opens(), opens_before, "{query} opened a subgraph request");
     }
 
@@ -2771,6 +2835,322 @@ fn authenticated_router_refuses_nested_directive_fields_before_downstream() {
         event["payload"]["data"]["productChanged"]["id"], "p1",
         "{event}"
     );
+    socket.close();
+
+    router.stop();
+}
+
+/// Every error of a response refused before any subgraph request carries
+/// `outcome: "refused"`, in the vocabulary generated services use.
+fn assert_refused(case: &str, response: &Value) {
+    assert!(response["data"].is_null(), "{case}: {response}");
+    let errors = response["errors"].as_array().expect("refusal errors");
+    assert!(!errors.is_empty(), "{case}: {response}");
+    for error in errors {
+        assert_eq!(
+            error["extensions"]["outcome"], "refused",
+            "{case}: {response}"
+        );
+    }
+}
+
+/// No error of a response that reached a subgraph carries a router-stamped
+/// `refused`; a subgraph's own outcome is the only one present.
+fn assert_not_refused_by_router(case: &str, response: &Value, subgraph_outcome: Option<&str>) {
+    let errors = response["errors"].as_array().expect("downstream errors");
+    assert!(!errors.is_empty(), "{case}: {response}");
+    for error in errors {
+        assert_eq!(
+            error["extensions"].get("outcome").and_then(Value::as_str),
+            subgraph_outcome,
+            "{case}: {response}"
+        );
+    }
+}
+
+#[test]
+fn refusal_outcome_marks_only_operations_refused_before_any_subgraph_request() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_NESTED_DIRECTIVES);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS_NESTED_DIRECTIVES);
+    let id_argument = || ArgumentDescriptor {
+        name: "id".to_owned(),
+        graphql_type: "ID!".to_owned(),
+        required: true,
+    };
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        vec![
+            OperationDescriptor {
+                root_type: RootOperationType::Query,
+                field_name: "product".to_owned(),
+                arguments: vec![id_argument()],
+                authorization: AuthorizationRequirement::Public,
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Mutation,
+                field_name: "renameProduct".to_owned(),
+                arguments: vec![
+                    id_argument(),
+                    ArgumentDescriptor {
+                        name: "name".to_owned(),
+                        graphql_type: "String!".to_owned(),
+                        required: true,
+                    },
+                ],
+                authorization: AuthorizationRequirement::AllScopes {
+                    scopes: vec![scope("products.write")],
+                },
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Subscription,
+                field_name: "productChanged".to_owned(),
+                arguments: vec![id_argument()],
+                authorization: AuthorizationRequirement::Public,
+            },
+        ],
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let mut router = TestRouter::spawn_authenticated_mode_with_env(
+        "auth-subscriptions",
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+        products_protocol.endpoint(),
+        reviews_protocol.endpoint(),
+        &[(REFUSAL_OUTCOME_ENV, "1")],
+    );
+    router.wait_until_ready();
+    let opens = || products.opens() + reviews.opens();
+    let writer = [("authorization", "Bearer product-writer")];
+    let events = [("authorization", "Bearer product-events")];
+
+    // HTTP: each refusal class, none of which opens a subgraph request.
+    let opens_before = opens();
+    for (case, payload, headers, code) in [
+        (
+            "invalid bearer",
+            json!({"query": "query { product(id: \"p1\") { id } }"}),
+            &[("authorization", "Bearer unknown")][..],
+            "UNAUTHENTICATED",
+        ),
+        (
+            "anonymous root",
+            json!({"query": "mutation { renameProduct(id: \"p1\", name: \"x\") { id } }"}),
+            &[][..],
+            "UNAUTHENTICATED",
+        ),
+        (
+            "root scope",
+            json!({"query": "mutation { renameProduct(id: \"p1\", name: \"x\") { id } }"}),
+            &events[..],
+            "FORBIDDEN",
+        ),
+        (
+            "nested scope",
+            json!({"query": "mutation { renameProduct(id: \"p1\", name: \"x\") { id name } }"}),
+            &writer[..],
+            "FORBIDDEN",
+        ),
+        (
+            "nested authentication",
+            json!({"query": "query { product(id: \"p1\") { id reviews { body } } }"}),
+            &[][..],
+            "UNAUTHENTICATED",
+        ),
+        (
+            "parse",
+            json!({"query": "query { product(id: \"p1\") { id }"}),
+            &writer[..],
+            "GRAPHQL_PARSE_FAILED",
+        ),
+        (
+            "validation",
+            json!({"query": "query { unknownField }"}),
+            &writer[..],
+            "FieldsOnCorrectType",
+        ),
+        (
+            "variable coercion",
+            json!({"query": "query Read($id: ID!) { product(id: $id) { id } }"}),
+            &writer[..],
+            "BAD_USER_INPUT",
+        ),
+        (
+            "field limit",
+            json!({"query": "query { a: product(id: \"p1\") { id } b: product(id: \"p1\") { id } c: product(id: \"p1\") { id } d: product(id: \"p1\") { id } }"}),
+            &writer[..],
+            "OPERATION_LIMIT_EXCEEDED",
+        ),
+        (
+            "introspection",
+            json!({"query": "{ __schema { queryType { name } } }"}),
+            &writer[..],
+            "INTROSPECTION_DISABLED",
+        ),
+        (
+            "subscription over HTTP",
+            json!({"query": "subscription { productChanged(id: \"p1\") { id } }"}),
+            &writer[..],
+            "SUBSCRIPTIONS_NOT_SUPPORTED",
+        ),
+    ] {
+        let (_, response) = router.graphql_response_at("/api/graphql", payload, headers);
+        assert_eq!(
+            response["errors"][0]["extensions"]["code"], code,
+            "{case}: {response}"
+        );
+        assert_refused(case, &response);
+        assert_eq!(opens(), opens_before, "{case} opened a subgraph request");
+    }
+    let get_mutation = raw_http(
+        router.address,
+        "GET",
+        "/api/graphql?query=mutation%20%7B%20renameProduct(id%3A%20%22p1%22%2C%20name%3A%20%22x%22)%20%7B%20id%20%7D%20%7D",
+        &[("accept", "application/json"), writer[0]],
+        None,
+    )
+    .unwrap();
+    let get_mutation: Value = serde_json::from_slice(&get_mutation.body).unwrap();
+    assert_eq!(
+        get_mutation["errors"][0]["extensions"]["code"], "MUTATION_NOT_ALLOWED_OVER_HTTP_GET",
+        "{get_mutation}"
+    );
+    assert_refused("mutation over GET", &get_mutation);
+    assert_eq!(opens(), opens_before);
+
+    // HTTP: an operation that reached a subgraph is never marked by the
+    // router, and a subgraph's own outcome passes through unchanged.
+    let downstream = router.graphql_at(
+        "/api/graphql",
+        json!({"query": "query { product(id: \"downstream-refusal\") { id } }"}),
+        &[],
+    );
+    assert_eq!(
+        downstream["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{downstream}"
+    );
+    assert_not_refused_by_router("downstream refusal", &downstream, None);
+    for outcome in [
+        None,
+        Some("refused"),
+        Some("failed"),
+        Some("committed"),
+        Some("unknown"),
+    ] {
+        let name = format!("outcome-{}", outcome.unwrap_or("none"));
+        let response = router.graphql_at(
+            "/api/graphql",
+            json!({"query": format!("mutation {{ renameProduct(id: \"p1\", name: \"{name}\") {{ id }} }}")}),
+            &writer,
+        );
+        assert_eq!(
+            response["errors"][0]["extensions"]["code"], "CONFLICT",
+            "{name}: {response}"
+        );
+        assert_not_refused_by_router(&name, &response, outcome);
+    }
+    let (products_before, reviews_before) = (products.opens(), reviews.opens());
+    let partial = router.graphql_at(
+        "/api/graphql",
+        json!({"query": "query { product(id: \"partial\") { id reviews { body } } }"}),
+        &[("authorization", "Bearer product-p1")],
+    );
+    assert!(products.opens() > products_before, "{partial}");
+    assert!(reviews.opens() > reviews_before, "{partial}");
+    assert_eq!(
+        partial["errors"][0]["extensions"]["service"], "reviews",
+        "{partial}"
+    );
+    assert_not_refused_by_router("partial execution", &partial, None);
+
+    // WebSocket: gateway, plugin and Hive refusals are marked; a forwarded
+    // operation that reached a subgraph is not, even on the same connection.
+    let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+    socket.connection_init_bearer("product-writer");
+    socket.subscribe(
+        "downstream",
+        "mutation { renameProduct(id: \"p1\", name: \"outcome-none\") { id } }",
+    );
+    let downstream = socket.wait_for_operation_message("downstream", "next");
+    assert_not_refused_by_router("websocket downstream", &downstream["payload"], None);
+    socket.subscribe(
+        "committed",
+        "mutation { renameProduct(id: \"p1\", name: \"outcome-committed\") { id } }",
+    );
+    let committed = socket.wait_for_operation_message("committed", "next");
+    assert_not_refused_by_router(
+        "websocket committed",
+        &committed["payload"],
+        Some("committed"),
+    );
+    let opens_before = opens();
+    socket.subscribe(
+        "nested",
+        "mutation { renameProduct(id: \"p1\", name: \"x\") { id name } }",
+    );
+    let nested = socket.wait_for_operation_message("nested", "next");
+    assert_eq!(
+        nested["payload"]["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{nested}"
+    );
+    assert_refused("websocket nested scope", &nested["payload"]);
+    for (id, query, code) in [
+        (
+            "validation",
+            "query { unknownField }",
+            "GRAPHQL_VALIDATION_FAILED",
+        ),
+        (
+            "coercion",
+            "query Read($id: ID!) { product(id: $id) { id } }",
+            "BAD_USER_INPUT",
+        ),
+        (
+            "ambiguous",
+            "query A { product(id: \"p1\") { id } } query B { product(id: \"p1\") { id } }",
+            "GRAPHQL_VALIDATION_FAILED",
+        ),
+    ] {
+        socket.subscribe(id, query);
+        let error = socket.wait_for_operation_message(id, "error");
+        assert_eq!(
+            error["payload"][0]["extensions"]["code"], code,
+            "{id}: {error}"
+        );
+        for error in error["payload"].as_array().unwrap() {
+            assert_eq!(error["extensions"]["outcome"], "refused", "{id}: {error}");
+        }
+    }
+    assert_eq!(
+        opens(),
+        opens_before,
+        "a WebSocket refusal opened a subgraph request"
+    );
+    socket.close();
+
+    let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+    socket.connection_init_bearer("product-events");
+    socket.subscribe(
+        "root",
+        "mutation { renameProduct(id: \"p1\", name: \"x\") { id } }",
+    );
+    let root = socket.wait_for_operation_message("root", "next");
+    assert_eq!(
+        root["payload"]["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{root}"
+    );
+    assert_refused("websocket root scope", &root["payload"]);
+    assert_eq!(opens(), opens_before);
     socket.close();
 
     router.stop();
@@ -4867,7 +5247,31 @@ impl TestRouter {
         products_protocol_endpoint: String,
         reviews_protocol_endpoint: String,
     ) -> Self {
+        Self::spawn_authenticated_mode_with_env(
+            mode,
+            products_endpoint,
+            reviews_endpoint,
+            products_sdl_endpoint,
+            reviews_sdl_endpoint,
+            products_protocol_endpoint,
+            reviews_protocol_endpoint,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_authenticated_mode_with_env(
+        mode: &str,
+        products_endpoint: String,
+        reviews_endpoint: String,
+        products_sdl_endpoint: String,
+        reviews_sdl_endpoint: String,
+        products_protocol_endpoint: String,
+        reviews_protocol_endpoint: String,
+        extra_env: &[(&str, &str)],
+    ) -> Self {
         let child = Command::new(env::current_exe().expect("test executable path"))
+            .envs(extra_env.iter().copied())
             .arg("--exact")
             .arg("federation::wire_tests::router_child_entrypoint")
             .arg("--nocapture")
@@ -5689,6 +6093,31 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
         SubgraphKind::Products if query.contains("_entities") => {
             json!({"data": {"_entities": [{"id": "p1", "name": "desk"}]}})
         }
+        // A subgraph's own refusal, with the outcome named in the new name.
+        SubgraphKind::Products if query.contains("renameProduct") && query.contains("outcome-") => {
+            let mut extensions = json!({"code": "CONFLICT"});
+            for outcome in ["refused", "failed", "committed", "unknown"] {
+                if query.contains(&format!("outcome-{outcome}")) {
+                    extensions["outcome"] = json!(outcome);
+                }
+            }
+            json!({
+                "data": {"renameProduct": null},
+                "errors": [{
+                    "message": "test-owned downstream write error",
+                    "path": ["renameProduct"],
+                    "extensions": extensions
+                }]
+            })
+        }
+        SubgraphKind::Products if query.contains("downstream-refusal") => json!({
+            "data": {"product": null},
+            "errors": [{
+                "message": "test-owned downstream refusal",
+                "path": ["product"],
+                "extensions": {"code": "FORBIDDEN"}
+            }]
+        }),
         SubgraphKind::Products if query.contains("renameProduct") => {
             json!({"data": {"renameProduct": {"id": "p1", "name": "renamed"}}})
         }
@@ -5702,9 +6131,24 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
             }]
         }),
         SubgraphKind::Products => {
-            let id = if query.contains("slow") { "slow" } else { "p1" };
+            let id = if query.contains("slow") {
+                "slow"
+            } else if query.contains("partial") {
+                "partial"
+            } else {
+                "p1"
+            };
             json!({"data": {"product": {"id": id, "name": "desk"}}})
         }
+        // Products answered first; this later fetch fails.
+        SubgraphKind::Reviews if payload["variables"].to_string().contains("partial") => json!({
+            "data": {"_entities": [null]},
+            "errors": [{
+                "message": "test-owned review failure",
+                "path": ["_entities", 0, "reviews"],
+                "extensions": {"code": "BAD_USER_INPUT"}
+            }]
+        }),
         SubgraphKind::Reviews => {
             json!({"data": {"_entities": [{"reviews": [{"body": "excellent"}]}]}})
         }

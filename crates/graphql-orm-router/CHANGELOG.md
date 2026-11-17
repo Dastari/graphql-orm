@@ -3,12 +3,31 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-17
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.19.0 (unreleased, breaking batch)
+
+- **Added (opt-in): the router says when it refused an operation before
+  execution.** With `RouterConfig::with_refusal_outcome(true)` (file
+  configuration `refusalOutcome: true`), each error of an operation the router
+  refused before it sent any subgraph request carries
+  `extensions.outcome: "refused"`, the value generated ORM services use on
+  their mutation errors. It covers the router's own refusals (bearer and
+  authority checks, root and nested authorization, the field limit,
+  subscriptions over HTTP, anonymous introspection, persisted documents and
+  the WebSocket gateway's admission refusals) and the engine's refusals before
+  execution (request, parse, validation and its limits, variable coercion,
+  `INTROSPECTION_DISABLED`, `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`), over HTTP
+  and the WebSocket gateway. An operation for which any subgraph request
+  started, an execution failure and the request timeout are never marked, and
+  a subgraph's own `outcome` passes through unchanged. Off by default; codes,
+  messages, paths and HTTP status are unchanged either way.
+  ([#764](https://github.com/Dastari/graphql-orm/issues/764))
 
 ## 0.18.0 (unreleased, breaking batch)
 

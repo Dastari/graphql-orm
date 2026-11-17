@@ -36,6 +36,8 @@ pub struct RouterFileConfig {
     #[serde(default)]
     introspection: bool,
     #[serde(default)]
+    refusal_outcome: bool,
+    #[serde(default)]
     allow_plaintext_http: bool,
     #[serde(default)]
     use_environment_proxy: bool,
@@ -114,6 +116,7 @@ impl RouterFileConfig {
             .with_graphql_path(self.graphql_path)
             .allow_anonymous_development(self.anonymous_development)
             .with_introspection(self.introspection)
+            .with_refusal_outcome(self.refusal_outcome)
             .allow_plaintext_http(self.allow_plaintext_http)
             .use_environment_proxy(self.use_environment_proxy);
         if let Some(documents) = self.persisted_documents {
@@ -969,6 +972,7 @@ mod tests {
         "nodeLookup": {"maxNodes": 50},
         "requestLimits": {"maxDepth": 12},
         "introspection": true,
+        "refusalOutcome": true,
         "subscriptions": {"maxConnectionAttemptsPerSecond": 55, "maxPendingConnections": 7},
         "telemetry": {"logLevel": "warn", "prometheus": {"port": 4900}}
     }"#;
@@ -1138,6 +1142,17 @@ mod tests {
                 .unwrap()
                 .introspection,
             "file configuration keeps introspection off unless it is named"
+        );
+        assert!(config.refusal_outcome);
+        assert!(
+            !RouterFileConfig::from_json(&FILE.replace("\"refusalOutcome\": true,", ""))
+                .unwrap()
+                .into_router_config_with(|name| Ok(
+                    (name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer schema-secret".to_owned())
+                ))
+                .unwrap()
+                .refusal_outcome,
+            "file configuration keeps the refusal outcome off unless it is named"
         );
         assert_eq!(config.telemetry.prometheus_port, Some(4900));
         assert_eq!(

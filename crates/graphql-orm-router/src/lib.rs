@@ -21,6 +21,7 @@ mod lifecycle;
 mod metrics;
 mod network;
 mod node_lookup;
+mod outcome;
 mod persisted;
 mod server;
 mod subscription_continuity;

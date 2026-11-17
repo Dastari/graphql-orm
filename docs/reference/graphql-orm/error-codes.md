@@ -3,7 +3,7 @@ title: "Public ORM Error-Code Contract"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,6 +29,142 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `SERVICE_UNAVAILABLE` | Temporary dependency failure |
 | `INTERNAL_ERROR` | Unexpected failure |
 | `AUTHORIZATION_MISCONFIGURED` | A declared policy key has no provider. Under `DeclaredPoliciesRequired` this covers every key; in every mode it covers an entity `write_policy` without a row provider on generated writes |
+
+## One vocabulary with the router
+
+Generated entity roots and `graphql-orm-router` share one `extensions.code`
+vocabulary. A client behind the router can therefore match one set of codes,
+whichever component refused. The rules:
+
+- Codes are `SCREAMING_SNAKE_CASE` ASCII. A generic category (`FORBIDDEN`,
+  `INVALID_INPUT`) has no prefix. A code that only one feature raises is
+  prefixed with that feature (`SUBSCRIPTION_`, `PERSISTED_DOCUMENT_`,
+  `BYTE_ROUTE_`).
+- A code means the same thing wherever it is raised, and a new case reuses an
+  existing code when the client's next step is the same. The single-row result
+  codes below therefore reuse `NOT_FOUND`, `INVALID_INPUT` and
+  `CONSTRAINT_VIOLATION`, and are not new codes.
+- New codes and new extensions that would change what an existing client sees
+  are opt-in.
+- Runtime GraphQL keeps its lower-case codes; see
+  [code case by surface](#code-case-by-surface).
+
+The ORM owns its constants: [`OrmErrorCode`](#codes),
+`graphql_orm::graphql::subscriptions::{SUBSCRIPTION_CONTINUITY_LOST,
+SUBSCRIPTION_SOURCE_CLOSED, SUBSCRIPTION_SELECTION_UNSUPPORTED}` and
+`graphql_orm::graphql::errors::MutationOutcome`. The router keeps its own
+literals and depends on no ORM package. The constants are not in
+`graphql-orm-router-protocol` because that crate holds descriptor data, and
+the ORM depends on it only under an optional feature. This table is the
+mapping between the two:
+
+| Code | Raised by | Meaning for the client |
+| --- | --- | --- |
+| `UNAUTHENTICATED` | ORM, router | No principal, or the router's token check failed. Authenticate and retry |
+| `FORBIDDEN` | ORM, router | The principal may not do this. Do not retry unchanged |
+| `INVALID_INPUT` | ORM, router | The request's input is invalid. Fix it before retrying |
+| `SERVICE_UNAVAILABLE` | ORM, router | A dependency is temporarily unavailable. A retry may succeed |
+| `SUBSCRIPTION_CONTINUITY_LOST` | ORM, router | The stream ended and missed events. Subscribe again and refetch |
+| `NOT_FOUND`, `CONFLICT`, `CONSTRAINT_VIOLATION`, `CURSOR_INVALID`, `PAGE_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `AUTHORIZATION_MISCONFIGURED`, `STEP_UP_REQUIRED` | ORM | See [codes](#codes) |
+| `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
+| `SUBSCRIPTION_SELECTION_UNSUPPORTED` | ORM, opt-in | The `Changed` selection can never be streamed (a relation, a computed field or an unavailable key). Subscribe with a smaller selection, for example keys only |
+| `SUBSCRIPTIONS_NOT_SUPPORTED` | router | A subscription was sent over HTTP, or the router has no subscription gateway. Subscribe over the router's `graphql-transport-ws` endpoint |
+| `MUTATION_NOT_ALLOWED_OVER_HTTP_GET` | router | A mutation was sent with HTTP `GET`. Send it with `POST` |
+| `GRAPHQL_VALIDATION_FAILED`, `REQUEST_TOO_LARGE`, `OPERATION_LIMIT_EXCEEDED`, `INTROSPECTION_DISABLED`, `SUBGRAPH_FAILURE`, `SUBGRAPH_UNAVAILABLE`, `SUBSCRIPTION_LIMIT_EXCEEDED`, `SUBSCRIPTION_AUTHORIZATION_CHANGED`, `SUBSCRIPTION_SCHEMA_RELOAD`, `PERSISTED_DOCUMENT_*`, `BYTE_ROUTE_*` | router | See the [router configuration reference](../../../crates/graphql-orm-router/docs/configuration.md) |
+
+The router's wire tests show a subgraph error's `extensions.code` and
+`extensions.outcome` reaching the client unchanged, over HTTP and the
+WebSocket gateway.
+
+## Unsupported subscription selection
+
+A generated `Changed` subscription refuses, before it registers, a selection it
+can never stream: a relation, a computed field, or a key the subscription
+cannot release. By default the refusal carries `INVALID_INPUT`, the code of
+other invalid stream input such as a `Keys` list over its bound. With
+`DatabaseBuilder::subscription_selection_unsupported_code(true)` (or
+`Database::with_subscription_selection_unsupported_code(true)`) it carries
+`SUBSCRIPTION_SELECTION_UNSUPPORTED` instead, with the same message, so a
+client can fall back to a smaller selection without reading the message.
+
+## Mutation outcome
+
+With `DatabaseBuilder::mutation_error_outcome(true)` (or
+`Database::with_mutation_error_outcome(true)`), every error raised by a
+generated create, upsert, update, delete, `updateMany` or `deleteMany` root
+carries `extensions.outcome` beside its `code`:
+
+| `outcome` | Meaning | Examples |
+| --- | --- | --- |
+| `refused` | Refused before the root attempted its write. Nothing was written | Authentication, scopes, assurance, an entity or row policy, a write-input transform, a before hook, a stale `expectedVersion` |
+| `failed` | The write statement ran, or was sent, and the transaction rolled back. Nothing remains | A constraint violation, an after hook's refusal, a post-image check, a refusal at commit that rolls back |
+| `committed` | The write committed. Repeating the mutation applies it again | A `notify` handler or output authorization failing after the commit |
+| `unknown` | The server cannot tell | The commit itself failed, for example on a lost connection or a deferred constraint |
+
+A client must read an absent `outcome` as `unknown`. The outcome says whether
+the write took effect, not whether a retry would succeed; the `code` says that.
+The ORM sets `outcome` itself, replacing any value a host callback put on its
+error, so a `notify` handler cannot report a committed write as refused.
+Before-hook writes made through the hook's transaction roll back with it and
+still report `refused`.
+
+With the setting, a generated bulk write whose commit fails raises a
+top-level error with `outcome: "unknown"` instead of returning
+`success: false`. A `success: false` payload from any generated root then
+always means nothing was written.
+
+Runtime GraphQL mutations already send `committed` and `unknown` from the same
+vocabulary on their own errors, without the setting.
+
+An entity with `dependent_deletes` runs its delete through the dependent
+delete plan; an error raised once that plan runs reports `unknown`.
+
+## Router refusal outcome
+
+With `RouterConfig::with_refusal_outcome(true)` (`refusalOutcome: true` in the
+file configuration), `graphql-orm-router` 0.19.0 adds `outcome: "refused"` to
+each error of an operation it refused before it sent any subgraph request, so
+a client handles a router refusal and a service refusal the same way. It
+covers the router's own refusals (bearer and authority checks, root and
+nested authorization, the field limit, subscriptions over HTTP, persisted
+documents, and the WebSocket gateway's admission refusals) and the engine's
+refusals before execution (request, parse, validation, depth, alias and
+directive limits, variable coercion, `INTROSPECTION_DISABLED` and
+`MUTATION_NOT_ALLOWED_OVER_HTTP_GET`).
+
+The router adds only `refused`, and only before any subgraph request. It never
+marks an operation that reached a subgraph, even partly, nor the request
+timeout or an execution failure, and it keeps an `outcome` a subgraph sent.
+An absent `outcome` still means unknown. The setting is off by default and
+changes no code, message, path or HTTP status. See the
+[router configuration reference](../../../crates/graphql-orm-router/docs/configuration.md#refusal-outcome).
+
+## Mutation result error codes
+
+A generated single-row `…Result` (create, update and delete) reports some
+failures in its payload, with `success: false` and a free-text `error`. An
+entity declared with `#[graphql_entity(mutation_error_codes)]` adds a nullable
+`errorCode` field (named by the schema's field case) holding the code a
+top-level error would carry:
+
+| `error` | `errorCode` |
+| --- | --- |
+| `Entity not found` (missing or not visible) | `NOT_FOUND` |
+| `Entity not found after update` | `NOT_FOUND` |
+| `No fields to update` | `INVALID_INPUT` |
+| A failed write statement, such as a unique violation | that error's code, such as `CONSTRAINT_VIOLATION` |
+
+The same attribute gives the bulk `Where filter is required…` refusals of
+`updateMany` and `deleteMany` the code `INVALID_INPUT`; their other refusals
+already carry a code. `errorCode` is null when `success` is true. A
+`success: false` from a single-row root means nothing was written. Upsert
+reports every failure as a top-level error, so its result has no `errorCode`.
+
+Without the attribute the single-row result types, the SDL and the bulk codes
+are unchanged. Rust code that builds a single-row result with a struct literal
+must add `error_code: None` once the attribute is set; the constructors `ok`
+and `err` are unaffected. A root delete refused by an entity's dependent
+delete plan returns its message without a code.
 
 ## GraphQL Extensions
 

@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-17
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -70,6 +70,7 @@ an unbounded value.
 | `graphqlPath` | `/graphql`; absolute, non-root, without query or fragment. |
 | `anonymousDevelopment` | `false`; mutually exclusive with authentication and unsuitable for production. |
 | `introspection` | `false`. `true` enables `__schema` and `__type`; with authentication configured they also need a valid bearer. The depth limit applies either way. |
+| `refusalOutcome` | `false`. `true` adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request. See [Refusal outcome](#refusal-outcome). |
 | `authentication` | Required unless anonymous development is explicitly enabled. |
 | `scopeMatcher` | Omitted means exact-string matching. `kind: "hierarchical"` requires the `auth-agql` feature. |
 | `subgraphs` | At least one static source is required. |
@@ -94,6 +95,55 @@ an unbounded value.
 
 Durations must be nonzero. Values over their hard safety ceilings fail before
 binding.
+
+## Refusal outcome
+
+`refusalOutcome: true` (programmatically `RouterConfig::with_refusal_outcome(true)`)
+lets a client tell that an operation never ran. Each error of an operation the
+router refused before it sent any subgraph request carries
+`extensions.outcome: "refused"` beside its `code`. The value is the one
+generated ORM services put on their mutation errors (`refused`, `failed`,
+`committed`, `unknown`; see the
+[shared vocabulary](../../../docs/reference/graphql-orm/error-codes.md#router-refusal-outcome)),
+so one client rule covers a refusal by the router and by a service.
+
+It is off by default because it adds an extension field to existing
+responses. It changes no code, message, path or HTTP status.
+
+Marked, over HTTP and the WebSocket gateway alike:
+
+- the router's own refusals: an invalid or unverifiable bearer, a root or
+  nested `@authenticated`/`@requiresScopes` refusal and an unavailable
+  authorization state (`UNAUTHENTICATED`, `FORBIDDEN`), the field limit
+  (`OPERATION_LIMIT_EXCEEDED`), a subscription over HTTP
+  (`SUBSCRIPTIONS_NOT_SUPPORTED`), anonymous introspection, persisted-document
+  refusals (`PERSISTED_DOCUMENT_*`, and `SERVICE_UNAVAILABLE` when the
+  persisted-document runtime cannot be verified), and the WebSocket gateway's
+  admission refusals (`SUBSCRIPTION_LIMIT_EXCEEDED`, `REQUEST_TOO_LARGE`, an
+  ambiguous operation, an unavailable authority, and a subscription refused
+  while continuity is lost);
+- the engine's refusals before execution: request and body errors, parse
+  failures and the token limit, validation failures and the depth, alias and
+  directive limits, `BAD_USER_INPUT` variable coercion,
+  `INTROSPECTION_DISABLED` and `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`. Over the
+  WebSocket gateway the engine reports these with one pipeline code, such as
+  `GRAPHQL_VALIDATION_FAILED`, and only the codes it raises before execution
+  are marked.
+
+Never marked:
+
+- any error of an operation for which a subgraph request started, including a
+  partly executed operation, a subgraph's own errors and the router-hosted
+  Node lookup;
+- an execution failure, the request timeout (`GATEWAY_TIMEOUT`), and
+  terminal subscription errors such as `SUBSCRIPTION_SCHEMA_RELOAD`,
+  `SUBSCRIPTION_AUTHORIZATION_CHANGED` and `SUBSCRIPTION_CONTINUITY_LOST`
+  after a subscription started;
+- byte-route responses, which are not GraphQL operations.
+
+The router never replaces an `outcome` that a subgraph sent, so a service's
+`failed`, `committed` or `unknown` reaches the client unchanged. Read an
+absent `outcome` as unknown.
 
 ## Outbound transport
 
