@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version 0.148.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 AI 0.147.0 gives lease recovery a default clock-skew grace (a quarter of the lease TTL, at most 30 seconds), completes Anthropic `max_tokens`, `model_context_window_exceeded` and `pause_turn` turns and chat-completions `length` turns with exact usage and a visible notice instead of failing after the spend, accepts dated-snapshot model echoes, never treats a provider-file 404 as proof of absence, and deletes OpenAI stored responses after their session is deleted through a fail-closed [stored-response ledger](docs/session-retention.md#stored-provider-responses). Apply AI schema module `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
 
 AI 0.146.0 keeps the model-facing capability surface flat as a catalogue grows: reviewed static read tools can sit behind the fixed broker instead of the provider surface, `describe` defines each repeated input type once, search no longer re-tokenises the catalogue, one oversized root no longer fails its target, and large surfaces can opt into the fixed broker over native deferred loading. It also adds an opt-in host-held [epoch anchor](docs/recovery-and-restore.md#detecting-a-file-level-restore-with-a-host-held-anchor) that keeps a file-level database restore closed, and an opt-in [dependent-effect policy](docs/security.md#dependent-effects-of-generated-deletes) for generated deletes. No schema change; see [migration guidance](MIGRATION.md#01450-to-01460-capability-scale).

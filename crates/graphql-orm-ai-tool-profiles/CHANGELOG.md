@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.25.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## Unreleased - 0.24.0
 
 - Preserve root description, title, examples and default through shared-schema compilation and expansion.

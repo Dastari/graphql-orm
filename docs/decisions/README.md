@@ -21,7 +21,7 @@ unchanged and discoverable.
 - [ADR-0005: Restore readiness and uncertain effects](ADR-0005-restore-readiness-and-uncertain-effects.md)
 - [ADR-0006: Streaming storage and backup layering](ADR-0006-streaming-storage-and-backup-layering.md)
 - [ADR-0007: Seven-package workspace boundaries](ADR-0007-seven-package-workspace-boundaries.md)
-- [ADR-0008: Hive federation runtime and composition boundary](ADR-0008-hive-federation-runtime-and-composition-boundary.md)
+- [ADR-0008: Hive federation runtime and composition boundary](ADR-0008-hive-federation-runtime-and-composition-boundary.md) — MSRV statements superseded by ADR-0014
 - [ADR-0009: Nine-package backend-neutral discovery boundaries](ADR-0009-nine-package-backend-neutral-discovery-boundaries.md)
 - [ADR-0010: Independent package and workspace release identities](ADR-0010-independent-package-and-workspace-release-identities.md) — superseded by ADR-0013
 - [ADR-0011: Generated Federation entity keys](ADR-0011-generated-federation-entity-keys.md)
@@ -29,6 +29,8 @@ unchanged and discoverable.
 - [ADR-0012: Owner-local third-party source documentation](ADR-0012-owner-local-third-party-source-documentation.md)
 
 - [ADR-0013: Explicit source-only release verification profiles](ADR-0013-explicit-source-only-release-verification-profiles.md)
+
+- [ADR-0014: Workspace minimum supported Rust version](ADR-0014-workspace-msrv.md)
 
 Use the [ADR template](../templates/adr.md) for a genuinely durable decision,
 not for feature chronology or implementation status.

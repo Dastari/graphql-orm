@@ -47,7 +47,7 @@
   {
     "finding": "RUSTSEC-2026-0459:libsqlite3-sys:0.30.1",
     "review_by": "2026-12-04",
-    "reason": "sqlx 0.8.6 -> sqlx-sqlite -> libsqlite3-sys 0.30.1. Fixed 0.39 requires an incompatible SQLx owner migration and backend/API review. SQLite accepts application SQL/data; no unreachability exemption claimed."
+    "reason": "Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical."
   },
   {
     "finding": "RUSTSEC-2026-0543:chrono:0.4.45",

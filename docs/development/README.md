@@ -17,6 +17,7 @@ the [how-to guides](../how-to/README.md).
 - [Set up the workspace](setup.md)
 - [Run tests and verification](testing.md)
 - [Work on GraphQL changes](graphql-workflow.md)
+- [Release cadence and changelog policy](release-changelog-policy.md)
 - [Follow the release process](../operations/release/process.md)
 
 Package-local documentation and `AGENTS.md` files add invariants and commands

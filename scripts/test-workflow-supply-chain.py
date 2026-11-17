@@ -227,7 +227,7 @@ class SupplyChainTests(unittest.TestCase):
         self.assertReported("selects no reviewed toolchain")
 
     def test_floating_toolchain_input_is_rejected(self):
-        self.edit(".github/workflows/ci.yml", "toolchain: 1.90.0", "toolchain: stable")
+        self.edit(".github/workflows/ci.yml", "toolchain: 1.97.1", "toolchain: stable")
         self.assertReported("selects floating toolchain stable")
 
     def test_publisher_may_not_restore_caches_or_build(self):

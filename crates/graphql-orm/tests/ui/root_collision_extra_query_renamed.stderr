@@ -12,7 +12,8 @@ error[E0080]: evaluation panicked: graphql-orm: handwritten Query root field `it
 note: inside `graphql_orm::prelude::assert_unique_root_fields`
   --> $RUST/core/src/panic.rs
    |
-   = note: the failure occurred here
+   |           $crate::panicking::panic_display(&$arg);
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
    |
   ::: src/graphql/orm/root_fields.rs
    |

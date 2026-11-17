@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.172.0 to 0.173.0: process and toolchain
+
+**Action needed:** use Rust 1.97.1 or newer (development/CI pin 1.97.1).
+No data migration is needed. Tiberius remains on the reviewed 0.12.4 revision.
+Release operators must supply a same-repository merged PR URL or approved
+review URL for scoped publication and router binary distribution.
+
 ## ORM/macros 0.172.0 and operation catalogue 0.8.1: client-facing metadata
 
 Upgrade ORM and macros together and recompile entities. Without the new

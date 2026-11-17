@@ -14,6 +14,23 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.173.0
+
+- The operation catalogue 0.9.0 and companion package releases declare the same
+  minimum compiler; serialized contracts and stored data remain unchanged.
+- Refresh eight root-collision diagnostic snapshots for the pinned Rust 1.97.1
+  panic-display excerpt and require `rust-src` in the toolchain/ORM CI setup; collision rejection and error messages are unchanged.
+- Declare Rust 1.97.1 consistently across published packages, pin development to
+  1.97.1 and verify workspace/backend/provider MSRV graphs in CI (#501).
+- Retire the obsolete macros postgres-smoke fixture and its floating PostgreSQL
+  image (#684; removes its #615 pin only).
+- Validate scoped-release and router-binary approval URLs through the GitHub API
+  using the guard job token with read-only PR permission (#499).
+- Retain Tiberius 0.12.4: unpatched upstream 0.13.0 cannot compile the existing
+  query-notification API. See the SQL Server reference for exact errors (#516).
+- Record dated advisory exceptions, release/changelog policy, generator split
+  and security property-testing scope (#504, #505, #513).
+
 ## Unreleased - ORM/macros 0.172.0, operation catalogue 0.8.1
 
 Client-facing metadata, all opt-in. Without the new options, generated SDL, operation catalogues, semantic catalogues and fingerprints are unchanged. See [client-facing schema metadata](docs/reference/graphql-orm/client-metadata.md) and the [migration guide](MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).

@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Version 0.172.0 adds opt-in client-facing metadata: a build-time client
 metadata export (`schema_roots!(client_metadata: true)`) with `Changed` stream
 carried fields, lifetime fields and relationship key mappings, an opt-in

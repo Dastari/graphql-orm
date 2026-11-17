@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.25.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
 ## 0.23.0 to 0.24.0: capability scale
 
 No SDL or data migration is needed. Capability, catalogue and index

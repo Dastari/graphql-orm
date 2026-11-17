@@ -12,6 +12,8 @@ supersedes: []
 
 ## Active
 
+- [Generator and authorization pipeline split](active/generator-split/README.md)
+- [Security property and fuzz testing scope](active/security-property-testing/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [Changed stream replay](active/changed-stream-replay/README.md)
 - [Documentation experience](active/documentation-experience/README.md)

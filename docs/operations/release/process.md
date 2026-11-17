@@ -72,11 +72,16 @@ a side effect of this process.
 ## Reviewed compiler baseline
 
 CI and workspace release lanes select Rust **1.97.1** explicitly. The independent
-router MSRV lane remains Rust **1.90.0**. Floating `stable` previously selected
+workspace MSRV lane uses Rust **1.97.1**. Floating `stable` previously selected
 Rust 1.99.0 on hosted runners while local acceptance used 1.97.1, producing
 non-comparable evidence and new Clippy diagnostics in `async-trait`-generated
 `must_use` attributes. The selected compiler retains all warnings-denied gates;
 no lint is disabled and no test/provider/backend lane is removed.
+
+The [MSRV script](../../../scripts/check-msrv.sh) checks every workspace target
+and explicit backend/provider graphs. Full router tests already run on 1.97.1;
+the release conformance checker permits only the recorded MSRV expansion while
+keeping the remaining full lanes under their existing exact comparisons.
 
 Changing this compiler baseline requires a separately reviewed build change and
 full provider/backend validation before publication. Rust 1.99.0 ordinary ORM
@@ -203,6 +208,8 @@ Run **Workspace release** manually and supply:
 - `include_router_artifact`: normally false for source-only releases; and
 - `router_distribution_approval`: required when a router binary is attached.
 
+Both references must use the API-validated [approval URL format](#approval-reference-validation).
+
 Configure `Dastari` as a required human reviewer on the `release` environment
 and restrict it to `main` before dispatch. The guard rejects an environment
 without that reviewer; naming an environment in YAML does not create protection.
@@ -271,8 +278,8 @@ is explicitly approved for the final current-main source and release identity.
 
 The protected `guard` binds `GITHUB_REF=refs/heads/main`, workflow `GITHUB_SHA`,
 checked-out `target_ref` and current remote main. It checks unused workspace tag,
-Dastari required reviewer, explicit scoped selection, nonempty publication
-approval reference and `include_router_artifact=false`, then checks source reuse
+Dastari required reviewer, explicit scoped selection, an API-validated publication
+approval URL and `include_router_artifact=false`, then checks source reuse
 before any compiler/backend job runs. It never silently selects a recipe.
 
 - `replay-scoped-integrity`: source/evidence reconciliation plus eight positive
@@ -508,3 +515,17 @@ Because cargo-audit 0.22.2 omits Git revision fields with `--no-fetch`, the raw
 reports are bound by SHA-256 to the fresh checkout's verified full Git revision in
 `database-provenance.json`. The scanner checks the checkout remains unchanged;
 it never fills or rewrites the raw reports' missing metadata.
+
+## Approval reference validation
+
+Scoped source publication and router binary distribution each require a URL
+`https://github.com/Dastari/graphql-orm/pull/<number>` to a PR merged into `main`, or that
+PR URL with `#pullrequestreview-<id>` naming a currently APPROVED human review on a PR targeting `main`.
+The review must have `author_association` OWNER, MEMBER or COLLABORATOR;
+CONTRIBUTOR, NONE, FIRST_TIME_CONTRIBUTOR and missing associations are rejected.
+The guard queries the GitHub API and rejects foreign repositories, unmerged
+PRs, PRs targeting another branch, dismissed/non-approved or unaffiliated reviews,
+malformed URLs and API failures. It uses
+its job token with `pull-requests: read`, alongside the existing contents/actions
+read permissions. This validates the reference; reviewers still check that its
+content authorizes the chosen source, profile and retained gaps.

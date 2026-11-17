@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.148.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
 ## 0.146.0 to 0.147.0: lease grace, provider stops and stored-response deletion
 
 Apply AI schema module `0.82.0` before starting workers. It adds one table,

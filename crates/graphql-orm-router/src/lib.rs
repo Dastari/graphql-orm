@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-// The pinned Hive/Ntex service type exceeds rustc 1.90's default query depth
-// when the maintained loopback test server is monomorphized.
+// Allow enough query depth to monomorphize the pinned Hive/Ntex service type
+// in the maintained loopback test server.
 #![recursion_limit = "256"]
 //! Project-neutral federated GraphQL router.
 //!

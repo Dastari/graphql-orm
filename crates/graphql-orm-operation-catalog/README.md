@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.9.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Version `0.8.1` adds `GraphqlClientMetadata`, a separate client-facing
 companion document of a semantic catalogue (wire version 1, its own
 fingerprint, bound to the catalogue's fingerprint), with

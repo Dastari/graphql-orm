@@ -18,6 +18,32 @@ management, full-text search maintenance, and backup/restore remain unsupported.
 SQL Server support uses [`tiberius`](https://crates.io/crates/tiberius). Current SQLx releases do
 not provide an MSSQL driver.
 
+## Retained driver revision (#516)
+
+On 2026-11-15, upstream registry Tiberius 0.13.0 was checked without any
+patch using `cargo check -p graphql-orm --no-default-features --features mssql`.
+It failed with E0432 for `tiberius::QueryNotification` and E0599 for
+`Client::simple_query_with_notification` in `src/db/mssql/notifications.rs`.
+Consequently it cannot build the MSSQL owned, TLS or notification lanes.
+Upstream `src/tds/codec/batch_request.rs` gives `BatchRequest` only a query
+and transaction descriptor and writes only transaction-descriptor AllHeaders;
+there is no notification-header input or replacement registration API to use.
+
+The existing 0.12.4 fork remains pinned at
+`4d67cd1ad873dba0f42a838925f15fcfd40c2c67`. Its two-commit patch provides the
+TDS query-notification AllHeaders encoder, the public `QueryNotification`
+constructor, and `simple_query_with_notification` for registering a SELECT
+with a Service Broker destination, correlation ID and timeout. The ORM uses
+these to register externally provisioned query notifications. Removing the
+patch would remove an existing public capability; a version update alone
+cannot preserve it. No fork rebase or upstream contact was performed.
+
+This is a retained compatibility dependency, not a claim that 0.12.4 has the
+0.13.0 hardening. Re-check when upstream ships the required notification API;
+never fork or patch a third-party crate to clear an advisory. The standing
+supply-chain policy accepts minor or theoretical advisories, with dated
+exceptions and re-checks when upstream ships a fix.
+
 ## Feature Selection
 
 For a service that only uses SQL Server, select the `mssql` backend feature:

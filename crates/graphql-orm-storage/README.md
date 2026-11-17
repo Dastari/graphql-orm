@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-storage
 
+Version 0.17.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
 construction for a host-protected tree; `new` does not exist on Windows. This mode does
 not enforce links as a security boundary. Unix keeps its no-follow boundary.
