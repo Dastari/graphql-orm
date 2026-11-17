@@ -1654,6 +1654,7 @@ mod tests {
     ) {
         let clock = Arc::new(FixedClock::new(now()));
         let limits = AiRunServiceLimits::new(Duration::hours(1), Duration::hours(1), 16, 2, 8)
+            .and_then(|limits| limits.with_lease_recovery_grace(Duration::ZERO))
             .expect("run limits");
         (
             OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone()),

@@ -209,10 +209,12 @@ raw provider store ID cannot be adopted as authority.
 
 ## Unconfirmed provider-file cleanup
 
-A DELETE 404 proves absence only at or after the recorded provider expiry. An
-earlier deletion intent or repeated 404s cannot distinguish absence from a
-credential that now addresses another project, including after restore. Without
-expiry, unconfirmed outcomes retry up to the configured bound (24 by default).
+A DELETE 404 never proves absence, not even at or after the recorded provider
+expiry: a credential that now addresses another project gets the same answer
+while the file still exists, and an earlier deletion intent or repeated 404s
+cannot tell the two apart, including after restore. Only an acknowledged delete
+followed by a not-found retrieval confirms absence. Unconfirmed outcomes retry
+up to the configured bound (24 by default).
 Exhaustion produces `cleanup_unconfirmed` and increments the host cleanup report's
 `artifacts_unconfirmed`; it never reports provider deletion as successful.
 

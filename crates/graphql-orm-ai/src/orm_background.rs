@@ -3320,6 +3320,21 @@ async fn commit_background_terminal_graph(
     if let Some(output) = prepared_output {
         persist_background_provider_output(tx, submission, &run, output, now).await?;
     }
+    // A stored background response stays at the provider whatever its
+    // terminal status, so it joins the stored-response ledger.
+    if submission.provider_store == Some(true)
+        && let Some(response_id) = submission.provider_response_id.as_deref()
+    {
+        crate::orm_session_retention::record_retained_provider_response(
+            tx,
+            run.session_id,
+            &submission.provider_kind,
+            &submission.provider_profile_id,
+            response_id,
+            now.unix_timestamp(),
+        )
+        .await?;
+    }
     let run_update = tx
         .compare_and_swap::<AiRunRecord>(
             &run.id,
