@@ -19,8 +19,9 @@
 use graphql_orm::async_graphql::{Request, Response};
 use graphql_orm::futures::{Stream, StreamExt};
 use graphql_orm::graphql::orm::{
-    AuthorizedKeysetEntity, DefaultBackend, GraphqlClientMetadata, GraphqlLifetimeEncoding, GraphqlRelationshipKeyMapping,
-    GraphqlRelationshipNotBatchableReason, InterpretationEntity, interpretation_fingerprint,
+    AuthorizedKeysetEntity, DefaultBackend, GraphqlClientMetadata, GraphqlLifetimeEncoding,
+    GraphqlRelationshipKeyMapping, GraphqlRelationshipNotBatchableReason, InterpretationEntity,
+    interpretation_fingerprint,
 };
 use graphql_orm::prelude::*;
 use tokio::time::{Duration, timeout};
