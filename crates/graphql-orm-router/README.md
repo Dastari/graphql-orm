@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.1 changes only the wire tests: the persisted-documents snapshot
+tests no longer read a refresh result before it is fully written, and they
+check each response's status and media type before decoding it. Router
+behavior, configuration and public APIs are unchanged.
+
 Version 0.16.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
