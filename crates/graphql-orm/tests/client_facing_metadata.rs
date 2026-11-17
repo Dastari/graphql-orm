@@ -393,11 +393,13 @@ fn client_metadata_export_matches_its_golden() -> TestResult {
             reason: GraphqlRelationshipNotBatchableReason::Conditional,
         }
     );
-    // No private column name reaches the export.
-    // No column name or private field reaches the export. The policy-guarded
-    // key is a public field, so it appears only as a carried field.
-    assert!(!exported.contains("hidden_parent_id"));
-    assert!(!exported.contains("owner"));
+    // The policy-guarded key is a public field, so it may appear as a carried
+    // field, but no relationship mapping names it. The private field appears
+    // nowhere, under any case feature.
+    let relationships = serde_json::to_string(&child.relationships)?;
+    assert!(!relationships.contains(field_name("hiddenParentId")));
+    assert!(!relationships.contains("hidden_parent_id"));
+    assert!(!exported.contains("wner"));
 
     // Entities without a fact still report their stream, and nothing else.
     let plain = metadata.entity("MetaPlain").expect("plain facts");
