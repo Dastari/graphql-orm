@@ -721,9 +721,27 @@ where
     Ok(rows)
 }
 
-fn unsupported_subscription_selection() -> async_graphql::Error {
-    OrmPublicError::with_message(crate::graphql::errors::OrmErrorCode::InvalidInput,
-        "Subscription payloads support persisted subscribable scalar fields only; refresh authorized queries for relations or computed fields").into_graphql_error()
+/// `extensions.code` of the refusal of a generated `Changed` subscription whose
+/// selection can never be streamed, such as a relation, a computed field or an
+/// unavailable key. A client can retry with a smaller selection, for example
+/// keys only. Sent only under
+/// [`DatabaseBuilder::subscription_selection_unsupported_code`](crate::db::DatabaseBuilder::subscription_selection_unsupported_code);
+/// otherwise the same refusal carries `INVALID_INPUT`.
+pub const SUBSCRIPTION_SELECTION_UNSUPPORTED: &str = "SUBSCRIPTION_SELECTION_UNSUPPORTED";
+
+fn unsupported_subscription_selection<B: OrmBackend>(ctx: &Context<'_>) -> async_graphql::Error {
+    let error = OrmPublicError::with_message(crate::graphql::errors::OrmErrorCode::InvalidInput,
+        "Subscription payloads support persisted subscribable scalar fields only; refresh authorized queries for relations or computed fields").into_graphql_error();
+    if ctx
+        .data_opt::<crate::db::Database<B>>()
+        .is_some_and(crate::db::Database::subscription_selection_unsupported_code_enabled)
+    {
+        use async_graphql::ErrorExtensions;
+        return error.extend_with(|_, extensions| {
+            extensions.set("code", SUBSCRIPTION_SELECTION_UNSUPPORTED)
+        });
+    }
+    error
 }
 
 /// Reject unsupported nested/computed payload shapes before registration.
@@ -747,7 +765,7 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
                     .and_then(|column| T::subscription_field_policy(column.api_name))
                     .is_some_and(|(_, available, _)| available);
                 if !available {
-                    return Err(unsupported_subscription_selection());
+                    return Err(unsupported_subscription_selection::<B>(ctx));
                 }
             }
         }
@@ -771,7 +789,7 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
                             .is_some_and(|(_, available, _)| available)
                 }
             {
-                return Err(unsupported_subscription_selection());
+                return Err(unsupported_subscription_selection::<B>(ctx));
             }
         }
     }

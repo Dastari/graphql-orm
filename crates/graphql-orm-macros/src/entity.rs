@@ -44,6 +44,8 @@ pub(crate) struct EntityMetadata {
     /// Optional async hook path invoked after create/update/delete mutations.
     pub(crate) notify_handler: Option<String>,
     pub(crate) notify_report_errors: bool,
+    /// `mutation_error_codes`: generated single-row results carry `ErrorCode`.
+    pub(crate) mutation_error_codes: bool,
     pub(crate) upsert: Option<Vec<String>>,
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<OrdinaryIndexMetadata>,
@@ -256,6 +258,14 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     metadata.append_only = lit.value;
                 } else if meta.path.is_ident("dependent_deletes") {
                     metadata.dependent_deletes = true;
+                } else if meta.path.is_ident("mutation_error_codes") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("mutation_error_codes requires a GraphQL entity"));
+                    }
+                    if metadata.mutation_error_codes {
+                        return Err(meta.error("mutation_error_codes may only be declared once"));
+                    }
+                    metadata.mutation_error_codes = true;
                 } else if meta.path.is_ident("retention_purge") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;

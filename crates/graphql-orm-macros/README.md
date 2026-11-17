@@ -17,6 +17,14 @@ every `schema_roots!`. Without them generated output is unchanged. Recompile
 entities with aligned ORM/macros versions. See the
 [migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
 
+Version 0.171.0 accepts `#[graphql_entity(mutation_error_codes)]`, which adds
+a nullable `errorCode` to the entity's generated single-row results and a code
+to its bulk filter refusals, and wraps generated mutation roots so their
+errors can carry the opt-in `extensions.outcome`. Without the attribute and
+the `Database` setting, generated SDL and responses are unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
+
 Version 0.170.0 installs `GeneratedInputValidation` in the generated schema
 builders, so a value that is not an object where an input object is expected
 is refused with `invalid_graphql_input` before any resolver runs, as is a

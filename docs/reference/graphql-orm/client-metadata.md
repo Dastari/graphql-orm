@@ -98,7 +98,9 @@ and generated identity fields such as `NodeId` where the semantic catalogue
 lists them. The list is
 computed by the same rules as that check, so the two cannot differ. Selecting
 any other field (a relation, a computed field, a `subscribe = false` field)
-refuses the whole stream. `identity_carried` says whether the event's `Id`
+refuses the whole stream, with `INVALID_INPUT`, or with
+`SUBSCRIPTION_SELECTION_UNSUPPORTED` when the host opts into the dedicated
+code (ORM/macros 0.171.0, see [stable error codes](error-codes.md)). `identity_carried` says whether the event's `Id`
 (and `Key`, for a composite key) may be selected.
 
 A carried field with a field policy is listed. An event whose row the

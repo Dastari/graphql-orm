@@ -18,6 +18,18 @@ carried fields, lifetime fields and relationship key mappings, an opt-in
 [client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md)
 and the [migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
 
+Version 0.171.0 adds an opt-in client error contract with one code vocabulary
+shared with the router: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an
+unstreamable `Changed` selection
+(`DatabaseBuilder::subscription_selection_unsupported_code`),
+`extensions.outcome` on generated mutation errors
+(`DatabaseBuilder::mutation_error_outcome`, see `MutationOutcome`), and
+`errorCode` on the single-row results of entities declared with
+`mutation_error_codes`. Nothing changes without them. See the
+[error-code reference](../../docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router)
+and the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
+
 Version 0.170.0 refuses, on generated static schemas, a value that is not an
 object where an input object is expected, and on static and runtime schemas a
 variable at a position the GraphQL rule does not allow, with
