@@ -361,7 +361,8 @@ rows written for visible rows are unchanged. A row outside read visibility
 that `can_write_row` would allow is then left out, as a missing row is. If
 callers may bulk-write rows they cannot read, return a `write_target_prefilter`
 that selects them. It takes precedence, and the bulk write uses it instead of
-read visibility. Single-row updates and deletes use only the
+read visibility. An error from `read_visibility` fails the bulk write closed
+before any row is selected. Single-row updates and deletes use only the
 `write_target_prefilter`.
 
 Without either predicate (`CallbackOnly` or `Unrestricted` visibility and no
