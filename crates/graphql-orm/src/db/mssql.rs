@@ -58,7 +58,9 @@ const SESSION_RESET: &str = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
     SET NOCOUNT OFF; \
     SET IMPLICIT_TRANSACTIONS OFF; \
     WHILE APPLOCK_MODE('public', N'graphql_orm_restore', 'Session') <> 'NoLock' \
-    EXEC sp_releaseapplock @Resource = N'graphql_orm_restore', @LockOwner = 'Session';";
+    EXEC sp_releaseapplock @Resource = N'graphql_orm_restore', @LockOwner = 'Session'; \
+    WHILE APPLOCK_MODE('public', N'graphql_orm_restore_marker_install', 'Session') <> 'NoLock' \
+    EXEC sp_releaseapplock @Resource = N'graphql_orm_restore_marker_install', @LockOwner = 'Session';";
 
 /// Ends an ORM transaction. A `COMMIT` that leaves `@@TRANCOUNT` above zero
 /// only decremented a nested transaction; nothing is durable yet. Roll back
@@ -592,17 +594,21 @@ impl MssqlPool {
         }
     }
 
+    /// The refusal for a gate that saw a restore: its lock was held or its
+    /// marker present. The marker, read again, names the restore. A restore
+    /// that holds the lock but has not recorded its marker yet has no
+    /// identifier to report, and neither has one whose marker cannot be read
+    /// now (a timeout, or a role denied SELECT): the gate has already seen
+    /// the restore, so the refusal stays `RestoreInProgress` and never says
+    /// that no restore is running.
     async fn restore_in_progress_error(&self) -> sqlx::Error {
-        match self.read_restore_marker().await {
-            Ok(marker) => {
-                // A restore that holds the lock but has not recorded its
-                // marker yet has no identifier to report.
-                let (restore_id, started_at) = marker.unwrap_or_default();
-                crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
-            }
-            // The marker cannot be read now: say so instead of naming a restore.
-            Err(unavailable) => unavailable,
-        }
+        let (restore_id, started_at) = self
+            .read_restore_marker()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
     }
 
     /// Install the canonical infrastructure table as the schema owner, before
@@ -957,7 +963,19 @@ const CREATE_RESTORE_MARKER: &str = "\
                 (c.name = N'marker_key' AND t.name = N'tinyint') \
                 OR (c.name = N'restore_id' AND t.name = N'nvarchar' AND c.max_length = 400) \
                 OR (c.name = N'started_at' AND t.name = N'bigint'))) <> 3 \
-        OR NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND is_primary_key = 1) \
+        OR (SELECT COUNT(*) FROM sys.indexes AS i \
+            JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+            JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+            WHERE i.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND i.is_primary_key = 1) <> 1 \
+        OR NOT EXISTS (SELECT 1 FROM sys.indexes AS i \
+            JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+            JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+            WHERE i.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND i.is_primary_key = 1 \
+              AND c.name = N'marker_key') \
+        OR NOT EXISTS (SELECT 1 FROM sys.check_constraints AS k \
+            WHERE k.parent_object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') \
+              AND k.is_disabled = 0 AND k.is_not_trusted = 0 \
+              AND REPLACE(REPLACE(REPLACE(k.definition, N' ', N''), N'(', N''), N')', N'') = N'[marker_key]=1') \
          THROW 50000, N'dbo.__graphql_orm_restore_marker exists but does not have the documented shape', 1;";
 
 const INSERT_RESTORE_MARKER: &str = "INSERT INTO [dbo].[__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
@@ -1665,21 +1683,61 @@ impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
     }
 }
 
+/// Run one exchange with the driver, turning a panic inside it into an error.
+///
+/// The driver asserts on some values it cannot represent while it decodes a
+/// row, before the ORM sees the value: a non-NULL value in a column declared
+/// with scale 38 (`DECIMAL(38,38)`, #452) is one. A panic would unwind
+/// through the caller's task. Here it becomes a decode error instead. The
+/// stream is then in an unknown state, so the connection is never reused,
+/// and inside a transaction the failure ends the transaction. The process's
+/// panic hook still reports the assertion. A binary built with
+/// `panic = "abort"` cannot catch it and aborts.
+pub(super) async fn catch_driver_panic<T, E>(
+    exchange: impl std::future::Future<Output = Result<T, E>>,
+    into_error: impl FnOnce(sqlx::Error) -> E,
+) -> Result<T, E> {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(exchange).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|detail| (*detail).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "no detail".to_string());
+            Err(into_error(sqlx::Error::Decode(
+                format!(
+                    "the SQL Server driver could not decode a value in the result ({detail}); \
+                     the connection was closed"
+                )
+                .into(),
+            )))
+        }
+    }
+}
+
 async fn fetch_rows_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
 ) -> Result<Vec<MssqlRow>, StatementFailure> {
-    let mut query = Query::new(sql.to_string());
-    for value in values.iter().map(MssqlParamValue::from) {
-        query.bind(value);
-    }
-    let stream = query.query(client).await.map_err(statement_failure)?;
-    let rows = stream
-        .into_first_result()
-        .await
-        .map_err(statement_failure)?;
-    Ok(rows.into_iter().map(MssqlRow::new).collect())
+    catch_driver_panic(
+        async {
+            let mut query = Query::new(sql.to_string());
+            for value in values.iter().map(MssqlParamValue::from) {
+                query.bind(value);
+            }
+            let stream = query.query(client).await.map_err(statement_failure)?;
+            let rows = stream
+                .into_first_result()
+                .await
+                .map_err(statement_failure)?;
+            Ok(rows.into_iter().map(MssqlRow::new).collect())
+        },
+        StatementFailure::from,
+    )
+    .await
 }
 
 async fn execute_with_client(
@@ -1687,14 +1745,20 @@ async fn execute_with_client(
     sql: &str,
     values: &[SqlValue],
 ) -> Result<MssqlWriteResult, StatementFailure> {
-    let mut query = Query::new(sql.to_string());
-    for value in values.iter().map(MssqlParamValue::from) {
-        query.bind(value);
-    }
-    let result = query.execute(client).await.map_err(statement_failure)?;
-    Ok(MssqlWriteResult {
-        rows_affected: statement_rows_affected(result.rows_affected()),
-    })
+    catch_driver_panic(
+        async {
+            let mut query = Query::new(sql.to_string());
+            for value in values.iter().map(MssqlParamValue::from) {
+                query.bind(value);
+            }
+            let result = query.execute(client).await.map_err(statement_failure)?;
+            Ok(MssqlWriteResult {
+                rows_affected: statement_rows_affected(result.rows_affected()),
+            })
+        },
+        StatementFailure::from,
+    )
+    .await
 }
 
 /// The row count of the executed statement itself.
@@ -1714,14 +1778,20 @@ async fn execute_control_statement(
     client: &mut MssqlClient,
     sql: &str,
 ) -> Result<(), StatementFailure> {
-    client
-        .simple_query(sql)
-        .await
-        .map_err(statement_failure)?
-        .into_results()
-        .await
-        .map_err(statement_failure)?;
-    Ok(())
+    catch_driver_panic(
+        async {
+            client
+                .simple_query(sql)
+                .await
+                .map_err(statement_failure)?
+                .into_results()
+                .await
+                .map_err(statement_failure)?;
+            Ok(())
+        },
+        StatementFailure::from,
+    )
+    .await
 }
 
 /// Classify a driver error. Only a non-fatal error the server reported leaves
@@ -1809,6 +1879,33 @@ fn needs_instance_lookup(config: &Config) -> bool {
     rest.starts_with(", port: None,")
 }
 
+/// Whether `config` asks for `EncryptionLevel::On`, "encrypt if the server
+/// allows it".
+///
+/// The driver panics during prelogin when such a configuration meets a
+/// server that declines encryption, so the ORM refuses it before connecting.
+/// Only a caller-built `Config` under
+/// [`MssqlTransportPolicy::insecure_allow_login_only_encryption`] can carry
+/// it: every other policy raises the level to `Required`, and connection
+/// strings never produce `On`. The driver has no getter for the level, so it
+/// is read from the configuration's `Debug` form outside quoted values,
+/// which hides the password.
+fn requests_optional_encryption(config: &Config) -> bool {
+    let debug = format!("{config:?}");
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in debug.char_indices() {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted && debug[index..].starts_with(", encryption: On,") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Open the TCP stream for `config`.
 ///
 /// A named instance given without a port (`server=host\\INSTANCE`) has no
@@ -1838,6 +1935,14 @@ async fn open_tcp(config: &Config, redirected: bool) -> crate::Result<TcpStream>
 /// same transport policy against the redirected host name. A second redirect
 /// is an error.
 async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
+    if requests_optional_encryption(&config) {
+        return Err(sqlx::Error::Configuration(
+            "SQL Server EncryptionLevel::On is not supported: the driver panics when the \
+             server declines encryption. Use EncryptionLevel::Required, or Off with the \
+             login-only opt-in"
+                .into(),
+        ));
+    }
     let mut redirected = false;
     loop {
         let tcp = open_tcp(&config, redirected).await?;
@@ -1847,6 +1952,13 @@ async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
             Err(tiberius::error::Error::Routing { host, port }) if !redirected => {
                 redirected = true;
                 follow_route(&mut config, &host, port);
+            }
+            // The bound that keeps a routing loop from reconnecting forever.
+            Err(tiberius::error::Error::Routing { host, port }) => {
+                return Err(sqlx::Error::Protocol(format!(
+                    "SQL Server redirected the connection a second time, to {host}:{port}; \
+                     only one routing redirect is followed"
+                )));
             }
             Err(error) => return Err(map_tiberius_error(error)),
         }
@@ -2089,6 +2201,230 @@ mod tests {
         let mut config = config();
         follow_route(&mut config, "node7.worker.database.example", 11042);
         assert_eq!(config.get_addr(), "node7.worker.database.example:11042");
+    }
+
+    /// The driver panics when `EncryptionLevel::On` meets a server that
+    /// declines encryption; the pool refuses that configuration before it
+    /// opens a connection.
+    #[tokio::test]
+    async fn optional_encryption_is_refused_before_connecting() {
+        use std::sync::atomic::Ordering;
+        let (port, logins, task) = fake_tds_endpoint(FakeLogin::Accept).await;
+        let mut config = Config::new();
+        config.host("127.0.0.1");
+        config.port(port);
+        config.authentication(tiberius::AuthMethod::sql_server("owned", "owned"));
+        for (level, refused) in [
+            (tiberius::EncryptionLevel::On, true),
+            (tiberius::EncryptionLevel::Off, false),
+            (tiberius::EncryptionLevel::NotSupported, false),
+            (tiberius::EncryptionLevel::Required, false),
+        ] {
+            config.encryption(level);
+            assert_eq!(requests_optional_encryption(&config), refused, "{level:?}");
+        }
+        // A value cannot imitate the field.
+        let mut odd = config.clone();
+        odd.host("a\", encryption: On, \"");
+        odd.encryption(tiberius::EncryptionLevel::Required);
+        assert!(!requests_optional_encryption(&odd));
+
+        config.encryption(tiberius::EncryptionLevel::On);
+        let pool = MssqlPool::with_options(
+            config,
+            MssqlPoolOptions::new()
+                .transport(MssqlTransportPolicy::verified().insecure_allow_login_only_encryption()),
+        );
+        let error = pool
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&error, sqlx::Error::Configuration(message) if message.to_string().contains("EncryptionLevel::On")),
+            "{error:?}"
+        );
+        assert_eq!(logins.load(Ordering::SeqCst), 0, "nothing was sent");
+        task.abort();
+    }
+
+    /// What a fake TDS endpoint answers a login with.
+    #[derive(Clone)]
+    enum FakeLogin {
+        /// Log the client in, then answer every request with an empty result.
+        Accept,
+        /// Send the client to this port on loopback, as an Azure SQL gateway
+        /// under the Redirect connection policy does.
+        Redirect(u16),
+    }
+
+    type FakeStream = tokio_util::compat::Compat<TcpStream>;
+
+    /// Read one TDS message: packets up to the one with the end-of-message bit.
+    async fn read_tds_message(stream: &mut FakeStream) -> std::io::Result<u8> {
+        use futures::io::AsyncReadExt;
+        loop {
+            let mut header = [0u8; 8];
+            stream.read_exact(&mut header).await?;
+            let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+            let mut body = vec![0u8; length.saturating_sub(8)];
+            stream.read_exact(&mut body).await?;
+            if header[1] & 0x01 != 0 {
+                return Ok(header[0]);
+            }
+        }
+    }
+
+    async fn write_tds_message(
+        stream: &mut FakeStream,
+        packet_type: u8,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        use futures::io::AsyncWriteExt;
+        let length = u16::try_from(body.len() + 8).expect("one small packet");
+        let mut packet = vec![packet_type, 0x01];
+        packet.extend_from_slice(&length.to_be_bytes());
+        packet.extend_from_slice(&[0, 0, 1, 0]);
+        packet.extend_from_slice(body);
+        stream.write_all(&packet).await
+    }
+
+    /// A final `DONE` token: status, current command and a TDS 7.2+ row count.
+    fn tds_done() -> Vec<u8> {
+        let mut token = vec![0xFD, 0, 0, 0, 0];
+        token.extend_from_slice(&0u64.to_le_bytes());
+        token
+    }
+
+    /// An `ENVCHANGE` routing token (type 20) naming `host:port`.
+    fn tds_routing(host: &str, port: u16) -> Vec<u8> {
+        let name = host.encode_utf16().collect::<Vec<_>>();
+        let mut value = vec![0u8]; // TCP
+        value.extend_from_slice(&port.to_le_bytes());
+        value.extend_from_slice(&u16::try_from(name.len()).unwrap().to_le_bytes());
+        for unit in &name {
+            value.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut body = vec![20u8];
+        body.extend_from_slice(&u16::try_from(value.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(&value);
+        body.extend_from_slice(&0u16.to_le_bytes()); // no old value
+        let mut token = vec![0xE3];
+        token.extend_from_slice(&u16::try_from(body.len()).unwrap().to_le_bytes());
+        token.extend_from_slice(&body);
+        token
+    }
+
+    /// A loopback TDS endpoint without TLS that counts the logins it sees.
+    async fn fake_tds_endpoint(
+        answer: FakeLogin,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let logins = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = logins.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let mut stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                let answer = answer.clone();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    // PRELOGIN: version 16.0, encryption not supported.
+                    assert_eq!(read_tds_message(&mut stream).await?, 0x12);
+                    let prelogin = [
+                        0x00, 0x00, 0x0B, 0x00, 0x06, // VERSION at 11, 6 bytes
+                        0x01, 0x00, 0x11, 0x00, 0x01, // ENCRYPTION at 17, 1 byte
+                        0xFF, 16, 0, 0, 0, 0, 0,    // version, sub-build
+                        0x02, // ENCRYPT_NOT_SUP
+                    ];
+                    write_tds_message(&mut stream, 0x04, &prelogin).await?;
+                    // LOGIN7.
+                    assert_eq!(read_tds_message(&mut stream).await?, 0x10);
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    match answer {
+                        FakeLogin::Redirect(port) => {
+                            let mut tokens = tds_routing("127.0.0.1", port);
+                            tokens.extend(tds_done());
+                            write_tds_message(&mut stream, 0x04, &tokens).await?;
+                        }
+                        FakeLogin::Accept => {
+                            write_tds_message(&mut stream, 0x04, &tds_done()).await?;
+                            while read_tds_message(&mut stream).await.is_ok() {
+                                write_tds_message(&mut stream, 0x04, &tds_done()).await?;
+                            }
+                        }
+                    }
+                    std::io::Result::Ok(())
+                });
+            }
+        });
+        (port, logins, task)
+    }
+
+    /// Under Azure SQL's Redirect connection policy the gateway logs the
+    /// client in and names the node to connect to (#518). The pool follows
+    /// that one redirect and runs its statements on the node; a second
+    /// redirect is refused rather than followed.
+    #[tokio::test]
+    async fn the_pool_follows_one_routing_redirect_to_the_node() {
+        use std::sync::atomic::Ordering;
+        // No TLS: the fake endpoints speak plain TDS. That needs both the
+        // code opt-in and a caller-built configuration.
+        let pool = |port: u16| {
+            let mut config = Config::new();
+            config.host("127.0.0.1");
+            config.port(port);
+            config.authentication(tiberius::AuthMethod::sql_server("owned", "owned"));
+            config.encryption(tiberius::EncryptionLevel::NotSupported);
+            MssqlPool::with_options(
+                config,
+                MssqlPoolOptions::new()
+                    .connect_timeout(Duration::from_secs(5))
+                    .transport(
+                        MssqlTransportPolicy::verified().insecure_allow_login_only_encryption(),
+                    ),
+            )
+        };
+
+        let (node, node_logins, node_task) = fake_tds_endpoint(FakeLogin::Accept).await;
+        let (gateway, gateway_logins, gateway_task) =
+            fake_tds_endpoint(FakeLogin::Redirect(node)).await;
+        let rows = pool(gateway)
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .expect("the redirected connection serves the statement");
+        assert!(rows.is_empty());
+        assert_eq!(gateway_logins.load(Ordering::SeqCst), 1);
+        assert_eq!(node_logins.load(Ordering::SeqCst), 1);
+
+        // A node that redirects again is not followed: the redirect bound is
+        // one hop, so a routing loop cannot keep the pool connecting.
+        let (second, second_logins, second_task) =
+            fake_tds_endpoint(FakeLogin::Redirect(node)).await;
+        let (first, first_logins, first_task) =
+            fake_tds_endpoint(FakeLogin::Redirect(second)).await;
+        let error = pool(first)
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .err()
+            .expect("a second redirect is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("only one routing redirect is followed"),
+            "{error}"
+        );
+        assert_eq!(first_logins.load(Ordering::SeqCst), 1);
+        assert_eq!(second_logins.load(Ordering::SeqCst), 1);
+        assert_eq!(node_logins.load(Ordering::SeqCst), 1, "never reached");
+        for task in [node_task, gateway_task, second_task, first_task] {
+            task.abort();
+        }
     }
 
     /// A named instance without a port is resolved through SQL Server
