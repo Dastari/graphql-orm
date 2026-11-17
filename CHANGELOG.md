@@ -14,15 +14,32 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.173.0
+## Unreleased - ORM/macros 0.174.0
 
-Read-policy negation with a stated fail-closed NULL rule ([#766](https://github.com/Dastari/graphql-orm/issues/766)). See [read-predicate negation and NULLs](docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls) and the [migration guide](MIGRATION.md#01720-to-01730-read-policy-negation).
+Read-policy negation with a stated fail-closed NULL rule ([#766](https://github.com/Dastari/graphql-orm/issues/766)). See [read-predicate negation and NULLs](docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls) and the [migration guide](MIGRATION.md#01730-to-01740-read-policy-negation).
 
 - **`ReadPredicate::not_related`.** The fail-closed "no related row matching P" counterpart of `ReadPredicate::related`, with the same key, entity and backend validation. It is three-valued: UNKNOWN when a source key is NULL, FALSE when a related row has `P` TRUE, UNKNOWN when no related row has `P` TRUE but one has it UNKNOWN, TRUE otherwise (including no related rows). It renders a `CASE` over two correlated `EXISTS` subqueries on SQLite, PostgreSQL and SQL Server, so it composes with `not`, `and` and `or` under the same rule as every other predicate, and `not_related(k, p).not()?` admits exactly the rows of `related(k, p)`. As with `related`, the policy owns the join and the target's row policy is not imported. The outcome reveals what `related(k, p)` reveals plus whether some related row, hidden or not, has `p` UNKNOWN; that case fails closed (it can deny a row, never admit one).
 - **`ReadPredicate::is_null` and `is_not_null`.** Validated, two-valued NULL tests on persisted columns, including private ones, for policies that want NULL rows (`p.not()?.or(ReadPredicate::is_null::<B, T>("column")?)?`) or every row with a value.
 - **Fix (authorization, fail closed): negating the deny fallback is refused.** A generated filter renders the deny fallback `1 = 0` for an empty `in_list` or `or` list, for a filter that fails validation (such as a list over `MAX_FILTER_LIST_OPERANDS`, 1,000, operands) and for an invalid filter value. `ReadPredicate::not()` now refuses with `AUTHORIZATION_MISCONFIGURED`, when the policy is built, any predicate that renders `1 = 0` anywhere, including inside a relation. Previously, negating such a predicate admitted all rows of the entity, including rows whose column is NULL; it is now refused. `not_related` refuses such a target too. A generated client filter's own `not: { field: { inList: [] } }` is unchanged: it still matches every row the request can see, and row policy still applies.
 - **Documented NULL rule.** `not()` keeps SQL three-valued semantics: it is TRUE only when the inner predicate is FALSE, so a NULL compared column never admits a row, double negation is the identity, and the rule holds in nested `and`/`or` trees. `related(..).not()` remains the two-valued `NOT EXISTS` it has been since 0.92.0. Every read path, including keyset and connection pages, authorized scans, search and subscription delivery, applies the same SQL clause.
 - New tests run truth tables with NULLs for negation, double negation, nested trees, `related`/`not_related` with matching, non-matching, UNKNOWN and absent related rows and NULL keys, empty-list refusals, bind order and placeholder numbering, and keyset and connection pages over negated policies on SQLite and owned PostgreSQL and SQL Server; a SQLite test checks that subscription delivery admits exactly the rows of the SQL read.
+
+## Unreleased - ORM/macros 0.173.0
+
+- The operation catalogue 0.9.0 and companion package releases declare the same
+  minimum compiler; serialized contracts and stored data remain unchanged.
+- Refresh eight root-collision diagnostic snapshots for the pinned Rust 1.97.1
+  panic-display excerpt and require `rust-src` in the toolchain/ORM CI setup; collision rejection and error messages are unchanged.
+- Declare Rust 1.97.1 consistently across published packages, pin development to
+  1.97.1 and verify workspace/backend/provider MSRV graphs in CI (#501).
+- Retire the obsolete macros postgres-smoke fixture and its floating PostgreSQL
+  image (#684; removes its #615 pin only).
+- Validate scoped-release and router-binary approval URLs through the GitHub API
+  using the guard job token with read-only PR permission (#499).
+- Retain Tiberius 0.12.4: unpatched upstream 0.13.0 cannot compile the existing
+  query-notification API. See the SQL Server reference for exact errors (#516).
+- Record dated advisory exceptions, release/changelog policy, generator split
+  and security property-testing scope (#504, #505, #513).
 
 ## Unreleased - ORM/macros 0.172.0, operation catalogue 0.8.1
 

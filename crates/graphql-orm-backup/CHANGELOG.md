@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.27.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## 0.26.0 (unreleased)
 
 - Host-held snapshot records (#610). A seal proves the host once wrote a

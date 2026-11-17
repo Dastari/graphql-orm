@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.172.0 to 0.173.0: read-policy negation
+## 0.173.0 to 0.174.0: read-policy negation
 
 Upgrade ORM and macros together. Generated code is unchanged. See
 [read-predicate negation and NULLs](docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls).
@@ -39,6 +39,13 @@ Upgrade ORM and macros together. Generated code is unchanged. See
   `related(..).not()` is unchanged (two-valued `NOT EXISTS`, which admits rows
   with a NULL key or only UNKNOWN related rows); switch absence policies to
   `not_related` if those rows must be denied.
+
+## 0.172.0 to 0.173.0: process and toolchain
+
+**Action needed:** use Rust 1.97.1 or newer (development/CI pin 1.97.1).
+No data migration is needed. Tiberius remains on the reviewed 0.12.4 revision.
+Release operators must supply a same-repository merged PR URL or approved
+review URL for scoped publication and router binary distribution.
 
 ## ORM/macros 0.172.0 and operation catalogue 0.8.1: client-facing metadata
 

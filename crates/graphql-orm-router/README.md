@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Version 0.15.5 changes only the wire tests: the Prometheus exporter test no
 longer depends on which listeners other tests hold on the public loopback
 address. Router behavior, configuration and public APIs are unchanged.

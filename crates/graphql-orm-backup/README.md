@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.27.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Version 0.26.0 adds host-held snapshot records: a known-snapshot list or a
 revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is
 put back into the repository, and `prune_observed` and

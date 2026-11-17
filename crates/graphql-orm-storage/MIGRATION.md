@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.17.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
 ## 0.15.0 to 0.16.0: local links, listing pages and canonical keys
 
 **Windows local roots — Action needed (Windows hosts):**

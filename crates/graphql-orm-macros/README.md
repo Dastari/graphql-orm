@@ -10,7 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.173.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
+Version 0.174.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
+
+Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Version 0.172.0 accepts the entity options `lifetime(...)`,
 `changed_started` and `aggregate_source`, and the `schema_roots!` option

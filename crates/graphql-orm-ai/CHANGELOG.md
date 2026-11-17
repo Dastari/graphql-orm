@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.148.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## Unreleased - 0.147.0
 
 - **Changed (leases):** `AiRunServiceLimits::new` now sets a lease-recovery clock-skew grace of a quarter of the lease TTL in whole seconds, at most 30 seconds (15 seconds for a one-minute lease). `recover_expired_leases` waits that long past a lease's stamped expiry, so a recovering process whose clock runs ahead of the lease holder's by less than the grace can no longer close a live lease. Recovery of a dead lease is delayed by the same amount; `with_lease_recovery_grace(Duration::ZERO)` restores the previous timing. The approval half of #536 (approvals closed with their run, decisions refused once the run leaves `WaitingApproval`, the lease renewed during tool execution) shipped in 0.138.0. Fixes #536.

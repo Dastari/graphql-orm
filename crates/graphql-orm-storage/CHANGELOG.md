@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.17.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## 0.16.0 (unreleased)
 
 **Windows local roots — Action needed (Windows hosts):**

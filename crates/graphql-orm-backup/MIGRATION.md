@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.27.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
 ## To 0.26.0: host-held snapshot records
 
 Upgrade backup to 0.26.0 and, when using the optional ORM adapter, ORM/macros

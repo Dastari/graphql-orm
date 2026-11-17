@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+Version 0.24.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 `graphql-orm-ai-tool-profiles` compiles reviewed static profiles and automatic,
 least-disclosure GraphQL query capabilities against a finished SDL. It emits
 closed provider schemas, exact server-owned documents, disclosure contracts,
