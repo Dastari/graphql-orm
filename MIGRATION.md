@@ -3,19 +3,404 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## 0.159.0 to 0.160.0: process and toolchain
+## 0.172.0 to 0.173.0: process and toolchain
 
 **Action needed:** use Rust 1.97.1 or newer (development/CI pin 1.97.1).
 No data migration is needed. Tiberius remains on the reviewed 0.12.4 revision.
 Release operators must supply a same-repository merged PR URL or approved
 review URL for scoped publication and router binary distribution.
+
+## ORM/macros 0.172.0 and operation catalogue 0.8.1: client-facing metadata
+
+Upgrade ORM and macros together and recompile entities. Without the new
+options, generated SDL, operation catalogues, semantic catalogues and their
+fingerprints are unchanged. See
+[client-facing schema metadata](docs/reference/graphql-orm/client-metadata.md).
+
+- **Client metadata export (#340, #670, #672). No action.**
+  `schema_roots!(client_metadata: true)` emits
+  `graphql_orm_client_metadata()`, a separate document bound to the semantic
+  catalogue by its fingerprint. It lists the fields each generated `Changed`
+  stream can carry, each declared lifetime field and each public relationship's
+  key mapping (`batchable`, `not_batchable` for conditional or policy-guarded
+  relationships, or `no_exposed_key` when a key field is not public, has a
+  field policy or is classified `secret`). Export it at build time with
+  `GraphqlClientMetadata::export_json`. The semantic catalogue is unchanged.
+- **Lifetime fields (#670). No action.**
+  `#[graphql_entity(lifetime(field = "...", format = "..."))]` names the field
+  holding a record's expiry time. Integer and `String` fields must state their
+  `format`. The ORM never enforces expiry.
+- **Started signal (#341). Action needed** only for clients of an entity you
+  opt in with `changed_started = true`. That entity's `Changed` root gains
+  `Started: Boolean`, its `<Entity>ChangedEvent` gains `Started: Boolean!`,
+  and its `Action`, `ChangeKind`, `Id` and `Key` fields become nullable so a
+  started frame can leave them null. Events still fill them, and a subscriber
+  that does not pass `Started: true` receives no started frame, but typed
+  client code generated from the old schema sees the nullability change.
+  Regenerate it.
+- **Aggregate source entity (#372). Action needed** only for clients of an
+  entity you opt in with `aggregate_source = true`. Its aggregate root returns
+  `[<Entity>AggregateResultRow!]!`, with the shared row's fields plus an
+  always-null `SourceEntity: <Entity>`, in place of
+  `[GraphqlAggregateResultRow!]!`. Documents keep validating; typed client
+  code and AI capability approvals that name the result type must be
+  regenerated.
+- **Interpretation fingerprint (#671). Action needed** only if a host already
+  defines an item named `graphql_orm_interpretation_fingerprint` in the
+  `schema_roots!` scope: rename it, because every `schema_roots!` now emits a
+  function of that name (and, with `client_metadata: true`,
+  `graphql_orm_client_metadata`). The fingerprint changes when a release may
+  read existing cursors, keys or `NodeId` values differently, and does not
+  depend on the order of `entities:`. The ORM does not serve it; a host may
+  serve it as the `graphql-orm-interpretation` response header and in
+  `connection_ack`.
+- **Operation catalogue 0.8.1. No action.** The client metadata types are
+  additive (`GraphqlClientMetadata` and its members, all non-exhaustive with
+  constructors). No existing type, wire format or fingerprint changes.
+- **Multi-page reads (#673). No action.** The pagination reference now states
+  that each page is an independent read and why there is no snapshot token.
+
+## 0.170.0 to 0.171.0: opt-in client error contract
+
+Upgrade ORM and macros together and recompile entities. Without the new
+settings, generated SDL, responses, operation catalogues and fingerprints are
+unchanged. See [one vocabulary with the router](docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router).
+
+- **Unsupported subscription selection code. No action.** Opt in with
+  `DatabaseBuilder::subscription_selection_unsupported_code(true)` to refuse an
+  unstreamable generated `Changed` selection with
+  `SUBSCRIPTION_SELECTION_UNSUPPORTED` instead of `INVALID_INPUT`. Before
+  enabling it, update clients that treat `INVALID_INPUT` on a stream as a
+  selection refusal.
+- **Mutation error outcome. No action.** Opt in with
+  `DatabaseBuilder::mutation_error_outcome(true)` to add `extensions.outcome`
+  (`refused`, `failed`, `committed` or `unknown`) to every generated mutation
+  root error. Under it, a bulk write whose commit fails returns a top-level
+  error instead of `success: false`; clients should read an absent `outcome`
+  as `unknown`. An `outcome` set by a host callback is replaced while the
+  setting is on.
+- **Mutation result error codes. No action.** Add `mutation_error_codes` to an
+  entity's `#[graphql_entity(...)]` to add a nullable `errorCode` to its
+  single-row results and a code to its bulk filter refusals. Refresh pinned
+  SDL and generated client types for that entity. Rust code that builds the
+  entity's `…Result` with a struct literal must then add `error_code: None`;
+  `ok` and `err` are unchanged.
+
+## 0.169.0 to 0.170.0: input-object values on static schemas and bulk-write filter authority
+
+Upgrade ORM and macros together and recompile entities. Generated SDL,
+operation catalogues and fingerprints are unchanged.
+
+- **Input-object values on generated `schema_builder` schemas. No action.**
+  A request that sends a scalar, list or enum where an input object is
+  expected (as a literal, a variable or a variable default, at any depth) is
+  now refused as a whole before any resolver runs, with message and
+  `extensions.code` `invalid_graphql_input`. It used to fail while that field
+  resolved, with an uncoded async-graphql coercion message, after earlier
+  fields had run. The check covers field arguments; directive arguments
+  (`@include`, `@skip` and custom directives) are left to async-graphql.
+  Spec-valid requests behave as before.
+- **Client documents with a variable at a position the GraphQL rule does not
+  allow. Action needed** only for clients that send such documents.
+  async-graphql 7.2.1 never applies the rule "All Variable Usages Are
+  Allowed" (its validator does not pass argument values on to it, in either
+  `ValidationMode`), so such a request used to run whenever its value happened
+  to coerce. Generated static schemas and runtime GraphQL schemas, whose
+  guard uses the same checker, now refuse it before any resolver runs.
+  Examples: a variable of another type, a nullable variable without a default
+  at a required argument, a list of nullable items where the items must be
+  non-null, and a nullable variable, or one that is `null` or omitted, as the
+  member of a oneof input object. To spot affected documents, look for
+  responses with `extensions.code` `invalid_graphql_input` and no data where
+  the same document used to run; declare each variable with the type of the
+  position it is used in. A variable that is not a list may still stand where
+  a list is expected when the list's item type admits it, since execution
+  coerces its value to a one-element list.
+- **Schemas built by hand from generated roots. Action needed.** Such a
+  schema does not get this check: generated roots do not install it
+  themselves. Add
+  `.extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`
+  to the `Schema::build(..)` chain. Without it the schema keeps async-graphql's
+  behaviour above.
+- **Bulk-write filter authority. No action.** Generated `updateMany` and
+  `deleteMany` keep authorizing every filter field with its read policy before
+  any SQL, as they have since 0.129.0, and report a denial in the payload
+  with the list query's message and code. This release adds SQLite and
+  PostgreSQL tests and reference documentation. The repository helpers
+  (`update_where`, `delete_where` and their bounded and `MutationContext`
+  forms) still run host-built filters without field read checks; a host
+  resolver that passes a client-supplied filter to one should call
+  `authorize_read_fields` first.
+
+## 0.167.0 to 0.169.0: SQL Server correctness and a client offset bound
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Client page offsets. No action.** `DatabaseBuilder::max_page_offset(Some(n))`
+  (or `Database::with_max_page_offset`) refuses a client page offset above `n`
+  with `PAGE_LIMIT_EXCEEDED` on every backend, for generated list roots,
+  to-many relation pages, search pages and custom resolvers that use
+  `ClientPaginationConfig::resolve_client_page`. Without it offsets stay
+  unbounded. Each backend scans the rows an offset skips, so public services
+  should set a bound, for example `PaginationConfig::RECOMMENDED_MAX_OFFSET`
+  (10,000), and page deeper with keyset cursors.
+- **Search page limit refusal. No action**, unless clients of a service with
+  `refuse_oversized_page_limit(true)` relied on a generated GraphQL search
+  over a native SQLite or PostgreSQL index reducing an oversized
+  `page.limit`: such a search is now refused with `PAGE_LIMIT_EXCEEDED`, as
+  the other generated pages and the scan path already were since 0.164.0.
+- **SQL Server `DECIMAL(38,38)`. No action.** A non-NULL value in a column
+  declared with scale 38 used to panic inside the driver while the row was
+  read. The statement now fails with `sqlx::Error::Decode` and its connection
+  is closed. The panic hook still reports the driver's assertion; cast such a
+  column in a view to read it.
+- **SQL Server introspection. Action needed** only for hosts that read
+  `introspect_mssql_schema` or diff it against a model. Tables now carry their
+  ordinary and unique indexes, so a model without them plans `DropIndex`. A
+  table without a primary key has an empty `primary_key`, `primary_keys` and
+  `default_sort` instead of `[id]`.
+- **SQL Server key strings. Action needed** only for hosts that compare
+  `ColumnDef::sql_type` of SQL Server entities or render DDL from them. A
+  `String` field that is a primary key, unique, a declared index or composite
+  unique member, or a foreign-key source is now `NVARCHAR(450)` (indexable)
+  instead of `NVARCHAR(MAX)`, and a Rust type with no mapping is
+  `NVARCHAR(MAX)` instead of `TEXT`. Recompile entities. Reads and writes are
+  unchanged. A plan against a live table now compares those columns with
+  `NVARCHAR(450)`: a live `NVARCHAR(MAX)` column (which SQL Server cannot
+  have indexed) plans an `AlterColumn` to `NVARCHAR(450)`, classified
+  `Risky` because it changes the column type; a live column of another length
+  plans one as before, with the new target.
+- **SQL Server `ALTER COLUMN`. No action.** A rendered alteration to a
+  character type is now an `EXEC sys.sp_executesql` batch that keeps the
+  column's live collation, instead of a plain `ALTER COLUMN` that reset it to
+  the database default. Review rendered plans with that in mind.
+- **SQL Server restore marker. Action needed** only for hosts that created
+  `dbo.__graphql_orm_restore_marker` by hand in a different shape:
+  `install_restore_marker` now also requires the primary key to be exactly
+  `marker_key` and the `CHECK (marker_key = 1)` constraint, as in the
+  documented DDL. Recreate such a table (while no restore is in progress). A
+  statement refused while a restore holds the lock now reports
+  `RestoreInProgress` with an empty `restore_id` when the marker cannot then
+  be read, where it used to report `RestoreStateUnavailable`.
+- **SQL Server routing. No action.** A second routing redirect is refused with
+  `sqlx::Error::Protocol` saying only one redirect is followed; the message
+  used to be the driver's.
+
+## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
+
+**No action.** Generated code, schemas and runtime behavior are unchanged. The
+macros unit tests no longer assume the SQLite backend (#735).
+
+## ORM/macros 0.166.0: guarded dependent deletes
+
+**No action** for unchanged hosts. No data or schema migration is needed.
+For the opt-in AI dependent-effect policy, implement the authenticated
+executor's `execute_registered_with_effect_guard` method and attach its guard
+to request data. The ORM checks the physical graph and locked row counts before
+writes; mismatched or unknown effects refuse and excess bounds roll back.
+Unsupported physical opt-out, bulk and unprovable ORM-managed paths refuse.
+
+The opt-in epoch anchor now requires atomic `compare_exchange` and an exclusive
+`lock_rotation` lease shared across processes through commit and finalization.
+Existing unanchored hosts are unaffected.
+
+## AI 0.145.0 to 0.146.0 and tool profiles 0.23.0 to 0.24.0: capability scale
+
+Upgrade AI and tool profiles together. No SDL, schema or data migration, and
+ORM/macros 0.166.0 provide transaction-bound effect verification. Details are in the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale)
+and the
+[tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale).
+
+- **Delivery-mode selection. No action.** Existing hosts keep native deferred
+  selection and their exact retained binding. Opt in with
+  `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+  prefer the fixed broker above the eager limits; opting in requires rebinding.
+- **Describe output. No action.** Fixed-broker `describe` returns repeated
+  input types once under `planSchema.types`. Execute arguments and all
+  fingerprints are unchanged.
+- **Oversized generated roots. No action.** One oversized root is excluded
+  and reported instead of failing its target; check
+  `excluded_capabilities()` at startup.
+- **Static tools behind the broker, epoch anchor, dependent-effect policy,
+  strict query roots. No action.** All four are opt-in.
+
+## 0.164.0 to 0.165.0: atomic restore, search reset and kept values on ignored denials
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Upsert with an ignored field-write denial. Action needed** only for hosts
+  that return `true` from `FieldPolicy::ignore_denied_field_write` and relied
+  on a denied optional field being cleared. A GraphQL upsert that resolves to
+  an existing row now leaves the denied column out of the conflict update, so
+  its stored value is kept; it used to be written as `NULL`. This applies to
+  fields with a declared `write_policy` and to key-less optional fields, on
+  SQLite, PostgreSQL and SQL Server. An upsert that inserts, updates, bulk
+  updates and required fields are unchanged. To clear such a field, allow the
+  write in `can_write_field`. `MutationEvent::changes` of that upsert no
+  longer lists the column. Recompile entities to pick up the generated code.
+- **Snapshot restore is one transaction. No action.** On PostgreSQL and SQLite
+  `restore_backup_rows` (and the backup adapter's `restore_full`) now commits
+  all tables together or not at all. A failed restore no longer needs the
+  target cleared before a retry. Row-hash validation runs before the commit; a
+  mismatch used to be reported after the table was already committed. Very
+  large restores hold one transaction for their whole duration: size the
+  PostgreSQL `statement_timeout` and `idle_in_transaction_session_timeout` of
+  the restoring role accordingly.
+- **Restore resets runtime search. Action needed** only for hosts that restore
+  the tables of searchable runtime collections with `restore_backup_rows`:
+  the restore leaves each such index `building`, so run
+  `backfill_runtime_search` for those collections before serving search.
+  Hosts that import runtime rows another way should call the new
+  `SchemaManager::reset_runtime_search` afterwards.
+- **SQL Server infrastructure. Action needed** for every MSSQL host.
+  As schema owner, run `MssqlPool::install_restore_marker()` during schema
+  installation, before runtime work. It creates the fixed
+  `dbo.__graphql_orm_restore_marker` table without clearing existing rows.
+  Grant the runtime role `SELECT` on that table; the restore role also needs
+  `INSERT` and `DELETE`. `install_restore_marker` needs an external-writable
+  pool, is idempotent, and is safe to run from several replicas at once. A
+  missing or unreadable table means restore state unavailable and fails
+  closed, refusing every statement with an error carrying the new
+  `RestoreStateUnavailable` (`RestoreStateUnavailable::from_error`), not
+  `RestoreInProgress`. Its `reason` is `MarkerNotInstalled` (call
+  `MssqlPool::install_restore_marker()` or run the DDL below),
+  `PermissionDenied` (grant the runtime role `SELECT`), `ConnectionFailed`
+  (the database could not be reached; retry, no marker fix needed) or `Other`
+  (for example a table of the wrong shape). The message names the fix and never
+  holds SQL text; the cause is its `source()`. Only a real restore in progress,
+  or a stale marker row, reports `RestoreInProgress`. Every SQL Server ORM
+  transaction and autocommit statement now takes a shared application lock
+  (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
+  it, and checks for a restore marker. Transactions and autocommit reads pay
+  no extra round trip; an autocommit write (a raw statement outside a
+  transaction) pays one short batch to release the lock. `sp_getapplock` is
+  granted to `public`. Raw
+  statements sent through the ORM run inside that wrapper batch; a statement
+  that must be alone in its batch (`CREATE VIEW`, `CREATE PROCEDURE`,
+  `CREATE TRIGGER` and similar) is sent unwrapped.
+- **Restoring a SQL Server database. Action needed** to get the exclusion:
+  call `Database::begin_restore(restore_id, wait)`, run the restore's
+  statements through the returned `MssqlRestore` guard (`execute`,
+  `fetch_rows`), then `finish()`. Statements a host runs on its own
+  connections are not covered by the lock. While the restore runs, and after
+  a restore whose process died, ORM work fails with an error carrying
+  `RestoreInProgress` (`RestoreInProgress::from_error`); after a crash, call
+  `Database::resume_restore(restore_id, wait)`, complete the restore or
+  remove its partial rows through the guard, and `finish()`. The marker must
+  exist before runtime work begins; it is never
+  created lazily by a restore. For SQL-only schema installation use:
+  `CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
+  Then `GRANT SELECT ON OBJECT::dbo.__graphql_orm_restore_marker TO [runtime_role]`.
+  If upgrading an unreleased build with an unqualified marker, quiesce all
+  access and reconcile any old marker into the canonical table before restarting;
+  do not clear a stale marker until its partial restore has been recovered.
+- Backup users also upgrade to
+  [backup 0.26.0](crates/graphql-orm-backup/MIGRATION.md#to-0260-host-held-snapshot-records).
+
+## 0.163.0 to 0.164.0: page limits, 64-bit identities, cursor keys and subscription lag
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged unless you
+turn on one of the new settings.
+
+- **Subscription lag ends on the authority tick. Action needed** only if a
+  client or test expects the end at once. A generated `Changed` stream or a
+  runtime live stream whose receiver fell behind used to end immediately with
+  `SUBSCRIPTION_CONTINUITY_LOST`. It now stops delivering and ends on its next
+  jittered authority tick, up to one recheck period later (30 to 33 seconds by
+  default; `Database::with_subscription_authority_recheck_interval`, 1 to 300
+  seconds). At the tick a subscriber whose authority is gone ends with
+  `FORBIDDEN` (generated) or `authorization_denied` (runtime); any other ends
+  with `SUBSCRIPTION_CONTINUITY_LOST` as before. Clients still resubscribe and
+  refetch. A runtime live client must now treat `authorization_denied` as a
+  terminal frame. Source closure, host continuity signals and schema-revision
+  changes still end at once.
+- **Runtime cursor keys that are too long. Action needed** only if you match
+  those codes. A runtime page whose row has order values too long for a cursor
+  used to fail through runtime GraphQL with `invalid_request` (above
+  `max_cursor_bytes`) or `invalid_cursor` (above the cursor protection bounds),
+  and a host `RuntimeRelationError::code()` returned `InvalidRequest`. Runtime
+  GraphQL now returns `cursor_key_too_large`. Host `RuntimeQueryError` and
+  `RuntimeRelationError` both return `ResourceLimit` with
+  `detail() == Some("cursor_key_too_large")`; match that pair instead of
+  `invalid_request`, `invalid_cursor` or `InvalidRequest`. The public enums
+  and existing `PaginationConfig` struct literals remain source-compatible.
+  Dedicated enum variants (and any `#[non_exhaustive]` change) belong to
+  `next/breaking`, in `breaking/orm-contract`.
+- **Refusing oversized page limits. No action.** Off by default. To let a
+  client tell a reduced page from a last page, set
+  `DatabaseBuilder::refuse_oversized_page_limit(true)`: an explicit GraphQL
+  page limit above the maximum then fails with `PAGE_LIMIT_EXCEEDED`. So does
+  a Rust `EntityQuery::paginate(page)` connection read (`fetch_connection`,
+  `fetch_connection_with_auth`, `fetch_connection_selected_with_auth`), which
+  is no longer reduced.
+- **Declared maximum page limit. No action.** Optional
+  `schema_roots!(max_page_limit: N)` publishes `N` in the semantic catalogue
+  and the complexity estimate and refuses a `Database` configured differently.
+  Declaring a maximum other than 100 changes the semantic catalogue and so its
+  fingerprint.
+- **Host-side reads above the page maximum. No action.** Repository and
+  transaction builders have been exact or refused since 0.128.0;
+  `with_max_limit(n)` gives one read its own maximum. The keyset helpers still
+  reduce an oversized limit; `EntityQuery::with_max_limit(n)` now applies to
+  them, and a handle with a raised maximum works as before. See
+  [page size](docs/reference/graphql-orm/pagination-migration.md#page-size-reduced-by-default-refused-on-request).
+  The next breaking release turns the remaining silent reduction into an error.
+- **64-bit identities as strings. No action.** Off by default.
+  `RuntimeGraphqlOptions::with_int64_identity_strings()` types runtime
+  `RecordVersion` and integer live keys as `RuntimeInt64` strings. It changes
+  the SDL and fingerprints. The next breaking release makes it the default.
+- **Router nested directives (changelog correction). No action** in code. The
+  router has never enforced SDL `@authenticated` or `@requiresScopes` on
+  nested fields, contrary to how the 0.18.0 changelog read. Keep
+  `auth = "required"` and policies on every entity a join can reach; do not
+  rely on a router rule on the parent query. Enforcement is tracked in
+  [#729](https://github.com/Dastari/graphql-orm/issues/729).
+- **Keyset cursor documentation. No action.** Static keyset cursors were never
+  tamper-evident; the documentation now says so. Do not treat a cursor as
+  proof of anything: authorization is applied to every page.
+
+## 0.159.0 to 0.163.0: wrapper object compile cost
+
+- **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
+  together. The generated edge, connection, mutation result, change event,
+  bulk delete and bulk update result, and authorized scan page types no longer
+  derive `async_graphql::SimpleObject`; the macros emit the equivalent output
+  impls. Generated SDL, operation and semantic catalogues and fingerprints are
+  byte-identical, and the types keep their fields, derives other than
+  `SimpleObject`, and `async fn` field getters. The new hidden
+  `graphql_orm::graphql::wrapper_object` module is for generated code only.
+
+## 0.162.0: context-bound authorized pages
+
+**No action.** Upgrade ORM and macros together. This release only adds API:
+generated pagination, `EntityQuery::fetch_authorized_scan`,
+`AuthorizedScanConfig` and every existing cursor are unchanged, and no schema,
+data or generated SDL changes.
+
+To adopt the new API in a handwritten resolver, a host:
+
+1. generates a random 32-byte secret owned by the service, stores it in the
+   service's encrypted settings, and installs it with
+   `Database::with_authorized_page_config(AuthorizedPageConfig::new(AuthorizedPageKeys::new(key_id, key)?, batch_size, max_scanned_rows)?)`
+   on every replica. Never derive the key from a provider credential or a
+   client value;
+2. builds an `AuthorizedPageBinding` from server state on every request and
+   calls `EntityQuery::fetch_authorized_page` with
+   `AuthorizedPageRequest::new(binding).after(after).limit(limit)`.
+
+See [context-bound authorized pages](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620)
+for the binding, bounds, errors and key rotation.
 
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 

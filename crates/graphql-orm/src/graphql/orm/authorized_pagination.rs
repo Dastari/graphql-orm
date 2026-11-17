@@ -802,6 +802,61 @@ impl AuthorizedScanConfig {
     }
 }
 
+/// The continuation codec and bounds of one bounded scan.
+enum ScanCursors<'a> {
+    /// `fetch_authorized_scan`: the `goms1` codec of [`AuthorizedScanConfig`].
+    Scan(&'a AuthorizedScanConfig),
+    /// `fetch_authorized_page`: the context-bound codec.
+    Page(&'a AuthorizedPageConfig, &'a AuthorizedPageBinding),
+}
+impl ScanCursors<'_> {
+    /// `(batch_size, max_scanned_rows)`, both non-zero.
+    fn bounds(&self) -> (u32, u32) {
+        match self {
+            Self::Scan(config) => (config.batch_size, config.max_scanned_rows),
+            Self::Page(config, _) => (config.batch_size(), config.max_scanned_rows()),
+        }
+    }
+    fn page_fingerprint<T: AuthorizedKeysetEntity>(filter_identities: &[String]) -> String {
+        bind_keyset_fingerprint(
+            None,
+            &format!("page:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+            filter_identities,
+        )
+    }
+    fn decode<T: AuthorizedKeysetEntity>(
+        &self,
+        cursor: &str,
+        filter_identities: &[String],
+    ) -> async_graphql::Result<Vec<KeysetValue>> {
+        match self {
+            Self::Scan(config) => config.decode::<T>(cursor, filter_identities),
+            Self::Page(config, binding) => config.open(
+                binding,
+                T::entity_name(),
+                &Self::page_fingerprint::<T>(filter_identities),
+                T::KEYSET_ORDER.len(),
+                cursor,
+            ),
+        }
+    }
+    fn encode<T: AuthorizedKeysetEntity>(
+        &self,
+        values: Vec<KeysetValue>,
+        filter_identities: &[String],
+    ) -> async_graphql::Result<String> {
+        match self {
+            Self::Scan(config) => config.encode::<T>(values, filter_identities),
+            Self::Page(config, binding) => config.seal(
+                binding,
+                T::entity_name(),
+                &Self::page_fingerprint::<T>(filter_identities),
+                values,
+            ),
+        }
+    }
+}
+
 /// Forward scan request. Continuations represent underlying scan positions,
 /// never visible offsets. Exact totals are available only for complete policies.
 #[derive(Clone, Debug, Default, async_graphql::InputObject)]
@@ -1131,6 +1186,9 @@ where
                 })
                 .collect()
         };
+        // Only a size the caller asked for can be refused as oversized; an
+        // omitted one takes the default and is reduced to the maximum.
+        let requested_limit = page.first.or(page.last);
         let page = page
             .validate(PaginationConfig::DEFAULT_LIMIT, i64::MAX)
             .map_err(|e| e.into_graphql_error())?;
@@ -1153,8 +1211,15 @@ where
         base.page = None;
         base.order_clauses = order.iter().map(|c| c.order_sql()).collect();
         base.order_values.clear();
-        let limit = db
-            .pagination_config()
+        // A per-read maximum set with `with_max_limit` replaces the
+        // database's for this page, as it does for `fetch_all`.
+        let page_config = db
+            .client_pagination_config()
+            .with_read_maximum(base.max_limit);
+        page_config
+            .admit_client_limit(requested_limit)
+            .map_err(|error| error.into_graphql_error())?;
+        let limit = page_config
             .resolve_page(
                 Some(&PageInput {
                     limit: Some(page.limit),
@@ -1267,28 +1332,100 @@ where
         if page.include_total_count && visibility.requires_residual_checks() {
             return Err(input_error());
         }
-        let mut base = self.with_read_visibility(&visibility)?;
-        base.page = None;
-        base.order_clauses = T::KEYSET_ORDER.iter().map(|c| c.order_sql()).collect();
-        base.order_values.clear();
         let limit = db
-            .pagination_config()
-            .resolve_page(
+            .client_pagination_config()
+            .with_read_maximum(self.max_limit)
+            .resolve_client_page(
                 Some(&PageInput {
                     limit: page.limit,
                     offset: Some(0),
                 }),
                 true,
             )
+            .map_err(|error| error.into_graphql_error())?
             .limit
             .unwrap_or(PaginationConfig::DEFAULT_LIMIT)
             .max(1) as usize;
-        let mut position = page
-            .after
-            .as_deref()
-            .map(|c| config.decode::<T>(c, &base.keyset_filter_identities))
+        self.scan_authorized_candidates(
+            db,
+            ctx,
+            auth,
+            &visibility,
+            ScanCursors::Scan(config),
+            page.after.as_deref(),
+            limit,
+            page.include_total_count,
+        )
+        .await
+    }
+
+    /// Fetch one context-bound authorized page for a handwritten resolver or
+    /// query builder.
+    ///
+    /// This is the bounded scan of [`fetch_authorized_scan`](Self::fetch_authorized_scan)
+    /// with a continuation that is sealed by the ORM under the service-owned
+    /// keys of [`AuthorizedPageConfig`] and accepted only under the
+    /// [`AuthorizedPageBinding`] it was issued under. Entity access, read
+    /// visibility, row callbacks and field policies are resolved again on
+    /// every request, exactly as for a first page: a continuation is a
+    /// position, never an authorization. `page_info.status` keeps the
+    /// [`ScanStatus`] meanings, and `page_info.total_count` is always absent.
+    ///
+    /// A continuation issued under a different binding, entity, order, filter
+    /// or key, or one that was altered, truncated, is oversized or has
+    /// expired, is refused with `CURSOR_INVALID` before any row is read. A
+    /// `limit` above `AuthorizedPageConfig::max_page_size` is refused with
+    /// `PAGE_LIMIT_EXCEEDED`. Without an installed configuration the call
+    /// fails closed with `AUTHORIZATION_MISCONFIGURED`.
+    pub async fn fetch_authorized_page(
+        self,
+        db: &Database<B>,
+        ctx: Option<&async_graphql::Context<'_>>,
+        auth: Option<&DbAuthContext>,
+        request: AuthorizedPageRequest,
+    ) -> async_graphql::Result<AuthorizedScanPage<T>> {
+        let visibility = self.authorize_pagination(db, ctx).await?;
+        Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, false, None).await?;
+        let config = db.authorized_page_config().ok_or_else(invalid)?;
+        if self.requires_in_memory_filtering() {
+            return Err(input_error());
+        }
+        let limit = config.resolve_limit(request.limit)?;
+        self.scan_authorized_candidates(
+            db,
+            ctx,
+            auth,
+            &visibility,
+            ScanCursors::Page(config, &request.binding),
+            request.after.as_deref(),
+            limit,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn scan_authorized_candidates(
+        self,
+        db: &Database<B>,
+        ctx: Option<&async_graphql::Context<'_>>,
+        auth: Option<&DbAuthContext>,
+        visibility: &ReadVisibility,
+        cursors: ScanCursors<'_>,
+        after: Option<&str>,
+        limit: usize,
+        include_total_count: bool,
+    ) -> async_graphql::Result<AuthorizedScanPage<T>> {
+        let (batch_size, max_scanned_rows) = cursors.bounds();
+        let mut base = self.with_read_visibility(visibility)?;
+        base.page = None;
+        base.order_clauses = T::KEYSET_ORDER.iter().map(|c| c.order_sql()).collect();
+        base.order_values.clear();
+        // The continuation is authenticated before any count or row is read.
+        let mut position = after
+            .map(|c| cursors.decode::<T>(c, &base.keyset_filter_identities))
             .transpose()?;
-        let total_count = if page.include_total_count {
+        let total_count = if include_total_count {
             Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
         } else {
             None
@@ -1296,9 +1433,8 @@ where
         let mut nodes = Vec::new();
         let mut scanned = 0;
         let status = 'scan: loop {
-            let batch_size = config
-                .batch_size
-                .min(config.max_scanned_rows - scanned)
+            let batch_size = batch_size
+                .min(max_scanned_rows - scanned)
                 .min((limit - nodes.len()).min(u32::MAX as usize) as u32);
             let query = if let Some(values) = &position {
                 base.clone().keyset_bound(values, false, false)?
@@ -1335,7 +1471,7 @@ where
             if nodes.len() == limit {
                 break 'scan ScanStatus::PageFull;
             }
-            if scanned == config.max_scanned_rows {
+            if scanned == max_scanned_rows {
                 break 'scan ScanStatus::BudgetExhausted;
             }
         };
@@ -1348,7 +1484,7 @@ where
         let continuation = if status == ScanStatus::Exhausted {
             None
         } else {
-            Some(config.encode::<T>(
+            Some(cursors.encode::<T>(
                 position.ok_or_else(invalid)?,
                 &base.keyset_filter_identities,
             )?)

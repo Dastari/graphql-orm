@@ -10,9 +10,83 @@ supersedes: []
 
 # Migration Guide
 
-## 0.24.0
+## 0.27.0
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
+## To 0.26.0: host-held snapshot records
+
+Upgrade backup to 0.26.0 and, when using the optional ORM adapter, ORM/macros
+to 0.165.0 on the same reviewed revision. Existing manifests, keys and
+repository identities need no conversion.
+
+- **Source compatible. No action** to keep compiling: no existing type,
+  field, variant or function signature changed.
+- **Snapshot records are opt-in. Action needed** to close the replay gap:
+  until a record is configured, a pruned snapshot that is put back into the
+  repository still verifies. Keep one of these outside the repository and
+  pass it to the authenticator on every start:
+  1. a revocation list: record every id your `SnapshotDeletionObserver` is
+     told about and configure `with_revoked_snapshots(ids)`; or
+  2. a known-snapshot list: add the id of every snapshot a backup or
+     compaction returns, remove the ids the observer is told about, and
+     configure `with_known_snapshots(ids)`. This also refuses a snapshot the
+     host never wrote down, at the cost of updating the record on every
+     backup.
+- **Use `prune_observed` and `delete_snapshot_observed`** in place of `prune`
+  and `delete_snapshot` to learn the ids. The observer is called under the
+  repository lock before each snapshot's first blob is deleted, and its error
+  aborts before that snapshot is touched. Make the id durable inside the
+  callback: the host then has every deleted id when the call fails after its
+  first deletion, is cancelled, or finishes but cannot release the lock
+  (`LockReleaseFailed`). It may also hold the id of a snapshot whose deletion
+  then failed; revoking a snapshot that is still stored is safe, and the next
+  prune removes it. `DeletedSnapshotLog` is an in-memory observer for hosts
+  that persist right after the call instead.
+- **Detecting a refused snapshot.** The refusal is
+  `BackupError::ManifestAuthenticationFailed`; `error.is_snapshot_not_admitted()`
+  tells it apart from a bad seal, also through a restore's
+  `RestoreStageFailed`.
+- **Removing a replayed snapshot.** `prune` fails with such an error while
+  one is listed. Delete it with `delete_snapshot(repository, id, ..)`.
+- **ORM adapter restore is one transaction. No action.** A failed
+  `restore_full` on PostgreSQL or SQLite now leaves the target empty. Hosts
+  that restore the tables of searchable runtime collections must backfill
+  their search indexes afterwards; see the
+  [workspace migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+## To 0.25.0: storage 0.16.0
+
+**Windows local roots — Action needed (Windows hosts):**
+`LocalBackupRepository::new` and `LocalBackupRepository::open_existing` no
+longer exist on Windows, so a Windows build that calls them fails to compile.
+Call `LocalBackupRepository::new_trusted_windows_root` or
+`LocalBackupRepository::open_existing_trusted_windows_root` instead, and only
+when the host protects the repository root, its ancestors and descendants from
+concurrent mutation. Links are not enforced as a security boundary in this
+mode. Hosts that build `LocalStorageBackend` themselves call
+`LocalStorageBackend::new_trusted_windows_root`. The no-follow guarantees below
+apply to Unix; Unix hosts need no change. Windows conditional creation uses
+atomic no-replace rename.
+
+Unix conditional-create fallback retries the temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links. A
+failed rollback is a single-attempt error that must not be replayed.
+
+Move `graphql-orm-backup` and `graphql-orm-storage` together to one reviewed
+revision and refresh the lockfile. Storage 0.16.0 is required.
+
+- **Unix local repositories and links. Action needed** only if a local
+  repository root contains symbolic links below
+  it, or hard-linked files: storage now refuses every key through a link and
+  every read of a file with more than one hard link, so such a repository
+  fails verification and restore with `InvalidStorageKey` until they are
+  replaced with real directories and independent copies. See the storage
+  [migration guide](../graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys).
+- **Restore reads and content type. No action.** The documented three reads
+  per object and two per payload, and the content type local and SMB stores
+  do not keep, are existing behaviour. See
+  [repository reads](docs/restore-semantics.md#repository-reads).
 
 ## To 0.23.0: PostgreSQL mixed-case table restore
 
@@ -533,7 +607,6 @@ cleanup/disarm may leave an orphan lock until offline recovery.
 
 The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
 after updating the reviewed monorepo revision.
-
 
 ### Single-attempt error classification
 

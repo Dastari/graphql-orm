@@ -1,6 +1,10 @@
+mod delete_effect_guard;
+pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
 #[doc(hidden)]
 pub use generated_filter::*;
+mod authorized_page;
+pub use authorized_page::*;
 mod authorized_pagination;
 pub use authorized_pagination::*;
 mod backend;
@@ -9,6 +13,8 @@ mod backend;
     all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
 ))]
 mod backup;
+mod client_metadata;
+pub use client_metadata::*;
 mod core;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod default_equivalence;
@@ -23,6 +29,7 @@ mod owned_schema;
 mod point_read;
 mod query;
 mod read_authorization;
+mod restore_marker;
 mod rls;
 mod root_fields;
 mod runtime_backup;
@@ -95,6 +102,9 @@ pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedT
 pub use point_read::*;
 pub use query::*;
 pub use read_authorization::*;
+pub use restore_marker::{
+    RESTORE_MARKER_TABLE, RestoreInProgress, RestoreStateUnavailable, RestoreStateUnavailableReason,
+};
 pub use rls::*;
 pub use root_fields::*;
 pub use runtime_backup::*;

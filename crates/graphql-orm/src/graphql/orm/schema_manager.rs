@@ -64,6 +64,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     }
 
     /// Introspect the live database and compare it to metadata from generated entities.
+    ///
+    /// On SQL Server this fails with an error carrying
+    /// [`RestoreInProgress`](super::RestoreInProgress) while a host-run
+    /// restore's marker is present; see
+    /// [`Database::ensure_no_restore_in_progress`](crate::db::Database::ensure_no_restore_in_progress).
     pub async fn validate_against_entities(
         &self,
         entities: &[&'static EntityMetadata],
@@ -71,6 +76,8 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend,
     {
+        // A partly restored database must not pass a start-up validation.
+        super::restore_marker::refuse_while_restoring::<B>(self.database.pool()).await?;
         let target = SchemaModel::from_entities(entities);
         let current =
             B::introspect_schema_including(self.database.pool(), &declared_tables([&target]))
@@ -100,6 +107,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     /// a policy whose command, `PERMISSIVE` mode or roles differ, is an error,
     /// as is an expression PostgreSQL could not render. Rendering needs the
     /// `TEMP` privilege, which PostgreSQL grants to `PUBLIC` by default.
+    ///
+    /// On SQL Server this fails with an error carrying
+    /// [`RestoreInProgress`](super::RestoreInProgress) while a host-run
+    /// restore's marker is present.
     pub async fn validate_target(
         &self,
         target: &SchemaTarget,
@@ -107,6 +118,8 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend + RlsIntrospectionBackend,
     {
+        // A partly restored database must not pass a start-up validation.
+        super::restore_marker::refuse_while_restoring::<B>(self.database.pool()).await?;
         let current = B::introspect_schema_including(
             self.database.pool(),
             &declared_tables([&target.schema]),

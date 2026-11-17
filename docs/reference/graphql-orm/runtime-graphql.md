@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -213,10 +213,17 @@ directive condition is refused the same way.
 
 After async-graphql's validation the guard checks every argument of the
 selected operation again, including `RuntimeHostField` and host type arguments:
-each variable value once against its declared type, and each argument with its
-variable references in place. Runtime scalars use their input bounds; a value
-that is not an object for an input object, and a missing non-null value, are
-refused with `invalid_graphql_input` before any resolver runs. Composition
+each variable value once against its declared type, and each argument with each
+variable reference checked against the position it is used in. Runtime scalars
+use their input bounds; a value that is not an object for an input object, a
+missing non-null value, and a variable at a position the GraphQL rule "All
+Variable Usages Are Allowed" does not admit (async-graphql 7.2.1 never applies
+that rule), including a nullable, `null` or omitted variable as the member of a
+oneof input object, are refused with `invalid_graphql_input` before any resolver
+runs. Such a variable usage used to run whenever its value happened to coerce.
+Field arguments are checked; directive arguments are left to async-graphql.
+Generated static schemas share this check through `GeneratedInputValidation`; see
+[input object values](entities-and-relations.md#input-object-values). Composition
 (`finish`) refuses with `invalid_composition` any argument default, on a host
 field, a type added with `register` or a host subscription root, that is not a
 valid value of its type: async-graphql never validates schema defaults.
@@ -284,7 +291,11 @@ and output bytes. Providers must also honor their supplied limits.
 New cursors use the host's active key; old cursors resume only while their key is
 in the bounded allowed ring and host expiry/revocation permits it. Retired keys
 and provider unavailability yield `cursor_unavailable`; framing, tampering and
-context/authentication failures yield indistinguishable `invalid_cursor`. Errors
+context/authentication failures yield indistinguishable `invalid_cursor`. A
+page whose row has order values too long to carry (an unprotected cursor above
+`max_cursor_bytes`, or a protected one above the 16 KiB plaintext or 32 KiB
+token bound) is refused with `cursor_key_too_large`; with the default limits
+that is one stored string sort key of roughly 8 KiB or more. Errors
 carry no ciphertext, plaintext, crypto source error or caller values. Tokens grant
 no access. Hosts may include a policy revision in their trusted partition to revoke
 old cursors; otherwise current row policies still apply to resumed pages.

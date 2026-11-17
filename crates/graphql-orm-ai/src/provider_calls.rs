@@ -2124,6 +2124,10 @@ pub struct AiProviderCallResult {
     provider_session_claim: Option<crate::AiProviderSessionClaim>,
     static_offering_reset_receipt:
         Option<Arc<crate::provider_session::AiStaticOfferingResetReceipt>>,
+    /// Whether the dispatching provider declared that it retains responses
+    /// (`ProviderCapabilities::provider_retained_continuation`; for OpenAI the
+    /// `store` flag it sent). Read from the registered provider at dispatch.
+    provider_retains_responses: bool,
 }
 
 /// Authoritative completed provider-hosted tool counts for one turn.
@@ -2701,6 +2705,7 @@ impl DynamicToolResponder {
                 None => None,
             },
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         };
         let requires_source = self
             .runtime
@@ -3018,6 +3023,18 @@ impl AiProviderCallResult {
         &self.model_inference_manifest
     }
 
+    /// Logical profile of the response when the provider retains it: an
+    /// OpenAI response from a provider that sent `store: true`
+    /// (`store_responses = true`, declared as
+    /// `ProviderCapabilities::provider_retained_continuation`).
+    pub(crate) fn retained_response_profile(&self) -> Option<String> {
+        (self.provider_kind == ProviderKind::OpenAi
+            && self.provider_retains_responses
+            && self.request_snapshot.continuation_mode == ModelContinuationMode::ProviderRetained
+            && self.provider_response_id.is_some())
+        .then(|| self.model_inference_manifest.provider_profile_id.clone())
+    }
+
     pub(crate) fn uses_stateless_continuation(&self) -> bool {
         self.request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
     }
@@ -3323,6 +3340,12 @@ impl AiProviderCallResult {
         }
     }
 
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn with_test_provider_retains_responses(mut self, retains: bool) -> Self {
+        self.provider_retains_responses = retains;
+        self
+    }
+
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_result(
         lease: &AiRunLease,
@@ -3407,6 +3430,7 @@ impl AiProviderCallResult {
             native_control_receipts: Vec::new(),
             provider_session_claim: None,
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         }
     }
 
@@ -3516,6 +3540,7 @@ impl AiProviderCallResult {
             native_control_receipts: Vec::new(),
             provider_session_claim: None,
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         }
     }
 
@@ -3571,6 +3596,7 @@ impl AiProviderCallResult {
             native_control_receipts: Vec::new(),
             provider_session_claim: None,
             static_offering_reset_receipt: None,
+            provider_retains_responses: false,
         }
     }
 }
@@ -4898,6 +4924,12 @@ impl AiProviderCallExecutor {
             .runtime
             .resolve_dispatch_request(current.principal(), &plan.budget.scope, plan.request)
             .await;
+        // Read from the same registered provider that sends the request: the
+        // OpenAI adapter sends `store` equal to this declaration.
+        let provider_retains_responses = self
+            .runtime
+            .provider_capabilities(&plan.provider_kind)
+            .is_some_and(|capabilities| capabilities.provider_retained_continuation);
         let dispatch = if let Some(responder) = &dynamic_responder {
             let responder: Arc<dyn ProviderDynamicToolResponder> = responder.clone();
             self.runtime
@@ -5395,6 +5427,7 @@ impl AiProviderCallExecutor {
             native_control_receipts,
             provider_session_claim: None,
             static_offering_reset_receipt: plan.static_offering_reset_receipt,
+            provider_retains_responses,
         })
     }
 
@@ -11710,6 +11743,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_provider_that_stores_responses_feeds_the_stored_response_ledger() {
+        // The default plan mode is provider-retained even with
+        // `store_responses = false`; that alone must not record a response
+        // OpenAI never stored.
+        let fixture = fixture(Vec::new()).await;
+        let mut result = AiProviderCallResult::test_result(&fixture.lease, None, "resp_1", vec![]);
+        assert_eq!(result.provider_kind, ProviderKind::OpenAi);
+        assert_eq!(
+            result.request_snapshot.continuation_mode,
+            ModelContinuationMode::ProviderRetained
+        );
+        assert_eq!(result.retained_response_profile(), None);
+        result.provider_retains_responses = true;
+        assert_eq!(
+            result.retained_response_profile().as_deref(),
+            Some(result.model_inference_manifest.provider_profile_id.as_str())
+        );
+
+        // The executor reads the declaration from the provider that sends
+        // the request.
+        for retains in [false, true] {
+            let mock = MockProvider::new(vec![
+                ProviderEvent::ResponseStarted {
+                    response_id: Some("resp_store_check".to_owned()),
+                },
+                ProviderEvent::TextDelta {
+                    text: "done".to_owned(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some("resp_store_check".to_owned()),
+                },
+            ])
+            .with_capabilities(ProviderCapabilities {
+                streaming: true,
+                structured_output: true,
+                provider_retained_continuation: retains,
+                local: true,
+                ..ProviderCapabilities::default()
+            });
+            let fixture = fixture_with_provider(mock).await;
+            let executor = AiProviderCallExecutor::new(
+                fixture.runtime.clone(),
+                fixture.budget_service.clone(),
+                fixture.audit.clone(),
+                Arc::new(TestUsageAccounting),
+                Arc::new(SystemClock),
+                AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                    .expect("test provider limits should validate"),
+            );
+            let result = executor
+                .execute(&fixture.lease, plan(&fixture))
+                .await
+                .expect("provider call should complete");
+            assert_eq!(result.provider_retains_responses, retains);
+        }
+    }
+
+    #[tokio::test]
     async fn post_reservation_budget_binding_denial_releases_before_transport() {
         let fixture = fixture(Vec::new()).await;
         let mut plan = plan(&fixture);
@@ -13702,6 +13798,346 @@ mod tests {
                 AI_CAPABILITY_DESCRIBE_TOOL_ID,
                 AI_CAPABILITY_EXECUTE_TOOL_ID,
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_broker_runs_a_brokered_static_read_tool_through_ordinary_tool_authorization() {
+        let fixture = fixture(Vec::new()).await;
+        let static_id = AiToolId::parse("records.read").expect("static tool ID");
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&static_id)
+            .expect("fixture should register the static read tool")
+            .clone();
+        let semantics = GraphqlSemanticCatalog::compose(
+            Vec::new(),
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+        )
+        .expect("empty semantic catalogue should validate");
+        let capability_index = Arc::new(
+            AiCapabilityIndex::compile(
+                GraphqlExecutionTargetId::parse("local-application")
+                    .expect("static target should validate"),
+                "schema-v1",
+                &semantics,
+                None,
+                None,
+                None,
+                [descriptor.clone()],
+                "target-policy-v1",
+                AiCapabilityIndexLimits::default(),
+            )
+            .expect("static capability index should compile"),
+        );
+        let broker = Arc::new(
+            AiCapabilityDiscoveryBroker::new(
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(BrokerCurrentIndex(Arc::clone(&capability_index))),
+                Arc::new(BrokerAuthority {
+                    allowed: AtomicBool::new(true),
+                    policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+                }),
+                Arc::new(SystemClock),
+                Duration::seconds(30),
+            )
+            .expect("capability broker should validate"),
+        );
+        let capability_index_set = AiCapabilityIndexSet::compile([Arc::clone(&capability_index)])
+            .expect("capability index set should compile");
+        let capabilities = ProviderCapabilities {
+            custom_tools: true,
+            capability_delivery_modes: BTreeSet::from([AiCapabilityDeliveryMode::FixedBroker]),
+            ..ProviderCapabilities::default()
+        };
+        // The static tool is not a bootstrap definition: the surface is the
+        // three broker definitions only, and the session binding is the one a
+        // run with no static tool at all would have.
+        let select = |session: AiCapabilityBrokerSession| {
+            AiCapabilityDeliveryTurn::select(
+                &capabilities,
+                capability_index_set.fingerprint(),
+                Vec::new(),
+                true,
+                AiProviderCapabilitySessionBinding::new(
+                    AiCapabilityDeliveryMode::FixedBroker,
+                    capability_index_set.fingerprint(),
+                    BTreeSet::new(),
+                    "test-provider-projection-v1",
+                    "coordinator-test-model",
+                    ModelReasoningEffort::Unspecified,
+                    "f".repeat(64),
+                )
+                .expect("provider capability binding should validate"),
+                Arc::clone(&broker),
+                session,
+            )
+            .expect("fixed broker delivery should select")
+        };
+        let unbrokered = select(
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+                .expect("broker session should validate"),
+        );
+        let delivery = select(
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+                .expect("broker session should validate")
+                .with_brokered_static_tools(BTreeSet::from([descriptor.fingerprint.clone()]))
+                .expect("brokered static tools should validate"),
+        );
+        assert_eq!(delivery.current_tools(), unbrokered.current_tools());
+        assert_eq!(delivery.current_tools().len(), 3);
+        assert_eq!(
+            delivery.session_binding().fingerprint(),
+            unbrokered.session_binding().fingerprint()
+        );
+
+        // Hierarchical rules apply to a brokered static tool exactly as they
+        // apply to an offered one.
+        let rules = test_rules(fixture.scope.clone());
+        assert!(crate::orm_coordinator::brokered_static_tools_follow_rules(
+            &delivery, &rules
+        ));
+        let restricted = AiResolvedRuleSet::new(
+            fixture.scope.clone(),
+            AiRuleConstraints {
+                allowed_tool_fingerprints: Some(
+                    delivery
+                        .current_tools()
+                        .iter()
+                        .map(|definition| definition.fingerprint.clone())
+                        .collect(),
+                ),
+                ..rules.constraints().clone()
+            },
+            rules.applied_layers().to_vec(),
+        )
+        .expect("restricted rules should validate");
+        assert!(!crate::orm_coordinator::brokered_static_tools_follow_rules(
+            &delivery,
+            &restricted
+        ));
+        assert!(crate::orm_coordinator::brokered_static_tools_follow_rules(
+            &unbrokered,
+            &restricted
+        ));
+
+        let definitions = delivery.current_tools();
+        let definition = |tool_id: &str| {
+            definitions
+                .iter()
+                .find(|definition| definition.tool_id == tool_id)
+                .expect("fixed broker should offer the operation")
+        };
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_capability_broker_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("broker result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                16_384,
+                256 * 1_024,
+                8,
+                8,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("tool limits should validate"),
+        );
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(8, 8).expect("broker loop limits should validate"),
+        );
+        let broker_turns = BrokerTurnTestHarness {
+            fixture: &fixture,
+            checkpoint_service: &checkpoint_service,
+            tool_service: &tool_service,
+            route: &route,
+            delivery: &delivery,
+        };
+
+        let discover = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &fixture.lease,
+                None,
+                "static-broker-response-1",
+                "static-broker-discover-call",
+                definition(AI_CAPABILITY_DISCOVER_TOOL_ID),
+                json!({
+                    "text": "read one authorized record",
+                    "namespace": null,
+                    "kind": null,
+                    "entityOrClass": null,
+                    "maximumResults": 4
+                }),
+            ),
+        )
+        .await;
+        let (discover_call, lease) = broker_turns
+            .persist_and_execute(&mut guard, &fixture.lease, &discover, &[&discover])
+            .await;
+        let candidate = &broker_output(&discover_call)["candidates"][0];
+        assert_eq!(candidate["capabilityId"], "records.read");
+        assert_eq!(candidate["kind"], "reviewed_static");
+
+        let describe = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("static-broker-response-1".to_owned()),
+                "static-broker-response-2",
+                "static-broker-describe-call",
+                definition(AI_CAPABILITY_DESCRIBE_TOOL_ID),
+                json!({
+                    "capabilityId": candidate["capabilityId"],
+                    "candidateFingerprint": candidate["candidateFingerprint"]
+                }),
+            ),
+        )
+        .await;
+        let (describe_call, lease) = broker_turns
+            .persist_and_execute(&mut guard, &lease, &describe, &[&discover, &describe])
+            .await;
+        let description = broker_output(&describe_call);
+        // Describe carries the review metadata and the reviewed argument
+        // schema of the exact registered tool.
+        assert_eq!(description["kind"], "reviewed_static");
+        assert_eq!(description["risk"], json!(descriptor.risk));
+        assert_eq!(description["approval"], json!(descriptor.approval));
+        assert_eq!(
+            description["planSchema"]["properties"]["arguments"],
+            descriptor.argument_schema
+        );
+        assert_eq!(
+            description["planSchema"]["properties"]["selections"]["maxItems"],
+            0
+        );
+        let loaded_reference = description["loadedReference"]
+            .as_str()
+            .expect("description should carry an opaque loaded reference")
+            .to_owned();
+
+        // Arguments the registered schema refuses never reach the resolver.
+        let invalid = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("static-broker-response-2".to_owned()),
+                "static-broker-response-invalid",
+                "static-broker-invalid-call",
+                definition(AI_CAPABILITY_EXECUTE_TOOL_ID),
+                json!({
+                    "loadedReference": loaded_reference,
+                    "arguments": [{"name": "unreviewed", "value": "record-7"}],
+                    "selections": []
+                }),
+            ),
+        )
+        .await;
+        let (invalid_call, lease) = broker_turns
+            .persist_and_execute(
+                &mut guard,
+                &lease,
+                &invalid,
+                &[&discover, &describe, &invalid],
+            )
+            .await;
+        assert_eq!(broker_output(&invalid_call)["code"], "invalid_arguments");
+        assert_eq!(
+            invalid_call.state(),
+            AiApplicationToolCallState::ExecutionFailed
+        );
+
+        let execute = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("static-broker-response-invalid".to_owned()),
+                "static-broker-response-3",
+                "static-broker-execute-call",
+                definition(AI_CAPABILITY_EXECUTE_TOOL_ID),
+                json!({
+                    "loadedReference": loaded_reference,
+                    "arguments": [{"name": "recordId", "value": "record-7"}],
+                    "selections": []
+                }),
+            ),
+        )
+        .await;
+        let (execute_call, _lease) = broker_turns
+            .persist_and_execute(
+                &mut guard,
+                &lease,
+                &execute,
+                &[&discover, &describe, &invalid, &execute],
+            )
+            .await;
+        assert_eq!(execute_call.state(), AiApplicationToolCallState::Completed);
+        assert!(
+            broker_output(&execute_call)
+                .to_string()
+                .contains("record-7"),
+            "unexpected brokered static output: {}",
+            broker_output(&execute_call)
+        );
+
+        let rows = AiToolCallRecord::query(fixture.database.pool())
+            .filter(AiToolCallRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.run_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(10)
+            .fetch_all()
+            .await
+            .expect("broker tool rows should load");
+        // Every row is a broker call; the static tool never became a
+        // provider definition.
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| {
+            [
+                AI_CAPABILITY_DISCOVER_TOOL_ID,
+                AI_CAPABILITY_DESCRIBE_TOOL_ID,
+                AI_CAPABILITY_EXECUTE_TOOL_ID,
+            ]
+            .contains(&row.tool_id.as_str())
+        }));
+        let executed = rows
+            .iter()
+            .find(|row| row.state == "completed" && row.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
+            .expect("completed brokered static row");
+        // The stored result is bound to the static tool's own reviewed
+        // disclosure schema.
+        assert_eq!(
+            executed.disclosure_schema_fingerprint.as_deref(),
+            fixture
+                .runtime
+                .tool_catalog()
+                .disclosure_schema(&static_id)
+                .map(|schema| schema.fingerprint.as_str())
         );
     }
 
@@ -17373,6 +17809,7 @@ mod tests {
                             .clone()
                             .expect("provider model should bind"),
                         provider_response_id: call.provider_response_id.clone(),
+                        retained_response_profile: None,
                         budget_reservation_id: call
                             .budget_reservation_id
                             .expect("provider budget should bind"),

@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-23
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -47,6 +47,49 @@ that target's schema, semantic catalogue, target policy, capability, and
 current resolver authority. A host-authored combined fingerprint is neither
 needed nor accepted.
 
+### Roots a catalogue leaves out
+
+A generated capability catalogue compiles one capability per admitted root.
+Two things can leave a root out while the rest of its target compiles:
+
+- **An oversized schema.** A root whose compact plan schema is larger than the
+  fixed provider-contract ceiling for one capability (1 MiB) is excluded. It
+  used to fail the whole catalogue. `excluded_capabilities()` on the query,
+  mutation and subscription catalogues lists each excluded root with its
+  schema size and the ceiling, and `AiToolCatalog` logs one warning per
+  excluded root when the catalogue is registered. An excluded root is absent
+  from the catalogue fingerprint, the index and discovery. Check the list at
+  startup: nothing else tells an operator that a root the schema exposes is
+  unavailable to the model.
+- **Strict query roots.** By default every exportable public Query root
+  becomes a capability once the target policy calls `allow_queries()`.
+  `AiGraphqlQueryCapabilityOptions::with_strict_query_roots` switches a query
+  catalogue to opt-in: only the listed root field names are compiled, so any
+  other root is never registered, indexed, discovered or executable as a
+  generated capability. A listed name that is not an exportable public Query
+  root fails compilation. The list selects roots only. Fields and
+  relationship paths under an admitted root are still governed by the ORM's
+  export and classification metadata and by resolver authorization.
+
+```rust,no_run
+# fn options() -> Result<graphql_orm_ai::AiGraphqlQueryCapabilityOptions, graphql_orm_ai::AiError> {
+graphql_orm_ai::AiGraphqlQueryCapabilityOptions::default()
+    .with_strict_query_roots(["Records", "RecordById"])
+# }
+```
+
+### Startup cost
+
+`cargo run --release -p graphql-orm-ai-tool-profiles --example
+capability_startup_benchmark -- 250 500 1000` compiles a synthetic target at
+each size and prints catalogue and index compile time, search latency and
+peak resident memory, with the per-entity slope. CI runs it and publishes the
+result as the `capability-startup-benchmark` artefact. Capabilities of one
+catalogue share one copy of the finished schema and semantic catalogue, so
+catalogue memory grows linearly with the number of roots. Catalogue compile
+time is still more than linear in the number of roots; read the artefact
+before sizing a very large target.
+
 ```rust,no_run
 # use std::sync::Arc;
 # use graphql_orm_ai::{AiCapabilityIndex, AiCapabilityIndexLimits, AiCapabilityIndexSet};
@@ -74,7 +117,15 @@ tie-breaking. Narrow, explicit list, details, search, keyset-page, or aggregate
 intent ranks the matching compiler-owned operation shape before entity,
 target/namespace and lexical-description relevance. Every result must retain a
 positive lexical match, and relevant non-matching shapes are not discarded. It
-needs no embeddings or external database. A host may later
+needs no embeddings or external database.
+
+Each entry's search terms are computed once, when its index is compiled, and
+interned per index. A search tokenises only its query and scores each entry
+from those precomputed terms, so its cost no longer includes re-tokenising
+the catalogue. Scores are fixed per-entry field weights. They never depend on
+how many other entries hold a term, so the rank of an entry a principal may
+see carries no information about entries it may not. The ranking is the same
+as before for every query. A host may later
 implement the closed current-index-set and authority traits with a reviewed
 search service, but returned IDs and fingerprints must still bind to the
 canonical set and the candidate's exact owning index.
@@ -116,8 +167,14 @@ negotiation metadata, never authority.
 | --- | --- | --- |
 | `EagerExact` | All already-filtered exact definitions | Small sets within exact count and byte limits |
 | `ClientDeferred` | Exact static bootstrap plus discovery; freshly loaded generated-query definitions on the next continuation | Stateless/local or client-executed search |
-| `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search |
+| `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search, including large non-frozen surfaces unless the broker preference is enabled |
 | `FixedBroker` | Exact static bootstrap plus frozen discover/describe/execute definitions | Retained sessions whose generated definitions cannot change |
+
+`ProviderDeferred` remains the default for large non-frozen surfaces.
+Opt into `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces`
+to choose `FixedBroker` above the eager count or byte limit when both modes
+are supported. Opting in changes the retained binding and requires a rebind.
+Unchanged hosts keep their delivery mode and binding fingerprint.
 
 Provider-session bindings admit at most 128 exact static bootstrap fingerprints.
 Grok SDK and Codex dynamic tools independently enforce 128-definition ceilings
@@ -130,6 +187,55 @@ arguments use a closed scalar argument list and public selection paths; the
 selected capability's authoritative compiler validates every name and type.
 No broker accepts arbitrary GraphQL, target, alias, fragment, introspection,
 SQL, URL or callback.
+
+### Reviewed static tools behind the fixed broker
+
+A reviewed static read tool can be reached through the fixed broker instead
+of being offered as a bootstrap definition. Such a tool is not a provider
+definition: it does not count against the 128 static bootstrap fingerprints
+or a provider's definition ceiling, and adding or removing one never changes
+the session binding or the three broker definitions.
+
+```rust,ignore
+let session = AiCapabilityBrokerSession::new(delivery_limits)?
+    .with_brokered_static_tools(brokered_descriptor_fingerprints)?;
+```
+
+List each tool either in the session binding's bootstrap fingerprints or
+here, never both; `AiCapabilityDeliveryTurn::select` refuses an overlap and
+refuses the list in any mode other than `FixedBroker`. The static descriptors
+must be in the compiled index, as before.
+
+The model finds a brokered tool with discover (an unfiltered search returns
+generated queries and brokered static tools together), loads it with
+describe and runs it with execute:
+
+- describe returns the tool's risk, approval and classification metadata and
+  a `planSchema` whose `arguments` member is the tool's reviewed argument
+  schema and whose `selections` member is an empty list;
+- execute takes the arguments as the same flattened name and value entries a
+  generated query uses, and an empty `selections` list. The tool's document
+  and result are fixed, so a selection, relationship argument or bound is
+  refused as invalid input.
+
+The exact-definition review contract is unchanged. The fingerprint in the
+list must equal the indexed entry's and the registered descriptor's
+fingerprint at discover, describe and execute, or the call fails closed. Each
+call rehydrates the principal and applies host capability policy to the exact
+entry. Execute then validates the arguments against the registered schema,
+applies current tool authorization, runs the ordinary resolver path and
+applies the tool's own static disclosure schema. The coordinator refuses a
+turn whose hierarchical rules do not admit every listed fingerprint as an
+approval-free read tool, so a rule that lists allowed tool fingerprints
+applies to a brokered tool exactly as to an offered one.
+
+Only an approval-free, read-only, idempotent application query whose maximum
+classification is below `Restricted` and which declares no result media can
+be brokered. Anything else in the list is never discoverable and never
+executable through the broker; keep it a bootstrap definition. A brokered
+call carries no `AiToolExecutionProvenance`, so a host executor that requires
+provenance refuses it. Mutations and subscriptions keep their own approval
+and wait contracts and cannot enter the broker.
 
 ### Coordinator construction and dispatch
 
@@ -192,8 +298,25 @@ not application authority: the execute operation still rehydrates the current
 principal and passes the selected generated query through the ordinary policy,
 delegation, resolver and disclosure boundary.
 
-Fixed-broker `describe` returns the exact compact planning schema only on
-demand. It also reports conservative compiler-owned maximum root and total
+Fixed-broker `describe` returns the compact planning schema only on demand,
+with each repeated input type defined once. A compact plan schema inlines
+every input type at every use, so a scalar filter repeats per filterable
+field and an entity filter repeats per relationship path. Describe instead
+puts each repeated type under `planSchema.types`, named after its GraphQL
+input type, and replaces each use with `{"$ref": "#/types/<Name>"}`. A
+reference may carry the `description` of that one use. Nullable and list
+wrappers stay inline around the reference. The contract's
+`planSchemaTypeReferences` member states the convention for the model.
+
+The rendering is lossless and model-facing only. Expanding the references
+gives back the compact schema exactly. The capability fingerprint, the eager
+and client-deferred definitions, the execute arguments and the server-side
+plan validation are unchanged. `AiCapabilityBrokerSession::with_inline_describe_schema`
+restores the inline schema for a model that cannot follow a reference.
+`AiGraphqlQueryCapability::shared_type_plan_schema` and
+`AiSharedTypePlanSchema` expose the same rendering to hosts.
+
+Describe also reports conservative compiler-owned maximum root and total
 result-record costs plus whether the plan must choose a positive root bound;
 these values are planning metadata, not execution authority or observed row
 counts. The complete description, including that schema, is bounded by

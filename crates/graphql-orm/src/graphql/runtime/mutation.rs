@@ -252,7 +252,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                     InputValue::new(
                         &f.api_name,
                         TypeRef::named_nn(if c.live_subscriptions.is_some() {
-                            super::live::key_scalar(f.value_kind)
+                            super::live::key_scalar(module, f.value_kind)
                         } else {
                             super::scalar::name(f.value_kind)
                         }),
@@ -513,7 +513,10 @@ impl Drop for GroupExecution {
 fn uncertain_error() -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
     wire_error("mutation_outcome_unknown").extend_with(|_, extensions| {
-        extensions.set("outcome", "unknown");
+        extensions.set(
+            "outcome",
+            crate::graphql::errors::MutationOutcome::Unknown.as_str(),
+        );
         extensions.set("retryable", false);
     })
 }
@@ -594,7 +597,7 @@ fn input_fields(
             let value = if value == &Value::Null {
                 RuntimeValue::Null
             } else if c.live_subscriptions.is_some() && c.primary_key.contains(&field.id) {
-                super::live::decode_key_value(field.value_kind, value, limits.scalars)?
+                super::live::decode_key_value(module, field.value_kind, value, limits.scalars)?
             } else {
                 super::scalar::decode(field.value_kind, value, limits.scalars)?
             };
@@ -1096,6 +1099,14 @@ async fn execute<B: RuntimeMutationBackend>(
     // Unprepared first: over `execute_stream` neither value is present, and the
     // refusal must not name an internal type.
     let results = super::execution::Results::prepared(&ctx)?;
+    if ctx
+        .data_opt::<crate::graphql::orm::DependentDeleteGuard>()
+        .is_some()
+    {
+        // This runtime path does not yet provide a physical effect receipt.
+        // Refuse before dispatch rather than detecting missing proof after writes.
+        return Err(wire_error("unsupported_capability"));
+    }
     let context = ctx
         .data_opt::<RuntimeGraphqlRequest<B>>()
         .ok_or_else(|| wire_error("authorization_missing"))?;
@@ -1351,7 +1362,10 @@ pub struct RuntimeMutationOutputCheck<'a> {
 fn committed_error(code: &'static str) -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
     wire_error(code).extend_with(|_, extensions| {
-        extensions.set("outcome", "committed");
+        extensions.set(
+            "outcome",
+            crate::graphql::errors::MutationOutcome::Committed.as_str(),
+        );
         extensions.set("retryable", false);
     })
 }

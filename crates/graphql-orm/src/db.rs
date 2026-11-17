@@ -98,9 +98,16 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     change_journal_enabled: bool,
     schema_policy: SchemaPolicy,
     pagination_config: PaginationConfig,
+    refuse_oversized_limit: bool,
+    max_page_offset: Option<i64>,
+    /// Opt-in `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an unstreamable selection.
+    subscription_selection_unsupported_code: bool,
+    /// Opt-in `extensions.outcome` on generated mutation root errors.
+    mutation_error_outcome: bool,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
+    page_config: Option<Arc<crate::graphql::orm::AuthorizedPageConfig>>,
     read_observer: Option<Arc<dyn crate::graphql::orm::ReadQueryObserver>>,
     subscription_key_limit: usize,
     subscription_authority_recheck_interval: std::time::Duration,
@@ -122,9 +129,14 @@ impl<B: OrmBackend> Clone for Database<B> {
             change_journal_enabled: self.change_journal_enabled,
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
+            refuse_oversized_limit: self.refuse_oversized_limit,
+            subscription_selection_unsupported_code: self.subscription_selection_unsupported_code,
+            mutation_error_outcome: self.mutation_error_outcome,
+            max_page_offset: self.max_page_offset,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
             scan_config: self.scan_config.clone(),
+            page_config: self.page_config.clone(),
             read_observer: self.read_observer.clone(),
             subscription_key_limit: self.subscription_key_limit,
             subscription_authority_recheck_interval: self.subscription_authority_recheck_interval,
@@ -197,9 +209,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy,
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -227,9 +244,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -254,9 +276,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -281,9 +308,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -308,9 +340,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -338,9 +375,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -375,9 +417,14 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
+            page_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
@@ -405,6 +452,54 @@ impl<B: OrmBackend> Database<B> {
     /// Return a copy of this handle with a different schema ownership policy.
     pub fn with_schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
         self.schema_policy = schema_policy;
+        self
+    }
+
+    /// Client page limits and the opt-in oversized-limit refusal policy.
+    pub fn client_pagination_config(&self) -> crate::graphql::orm::ClientPaginationConfig {
+        self.pagination_config
+            .into_client_policy(self.refuse_oversized_limit)
+            .with_max_offset(self.max_page_offset)
+    }
+
+    /// Set whether oversized GraphQL page limits are refused instead of reduced.
+    pub fn with_oversized_page_limit_refusal(mut self, refuse: bool) -> Self {
+        self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Whether an unstreamable generated subscription selection is refused
+    /// with `SUBSCRIPTION_SELECTION_UNSUPPORTED`; see
+    /// [`DatabaseBuilder::subscription_selection_unsupported_code`].
+    pub fn subscription_selection_unsupported_code_enabled(&self) -> bool {
+        self.subscription_selection_unsupported_code
+    }
+
+    /// Return a copy of this handle that refuses an unstreamable generated
+    /// subscription selection with `SUBSCRIPTION_SELECTION_UNSUPPORTED`; see
+    /// [`DatabaseBuilder::subscription_selection_unsupported_code`].
+    pub fn with_subscription_selection_unsupported_code(mut self, enabled: bool) -> Self {
+        self.subscription_selection_unsupported_code = enabled;
+        self
+    }
+
+    /// Whether generated mutation root errors carry `extensions.outcome`; see
+    /// [`DatabaseBuilder::mutation_error_outcome`].
+    pub fn mutation_error_outcome_enabled(&self) -> bool {
+        self.mutation_error_outcome
+    }
+
+    /// Return a copy of this handle whose generated mutation root errors
+    /// carry `extensions.outcome`; see [`DatabaseBuilder::mutation_error_outcome`].
+    pub fn with_mutation_error_outcome(mut self, enabled: bool) -> Self {
+        self.mutation_error_outcome = enabled;
+        self
+    }
+
+    /// Set the largest client page offset served; see
+    /// [`DatabaseBuilder::max_page_offset`].
+    pub fn with_max_page_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.max_page_offset = max_offset;
         self
     }
 
@@ -1201,6 +1296,24 @@ impl<B: OrmBackend> Database<B> {
         self.scan_config.as_ref()
     }
 
+    /// Enable context-bound authorized pages
+    /// (`EntityQuery::fetch_authorized_page`). Every replica that serves the
+    /// same pages needs the same keys; see
+    /// [`AuthorizedPageKeys`](crate::graphql::orm::AuthorizedPageKeys) for
+    /// key custody and rotation.
+    pub fn with_authorized_page_config(
+        mut self,
+        config: crate::graphql::orm::AuthorizedPageConfig,
+    ) -> Self {
+        self.page_config = Some(Arc::new(config));
+        self
+    }
+
+    /// The installed context-bound page configuration, if any.
+    pub fn authorized_page_config(&self) -> Option<&crate::graphql::orm::AuthorizedPageConfig> {
+        self.page_config.as_deref()
+    }
+
     /// Observe SQL text (without bind values) and database rows fetched by
     /// EntityQuery, projection and aggregate-page reads. Intended for diagnostics and query-behavior tests.
     pub fn with_read_query_observer(
@@ -1574,7 +1687,10 @@ impl<B: OrmBackend> Database<B> {
         }
         fn after_commit(error: async_graphql::Error) -> async_graphql::Error {
             error.extend_with(|_, extensions| {
-                extensions.set("outcome", "committed");
+                extensions.set(
+                    "outcome",
+                    crate::graphql::errors::MutationOutcome::Committed.as_str(),
+                );
                 extensions.set("retryable", false);
             })
         }
@@ -2185,6 +2301,34 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
         self
     }
 
+    /// Refuse a client page limit above the maximum with
+    /// `PAGE_LIMIT_EXCEEDED` instead of reducing it. Off by default; see
+    /// [`Self::refuse_oversized_page_limit`].
+    pub fn refuse_oversized_page_limit(mut self, refuse: bool) -> Self {
+        self.database.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Refuse a client page offset above `max_offset` with
+    /// `PAGE_LIMIT_EXCEEDED`, on every backend.
+    ///
+    /// `None`, the default, leaves client offsets unbounded. Every backend
+    /// reads and discards the rows an offset skips, so one large offset costs
+    /// a scan of that many rows; set a maximum such as
+    /// [`PaginationConfig::RECOMMENDED_MAX_OFFSET`] and page deeper with
+    /// keyset cursors. The bound applies to generated list roots, to-many
+    /// relation pages and search pages, to custom resolvers that resolve
+    /// their page through
+    /// [`ClientPaginationConfig::resolve_client_page`](crate::graphql::orm::ClientPaginationConfig::resolve_client_page),
+    /// and to Rust reads that take a `PageInput` (`EntityQuery::paginate`,
+    /// `EntitySearchQuery::paginate`). An offset set with a builder's own
+    /// `offset(n)`, including the search builders', is trusted code and is
+    /// not bounded.
+    pub fn max_page_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.database.max_page_offset = max_offset;
+        self
+    }
+
     /// Set the maximum rows one generated GraphQL `updateMany` or
     /// `deleteMany` loads and locks; see
     /// [`PaginationConfig::max_bulk_write_rows`]. A bulk write that selects
@@ -2209,6 +2353,33 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     ) -> Self {
         self.database
             .set_subscription_authority_recheck_interval(interval);
+        self
+    }
+
+    /// Refuse a generated `Changed` subscription whose selection can never be
+    /// streamed (a relation, a computed field or an unavailable key) with
+    /// `extensions.code` `SUBSCRIPTION_SELECTION_UNSUPPORTED` instead of
+    /// `INVALID_INPUT`. Off by default, so clients that match
+    /// `INVALID_INPUT` keep working; the message is the same either way.
+    /// Other invalid stream input, such as a `Keys` list over its bound,
+    /// stays `INVALID_INPUT`.
+    pub fn subscription_selection_unsupported_code(mut self, enabled: bool) -> Self {
+        self.database.subscription_selection_unsupported_code = enabled;
+        self
+    }
+
+    /// Add `extensions.outcome` to every error a generated create, upsert,
+    /// update, delete, `updateMany` or `deleteMany` root raises: `refused`
+    /// (nothing was attempted), `failed` (attempted and rolled back),
+    /// `committed`, or `unknown` (for example a failed commit). Off by
+    /// default, so responses are unchanged; see
+    /// [`MutationOutcome`](crate::graphql::errors::MutationOutcome).
+    ///
+    /// With this set, a generated bulk write whose commit fails raises a
+    /// top-level error with `outcome: "unknown"` instead of returning
+    /// `success: false`, so `success: false` always means nothing was written.
+    pub fn mutation_error_outcome(mut self, enabled: bool) -> Self {
+        self.database.mutation_error_outcome = enabled;
         self
     }
 

@@ -237,6 +237,9 @@ pub fn authenticate_manifest(
     }
     validate_manifest_entries(manifest)?;
     authenticator.require_repository_identity()?;
+    // A revoked id is never sealed again. An id missing from the
+    // known-snapshot list is: that list is updated after the write.
+    authenticator.check_snapshot_not_revoked(manifest.snapshot_id)?;
     let canonical = canonical_manifest_bytes(manifest)?;
     manifest.checksum = sha256_hex(&canonical);
     if let Some(identity) = manifest
@@ -266,7 +269,10 @@ pub fn authenticate_manifest(
 /// [`BackupError::ChecksumMismatch`],
 /// [`BackupError::ManifestAuthenticationFailed`],
 /// [`BackupError::LegacyManifestRefused`] or
-/// [`BackupError::InvalidManifestEntry`].
+/// [`BackupError::InvalidManifestEntry`]. A snapshot the host's snapshot
+/// records do not admit is refused with
+/// [`BackupError::ManifestAuthenticationFailed`]; see
+/// [`BackupError::is_snapshot_not_admitted`].
 pub fn verify_manifest_authenticity(
     authenticator: &ManifestAuthenticator,
     manifest: &BackupSnapshotManifest,
@@ -327,6 +333,9 @@ pub fn verify_manifest_authenticity(
             });
         }
     }
+    // Checked after the seal, so a forged manifest is reported as forged and
+    // only the host's own, authentic snapshots reach the admission records.
+    authenticator.check_snapshot_admitted(manifest.snapshot_id)?;
     validate_manifest_entries(manifest)
 }
 

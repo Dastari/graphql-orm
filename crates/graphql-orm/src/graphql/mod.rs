@@ -29,8 +29,12 @@ pub mod __policy_object {
 }
 pub mod structural_auth;
 pub mod subscriptions;
+/// Shared output glue for generated wrapper objects; generated code only.
+#[doc(hidden)]
+pub mod wrapper_object;
 
 #[cfg(feature = "runtime-graphql")]
 pub mod runtime;
 
+pub mod input_validation;
 pub(crate) mod subscription_admission;

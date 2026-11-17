@@ -3,15 +3,82 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
 
-Version 0.160.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Version 0.172.0 accepts the entity options `lifetime(...)`,
+`changed_started` and `aggregate_source`, and the `schema_roots!` option
+`client_metadata`, and emits `graphql_orm_interpretation_fingerprint` from
+every `schema_roots!`. Without them generated output is unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
+Version 0.171.0 accepts `#[graphql_entity(mutation_error_codes)]`, which adds
+a nullable `errorCode` to the entity's generated single-row results and a code
+to its bulk filter refusals, and wraps generated mutation roots so their
+errors can carry the opt-in `extensions.outcome`. Without the attribute and
+the `Database` setting, generated SDL and responses are unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
+
+Version 0.170.0 installs `GeneratedInputValidation` in the generated schema
+builders, so a value that is not an object where an input object is expected
+is refused with `invalid_graphql_input` before any resolver runs, as is a
+variable at a position the GraphQL rule does not allow. Recompile entities with
+aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01690-to-01700-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
+
+Version 0.169.0 maps a SQL Server `String` field that is a key, unique, an
+index member or a foreign-key source to `NVARCHAR(450)`, which SQL Server can
+index, and an unmapped Rust type to `NVARCHAR(MAX)` instead of `TEXT`.
+Recompile entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01670-to-01690-sql-server-correctness-and-a-client-offset-bound).
+
+Version 0.167.0 changes test code only: the macros unit tests no longer assume
+the SQLite backend, so they run under each backend feature. No generated code
+or behavior changes.
+
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
+`DependentDeleteGuard` compares declarations with the introspected delete plan
+and enforces dependent row limits before writes. Generated physical opt-out and
+bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
+Version 0.165.0 preserves the stored value of an optional field when its
+write policy denies an upsert update and the host opts to ignore that denial.
+Recompile entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
+page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
+of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and
+`schema_roots!(max_page_limit: N)` publishes the real maximum in the semantic
+catalogue and refuses a `Database` configured differently. Runtime GraphQL can
+serve `RecordVersion` and integer live keys as `RuntimeInt64` strings
+(`with_int64_identity_strings`). A runtime page whose stored sort key is too
+long for a cursor is refused with `cursor_key_too_large`. A subscriber that
+lagged now ends on the next authority tick instead of at once. Defaults are
+unchanged except for that timing. See the
+[migration guide](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
+Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
+per-entity wrapper objects (edges, connections, mutation results, change
+events, bulk results and authorized scan pages) carry hand-emitted output
+impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
+fingerprints are byte-identical; no action is needed. See the
+[migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
+
+Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
+context-bound authorized pages for handwritten resolvers. The macros are
+unchanged. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,

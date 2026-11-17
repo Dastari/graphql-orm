@@ -75,6 +75,24 @@ enum AiReadOnlyAgentTurnMode {
     ExperimentalDynamicTools(AiToolResultEgressRoute),
 }
 
+/// Whether the turn's hierarchical rules admit every reviewed static tool the
+/// delivery turn brokers, exactly as they must admit an offered static read
+/// tool. A brokered tool is reached through the broker's own fingerprint, so
+/// without this check a rule that lists allowed tool fingerprints would not
+/// apply to it.
+pub(crate) fn brokered_static_tools_follow_rules(
+    delivery: &crate::AiCapabilityDeliveryTurn,
+    rules: &AiResolvedRuleSet,
+) -> bool {
+    delivery.brokered_static_tools_admitted(|fingerprint| {
+        rules.constrain_tool(
+            fingerprint,
+            crate::ToolMaturity::ReadOnly,
+            crate::AiApprovalRule::None,
+        ) == Some(crate::AiApprovalRule::None)
+    })
+}
+
 impl AiReadOnlyAgentTurnPlan {
     /// Binds a provider plan to current rule evidence and the server-selected
     /// route used for every exact application-tool result in that turn.
@@ -229,11 +247,16 @@ impl AiReadOnlyAgentTurnPlan {
     /// # Errors
     ///
     /// Returns [`AiError::InvalidInput`] unless the plan offers exactly the
-    /// crate-owned surface and carries an application-tool result route.
+    /// crate-owned surface and carries an application-tool result route, and
+    /// [`AiError::Forbidden`] when the turn's hierarchical rules do not admit
+    /// every brokered static tool as an approval-free read tool.
     pub fn with_capability_delivery(
         mut self,
         delivery: crate::AiCapabilityDeliveryTurn,
     ) -> Result<Self, AiError> {
+        if !brokered_static_tools_follow_rules(&delivery, &self.rules) {
+            return Err(AiError::Forbidden);
+        }
         if !delivery.matches_offered_tools(self.provider_call.offered_tools())
             || matches!(&self.mode, AiReadOnlyAgentTurnMode::ChatOnly)
             || self.provider_session.as_ref().is_some_and(|session| {
@@ -433,6 +456,25 @@ pub trait AiAgentRunControl: Send + Sync {
     ) -> Result<(), AiError> {
         Err(AiError::RuntimeNotReady)
     }
+
+    /// Records a response the provider retains, as soon as the turn returns,
+    /// so the stored-response ledger can delete it after the session is
+    /// deleted, whatever happens to the turn afterwards.
+    ///
+    /// The default records nothing; the ORM run service records OpenAI
+    /// responses sent with `store: true`.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the run cannot be read or the record cannot be
+    /// persisted.
+    async fn record_retained_provider_response(
+        &self,
+        _lease: &AiRunLease,
+        _result: &crate::AiProviderCallResult,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -471,6 +513,14 @@ impl AiAgentRunControl for OrmAiRunService {
         error_code: &str,
     ) -> Result<(), AiError> {
         OrmAiRunService::schedule_retry(self, lease, delay, error_code).await
+    }
+
+    async fn record_retained_provider_response(
+        &self,
+        lease: &AiRunLease,
+        result: &crate::AiProviderCallResult,
+    ) -> Result<(), AiError> {
+        OrmAiRunService::record_retained_provider_response(self, lease, result).await
     }
 }
 
@@ -1707,7 +1757,14 @@ impl AiReadOnlyAgentCoordinator {
                     .await
             };
             let result = match provider_result {
-                Ok(result) => result,
+                Ok(result) => {
+                    // Before any later check can fail the turn: the provider
+                    // already holds the response.
+                    self.run_control
+                        .record_retained_provider_response(&lease, &result)
+                        .await?;
+                    result
+                }
                 Err(ProviderTurnFailure::Deferred) => {
                     const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
                     // The durable retry is what makes a message accepted during

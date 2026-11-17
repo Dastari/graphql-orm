@@ -3,7 +3,7 @@ title: "Usage Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -390,6 +390,56 @@ re-listing manifests gives a different set. Just before the object sweep they
 list manifests again and stop, without deleting any object, unless the set is
 exactly the retained snapshots. A listing truncated identically on every read
 cannot be detected; the storage provider must fail such listings.
+
+### Snapshot records
+
+A sealed manifest stays valid after its snapshot is deleted, so a repository
+writer can put a pruned snapshot back. Keep a record of deleted (or of live)
+snapshot ids outside the repository and give it to the authenticator:
+
+```rust
+use async_trait::async_trait;
+use graphql_orm_backup::{
+    BackupError, BackupRepository, KeepPolicy, ManifestAuthenticator, SnapshotDeletionObserver,
+    prune_observed,
+};
+use uuid::Uuid;
+
+fn authenticator(base: ManifestAuthenticator, revoked: Vec<Uuid>) -> ManifestAuthenticator {
+    // `revoked` is loaded from the host's own store on every start.
+    base.with_revoked_snapshots(revoked)
+}
+
+struct RevocationRecord; // the host's durable store
+
+#[async_trait]
+impl SnapshotDeletionObserver for RevocationRecord {
+    async fn snapshot_will_be_deleted(&self, snapshot_id: Uuid) -> Result<(), BackupError> {
+        // Persist `snapshot_id` here, before returning.
+        let _ = snapshot_id;
+        Ok(())
+    }
+}
+
+async fn prune_and_record(repository: &dyn BackupRepository) -> Result<(), BackupError> {
+    prune_observed(repository, &KeepPolicy::default(), &RevocationRecord).await?;
+    Ok(())
+}
+```
+
+The observer is called under the repository lock, before each snapshot's
+first blob is deleted, so the record is complete whether the call succeeds,
+fails after its first deletion, or completes and then fails to release the
+lock. An error from the observer aborts before that snapshot is touched.
+`DeletedSnapshotLog` is a ready-made observer that collects the ids in memory.
+
+`with_known_snapshots` takes the opposite record, the ids that are live, and
+also refuses snapshots the host never recorded. Every manifest read refuses a
+snapshot the records do not admit with a `ManifestAuthenticationFailed` error
+for which `BackupError::is_snapshot_not_admitted()` is true. `prune` refuses
+to run while such a snapshot is listed; remove it with `delete_snapshot`,
+which then deletes it without reading its manifest. See the
+[trust model](architecture.md#trust-model).
 
 `delete_snapshot` removes one snapshot under the repository writer lock. It
 refuses to delete a snapshot that is the parent of another manifest and

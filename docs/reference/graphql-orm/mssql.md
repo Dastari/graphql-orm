@@ -3,7 +3,7 @@ title: "Microsoft SQL Server Backend"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -112,7 +112,8 @@ An entity declared with `schema_policy = "external_read_only"` does not contain:
 - mutation repository helpers or subscriptions
 - migration runners
 - schema diffing or schema creation APIs
-- backup/restore APIs
+- backup/restore APIs (a host-run restore records the
+  [restore-in-progress marker](#restore-in-progress-marker))
 
 An entity declared with `schema_policy = "external_writable"` may generate the normal applicable
 repository and GraphQL DML surface: insert/bulk insert, key and bounded predicate update/delete,
@@ -144,12 +145,101 @@ mismatched hostname. The transport fixture checks the encryption default, each
 explicit opt-in, session reset between checkouts, pool timeouts and a server
 default of `NOCOUNT ON`.
 
+## Restore-in-progress marker
+
+The ORM does not restore SQL Server databases. A host that restores one with
+its own statements may commit table by table, so a failure can leave the
+database partly restored, and a service that is already running must not read
+or write the tables meanwhile. A lock and a marker provide that:
+
+```rust
+let mut restore = database
+    .begin_restore("snapshot-2026-11-15", std::time::Duration::from_secs(60))
+    .await?;
+restore.execute("DELETE FROM dbo.Jobs", &[]).await?;
+// ... the rest of the restore, through the guard ...
+restore.finish().await?;
+```
+
+- **The lock.** Every ORM transaction and every autocommit ORM statement
+  takes the application lock `graphql_orm_restore` in shared mode
+  (`sp_getapplock`), in the same batch as the statement or `BEGIN
+  TRANSACTION`. Transactions and autocommit reads pay no extra round trip.
+  An autocommit write releases the lock in one short follow-up batch, because
+  a release inside its own batch would replace the row count SQL Server
+  reports for it. `begin_restore` takes it
+  exclusively on a dedicated connection and holds it until `finish`. It waits
+  up to `wait` for ORM work already in flight in any process, and from then on
+  each new transaction or statement waits 250 ms and is refused. The check
+  cannot race: a transaction that began before the restore holds the shared
+  lock until it ends, and one that begins later cannot obtain it.
+- **The marker.** `begin_restore` also records one row in
+  `dbo.__graphql_orm_restore_marker`. The gate that takes the shared lock refuses
+  while that row exists. This covers a restore whose process died: its lock
+  is released with its session, its partial rows remain. Before runtime access, the schema owner must call
+  `MssqlPool::install_restore_marker()` as part of schema installation.
+  MSSQL schemas are externally managed; install this infrastructure even on
+  hosts that never restore. Runtime roles need SELECT on the table; restore
+  roles also need INSERT and DELETE. `install_restore_marker` needs an
+  external-writable pool, is idempotent and race-safe (replicas may install at
+  the same time; it serialises on an application lock, accepts a table another
+  installer created, and verifies the table's shape: its three columns and
+  types, a primary key of exactly `marker_key`, and an enabled,
+  trusted `CHECK (marker_key = 1)` (not added `WITH NOCHECK`), declared on the
+  column or on the table). A missing table or
+  denied access fails closed as unavailable restore state, even when no marker
+  is visible. See the
+  [migration guide](../../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+- **The refusal.** A refused transaction or statement fails before it reads
+  or writes, with an error carrying `RestoreInProgress` (read it with
+  `RestoreInProgress::from_error`). `restore_id` is empty, with `started_at`
+  zero, when the identifier is unknown: in the short window where the restore
+  holds the lock and has not recorded its marker yet, or when a statement was
+  refused because the restore holds the lock and the marker could then not
+  be read (a timeout, or a role denied SELECT). A refusal caused by a restore
+  is never reported as unavailable state.
+- **Unavailable restore state.** When the marker table is missing or
+  unreadable the gate still refuses every statement, but with an error
+  carrying `RestoreStateUnavailable` (`RestoreStateUnavailable::from_error`),
+  never `RestoreInProgress`. Its `reason` says what to fix:
+  `MarkerNotInstalled` (run `MssqlPool::install_restore_marker()` or the
+  documented DDL), `PermissionDenied` (grant the runtime role SELECT),
+  `ConnectionFailed` (the database could not be reached or timed out while
+  reading the marker; nothing to install), or `Other` (for example a table of
+  the wrong shape). The message names the fix and never contains SQL text; the
+  driver or server error is its `source()`, for logs. `begin_restore` and
+  `resume_restore` report a missing table or denied permission the same way.
+  `Database::restore_in_progress` reads the marker during a restore, failing
+  closed when it cannot read the table;
+  `Database::ensure_no_restore_in_progress`,
+  `SchemaManager::validate_against_entities` and `validate_target` refuse on
+  it, for a service that wants one check at start.
+- **After a crash.** `Database::resume_restore(restore_id, wait)` takes the
+  lock again and adopts the marker of that restore, and of no other. Complete
+  the restore, or remove its partial rows, through the guard, then `finish`.
+  `finish` fails, leaving the marker, while the guard's connection has an
+  open transaction.
+- **What the guard is for.** The restore's own statements go through
+  `MssqlRestore::execute` and `fetch_rows`, on the connection that holds the
+  lock; the same statements sent through the ORM would be refused. Statements
+  a host or tool sends on connections of its own are outside the lock: they
+  are neither refused nor waited for.
+
+A raw statement sent through the ORM runs inside the batch that takes and
+releases the shared lock. A statement that SQL Server requires to be alone in
+its batch (`CREATE VIEW`, `CREATE PROCEDURE`, `CREATE FUNCTION`,
+`CREATE TRIGGER`, `CREATE SCHEMA`, and their `ALTER` forms) is sent as it is.
+PostgreSQL and SQLite restore a snapshot in one transaction and keep no lock
+or marker.
+
 ## Connections
 
 Connections follow one routing redirect: under Azure SQL's Redirect connection
 policy the gateway answers the login with the address of the node that hosts
 the database, and the pool and the notification connection connect there under
-the same transport policy.
+the same transport policy. Both connections fall within one `connect_timeout`.
+A second redirect is refused with `sqlx::Error::Protocol` ("only one routing
+redirect is followed"), so a routing loop cannot keep a pool reconnecting.
 
 A named instance given without a port (`server=host\INSTANCE`) is resolved through SQL Server
 Browser: the pool sends one UDP request to port 1434 on the host, waits up to one second for the
@@ -227,7 +317,10 @@ credentials cross the network in clear. The driver cannot report a `Config`'s
 level, so the ORM cannot refuse it, and it cannot raise the level to at least
 login-only without downgrading a caller who set `Required`. Only combine
 `insecure_allow_login_only_encryption()` with a caller-built `Config` whose
-level you set yourself. A connection string cannot ask for plaintext. The
+level you set yourself. Such a `Config` at `EncryptionLevel::On` ("encrypt if
+the server allows it") is refused with `sqlx::Error::Configuration` before
+any connection is opened: the driver panics when that level meets a server
+that declines encryption. Use `Required`, or `Off` for login-only TLS. A connection string cannot ask for plaintext. The
 driver also cannot report whether
 a `Config` trusts every certificate, so a caller that calls `Config::trust_cert`
 has chosen that in code. Build pools from connection strings to have
@@ -261,9 +354,11 @@ sessions can briefly exceed `max_connections`.
 The pool resets a connection's session when it opens it, in the same batch
 that commits or rolls back each transaction, before returning a connection
 after a non-fatal server error, and before reusing a connection that has been
-idle past `health_check_after_idle`. The reset rolls back any open transaction
-and sets `READ COMMITTED` isolation, `NOCOUNT OFF` and
-`IMPLICIT_TRANSACTIONS OFF`. If the reset fails, the connection is closed.
+idle past `health_check_after_idle`. The reset rolls back any open transaction,
+sets `READ COMMITTED` isolation, `NOCOUNT OFF` and
+`IMPLICIT_TRANSACTIONS OFF`, and releases the ORM's own session application
+locks (`graphql_orm_restore` and `graphql_orm_restore_marker_install`). If the
+reset fails, the connection is closed.
 
 Pooled statements run through `sp_executesql`, so SQL Server refuses one that
 leaves its transaction count changed (error 266). For example,
@@ -284,7 +379,7 @@ until its next reset, so restore them in the same batch.
 The reset is not a full `sp_reset_connection`. It does **not** clear:
 
 - local temporary tables (`#name`) and table variables still in scope;
-- session-owned application locks from `sp_getapplock` with
+- other session-owned application locks from `sp_getapplock` with
   `@LockOwner = 'Session'`;
 - `CONTEXT_INFO` and `SESSION_CONTEXT` values;
 - the current database after `USE`;
@@ -682,9 +777,11 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
   not depend on the session language or `DATEFORMAT`. Values are still
   bound as text, so write ISO 8601 with a `T` to columns of the legacy `datetime` type.
 - a `DECIMAL` value beyond `rust_decimal`'s range (more than 28 decimal places or a 96-bit
-  mantissa) is a column decode error. A non-NULL value in a column declared with scale 38
-  (`DECIMAL(38,38)`) panics inside the driver while the row is read; cast such a column in a
-  view or avoid mapping it
+  mantissa) is a column decode error. The driver cannot read a non-NULL value in a column
+  declared with scale 38 (`DECIMAL(38,38)`) at all: it asserts while it decodes the row. The
+  statement then fails with `sqlx::Error::Decode`, its connection is closed and, inside a
+  transaction, the transaction fails; the process's panic hook still prints the assertion,
+  and a binary built with `panic = "abort"` aborts. Cast such a column in a view to read it
 - `uniqueidentifier` mapped to `uuid::Uuid`
 - floating point values
 - fixed decimals declared with `#[graphql_orm(decimal(precision = P, scale = S))]` and mapped to
@@ -704,6 +801,40 @@ SQL Server-specific types such as `xml`, `hierarchyid`,
 `geography`, `geometry`, `sql_variant`, `rowversion`, and table-valued columns are not first-class
 ORM scalar types in this phase.
 
+## Introspection and rendered DDL
+
+The ORM never runs DDL against SQL Server, but `introspect_mssql_schema` and
+the migration renderers describe an existing schema and the T-SQL to change
+it, for review or for a host's own tooling.
+
+- Introspection reports column types with their parameters (`DECIMAL(19,4)`,
+  `VARBINARY(MAX)`, `NVARCHAR(50)`), primary keys, unique constraints, foreign
+  keys with their delete action, and ordinary and unique indexes with their
+  column order, descending columns and `IN`-list filters. Indexes that back a
+  primary key or unique constraint are reported as key and unique columns
+  instead. Included columns and spatial, XML and columnstore indexes are not
+  part of the model; a filter other than an `IN` list on one column is kept
+  as text that never matches a declared index, so a plan replaces such an
+  index rather than ignoring the filter. A table without a primary key
+  reports none. Check constraints are not read: portable constraints are not
+  supported on SQL Server.
+- Entities map a `String` field to `NVARCHAR(MAX)`, except when SQL Server must
+  index it: a primary key, a unique field, a member of a declared index or
+  composite unique, or a foreign-key source is `NVARCHAR(450)`, the 900-byte
+  limit of a clustered index key. A Rust type without a mapping is
+  `NVARCHAR(MAX)`.
+- `ALTER COLUMN` states `NULL` or `NOT NULL`, since SQL Server otherwise takes
+  the nullability from session settings. To a character type it also keeps
+  the column's collation: SQL Server resets a column altered without
+  `COLLATE` to the database default, which for a `varchar` column can change
+  its code page and stored characters. The model does not record collations,
+  so the rendered statement is an `EXEC sys.sp_executesql` batch that reads
+  the live collation when it runs and adds `COLLATE` when it differs from
+  the database default. It fails, rather than alter the column, when that
+  name is not listed by `sys.fn_helpcollations()`.
+- Search metadata statements are T-SQL. SQL Server full-text indexes are not
+  created; the plan renders a comment for them.
+
 ## Tests
 
 Every owned SQL Server test generates a private CA with OpenSSL and installs a
@@ -718,9 +849,11 @@ timeouts and a `NOCOUNT ON` session default:
 cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls --test mssql_transport -- --ignored --test-threads=1
 ```
 
-The correctness regression executes error classification, decoding, empty
-pages, `LIKE` patterns, wide relation batches, the upsert batch and rendered
-DDL on the owned server; it is part of `scripts/run-owned-database-lanes.sh mssql`:
+The correctness regression executes error classification, decoding (including
+a `DECIMAL(38,38)` value), empty pages, `LIKE` patterns, wide relation batches,
+the upsert batch, rendered DDL with indexes, key strings and collations, and
+introspection round trips on the owned server; it is part of
+`scripts/run-owned-database-lanes.sh mssql`:
 
 ```bash
 cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_correctness -- --ignored --test-threads=1

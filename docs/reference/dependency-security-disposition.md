@@ -36,6 +36,7 @@ upstream ships a fix. These exceptions retain the path conditions below and
 the machine-readable review expiry; they do not authorize new private-key or
 untrusted-parser uses. A serious, actually reachable vulnerability requires
 maintainer review. Existing vendor/fork history is not permission for new patches.
+Later exceptions carry their own accepted date.
 
 | Accepted date | Advisory/package/version | One-line reason |
 | --- | --- | --- |
@@ -49,6 +50,9 @@ maintainer review. Existing vendor/fork history is not permission for new patche
 | 2026-11-15 | `RUSTSEC-2026-0387:crypto-bigint:0.5.5` | Pinned agql-auth/jsonwebtoken RustCrypto elliptic-curve path; no compatible fixed release. Existing owner acceptance excludes private EC operations; auth pin move requires maintainer approval. |
 | 2026-11-15 | `RUSTSEC-2026-0441:pin-utils:0.1.0` | aws-smithy-runtime (S3), sspi -> async-dnssd (optional SMB), and Hive reqwest-retry -> wasmtimer retain the unmaintained utility. Requires owning upstream migrations; maintenance status is not treated as a vulnerability exclusion. |
 | 2026-11-15 | `RUSTSEC-2026-0459:libsqlite3-sys:0.30.1` | Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical. |
+| 2026-11-17 | `RUSTSEC-2026-0543:chrono:0.4.45` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability. Re-check when upstream adopts a maintained successor or a security advisory appears. |
+| 2026-11-17 | `RUSTSEC-2026-0555:chrono-tz:0.10.4` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability. Re-check when upstream adopts a maintained successor or a security advisory appears. |
+| 2026-11-17 | `RUSTSEC-2026-0542:humantime:2.4.0` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability; humantime wraps chrono. Re-check when upstream adopts a maintained successor or a security advisory appears. |
 
 ## Owner-accepted crypto-bigint 0.5.5 disposition
 

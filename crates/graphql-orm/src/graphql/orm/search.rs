@@ -532,9 +532,13 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     pool: &'a B::Pool,
     search: SearchInput,
     query: EntityQuery<T, B>,
-    pagination_config: PaginationConfig,
+    pagination_config: super::ClientPaginationConfig,
     /// The limit set through [`Self::limit`], checked rather than clamped.
     explicit_limit: Option<i64>,
+    /// Whether the page offset was set by trusted code through
+    /// [`Self::offset`]. Only a client page offset ([`Self::paginate`] or a
+    /// GraphQL page) is bounded by `ClientPaginationConfig::with_max_offset`.
+    builder_offset: bool,
     _where: PhantomData<W>,
 }
 
@@ -573,7 +577,7 @@ where
             db,
             auth: None,
             query: EntitySearchQuery::new(db.pool(), search)
-                .pagination_config(db.pagination_config()),
+                .client_pagination_config(db.client_pagination_config()),
             limit: None,
             offset: 0,
             max_scanned_rows: None,
@@ -791,7 +795,7 @@ where
                     limit: Some(batch.fetch),
                     offset: Some(batch.offset),
                 }),
-                PaginationConfig::unbounded(),
+                PaginationConfig::unbounded().into(),
             );
             let hits = match page
                 .try_fetch_native_observed(self.auth.as_ref(), Some(self.db))
@@ -890,14 +894,19 @@ where
             pool,
             search,
             query: EntityQuery::new(),
-            pagination_config: PaginationConfig::default(),
+            pagination_config: PaginationConfig::default().into(),
             explicit_limit: None,
+            builder_offset: false,
             _where: PhantomData,
         }
     }
 
     /// A copy of this search with another page and pagination configuration.
-    fn copy_with_page(&self, page: Option<PageInput>, pagination_config: PaginationConfig) -> Self {
+    fn copy_with_page(
+        &self,
+        page: Option<PageInput>,
+        pagination_config: super::ClientPaginationConfig,
+    ) -> Self {
         let mut query = self.query.clone();
         query.page = page;
         Self {
@@ -906,13 +915,20 @@ where
             query,
             pagination_config,
             explicit_limit: self.explicit_limit,
+            builder_offset: self.builder_offset,
             _where: PhantomData,
         }
     }
 
     /// Apply runtime pagination defaults and caps to connection-style search execution.
     pub fn pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
-        self.pagination_config = pagination_config;
+        self.pagination_config = pagination_config.into();
+        self
+    }
+
+    /// Apply a client page policy, including opt-in oversized-limit refusal.
+    pub fn client_pagination_config(mut self, config: super::ClientPaginationConfig) -> Self {
+        self.pagination_config = config;
         self
     }
 
@@ -977,6 +993,19 @@ where
     }
 
     fn check_explicit_limit(&self) -> crate::Result<()> {
+        // The opt-in refusals of an oversized client page; see
+        // `ClientPaginationConfig::with_oversized_limit_refusal` and
+        // `ClientPaginationConfig::with_max_offset`. An offset that trusted
+        // code set with `offset(n)` is not a client offset.
+        let page = self.query.page.as_ref();
+        self.pagination_config
+            .admit_client_limit(page.and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        if !self.builder_offset {
+            self.pagination_config
+                .admit_client_offset(page.and_then(|page| page.offset))
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
         if let Some(limit) = self.explicit_limit {
             self.pagination_config
                 .checked_explicit_limit(limit)
@@ -985,19 +1014,23 @@ where
         Ok(())
     }
 
-    /// Offset the returned hits.
+    /// Offset the returned hits. This is a trusted offset: the client
+    /// offset bound (`DatabaseBuilder::max_page_offset`) does not apply.
     pub fn offset(mut self, offset: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.offset = Some(offset);
         self.query.page = Some(page);
+        self.builder_offset = true;
         self
     }
 
     /// Apply a generated page input with GraphQL page semantics: a limit
-    /// above the configured maximum is clamped.
+    /// above the configured maximum is clamped, and a client offset above
+    /// a configured maximum offset is refused.
     pub fn paginate(mut self, page: PageInput) -> Self {
         self.query = self.query.paginate(&page);
         self.explicit_limit = None;
+        self.builder_offset = false;
         self
     }
 
@@ -1401,7 +1434,13 @@ where
         if self.query.requires_in_memory_filtering() {
             return Err(invalid());
         }
+        // A client page: the opt-in limit refusal and the offset bound apply
+        // before either path reads a row, the native index included.
+        db.client_pagination_config()
+            .admit_client_page(page.as_ref())
+            .map_err(|error| error.into_graphql_error())?;
         self.query.page = page.clone();
+        self.builder_offset = false;
         if matches!(
             visibility,
             ReadVisibility::Complete(_) | ReadVisibility::Unrestricted
@@ -1413,13 +1452,16 @@ where
         if config.batch_size == 0 || config.max_scanned_rows == 0 {
             return Err(invalid());
         }
-        let resolved = db.pagination_config().resolve_page(page.as_ref(), true);
+        let resolved = db
+            .client_pagination_config()
+            .resolve_client_page(page.as_ref(), true)
+            .map_err(|error| error.into_graphql_error())?;
         let offset = resolved.offset.max(0) as usize;
         let limit = resolved.limit.ok_or_else(invalid)?.max(0) as usize;
         let window = offset
             .saturating_add(limit)
             .min(config.max_scanned_rows as usize);
-        self.pagination_config = PaginationConfig::unbounded();
+        self.pagination_config = PaginationConfig::unbounded().into();
         let mut native = None;
         let mut scanned = 0_u32;
         let mut total = 0_i64;

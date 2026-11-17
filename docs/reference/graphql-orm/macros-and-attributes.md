@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -58,11 +58,15 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
 | `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
+| `mutation_error_codes` | flag | absent; generated single-row results gain a nullable `errorCode` and the bulk filter refusals a code; see [mutation result error codes](error-codes.md#mutation-result-error-codes) |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
 | `federation_key` | marker, or `(fields = ["GraphQLField", …], assume_unique = bool)` | repeatable; rejected on `repository_entity` and schema-only entities |
+| `lifetime` | `(field = "rust_field", format = "rfc3339_utc" \| "unix_seconds" \| "unix_milliseconds" \| "sqlite_utc_text")` | absent; names the field holding the record's expiry time for the [client metadata export](client-metadata.md#lifetime-fields); `format` is required for integer and `String` fields; descriptive only |
+| `changed_started` | boolean | `false`; adds the argument `Started: Boolean` to the `Changed` root for the [started signal](client-metadata.md#started-signal-on-changed-streams); the event gains the field `Started: Boolean!` and its `Action`, `ChangeKind`, `Id` and `Key` become nullable |
+| `aggregate_source` | boolean | `false`; requires `aggregate = true`; the aggregate root returns `<Entity>AggregateResultRow` with a [`SourceEntity` field](client-metadata.md#aggregate-source-entity) |
 | `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only entities and on float, nullable or read-policy primary-key fields |
 
 The bare `federation_key` keys on the primary key in declaration order.
@@ -689,6 +693,10 @@ in a legacy composition/semantic list.
 `federation: true` calls `enable_federation()` on the schema builder. It is
 needed only by a subgraph that declares no resolvable `@key` of its own and
 participates in Federation purely through `unresolvable` reference stubs.
+`client_metadata: true` also emits `graphql_orm_client_metadata()`, the
+[client metadata export](client-metadata.md#client-metadata-export). Every
+`schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`; see the
+[interpretation fingerprint](client-metadata.md#interpretation-fingerprint).
 
 `schema_roots!` rejects root field name collisions at compile time. A merged root serves a field from
 only one of its members, so a handwritten field with the name of a generated operation would replace
@@ -752,6 +760,13 @@ with the fields the type really exposes, and panic, naming the root and the fiel
 missing. An empty or incomplete manual list therefore cannot hide a collision, although it is found
 at start-up rather than at compile time. A schema assembled by hand with `Schema::build` gets neither
 check.
+
+`max_page_limit: N` declares the maximum page limit of the `Database` the schema serves. The module
+then exposes `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the semantic catalogue publishes `N` as the ceiling of
+pageable relationship lists, the relation complexity estimate caps pages at `N`, and the schema
+builders panic for a `Database` whose `PaginationConfig::max_limit` is not `Some(N)`. It is optional;
+without it the catalogue and the estimate use the compile-time default of 100. See
+[page size](pagination-migration.md#page-size-reduced-by-default-refused-on-request).
 
 `require_policies: true` is an opt-in review gate. Every entity in `entities` must then record a
 policy decision in its declaration: an entity `read_policy` or `write_policy`, an

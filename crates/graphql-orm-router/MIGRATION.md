@@ -14,6 +14,11 @@ supersedes: []
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
+## 0.15.4 to 0.15.5
+
+No consumer migration is required. Only the wire tests change; router
+behavior, configuration and public APIs are unchanged.
+
 ## 0.15.3 to 0.15.4
 
 No consumer migration is required. Only the wire tests change; router

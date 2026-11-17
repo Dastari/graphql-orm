@@ -17,10 +17,34 @@ pub struct LocalBackupRepository {
 
 impl LocalBackupRepository {
     /// Creates a local repository rooted at a filesystem path.
+    ///
+    /// Not available on Windows: its path operations cannot promise the link
+    /// boundary this constructor stands for. Use
+    /// [`Self::new_trusted_windows_root`] there.
+    #[cfg(not(windows))]
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::from_backend(LocalStorageBackend::new(root))
+    }
+
+    /// Creates a local repository over a host-controlled Windows root.
+    ///
+    /// Links are not enforced as a security boundary: the host must prevent
+    /// other processes from changing the root, its ancestors and descendants
+    /// while the repository is in use. The plain constructor `new` does not
+    /// exist on Windows so that a host cannot obtain a repository by accident.
+    /// See [`LocalStorageBackend::new_trusted_windows_root`].
+    ///
+    /// On Unix this is equivalent to `new`; the link boundary remains
+    /// enforced there.
+    #[must_use]
+    pub fn new_trusted_windows_root(root: impl Into<PathBuf>) -> Self {
+        Self::from_backend(LocalStorageBackend::new_trusted_windows_root(root))
+    }
+
+    fn from_backend(backend: LocalStorageBackend) -> Self {
         Self {
-            inner: BlobStoreBackupRepository::new(Arc::new(LocalStorageBackend::new(root))),
+            inner: BlobStoreBackupRepository::new(Arc::new(backend)),
         }
     }
 
@@ -42,24 +66,49 @@ impl LocalBackupRepository {
 
     /// Opens an existing local repository root.
     ///
+    /// Not available on Windows; use
+    /// [`Self::open_existing_trusted_windows_root`] there.
+    ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the path cannot be inspected or is not a
     /// directory.
+    #[cfg(not(windows))]
     pub async fn open_existing(root: impl Into<PathBuf>) -> Result<Self, BackupError> {
-        let root = root.into();
-        let metadata = tokio::fs::metadata(&root)
-            .await
-            .map_err(|source| BackupError::Io {
-                path: root.clone(),
-                source,
-            })?;
-        if !metadata.is_dir() {
-            return Err(BackupError::InvalidRepositoryRoot { path: root });
-        }
-
+        let root = check_root_directory(root.into()).await?;
         Ok(Self::new(root))
     }
+
+    /// Opens an existing local repository root on a host-controlled Windows
+    /// tree.
+    ///
+    /// Links are not enforced as a security boundary: the host must prevent
+    /// other processes from changing the root, its ancestors and descendants
+    /// while the repository is in use. See [`Self::new_trusted_windows_root`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the path cannot be inspected or is not a
+    /// directory.
+    pub async fn open_existing_trusted_windows_root(
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, BackupError> {
+        let root = check_root_directory(root.into()).await?;
+        Ok(Self::new_trusted_windows_root(root))
+    }
+}
+
+async fn check_root_directory(root: PathBuf) -> Result<PathBuf, BackupError> {
+    let metadata = tokio::fs::metadata(&root)
+        .await
+        .map_err(|source| BackupError::Io {
+            path: root.clone(),
+            source,
+        })?;
+    if !metadata.is_dir() {
+        return Err(BackupError::InvalidRepositoryRoot { path: root });
+    }
+    Ok(root)
 }
 
 #[async_trait]

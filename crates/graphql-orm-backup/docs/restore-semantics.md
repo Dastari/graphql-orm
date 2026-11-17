@@ -3,7 +3,7 @@ title: "Restore Semantics"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -79,6 +79,35 @@ with `LegacyManifestRefused` unless the host opts in with a
 - Do not emit change journal entries during restore.
 - Do not run normal GraphQL row policies during restore.
 - Refuse non-empty target databases in `EmptyDatabase` mode.
+- Refuse a snapshot the host's snapshot records do not admit (a revoked id, or
+  one missing from the known-snapshot list) before writing.
+
+## Atomicity
+
+What a failed restore leaves behind depends on the database adapter:
+
+| Target | Full restore (`restore_full`) | After a failure |
+| --- | --- | --- |
+| PostgreSQL, SQLite through `OrmBackupAdapter` | One transaction for all tables, including the row-count and row-hash checks | The target is unchanged; retry without cleanup |
+| SQL Server, or any host-written adapter | Whatever the adapter implements; may commit table by table | The target may be partly restored |
+
+An adapter that cannot restore in one transaction should keep readers and
+writers away from the target while it restores, and leave evidence of a
+restore that did not finish. For SQL Server, `graphql-orm` provides both:
+`Database::begin_restore` returns a guard that holds an exclusive application
+lock which every ORM transaction and statement takes in shared mode, and
+records a marker row that keeps them refused after a crash until
+`resume_restore` and `finish`. Run the adapter's restore statements through
+that guard.
+
+A chain restore is still several stages: the full stage, then each incremental
+stage. Only the full stage of `OrmBackupAdapter` is atomic; the orchestration
+does not hold a transaction across stages and reports how far a failed chain
+got in `RestoreFailureProgress`.
+
+`OrmBackupAdapter` also clears the runtime search index of every restored
+table and marks it `building`, in the restore's transaction. Backfill those
+indexes before serving search.
 
 ## Object Restore
 
@@ -115,6 +144,29 @@ until the delete took effect
 never receive the bytes. A custom streaming sink must likewise discard a
 body whose stream ends in an error. A sink that returns success without
 reading the whole stream also fails with `ChecksumMismatch`.
+
+`BlobStoreRestoreObjectSink` passes each object's manifest `mime_type` as the
+`content_type` of its write. S3 stores it. Local and SMB storage ignore it,
+since a file has no content type there, so an object restored to them keeps
+its bytes and key but no content type; serve the type from the host's own
+object records. This is accepted behaviour.
+
+### Repository reads
+
+A full restore reads each object blob from the repository three times and
+each table or change payload twice. `restore_snapshot` first verifies the
+whole snapshot, reading every payload and object to check its size and
+digest. Then it reads each payload again to decode it. `restore_objects`
+reads each object once to check its size and digest before calling the sink,
+and once more as the digest-checked stream the sink consumes.
+
+This is accepted and intended. A repository can serve different bytes on a
+later read than it served to verification, so every read whose bytes are
+used is checked again, and an object's size is known before the sink sees
+any of it. Plan restore time and repository egress for about three times the
+object bytes and twice the payload bytes. A single verified streaming pass
+would need a sink that can stage and roll back unverified bytes, which the
+`RestoreObjectSink` contract does not require.
 
 A successful database restore does not imply that external objects,
 credentials, provider continuations, application reconciliation, or runtime

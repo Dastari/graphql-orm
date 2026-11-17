@@ -3,15 +3,97 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
 
-Version 0.160.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Version 0.172.0 adds opt-in client-facing metadata: a build-time client
+metadata export (`schema_roots!(client_metadata: true)`) with `Changed` stream
+carried fields, lifetime fields and relationship key mappings, an opt-in
+`Changed` started signal, an opt-in aggregate source entity, and
+`graphql_orm_interpretation_fingerprint`. Defaults are unchanged. See
+[client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md)
+and the [migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
+Version 0.171.0 adds an opt-in client error contract with one code vocabulary
+shared with the router: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an
+unstreamable `Changed` selection
+(`DatabaseBuilder::subscription_selection_unsupported_code`),
+`extensions.outcome` on generated mutation errors
+(`DatabaseBuilder::mutation_error_outcome`, see `MutationOutcome`), and
+`errorCode` on the single-row results of entities declared with
+`mutation_error_codes`. Nothing changes without them. See the
+[error-code reference](../../docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router)
+and the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
+
+Version 0.170.0 refuses, on generated static schemas, a value that is not an
+object where an input object is expected, and on static and runtime schemas a
+variable at a position the GraphQL rule does not allow, with
+`invalid_graphql_input` before any resolver runs. Spec-valid requests are
+unchanged. Clients that send such variable usages, and hosts that build
+schemas from generated roots by hand, need action. See the
+[migration guide](../../MIGRATION.md#01690-to-01700-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
+
+Version 0.169.0 adds an opt-in client page offset bound on every backend
+(`DatabaseBuilder::max_page_offset`, refused with `PAGE_LIMIT_EXCEEDED`) and
+fixes SQL Server details: a `DECIMAL(38,38)` value is a decode error instead
+of a driver panic, introspection reads indexes, key `String` columns are
+indexable `NVARCHAR(450)`, rendered `ALTER COLUMN` keeps the column's
+collation, and the restore marker checks its key and constraint. See the
+[migration guide](../../MIGRATION.md#01670-to-01690-sql-server-correctness-and-a-client-offset-bound).
+
+Version 0.167.0 changes test code only: the macros unit tests no longer assume
+the SQLite backend, so they run under each backend feature. No generated code
+or behavior changes.
+
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
+`DependentDeleteGuard` compares declarations with the introspected delete plan
+and enforces dependent row limits before writes. Generated physical opt-out and
+bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
+Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
+resets restored runtime search indexes, and preserves denied fields on upsert.
+MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
+`MssqlPool::install_restore_marker()` and grant runtime roles SELECT before
+serving ORM work. Missing or unreadable restore state fails closed with
+`RestoreStateUnavailable`, whose reason names the fix. See the
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
+page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
+of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and
+`schema_roots!(max_page_limit: N)` publishes the real maximum in the semantic
+catalogue and refuses a `Database` configured differently. Runtime GraphQL can
+serve `RecordVersion` and integer live keys as `RuntimeInt64` strings
+(`with_int64_identity_strings`). A runtime page whose stored sort key is too
+long for a cursor is refused with `cursor_key_too_large`. A subscriber that
+lagged now ends on the next authority tick instead of at once. Defaults are
+unchanged except for that timing. See the
+[migration guide](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
+Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
+per-entity wrapper objects (edges, connections, mutation results, change
+events, bulk results and authorized scan pages) carry hand-emitted output
+impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
+fingerprints are byte-identical; no action is needed. See the
+[migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
+
+Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
+resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its
+continuation with a service-owned key under a server-authored
+`AuthorizedPageBinding`, refuses a continuation from a different context
+before any row is read, and resolves entity, row and field authorization again
+on every page. The API is additive and needs no action. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages) and the
+[reference](../../docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,

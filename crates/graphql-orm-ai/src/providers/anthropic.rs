@@ -168,13 +168,12 @@ impl AnthropicProvider {
     /// Declares the one pinned snapshot a requested model identifier may
     /// resolve to.
     ///
-    /// By default the model named in a response must equal the requested
-    /// string byte for byte. Anthropic answers a request for a model alias
-    /// with the dated snapshot the alias currently points at, so such a
-    /// request is refused after the tokens were spent. This mapping accepts
-    /// exactly one extra response identifier for one requested identifier.
-    /// Any other returned model is still refused, including a newer snapshot
-    /// the alias moved to.
+    /// Without a pin, a response may name the requested identifier or a dated
+    /// snapshot of it (`-YYYYMMDD` or `-YYYY-MM-DD`, or the base of a
+    /// `-latest` alias followed by such a date). Declaring a pin replaces that
+    /// rule for this requested identifier: a response must then name exactly
+    /// the requested identifier or the pinned one. Any other returned model is
+    /// refused, including a newer dated snapshot the alias moved to.
     ///
     /// Budget reservations, pricing and usage stay keyed by the requested
     /// identifier. Declaring a mapping asserts that the host prices the
@@ -667,8 +666,35 @@ fn decode_sse_frame(frame: &[u8]) -> Result<Option<SseFrame>, ProviderError> {
 
 enum ContentBlockState {
     Text,
-    Tool { call_id: String, arguments: String },
+    Tool {
+        call_id: String,
+        tool_id: String,
+        fragments: Vec<String>,
+        arguments: String,
+    },
 }
+
+/// One closed `tool_use` block held back until the stop reason says whether
+/// the request is complete. `arguments` is `None` when the accumulated input
+/// is not a JSON object, which is what an output-limit cut leaves behind.
+struct PendingToolCall {
+    call_id: String,
+    tool_id: String,
+    fragments: Vec<String>,
+    arguments: Option<Value>,
+}
+
+/// Appended when the turn stopped at the output-token limit.
+const OUTPUT_LIMIT_NOTICE: &str =
+    "The response stopped at the output limit, so it may be incomplete.";
+/// Appended when the turn stopped because the context window was full.
+const CONTEXT_WINDOW_NOTICE: &str =
+    "The response stopped because the model's context window was full, so it may be incomplete.";
+/// Appended when the provider paused the turn before it finished.
+const PAUSED_TURN_NOTICE: &str = "The provider paused this turn before it finished, so the \
+     response may be incomplete. Send a follow-up to continue.";
+/// Appended when such a stop cut off one or more tool requests.
+const DROPPED_TOOL_NOTICE: &str = " A tool request was cut off, so no tool was run.";
 
 struct AnthropicEventNormalizer {
     expected_model: String,
@@ -678,6 +704,7 @@ struct AnthropicEventNormalizer {
     blocks: BTreeMap<u64, ContentBlockState>,
     completed_indices: BTreeSet<u64>,
     call_ids: BTreeSet<String>,
+    pending_tools: Vec<PendingToolCall>,
     started: bool,
     stop_reason: Option<String>,
     input_tokens: Option<u64>,
@@ -708,6 +735,7 @@ impl AnthropicEventNormalizer {
             blocks: BTreeMap::new(),
             completed_indices: BTreeSet::new(),
             call_ids: BTreeSet::new(),
+            pending_tools: Vec::new(),
             started: false,
             stop_reason: None,
             input_tokens: None,
@@ -726,8 +754,11 @@ impl AnthropicEventNormalizer {
     }
 
     fn accepts_model(&self, model: Option<&str>) -> bool {
-        model.is_some_and(|model| {
-            model == self.expected_model || self.pinned_snapshot.as_deref() == Some(model)
+        model.is_some_and(|model| match self.pinned_snapshot.as_deref() {
+            // A declared pin is exact: the requested identifier or the pinned
+            // one, never another snapshot the alias later moves to.
+            Some(pinned) => model == self.expected_model || model == pinned,
+            None => super::http::echoed_model_matches(&self.expected_model, model),
         })
     }
 
@@ -846,14 +877,18 @@ impl AnthropicEventNormalizer {
                 if !valid_call_id(&call_id) || !self.call_ids.insert(call_id.clone()) {
                     return Err(ProviderError::Rejected);
                 }
+                // Tool events are held until the stop reason shows whether the
+                // request was cut off; see `message_delta`.
                 self.blocks.insert(
                     index,
                     ContentBlockState::Tool {
-                        call_id: call_id.clone(),
+                        call_id,
+                        tool_id,
+                        fragments: Vec::new(),
                         arguments: String::new(),
                     },
                 );
-                Ok(vec![ProviderEvent::ToolCallStarted { call_id, tool_id }])
+                Ok(Vec::new())
             }
             _ => Err(ProviderError::Rejected),
         }
@@ -878,16 +913,21 @@ impl AnthropicEventNormalizer {
                     .ok_or(ProviderError::Rejected)?;
                 Ok(vec![ProviderEvent::TextDelta { text }])
             }
-            (Some(ContentBlockState::Tool { call_id, arguments }), Some("input_json_delta")) => {
+            (
+                Some(ContentBlockState::Tool {
+                    fragments,
+                    arguments,
+                    ..
+                }),
+                Some("input_json_delta"),
+            ) => {
                 let fragment = required_string(delta, "partial_json")?;
                 if arguments.len().saturating_add(fragment.len()) > MAXIMUM_TOOL_ARGUMENT_BYTES {
                     return Err(ProviderError::Rejected);
                 }
                 arguments.push_str(&fragment);
-                Ok(vec![ProviderEvent::ToolArgumentsDelta {
-                    call_id: call_id.clone(),
-                    delta: fragment,
-                }])
+                fragments.push(fragment);
+                Ok(Vec::new())
             }
             _ => Err(ProviderError::Rejected),
         }
@@ -902,20 +942,25 @@ impl AnthropicEventNormalizer {
         if !self.completed_indices.insert(index) {
             return Err(ProviderError::Rejected);
         }
-        match block {
-            ContentBlockState::Text => Ok(Vec::new()),
-            ContentBlockState::Tool { call_id, arguments } => {
-                let arguments: Value =
-                    serde_json::from_str(&arguments).map_err(|_| ProviderError::Rejected)?;
-                if !arguments.is_object() {
-                    return Err(ProviderError::Rejected);
-                }
-                Ok(vec![ProviderEvent::ToolCallCompleted {
-                    call_id,
-                    arguments,
-                }])
-            }
+        if let ContentBlockState::Tool {
+            call_id,
+            tool_id,
+            fragments,
+            arguments,
+        } = block
+        {
+            // An output-limit cut closes the block with partial input. Whether
+            // that is acceptable depends on the stop reason that follows.
+            self.pending_tools.push(PendingToolCall {
+                call_id,
+                tool_id,
+                fragments,
+                arguments: serde_json::from_str::<Value>(&arguments)
+                    .ok()
+                    .filter(Value::is_object),
+            });
         }
+        Ok(Vec::new())
     }
 
     fn message_delta(&mut self, value: &Value) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -926,24 +971,35 @@ impl AnthropicEventNormalizer {
             .pointer("/delta/stop_reason")
             .and_then(Value::as_str)
             .ok_or(ProviderError::Rejected)?;
-        // `pause_turn` is deliberately absent. Anthropic emits it only while a
-        // server tool runs, and this adapter refuses every request that offers
-        // one, so a paused turn can only be a response to something the
-        // adapter never sent. Accepting it would complete a turn the provider
-        // has not finished.
-        if !matches!(
-            stop_reason,
-            "end_turn" | "tool_use" | "refusal" | "max_tokens" | "stop_sequence"
-        ) {
-            return Err(ProviderError::Rejected);
-        }
-        if stop_reason == "tool_use" {
-            if self.call_ids.is_empty() {
-                return Err(ProviderError::Rejected);
+        let notice = match stop_reason {
+            "tool_use" => {
+                if self.pending_tools.is_empty()
+                    || self
+                        .pending_tools
+                        .iter()
+                        .any(|call| call.arguments.is_none())
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                None
             }
-        } else if !self.call_ids.is_empty() {
-            return Err(ProviderError::Rejected);
-        }
+            "end_turn" | "stop_sequence" | "refusal" => {
+                if !self.pending_tools.is_empty() {
+                    return Err(ProviderError::Rejected);
+                }
+                None
+            }
+            // The provider spent the tokens and ended the turn early. The turn
+            // completes metered with what was said and a visible notice; any
+            // tool request in it is dropped, never dispatched, because its
+            // input may be cut off. `pause_turn` is normally a server-tool
+            // pause; this adapter offers none, so the turn cannot be resumed
+            // as-is and ends the same way.
+            "max_tokens" => Some(OUTPUT_LIMIT_NOTICE),
+            "model_context_window_exceeded" => Some(CONTEXT_WINDOW_NOTICE),
+            "pause_turn" => Some(PAUSED_TURN_NOTICE),
+            _ => return Err(ProviderError::Rejected),
+        };
         self.output_tokens = value
             .pointer("/usage/output_tokens")
             .and_then(Value::as_u64);
@@ -954,7 +1010,43 @@ impl AnthropicEventNormalizer {
             return Err(ProviderError::Rejected);
         }
         self.stop_reason = Some(stop_reason.to_owned());
-        Ok(Vec::new())
+        let pending = std::mem::take(&mut self.pending_tools);
+        if let Some(notice) = notice {
+            let mut text = String::new();
+            if self.visible_text_bytes > 0 {
+                text.push_str("\n\n");
+            }
+            text.push_str(notice);
+            if !pending.is_empty() {
+                text.push_str(DROPPED_TOOL_NOTICE);
+            }
+            // The notice is visible text and counts against the same bound.
+            self.visible_text_bytes = self
+                .visible_text_bytes
+                .checked_add(text.len())
+                .filter(|bytes| *bytes <= self.maximum_visible_text_bytes)
+                .ok_or(ProviderError::Rejected)?;
+            return Ok(vec![ProviderEvent::TextDelta { text }]);
+        }
+        let mut events = Vec::new();
+        for call in pending {
+            let arguments = call.arguments.ok_or(ProviderError::Rejected)?;
+            events.push(ProviderEvent::ToolCallStarted {
+                call_id: call.call_id.clone(),
+                tool_id: call.tool_id,
+            });
+            events.extend(call.fragments.into_iter().map(|delta| {
+                ProviderEvent::ToolArgumentsDelta {
+                    call_id: call.call_id.clone(),
+                    delta,
+                }
+            }));
+            events.push(ProviderEvent::ToolCallCompleted {
+                call_id: call.call_id,
+                arguments,
+            });
+        }
+        Ok(events)
     }
 
     fn message_stop(&mut self) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -1628,32 +1720,50 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_snapshot_is_the_only_other_accepted_response_model() {
+    fn a_dated_snapshot_of_the_requested_model_or_a_declared_pin_is_accepted() {
         let exact = || AnthropicEventNormalizer::new("model-alias".into(), BTreeMap::new(), 128);
-        // Default: byte-for-byte equality, as before.
+        // Anthropic answers an alias with the dated snapshot it resolves to.
         assert!(start_with_model(&mut exact(), "model-alias").is_ok());
-        assert!(matches!(
-            start_with_model(&mut exact(), "model-alias-20250101"),
-            Err(ProviderError::Rejected)
-        ));
+        assert!(start_with_model(&mut exact(), "model-alias-20250101").is_ok());
+        let latest = || AnthropicEventNormalizer::new("model-latest".into(), BTreeMap::new(), 128);
+        assert!(start_with_model(&mut latest(), "model-20250101").is_ok());
+        assert!(start_with_model(&mut latest(), "model-latest").is_ok());
 
+        // A declared pin is exact: only the requested identifier or the pinned
+        // one, never another dated snapshot the alias moves to.
         let pinned = || exact().with_pinned_snapshot(Some("model-alias-20250101".to_owned()));
         assert!(start_with_model(&mut pinned(), "model-alias").is_ok());
         assert!(start_with_model(&mut pinned(), "model-alias-20250101").is_ok());
-        // The alias moved to a snapshot the deployment did not pin, or the
-        // provider answered with an unrelated or prefix-sharing model.
+        assert!(matches!(
+            start_with_model(&mut pinned(), "model-alias-20260101"),
+            Err(ProviderError::Rejected)
+        ));
+        // Unpinned, the same newer snapshot is accepted.
+        assert!(start_with_model(&mut exact(), "model-alias-20260101").is_ok());
+        // Another family, a prefix-sharing model or a malformed date is refused.
         for other in [
-            "model-alias-20260101",
             "model-alias-2025010",
+            "model-alias-202501011",
             "model-alias-20250101-extra",
+            "model-alias-x-20250101",
+            "model-alias20250101",
+            "model-alias-2025a101",
+            "model-20250101",
             "another-model",
             "",
         ] {
-            assert!(matches!(
-                start_with_model(&mut pinned(), other),
-                Err(ProviderError::Rejected)
-            ));
+            assert!(
+                matches!(
+                    start_with_model(&mut pinned(), other),
+                    Err(ProviderError::Rejected)
+                ),
+                "{other:?} must be refused"
+            );
         }
+        assert!(matches!(
+            start_with_model(&mut latest(), "model-latest-20250101-x"),
+            Err(ProviderError::Rejected)
+        ));
     }
 
     #[test]
@@ -1688,37 +1798,246 @@ mod tests {
         assert!(provider().with_model_snapshot(long, "model-alias").is_err());
     }
 
-    #[test]
-    fn a_paused_turn_is_refused_because_server_tools_are_never_offered() {
-        let mut normalizer =
-            AnthropicEventNormalizer::new("test-model".into(), BTreeMap::new(), 128);
-        start_with_model(&mut normalizer, "test-model").unwrap();
+    fn frames(
+        normalizer: &mut AnthropicEventNormalizer,
+        values: Vec<Value>,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let mut events = Vec::new();
+        for value in values {
+            let event = value["type"].as_str().expect("frame type").to_owned();
+            events.extend(normalizer.normalize(SseFrame {
+                event,
+                data: value.to_string(),
+            })?);
+        }
+        Ok(events)
+    }
+
+    fn tool_normalizer() -> AnthropicEventNormalizer {
+        AnthropicEventNormalizer::new(
+            "test-model".into(),
+            [("records_read".to_owned(), "records.read".to_owned())]
+                .into_iter()
+                .collect(),
+            128,
+        )
+    }
+
+    fn started() -> Value {
+        json!({"type": "message_start", "message": {
+            "role": "assistant", "model": "test-model", "content": [],
+            "usage": {"input_tokens": 3}
+        }})
+    }
+
+    fn text_block(index: u64, text: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "content_block_start", "index": index,
+                "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": index,
+                "delta": {"type": "text_delta", "text": text}}),
+            json!({"type": "content_block_stop", "index": index}),
+        ]
+    }
+
+    fn tool_block(index: u64, call_id: &str, partial_json: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "content_block_start", "index": index,
+                "content_block": {"type": "tool_use", "id": call_id, "name": "records_read", "input": {}}}),
+            json!({"type": "content_block_delta", "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": partial_json}}),
+            json!({"type": "content_block_stop", "index": index}),
+        ]
+    }
+
+    fn stopped(reason: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "message_delta",
+                "delta": {"stop_reason": reason, "stop_sequence": null},
+                "usage": {"output_tokens": 5}}),
+            json!({"type": "message_stop"}),
+        ]
+    }
+
+    fn visible_text(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_metered_completion(events: &[ProviderEvent]) {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::Usage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    cached_input_tokens: 0
+                }
+            )),
+            "usage must be reported: {events:?}"
+        );
         assert!(matches!(
-            normalizer.message_delta(
-                &json!({"delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 2}}),
-            ),
-            Err(ProviderError::Rejected)
-        ));
-        // The stream cannot then be completed as if the turn had ended.
-        assert!(matches!(
-            normalizer.message_stop(),
-            Err(ProviderError::Rejected)
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted { response_id: None })
         ));
     }
 
+    fn has_tool_events(events: &[ProviderEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                ProviderEvent::ToolCallStarted { .. }
+                    | ProviderEvent::ToolArgumentsDelta { .. }
+                    | ProviderEvent::ToolCallCompleted { .. }
+            )
+        })
+    }
+
     #[test]
-    fn bounded_text_stops_preserve_usage_and_complete() {
-        for reason in ["max_tokens", "stop_sequence"] {
-            let mut normalizer =
-                AnthropicEventNormalizer::new("test-model".into(), BTreeMap::new(), 128);
-            normalizer.message_start(&json!({"message": {"role": "assistant", "model": "test-model", "content": [], "usage": {"input_tokens": 1}}})).unwrap();
-            normalizer
-                .message_delta(
-                    &json!({"delta": {"stop_reason": reason}, "usage": {"output_tokens": 2}}),
-                )
-                .unwrap();
-            assert!(normalizer.message_stop().is_ok());
+    fn a_paused_turn_completes_metered_with_a_visible_notice() {
+        let mut values = vec![started()];
+        values.extend(text_block(0, "partial answer"));
+        values.extend(stopped("pause_turn"));
+        let events = frames(&mut tool_normalizer(), values).expect("pause_turn is accepted");
+        let text = visible_text(&events);
+        assert!(text.starts_with("partial answer\n\n"), "{text:?}");
+        assert!(text.contains("paused"), "{text:?}");
+        assert_metered_completion(&events);
+    }
+
+    #[test]
+    fn output_limit_stops_complete_metered_and_say_the_answer_may_be_incomplete() {
+        for reason in ["max_tokens", "model_context_window_exceeded"] {
+            let mut values = vec![started()];
+            values.extend(text_block(0, "partial answer"));
+            values.extend(stopped(reason));
+            let events = frames(&mut tool_normalizer(), values).expect("text stop is accepted");
+            let text = visible_text(&events);
+            assert!(text.starts_with("partial answer\n\n"), "{reason}: {text:?}");
+            assert!(text.contains("may be incomplete"), "{reason}: {text:?}");
+            assert_metered_completion(&events);
         }
+        // A configured stop sequence ends a complete answer: no notice.
+        let mut values = vec![started()];
+        values.extend(text_block(0, "answer"));
+        values.extend(stopped("stop_sequence"));
+        let events = frames(&mut tool_normalizer(), values).expect("stop_sequence is accepted");
+        assert_eq!(visible_text(&events), "answer");
+        assert_metered_completion(&events);
+    }
+
+    #[test]
+    fn a_tool_request_cut_off_by_the_output_limit_is_dropped_not_dispatched() {
+        for reason in ["max_tokens", "pause_turn", "model_context_window_exceeded"] {
+            let mut values = vec![started()];
+            values.extend(text_block(0, "looking"));
+            values.extend(tool_block(1, "toolu_complete", r#"{"id":"1"}"#));
+            values.extend(tool_block(2, "toolu_cut", r#"{"id":"#));
+            values.extend(stopped(reason));
+            let events =
+                frames(&mut tool_normalizer(), values).expect("a truncated tool turn is accepted");
+            assert!(!has_tool_events(&events), "{reason}: {events:?}");
+            let text = visible_text(&events);
+            assert!(text.contains("no tool was run"), "{reason}: {text:?}");
+            assert_metered_completion(&events);
+        }
+        // Without any visible text the notice carries no leading separator.
+        let mut values = vec![started()];
+        values.extend(tool_block(0, "toolu_cut", r#"{"id":"#));
+        values.extend(stopped("max_tokens"));
+        let events = frames(&mut tool_normalizer(), values).expect("accepted");
+        assert!(!visible_text(&events).starts_with('\n'));
+    }
+
+    #[test]
+    fn the_notice_counts_against_the_visible_text_bound() {
+        // One output token allows 64 visible bytes; the notice is longer.
+        let mut tight = AnthropicEventNormalizer::new("test-model".into(), BTreeMap::new(), 1);
+        let mut values = vec![started()];
+        values.extend(stopped("max_tokens"));
+        // `stopped` reports five output tokens, above this bound, so use one.
+        values[1]["usage"]["output_tokens"] = json!(1);
+        assert!(matches!(
+            frames(&mut tight, values),
+            Err(ProviderError::Rejected)
+        ));
+        let mut roomy = tool_normalizer();
+        let mut values = vec![started()];
+        values.extend(stopped("max_tokens"));
+        let events = frames(&mut roomy, values).expect("the notice fits");
+        assert_eq!(roomy.visible_text_bytes, visible_text(&events).len());
+    }
+
+    #[test]
+    fn complete_tool_requests_are_released_in_order_only_on_tool_use() {
+        let mut values = vec![started()];
+        values.extend(tool_block(0, "toolu_a", r#"{"id":"1"}"#));
+        values.extend(tool_block(1, "toolu_b", r#"{"id":"2"}"#));
+        values.extend(stopped("tool_use"));
+        let events = frames(&mut tool_normalizer(), values).expect("tool_use is accepted");
+        let calls = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolCallStarted { call_id, tool_id } => {
+                    Some(format!("start:{call_id}:{tool_id}"))
+                }
+                ProviderEvent::ToolArgumentsDelta { call_id, delta } => {
+                    Some(format!("delta:{call_id}:{delta}"))
+                }
+                ProviderEvent::ToolCallCompleted { call_id, arguments } => {
+                    Some(format!("done:{call_id}:{arguments}"))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            [
+                "start:toolu_a:records.read",
+                r#"delta:toolu_a:{"id":"1"}"#,
+                r#"done:toolu_a:{"id":"1"}"#,
+                "start:toolu_b:records.read",
+                r#"delta:toolu_b:{"id":"2"}"#,
+                r#"done:toolu_b:{"id":"2"}"#,
+            ]
+        );
+        assert_eq!(visible_text(&events), "");
+        assert_metered_completion(&events);
+
+        // Truncated arguments are never released as a finished request.
+        for reason in ["tool_use", "end_turn", "stop_sequence", "refusal"] {
+            let mut values = vec![started()];
+            values.extend(tool_block(0, "toolu_cut", r#"{"id":"#));
+            values.extend(stopped(reason));
+            assert!(
+                matches!(
+                    frames(&mut tool_normalizer(), values),
+                    Err(ProviderError::Rejected)
+                ),
+                "{reason}"
+            );
+        }
+        // A finished answer cannot carry a tool request.
+        let mut values = vec![started()];
+        values.extend(tool_block(0, "toolu_a", r#"{"id":"1"}"#));
+        values.extend(stopped("end_turn"));
+        assert!(matches!(
+            frames(&mut tool_normalizer(), values),
+            Err(ProviderError::Rejected)
+        ));
+        // An unknown stop reason stays refused.
+        let mut values = vec![started()];
+        values.extend(text_block(0, "answer"));
+        values.extend(stopped("something_new"));
+        assert!(matches!(
+            frames(&mut tool_normalizer(), values),
+            Err(ProviderError::Rejected)
+        ));
     }
 
     #[test]

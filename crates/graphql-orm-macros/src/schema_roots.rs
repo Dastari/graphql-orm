@@ -163,14 +163,41 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         })
         .collect::<Vec<_>>();
+    // A declared maximum page limit replaces the compile-time default in the
+    // catalogue's pageable relationship lists, is checked against the
+    // `Database` when the schema is built, and bounds the relation
+    // complexity estimate.
+    let declared_page_maximum = match args.max_page_limit {
+        Some(maximum) => quote! {
+            ::std::option::Option::<u32>::Some(#maximum)
+        },
+        None => quote! { ::std::option::Option::<u32>::None },
+    };
+    let page_maximum_const = quote! {
+        /// The maximum page limit this schema declares with
+        /// `schema_roots!(max_page_limit: ...)`, or `None` when it declares
+        /// none. A declared maximum is the one the semantic catalogue
+        /// publishes, and the schema refuses a `Database` configured with a
+        /// different one.
+        pub const GRAPHQL_ORM_MAX_PAGE_LIMIT: ::std::option::Option<u32> = #declared_page_maximum;
+    };
+    let page_maximum_check = quote! {
+        ::graphql_orm::graphql::orm::admit_declared_page_maximum(
+            &database,
+            GRAPHQL_ORM_MAX_PAGE_LIMIT,
+        );
+    };
     let semantic_entity_items = entities
         .iter()
         .map(|entity| {
             quote! {
-                <#entity as ::graphql_orm::graphql::orm::Entity>
-                    ::graphql_semantic_metadata()
-                    .expect("GraphQLEntity must emit semantic metadata")
-                    .clone()
+                ::graphql_orm::graphql::orm::with_declared_page_maximum(
+                    <#entity as ::graphql_orm::graphql::orm::Entity>
+                        ::graphql_semantic_metadata()
+                        .expect("GraphQLEntity must emit semantic metadata")
+                        .clone(),
+                    GRAPHQL_ORM_MAX_PAGE_LIMIT,
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -214,7 +241,71 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         })
         .collect::<Vec<_>>();
+    let backend_name = backend.name();
+    let interpretation_entities = entities
+        .iter()
+        .map(|entity| {
+            quote! {
+                ::graphql_orm::graphql::orm::InterpretationEntity::of::<#entity, #backend_marker>(
+                    #entity::__GOM_INTERPRETATION_SOURCE,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let client_metadata_helper = if args.client_metadata {
+        let sources = entities.iter().map(|entity| {
+            quote! {
+                ::graphql_orm::graphql::orm::ClientEntitySource::of::<#entity, #backend_marker>(
+                    #entity::__GOM_CHANGED_ROOT_NAME,
+                    #entity::__GOM_CHANGED_STARTED_SIGNAL,
+                )
+            }
+        });
+        quote! {
+            /// Returns the client-facing companion metadata of
+            /// [`graphql_orm_semantic_catalog`]: the fields each generated
+            /// `Changed` stream can carry, each declared lifetime field and
+            /// each public relationship's key mapping. Export it at build
+            /// time with `GraphqlClientMetadata::export_json`.
+            ///
+            /// The metadata is descriptive. It grants no resolver, field, row,
+            /// database or provider authority, and the server never enforces it.
+            pub fn graphql_orm_client_metadata(
+            ) -> &'static ::graphql_orm::graphql::orm::GraphqlClientMetadata {
+                static METADATA: ::std::sync::OnceLock<
+                    ::graphql_orm::graphql::orm::GraphqlClientMetadata
+                > = ::std::sync::OnceLock::new();
+                METADATA.get_or_init(|| {
+                    ::graphql_orm::graphql::orm::compose_client_metadata(
+                        graphql_orm_semantic_catalog(),
+                        &[#(#sources),*],
+                    )
+                })
+            }
+        }
+    } else {
+        quote! {}
+    };
     let operation_catalog_helper = quote! {
+        #client_metadata_helper
+
+        /// Returns this schema's interpretation fingerprint: a value that
+        /// changes when a release may read existing cursors, keys or `NodeId`
+        /// values differently, and stays the same across restarts and
+        /// replicas otherwise. `salt` is an optional host value, such as a
+        /// cursor-key version; only its SHA-256 enters the fingerprint.
+        /// See `graphql_orm::graphql::orm::interpretation_fingerprint` for
+        /// every input.
+        pub fn graphql_orm_interpretation_fingerprint(
+            salt: ::std::option::Option<&str>,
+        ) -> ::std::string::String {
+            ::graphql_orm::graphql::orm::interpretation_fingerprint(
+                #backend_name,
+                &[#(#interpretation_entities),*],
+                salt,
+            )
+        }
+
         /// Returns deterministic generated resolver metadata for this schema root.
         ///
         /// The catalog resolves generated root exposure after mutation and
@@ -475,6 +566,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
             pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
 
+            #page_maximum_const
+
             pub fn schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
             ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
@@ -532,6 +625,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 ::graphql_orm::graphql::orm::KeysetReadPolicyError,
             > {
                 #root_field_declaration_check
+                #page_maximum_check
                 database.validate_keyset_read_policies(
                     graphql_orm_operation_catalog(),
                     &graphql_orm_entity_metadata(),
@@ -542,6 +636,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     #readonly_subscription_value,
                 )
                 .data(database.clone())
+            .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
+            .extension(::graphql_orm::graphql::orm::PageMaximumValidation)
+            .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
             ));
@@ -686,6 +783,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
         pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
 
+            #page_maximum_const
+
         pub fn schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
         ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
@@ -743,6 +842,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ::graphql_orm::graphql::orm::KeysetReadPolicyError,
         > {
             #root_field_declaration_check
+                #page_maximum_check
             database.validate_keyset_read_policies(
                 graphql_orm_operation_catalog(),
                 &graphql_orm_entity_metadata(),
@@ -753,6 +853,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 #subscription_root_value,
             )
             .data(database.clone())
+            .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
+            .extension(::graphql_orm::graphql::orm::PageMaximumValidation)
+            .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
             ));
@@ -881,6 +984,10 @@ struct SchemaRootsArgs {
     auth: Option<String>,
     /// Require an explicit policy decision on every listed entity.
     require_policies: bool,
+    /// Declared maximum page limit of the `Database` this schema serves.
+    max_page_limit: Option<u32>,
+    /// Emit `graphql_orm_client_metadata()` (#340, #670, #672).
+    client_metadata: bool,
     generated_mutations: GeneratedMutationExposure,
     query_custom_ops: Vec<Ident>,
     entities: Vec<Ident>,
@@ -942,6 +1049,8 @@ impl Parse for SchemaRootsArgs {
         let mut schema_policy = None;
         let mut auth = None;
         let mut require_policies = None;
+        let mut max_page_limit = None;
+        let mut client_metadata = None;
         let mut generated_mutations = None;
         let mut query_custom_ops = None;
         let mut entities = None;
@@ -985,6 +1094,21 @@ impl Parse for SchemaRootsArgs {
                 reject_duplicate(&require_policies, &label)?;
                 let lit: syn::LitBool = input.parse()?;
                 require_policies = Some(lit.value);
+            } else if label == "client_metadata" {
+                reject_duplicate(&client_metadata, &label)?;
+                let lit: syn::LitBool = input.parse()?;
+                client_metadata = Some(lit.value);
+            } else if label == "max_page_limit" {
+                reject_duplicate(&max_page_limit, &label)?;
+                let lit: syn::LitInt = input.parse()?;
+                let maximum = lit.base10_parse::<u32>()?;
+                if maximum == 0 || i32::try_from(maximum).is_err() {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "`max_page_limit` must be a positive integer that fits a GraphQL Int",
+                    ));
+                }
+                max_page_limit = Some(maximum);
             } else if label == "generated_mutations" {
                 reject_duplicate(&generated_mutations, &label)?;
                 let lit: syn::LitStr = input.parse()?;
@@ -1054,7 +1178,7 @@ impl Parse for SchemaRootsArgs {
             } else {
                 return Err(syn::Error::new(
                     label.span(),
-                    "expected one of `backend`, `schema_policy`, `auth`, `require_policies`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `described_query_types`, `described_mutation_types`, `described_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
+                    "expected one of `backend`, `schema_policy`, `auth`, `require_policies`, `max_page_limit`, `client_metadata`, `federation`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `described_query_types`, `described_mutation_types`, `described_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
                 ));
             }
 
@@ -1202,6 +1326,8 @@ impl Parse for SchemaRootsArgs {
             schema_policy,
             auth,
             require_policies: require_policies.unwrap_or(false),
+            max_page_limit,
+            client_metadata: client_metadata.unwrap_or(false),
             generated_mutations,
             query_custom_ops,
             entities,

@@ -107,8 +107,13 @@ pub fn encode_keyset_cursor(order: &str, values: Vec<KeysetValue>) -> String {
     format!("gomk1.{}", hex_encode(&json))
 }
 
-/// Strictly decode a keyset cursor and reject legacy offsets, tampering,
+/// Strictly decode a keyset cursor and reject legacy offsets, corruption,
 /// unknown versions, order changes, and malformed scalar payloads.
+///
+/// The checksum uses no secret, so this is an integrity check, not
+/// authentication: a caller can rewrite the values and recompute it. That
+/// only moves the resume position. Authorization is never derived from a
+/// cursor; every page is read under the caller's policies.
 pub fn decode_keyset_cursor(
     cursor: &str,
     expected_order: &str,

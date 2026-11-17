@@ -209,7 +209,6 @@ impl AiGeneratedGraphqlTargetPolicySet {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn allows_mutation_capability(
         &self,
         capability: &AiGraphqlMutationCapability,
@@ -327,6 +326,20 @@ impl AiGeneratedGraphqlAuthorizationPolicy {
     }
 }
 
+/// Tells operators which roots a catalogue left out. An excluded root is
+/// unavailable to the model, and nothing else reports that at startup.
+fn warn_excluded_capabilities(excluded: &[crate::AiGraphqlCapabilityExclusion]) {
+    for exclusion in excluded {
+        tracing::warn!(
+            root = exclusion.field_name(),
+            operation_kind = ?exclusion.operation_kind(),
+            schema_bytes = exclusion.schema_bytes(),
+            maximum_schema_bytes = exclusion.maximum_schema_bytes(),
+            "generated AI capability excluded: its compact schema exceeds the provider contract"
+        );
+    }
+}
+
 /// Refuses a generated capability set that contains any AI control-plane root.
 ///
 /// Registration is all-or-nothing, so one control-plane root refuses the set.
@@ -379,6 +392,7 @@ impl AiToolCatalog {
         &mut self,
         catalog: &AiGraphqlQueryCapabilityCatalog,
     ) -> Result<(), AiError> {
+        warn_excluded_capabilities(catalog.excluded_capabilities());
         reject_control_plane_capabilities(
             catalog
                 .capabilities()
@@ -415,6 +429,7 @@ impl AiToolCatalog {
         &mut self,
         catalog: &AiGraphqlMutationCapabilityCatalog,
     ) -> Result<(), AiError> {
+        warn_excluded_capabilities(catalog.excluded_capabilities());
         reject_control_plane_capabilities(
             catalog
                 .capabilities()
@@ -450,6 +465,7 @@ impl AiToolCatalog {
         &mut self,
         catalog: &AiGraphqlSubscriptionCapabilityCatalog,
     ) -> Result<(), AiError> {
+        warn_excluded_capabilities(catalog.excluded_capabilities());
         reject_control_plane_capabilities(
             catalog
                 .capabilities()
@@ -734,6 +750,28 @@ impl AiToolCatalog {
             AiError::InvalidConfiguration("automatic query provider alias is invalid".to_owned())
         })?;
         Ok(definition)
+    }
+
+    /// Renders the plan schema of one registered automatic query capability
+    /// with each repeated input type defined once.
+    ///
+    /// The result is a lossless rendering of the schema
+    /// [`Self::query_capability_model_definition`] projects. It is what the
+    /// fixed broker's describe returns; plans are still validated against the
+    /// unchanged schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or a schema that cannot
+    /// be rendered.
+    pub fn query_capability_shared_type_plan_schema(
+        &self,
+        id: &AiToolId,
+    ) -> Result<crate::AiSharedTypePlanSchema, AiError> {
+        self.query_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?
+            .shared_type_plan_schema()
     }
 
     /// Compiles one provider-authored typed plan against the exact registered

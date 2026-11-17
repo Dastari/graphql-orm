@@ -3,7 +3,7 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-17
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -12,6 +12,19 @@ supersedes: []
 
 Version 0.9.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Version `0.8.1` adds `GraphqlClientMetadata`, a separate client-facing
+companion document of a semantic catalogue (wire version 1, its own
+fingerprint, bound to the catalogue's fingerprint), with
+`GraphqlClientEntityMetadata`, `GraphqlChangedStreamMetadata`,
+`GraphqlEntityLifetimeMetadata`, `GraphqlLifetimeEncoding`,
+`GraphqlRelationshipKeyMetadata`, `GraphqlRelationshipKeyMapping` and
+`GraphqlRelationshipNotBatchableReason`. The new types are non-exhaustive and
+have constructors. `compose` and `validate_against` check every name against
+the bound catalogue; `export_json` writes canonical JSON. The semantic
+catalogue, its wire version 3 and every existing fingerprint are unchanged. No
+data migration is needed. See
+[client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md).
 
 Version `0.8.0` (**breaking Rust API**) adds the host-only `generated_input_members` contract to entity
 metadata. ORM/macros 0.149.0 supplies exact types for generated members that

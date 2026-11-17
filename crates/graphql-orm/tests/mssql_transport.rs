@@ -342,25 +342,95 @@ async fn weaker_transport_is_an_explicit_opt_in() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// The session of the pool's one connection, opening it first. Opening
+/// counts against the acquire timeout, so an open that a loaded host makes
+/// slower than a short bound times out; it is retried, for up to a minute.
+async fn opened(pool: &MssqlPool) -> graphql_orm::Result<Session> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match session(pool).await {
+            Err(graphql_orm::sqlx::Error::PoolTimedOut) if Instant::now() < deadline => {}
+            result => return result,
+        }
+    }
+}
+
+/// Wait until the connection `connection` is blocked on an application lock.
+async fn wait_for_lock_waiter(
+    control: &MssqlPool,
+    connection: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let rows = control
+            .fetch_rows(
+                "SELECT COUNT(*) AS waiting FROM sys.dm_exec_requests AS r \
+                 JOIN sys.dm_exec_connections AS c ON c.session_id = r.session_id \
+                 WHERE CAST(c.connection_id AS NVARCHAR(36)) = @P1 AND r.wait_type LIKE N'LCK_M_%'",
+                &[SqlValue::String(connection.to_string())],
+            )
+            .await?;
+        if rows[0].try_get::<i32, _>("waiting")? > 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("the holder never waited for the lock".into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires cached SQL Server Docker image and OpenSSL; owns its loopback server"]
 async fn pool_bounds_acquire_and_statements_and_resets_idle_sessions()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut server = OwnedSqlServer::start().await?;
-    let options = MssqlPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_millis(500))
-        .query_timeout(Some(Duration::from_secs(2)));
-    let pool = MssqlPool::connect_ado_with(&server.connection_string, options).await?;
-    let first = session(&pool).await?;
+    // Observes and steers server state; never the pool under test.
+    let control = MssqlPool::connect_ado_with(
+        &server.connection_string,
+        MssqlPoolOptions::new().max_connections(1),
+    )
+    .await?;
 
-    // Acquire timeout: the only connection is busy.
+    // Acquire timeout: the only connection is busy, so a second checkout
+    // waits for it and gives up after the acquire timeout.
+    //
+    // Opening a connection (TCP, TLS, login and session reset) also counts
+    // against the acquire timeout. On a loaded host that alone can exceed
+    // the 500 ms bound, which is not what this checks (#734), so the one
+    // connection is opened before anything is timed. A timed-out open leaves
+    // nothing behind and is retried.
+    let pool = MssqlPool::connect_ado_with(
+        &server.connection_string,
+        MssqlPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(500)),
+    )
+    .await?;
+    let first = opened(&pool).await?;
+
+    // The holder's statement waits for an application lock that the control
+    // session holds, so it keeps the connection until the test lets it go
+    // rather than for a fixed delay.
+    control
+        .fetch_rows(
+            "EXEC sp_getapplock @Resource = N'gorm_test_pool_hold', @LockMode = 'Exclusive', \
+             @LockOwner = 'Session'; SELECT 1 AS held",
+            &[],
+        )
+        .await?;
     let busy = pool.clone();
     let holder = tokio::spawn(async move {
-        busy.fetch_rows("WAITFOR DELAY '00:00:01.500'; SELECT 1 AS done", &[])
-            .await
+        busy.fetch_rows(
+            "EXEC sp_getapplock @Resource = N'gorm_test_pool_hold', @LockMode = 'Shared', \
+             @LockOwner = 'Session', @LockTimeout = 60000; \
+             EXEC sp_releaseapplock @Resource = N'gorm_test_pool_hold', @LockOwner = 'Session'; \
+             SELECT 1 AS done",
+            &[],
+        )
+        .await
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_lock_waiter(&control, &first.connection).await?;
     let started = Instant::now();
     let error = pool
         .fetch_rows("SELECT 1 AS waited", &[])
@@ -376,28 +446,70 @@ async fn pool_bounds_acquire_and_statements_and_resets_idle_sessions()
         "{:?}",
         started.elapsed()
     );
-    holder.await??;
+    control
+        .fetch_rows(
+            "EXEC sp_releaseapplock @Resource = N'gorm_test_pool_hold', @LockOwner = 'Session'; \
+             SELECT 1 AS released",
+            &[],
+        )
+        .await?;
+    assert_eq!(holder.await??.len(), 1);
+    // The busy connection went back to the pool and is reused, not reopened.
     assert_eq!(session(&pool).await?.connection, first.connection);
 
     // Statement timeout: the driver cannot cancel, so the connection closes.
+    // This pool's acquire timeout is the default, which covers opening the
+    // replacement connection.
+    let pool = MssqlPool::connect_ado_with(
+        &server.connection_string,
+        MssqlPoolOptions::new()
+            .max_connections(1)
+            .query_timeout(Some(Duration::from_secs(2))),
+    )
+    .await?;
+    let before = session(&pool).await?;
+    // The statement blocks on a lock the control session holds, so it runs
+    // until the test releases it, however loaded the server is.
+    control
+        .fetch_rows(
+            "EXEC sp_getapplock @Resource = N'gorm_test_statement_hold', @LockMode = 'Exclusive', \
+             @LockOwner = 'Session'; SELECT 1 AS held",
+            &[],
+        )
+        .await?;
     let started = Instant::now();
-    let error = pool
-        .fetch_rows("WAITFOR DELAY '00:00:20'; SELECT 1 AS done", &[])
-        .await
-        .err()
-        .expect("the statement must time out");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        started.elapsed()
-    );
+    let outcome = pool
+        .fetch_rows(
+            "EXEC sp_getapplock @Resource = N'gorm_test_statement_hold', @LockMode = 'Shared', \
+             @LockOwner = 'Session', @LockTimeout = 60000; \
+             EXEC sp_releaseapplock @Resource = N'gorm_test_statement_hold', @LockOwner = 'Session'; \
+             SELECT 1 AS done",
+            &[],
+        )
+        .await;
+    let elapsed = started.elapsed();
+    control
+        .fetch_rows(
+            "EXEC sp_releaseapplock @Resource = N'gorm_test_statement_hold', @LockOwner = 'Session'; \
+             SELECT 1 AS released",
+            &[],
+        )
+        .await?;
+    let error = match outcome {
+        Ok(rows) => panic!(
+            "the statement must time out; it returned {} rows after {elapsed:?}",
+            rows.len()
+        ),
+        Err(error) => error,
+    };
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     assert!(
         matches!(&error, graphql_orm::sqlx::Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut),
         "{error}"
     );
     let replaced = session(&pool).await?;
     assert_ne!(
-        replaced.connection, first.connection,
+        replaced.connection, before.connection,
         "a timed-out connection is closed"
     );
 

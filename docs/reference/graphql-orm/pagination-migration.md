@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -225,10 +225,91 @@ Use the standalone authorized executor for the new capability. Handwritten
 pool-bound queries are still low-level queries and do not automatically apply
 application authorization.
 
+### Page size: reduced by default, refused on request
+
+A generated GraphQL page that asks for more rows than the database's maximum
+page limit (`PaginationConfig::max_limit`, `100` by default) is served the
+maximum, and nothing in the response says the size was reduced. A client that
+computes page counts from `totalCount` and the size it asked for then gets
+them wrong, and cannot tell a reduced page from a last page.
+
+Set `DatabaseBuilder::refuse_oversized_page_limit(true)` (or
+`Database::with_oversized_page_limit_refusal(true)`) to refuse instead.
+An explicit `page.limit` on a list root, to-many relation or search
+connection, or an explicit `limit`, `first` or `last` on a keyset connection,
+above the maximum then fails with `PAGE_LIMIT_EXCEEDED` before any row is
+read. The message names the limit asked for and the maximum. A limit at the
+maximum and an omitted limit are served as before. The setting is off by
+default, so existing responses do not change. A custom resolver that takes a
+client `PageInput` should resolve it with
+`Database::client_pagination_config().resolve_client_page` so the setting covers it too.
+The setting also covers Rust reads that take a `PageInput`: with refusal on,
+an `EntityQuery::paginate(page)` read through `fetch_connection`,
+`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and an
+`EntitySearchQuery::paginate(page)` read, fail with `PAGE_LIMIT_EXCEEDED` when
+`page.limit` is above the maximum instead of being reduced.
+
+`schema_roots!(max_page_limit: N, ...)` declares the maximum at compile time.
+The generated module then exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
+semantic catalogue publishes `N` as the ceiling of every pageable
+relationship list (in place of the compile-time default of 100), the relation
+complexity estimate caps a requested page at `N`, and building the schema
+panics when the `Database` applies a different maximum or none. Without the
+declaration nothing changes: the catalogue and the complexity estimate use
+100 whatever the database is configured with. With several declaring schemas
+in one process each complexity estimate uses its own schema data; undeclared schemas retain the default estimate of 100.
+
+Rust repository reads are separate. `limit(n)` on a repository or transaction
+builder is exact or refused, and `with_max_limit(n)` gives one trusted read
+its own maximum (see the 0.128.0 migration note). The keyset helpers
+(`Record::keyset_page`, `keyset_connection_page`, `tx.keyset_page`) keep GraphQL
+page semantics and reduce an oversized limit. To read more rows a page from
+trusted code, page with
+`EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(&db, None, None, page)`,
+or call the helper on a handle with a raised maximum:
+`db.clone().with_pagination_config(db.pagination_config().with_max_limit(Some(n)))`.
+Either way the page is bounded by `n`, and `pageInfo.hasNextPage` and the end
+cursor page through a larger set.
+
+### Page offset: unbounded by default, bounded on request
+
+Every backend reads and discards the rows an offset skips, so a client that
+sends `page: { offset: 1000000000 }` costs a scan of that many rows. Offsets
+are unbounded by default, so existing responses do not change. Set
+`DatabaseBuilder::max_page_offset(Some(n))` (or
+`Database::with_max_page_offset(Some(n))`) to refuse an offset above `n`
+with `PAGE_LIMIT_EXCEEDED`, the code of a refused page limit, before any row
+is read. The message is `requested offset N exceeds the maximum page offset M`.
+`PaginationConfig::RECOMMENDED_MAX_OFFSET` is 10,000; page deeper with keyset
+cursors. The bound applies on SQLite, PostgreSQL and SQL Server to the same
+pages as the limit refusal: list roots, to-many relations and search
+connections, custom resolvers that use
+`ClientPaginationConfig::resolve_client_page` (or `admit_client_offset`), and
+the Rust reads that take a `PageInput` (`EntityQuery::paginate(page)` through
+`fetch_connection*`, and `EntitySearchQuery::paginate(page)`). An
+offset that trusted code sets with a builder's own `offset(n)`, including
+`search_db(...).offset(n)` and `EntitySearchQuery::offset`, is not bounded;
+`paginate` after `offset` makes the page's offset a client offset again.
+Keyset connections take no offset.
+
 ### What a keyset cursor is bound to
 
 A generated keyset cursor (`gomk1.`) holds the order values of one row. It is
-refused with `CURSOR_INVALID` unless it matches all of:
+hex-encoded JSON with a checksum that uses no secret. The checksum catches
+corruption and the bindings below; it does not authenticate the cursor. A
+client can read the order values in a cursor it was given, and can write a
+cursor with other values and a recomputed checksum. Such a cursor is accepted
+and only moves the resume position within the same order: every page is read
+under the caller's entity, row and field policies, exactly as a first page is,
+so a rewritten cursor returns no row the caller could not already list.
+Ordering by a field therefore discloses its values to whoever receives the
+cursor; `keyset_cursor_field_authority.rs` covers the order-field checks.
+Treat a cursor as a position, never as an authorization token.
+`a_rewritten_cursor_only_moves_the_position_and_row_policy_still_applies` in
+`crates/graphql-orm/tests/keyset_cursor_binding.rs` pins this. The cursor
+length is bounded only by the request size the host accepts.
+
+A cursor is refused with `CURSOR_INVALID` unless it matches all of:
 
 | Bound to | Mismatch |
 | --- | --- |
@@ -271,7 +352,7 @@ resumes "after these values", so a cursor taken before a row's order values
 change is still accepted, and the next page reflects the new values: a row
 moved before the cursor is not returned again, a row moved after it is returned
 (possibly a second time), and a deleted cursor row changes nothing. Only a
-cursor that is malformed, tampered with, or bound to something else (above) is
+cursor that is malformed, corrupted, or bound to something else (above) is
 refused. The ORM does not try to detect this; doing so would need row versions
 or snapshots, which keyset pagination exists to avoid. Clients that need a
 stable view should page inside one transaction or order by an immutable column
@@ -336,6 +417,139 @@ request, not callback latency or total database execution work. Sparse
 visibility can require many requests and substantial scanning. No arbitrary
 Rust callback can provide constant-time authorization pagination.
 
+### Context-bound authorized pages for handwritten resolvers (0.162.0)
+
+`EntityQuery::fetch_authorized_page` is the bounded scan above for a
+handwritten GraphQL resolver or query builder whose pages belong to a
+server-side context: for example a private cache or another server-owned read
+model that must not be continued across a different committed snapshot, source
+registration, workspace or authority. The generated roots and
+`fetch_authorized_scan` are unchanged, and neither API enables the other.
+
+```rust,ignore
+// Start-up: load the service-owned 32-byte secret from the service's
+// encrypted settings.
+let database = database.with_authorized_page_config(
+    AuthorizedPageConfig::new(AuthorizedPageKeys::new("2026-11", page_key)?, 256, 4096)?
+        .with_max_page_size(100)?,
+);
+
+// Every request, in the resolver: state the context from server state only.
+let binding = AuthorizedPageBinding::builder()
+    .component("snapshot-generation", snapshot.generation_bytes())
+    .component("source-registration", source.registration_id())
+    .component("source-incarnation", source.incarnation())
+    .component("workspace", workspace.id())
+    .component("original-principal", session.original_principal())
+    .component("current-principal", session.current_principal())
+    .component("grants", session.grants_digest())
+    .component("credential-revision", source.credential_revision())
+    .component("configuration-revision", source.configuration_revision())
+    .component("placement-revision", source.placement_revision())
+    .build()
+    .map_err(AuthorizedPageBindingError::into_graphql_error)?;
+let page = EntityQuery::<Record, SqliteBackend>::new()
+    .filter_with_entity_matching(&filter)
+    .fetch_authorized_page(
+        db,
+        Some(ctx),
+        auth,
+        AuthorizedPageRequest::new(binding).after(after).limit(limit),
+    )
+    .await?;
+```
+
+The result is the `AuthorizedScanPage` of the scan API. `pageInfo.status` keeps
+the `EXHAUSTED`, `PAGE_FULL` and `BUDGET_EXHAUSTED` meanings in the table above,
+`continuation` must be passed back as `after` even after an empty page, and
+`totalCount` is always absent.
+
+**The binding.** `AuthorizedPageBinding` is the server's statement of the
+context. Build it on every request from trusted server state, never from a
+GraphQL argument, a client-controlled header or any other browser value, and
+include everything that must end a page sequence when it changes; the ORM
+cannot tell that a binding is incomplete. It is opaque to the ORM, at most
+4096 bytes (`AUTHORIZED_PAGE_MAX_BINDING_BYTES`), and its `Debug` output is
+redacted. The builder length-delimits up to 32 named components and binds
+their names and order, so add the same components in the same order every
+time; it refuses empty names, empty values and repeated names, so state an
+absent value explicitly. `AuthorizedPageBinding::from_bytes` takes bytes the
+server already keeps in canonical form.
+
+**The cursor.** A continuation is `gomp1.<key id>.<sealed bytes>`: codec
+version 1, the public identifier of the sealing key, and the
+XChaCha20-Poly1305 ciphertext of the scan position and an expiry time under a
+random nonce. The binding, the entity name, the key identifier and the
+fingerprint of the keyset order and caller-visible filter are authenticated as
+associated data; the binding is not in the cursor. The codec is
+internal: there is no public encoder, decoder or signer hook, and a later
+codec version gets a new prefix rather than reinterpreting `gomp1` cursors.
+
+A continuation is refused with `CURSOR_INVALID`, before any count or row is
+read, when it was issued under a different binding, entity, order, filter or
+key, was altered or truncated, has another prefix (including `goms1` scan
+cursors), or is longer than the configured bound. These cases are
+indistinguishable to the caller. Two more cases carry a `reason` extension
+because they concern a cursor that is otherwise acceptable. Expiry is
+reported only for a cursor that authenticates under the same binding, entity,
+order, filter and key:
+
+| `reason` | Meaning | Client action |
+| --- | --- | --- |
+| `AUTHORIZED_PAGE_CURSOR_EXPIRED` | Authenticated under the current binding, past its lifetime | Restart from the first page |
+| `AUTHORIZED_PAGE_CURSOR_KEY_UNAVAILABLE` | Names a key identifier this service does not accept | Restart from the first page |
+
+Errors carry the default message for their code and never the cursor, the
+binding, a position value or key material.
+
+**Authorization.** A continuation is a position, never an authorization.
+Every request resolves entity access and read visibility again before the
+cursor is opened, then row callbacks and field policies for every row it
+returns, exactly as for a first page. A
+row or field denied after a cursor was issued is not released by it, and a
+cursor presented by another caller under an unchanged binding gets that
+caller's own decisions.
+
+**Bounds.**
+
+| Bound | Setting | Default |
+| --- | --- | --- |
+| Rows per statement | `AuthorizedPageConfig::new(.., batch_size, ..)` | required |
+| Candidates examined per request | `AuthorizedPageConfig::new(.., max_scanned_rows)` | required |
+| Page size | `with_max_page_size` | 100 |
+| Cursor bytes | `with_max_cursor_bytes` (256 to 65536) | 8192 |
+| Cursor lifetime | `with_cursor_ttl` (1 millisecond to 30 days) | 1 hour |
+| Binding bytes | fixed | 4096 |
+
+A `limit` above the page-size bound is refused with `PAGE_LIMIT_EXCEEDED`; it
+is not truncated. A request without a limit gets the smaller of the bound and
+100. `PaginationConfig` limits do not apply to this API. A position too large
+to seal within the cursor bound fails the request with
+`AUTHORIZATION_MISCONFIGURED` rather than issuing an oversized cursor. Each
+page issues a fresh continuation, so the lifetime bounds the pause between two
+requests rather than the whole traversal; replicas compare it with their own
+clocks.
+
+**Key custody and rotation.** The key is a secret, randomly generated 32 bytes
+owned by the service. Keep it in the service's encrypted settings (or its
+root-secret store) and load it at start-up. Never derive it from a provider
+credential, a user or tenant secret or any value a client can see or choose,
+and never send it to a client. Replicas that serve the same pages need the
+same keys under the same identifiers; a replica with different key bytes
+refuses the others' cursors. `AuthorizedPageKeys` holds one active key, which
+seals, and up to seven accept-only keys:
+
+1. Add the new key with `accepting` on every replica.
+2. Make it the active key and keep the previous key with `accepting` for at
+   least the cursor lifetime.
+3. Remove the previous key. Its cursors are then refused with
+   `AUTHORIZED_PAGE_CURSOR_KEY_UNAVAILABLE`.
+
+Without an installed `AuthorizedPageConfig` the call fails closed with
+`AUTHORIZATION_MISCONFIGURED`. Residual caller filters are refused, as for
+scans. Coverage on SQLite, PostgreSQL and SQL Server is in
+[`authorized_page_context_binding.rs`](../../../crates/graphql-orm/tests/authorized_page_context_binding.rs).
+
 ### Consistency and backend boundaries
 
 Pages and permission callbacks do not form a snapshot across requests.
@@ -347,6 +561,21 @@ Counts and probes are separate statements and can differ under concurrent
 writes according to backend isolation; they always include the same SQL
 visibility restriction. A permission change during one request has the same
 request-local decision boundary as other authorization checks.
+
+Each page of a generated list, keyset connection, scan or search is an
+independent read of the data as it is when that page runs. A row written
+between two page reads can be skipped or repeated, and nothing on a page says
+that the data changed since the previous one. A client that must see each row
+exactly once reads the range again and drops duplicates, or reads inside one
+Rust repository transaction. The ORM deliberately offers no snapshot token
+that pins later pages to the first page's point in time (#673): serving one
+across requests would hold a database transaction open per token (a
+PostgreSQL exported snapshot, an SQLite read transaction that blocks WAL
+checkpoints, or SQL Server snapshot isolation), which exhausts the pool,
+blocks vacuum and checkpoints, does not work across replicas and is a
+denial-of-service surface. A weaker per-page revision value is deferred: it
+needs a per-entity revision source that is correct across replicas and does
+not reveal hidden writes.
 
 SQLite, PostgreSQL, and SQL Server use the shared parameterized renderer and
 bounded backend execution. The generated keyset capability currently requires

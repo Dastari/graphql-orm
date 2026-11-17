@@ -3,16 +3,46 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
 
-## Unreleased - 0.146.0
+## Unreleased - 0.148.0
 
 Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
+## Unreleased - 0.147.0
+
+- **Changed (leases):** `AiRunServiceLimits::new` now sets a lease-recovery clock-skew grace of a quarter of the lease TTL in whole seconds, at most 30 seconds (15 seconds for a one-minute lease). `recover_expired_leases` waits that long past a lease's stamped expiry, so a recovering process whose clock runs ahead of the lease holder's by less than the grace can no longer close a live lease. Recovery of a dead lease is delayed by the same amount; `with_lease_recovery_grace(Duration::ZERO)` restores the previous timing. The approval half of #536 (approvals closed with their run, decisions refused once the run leaves `WaitingApproval`, the lease renewed during tool execution) shipped in 0.138.0. Fixes #536.
+- **Providers (Anthropic):** `max_tokens`, `model_context_window_exceeded` and `pause_turn` stops complete the turn with exact usage instead of being refused after the tokens were spent. The adapter appends a visible notice that the response may be incomplete. Tool requests are held until the stop reason arrives; one cut off by such a stop is dropped and never dispatched, and the notice says no tool was run. A response naming a dated snapshot of the requested model (`-YYYYMMDD` or `-YYYY-MM-DD`, or the base of a `-latest` alias followed by a date) is accepted when no pin is declared. A pin declared with `with_model_snapshot` stays exact: only the requested identifier or the pinned one is accepted. Fixes #470.
+- **Providers (same shape elsewhere):** the OpenAI Responses adapter (also used for xAI and OpenAI-compatible routes), its background acknowledgement and retrieval, and the chat-completions adapter accept the same dated-snapshot model echo. A chat-completions `length` stop completes with the same notice and drops a cut-off tool request; `content_filter` and other finish reasons stay refused (#470).
+- **Fixed (provider files):** a 404 to an OpenAI file `DELETE` is never proof of absence, also at or after the artifact's recorded provider expiry: a credential that now addresses another project gets the same answer while the file still exists. Such cleanup now retries and ends `cleanup_unconfirmed` like any other unconfirmed outcome. `AiProviderFileDeletionRequest::provider_expired` is audit context only (#468).
+- **Added (stored responses):** OpenAI responses sent with `store: true` (`store_responses = true`) are recorded in a stored-response ledger and deleted after their session is deleted. A response is recorded as soon as its turn returns to an agent coordinator, through the new provided `AiAgentRunControl::record_retained_provider_response` (the default records nothing), and again, idempotently, with each checkpoint, final output and terminal stored background response. The coordinator record refuses a result whose run or session differs from the lease's with `InvalidInput`, and a response recorded after its session was finalized is due for deletion at once. A turn whose stream fails before a result is returned is not recorded; [session retention](docs/session-retention.md#stored-provider-responses) lists every case. Session retention releases a deleting session's rows once its purge cutoff passes and finalizes the shell only afterwards. `OrmAiSessionRetentionService::delete_stored_provider_responses` deletes released responses through the new `AiStoredProviderResponseDeletionService` boundary, installed with `with_stored_response_deletion_service` and bounded by `AiStoredResponseCleanupLimits`; it reports an `AiStoredResponseCleanupReport`. Intent and attempt count commit before each request, only an acknowledged delete followed by a not-found retrieval removes a row, and after the bounded attempts (24 by default) a row ends `cleanup_unconfirmed` with its identifier kept. `OpenAiStoredResponseDeletionService::with_provider_profile_id` binds the OpenAI adapter to one profile and implements the boundary. A boundary that does not own a row's profile returns `InvalidConfiguration`; the row spends no attempt and is counted in `AiStoredResponseCleanupReport::unrouted`. Fixes #468.
+- **Persistence:** apply AI schema module `0.82.0`. It adds the table `graphql_orm_ai_stored_provider_responses`. No data backfill: responses stored before the upgrade are not in the ledger.
+
+No GraphQL SDL change. See the [migration guide](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
+
+## Unreleased - 0.146.0
+
+- Keep 1A delivery selection opt-in; unchanged retained bindings stay stable.
+- Verify dependent-delete declarations and row bounds with the ORM transaction planner; unsupported executors and plans refuse.
+- With a dependent-effect policy installed, a generated delete whose capability or declaration cannot be looked up when its guard is built refuses with `Forbidden`. A host executor that runs the delete without attaching the guard is detected only after the write commits, by the missing ORM commit receipt.
+- Serialize host-anchor rotations and finalize with compare-and-swap.
+
+Capability scale (part of #551), with tool profiles 0.24.0. No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.81.0`. Capability, index, broker-definition and session-binding fingerprints are unchanged for a host that changes nothing. See the [migration guide](MIGRATION.md#01450-to-01460-capability-scale).
+
+- **Added:** reviewed static read tools can be reached through the fixed broker instead of being offered as bootstrap definitions (#551, ask 5C). `AiCapabilityBrokerSession::with_brokered_static_tools` lists them by exact descriptor fingerprint. A brokered tool is not a provider definition, so it does not count against the 128 static bootstrap fingerprints of a retained session, and the list never changes the session binding or the three broker definitions. Discover returns it, describe returns its review metadata and reviewed argument schema, and execute runs it through registered-schema validation, current tool authorization, the ordinary resolver path and its own static disclosure schema. The fingerprint must match the indexed entry and the registered descriptor at every step. The coordinator refuses a turn whose hierarchical rules do not admit every brokered fingerprint. Only an approval-free, read-only, idempotent application query below `Restricted` without result media can be brokered; a brokered call carries no `AiToolExecutionProvenance`. `AiCapabilityExecution::capability_kind` and `AI_CAPABILITY_MAXIMUM_BROKERED_STATIC_TOOLS` are new.
+- **Changed:** fixed-broker `describe` defines each repeated input type once under `planSchema.types` and references it by name (#551, ask 2A). The contract is the same, in fewer bytes; expanding the references gives back the compact schema exactly, and execute arguments and server-side validation are unchanged. `planSchemaTypeReferences` states the convention. `AiCapabilityBrokerSession::with_inline_describe_schema` restores the inline schema. New: `AiCapabilityDescription::with_shared_type_plan_schema` and `AiToolCatalog::query_capability_shared_type_plan_schema`.
+- **Behaviour:** 1A prefers `FixedBroker` above the eager limits only with `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces`. Unchanged hosts keep their native deferred mode and binding; opting in requires a retained-session rebind.
+- **Performance:** capability search tokenises only the query; entry terms are computed when the index is compiled (#551, ask 3A, in tool profiles). Ranking and scores are unchanged.
+- **Reliability:** a generated root whose compact schema exceeds the provider contract is excluded with a diagnostic instead of failing its whole target (#551, ask 4A, in tool profiles). `AiToolCatalog` logs one warning per excluded root when a catalogue is registered.
+- **Added:** `OrmAiRuntimeRecoveryService::with_epoch_anchor` takes a host-held `AiRuntimeEpochAnchorStore`, so a file-level or physical database restore starts closed (#572). Each successful `readiness_proof` rotates a random generation in the live epoch and in the anchor; a restored image carries an older generation and is refused with `RuntimeNotReady` until an operator reconciles and acknowledges. An ordinary restart keeps its epoch. Opt-in; no schema change.
+- **Added (security, opt-in):** `AiRuntimeBuilder::dependent_effect_policy` installs an `AiDependentEffectPolicy` for generated delete roots (#389). The host declares each root's cascade and set-null effects; a generated `Delete` or `DeleteMany` is refused before preparation and again before execution unless its root is declared and every dependent entity's own AI policy allows the effect. An undeclared root is refused. Without an installed policy behaviour is unchanged.
+- **Added (opt-in):** strict query roots for generated query capabilities (#463, in tool profiles): `AiGraphqlQueryCapabilityOptions::with_strict_query_roots` compiles only the listed roots. The default stays open.
+- **Internal:** `AiGeneratedGraphqlTargetPolicySet::allows_mutation_capability` is compiled on every backend.
 
 ## Unreleased - 0.145.0
 

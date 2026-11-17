@@ -10,9 +10,67 @@ supersedes: []
 
 # Migration Guide
 
-## 0.16.0
+## 0.17.0
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
+## 0.15.0 to 0.16.0: local links, listing pages and canonical keys
+
+**Windows local roots — Action needed (Windows hosts):**
+`LocalStorageBackend::new` no longer exists on Windows, so a Windows build that
+calls it fails to compile. Call `LocalStorageBackend::new_trusted_windows_root`
+instead, and only when the host protects the root, its ancestors and
+descendants from concurrent mutation. Links are not enforced as a security
+boundary in this mode, and Windows directory handles are held with read and
+write sharing but without delete sharing. The no-follow guarantees below apply
+to Unix. Unix hosts need no change. Windows conditional creation uses atomic
+no-replace rename.
+
+Unix conditional-create fallback retries the temporary unlink (a temporary that
+is already gone counts as published) and rolls back on persistent failure,
+returning an error rather than success with two links. If the rollback itself
+fails the key may remain published: that error is single-attempt
+(`StorageError::is_retryable()` is false) and must not be replayed.
+
+Update the storage requirement to 0.16.0 and refresh the consumer lockfile.
+
+1. **Unix local storage refuses links and hard-linked files. Action needed** only
+   if a local root contains symbolic links below
+   it, or files hard-linked from elsewhere. Every operation on a key whose path
+   names or passes through a link now fails with
+   `StorageError::InvalidStorageKey`, wherever the link points, listings skip
+   links, and every read of a file with more than one hard link fails the same
+   way. Replace each link or hard link with a real directory or an
+   independent copy, or point `LocalStorageBackend::new` at the real tree; the
+   root itself may stay a link. A FIFO, socket or device file at a key is
+   refused too. Resolution is now relative to held directory handles, so a
+   directory replaced by a link while an operation runs no longer redirects
+   it. Hosts with neither
+   links nor hard links below the root need no change. See
+   [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary).
+2. **Local listing pages. Action needed** only for code that calls
+   `list_blobs_page` directly and stops at a page shorter than its limit. A
+   local page now ends after `2 * limit + 64` directory reads, as when many
+   directories hold no keys, and can then hold fewer keys than the limit,
+   even none, with a continuation. Keep paging until `next_continuation` is
+   `None`, as `list_blobs` does and S3 already required. Continuation tokens
+   issued by 0.15.0 stay valid.
+3. **Canonical keys. No action.** Local storage also applies the mode when a
+   multipart upload completes, so an upload started before the mode was
+   enabled cannot publish a key it refuses; complete or abort such uploads
+   before enabling it. `with_canonical_keys` on the SMB and local
+   backends, and `validate_canonical_blob_key`, are opt-in and off by
+   default. Enable the mode for a target that ignores case or Unicode
+   normalisation only after checking that the keys you write are lowercase
+   ASCII; existing objects stay readable, listed and deletable. See
+   [key safety](docs/blob-store.md#key-safety).
+4. **Single-attempt local deletes. No action** unless code matched
+   `SingleAttemptFailed` from `LocalStorageBackend::delete_blob_once` to
+   detect an invalid key: a refused key is now reported as
+   `InvalidStorageKey`, unwrapped, because nothing was attempted.
+5. **Content type. No action.** Local and SMB storage
+   ignore `BlobPutOptions::content_type`, as before; this is now documented
+   as accepted behaviour. See [content type](docs/blob-store.md#content-type).
 
 ## 0.14.0 to 0.15.0: bounded SMB destructor cleanup
 
@@ -476,7 +534,6 @@ migration guide for coordinated upgrades and offline lock recovery.
 Provider configuration, storage keys and stored data are unchanged. No data
 migration is required. Update all selected workspace packages to one reviewed
 revision and regenerate `Cargo.lock`.
-
 
 ### Single-attempt error classification
 

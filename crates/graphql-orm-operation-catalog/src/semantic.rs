@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationCatalog, GraphqlOperationKind};
 
+mod client;
+pub use client::*;
+
 /// Current semantic-catalogue wire version.
 pub const GRAPHQL_SEMANTIC_CATALOG_VERSION: u16 = 3;
 

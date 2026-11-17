@@ -10,8 +10,13 @@ supersedes: []
 
 # graphql-orm-storage
 
-Version 0.16.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+Version 0.17.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
+construction for a host-protected tree; `new` does not exist on Windows. This mode does
+not enforce links as a security boundary. Unix keeps its no-follow boundary.
+See the storage [trust boundary documentation](docs/blob-store.md#local-filesystem-trust-boundary).
 
 Provider-neutral object storage primitives for `graphql-orm` applications.
 Use it to keep object bytes in a storage backend while your application owns
@@ -24,6 +29,18 @@ bytes in database rows.
 The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
+
+Version 0.16.0 resolves every Unix local storage operation relative to held
+directory handles without following links, so local storage refuses every
+read, write, copy and delete through a filesystem link below its root, even
+one swapped in while the operation runs, skips links in listings, and refuses
+to read files with more than one hard link. Local
+listing pages resume with bounded work and memory and can hold fewer keys
+than their limit. An opt-in canonical key mode for SMB and local targets
+that ignore case or normalisation (`validate_canonical_blob_key`,
+`with_canonical_keys`) refuses non-canonical keys on new writes. It documents
+that local and SMB storage ignore `BlobPutOptions::content_type`. See
+[MIGRATION.md](MIGRATION.md).
 
 Version 0.15.0 bounds the SMB cleanup that dropped trees, sessions and
 connections start: each step finishes or is abandoned within the connection's

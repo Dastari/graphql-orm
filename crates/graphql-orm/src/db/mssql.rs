@@ -56,7 +56,11 @@ impl MssqlWriteResult {
 const SESSION_RESET: &str = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
     SET TRANSACTION ISOLATION LEVEL READ COMMITTED; \
     SET NOCOUNT OFF; \
-    SET IMPLICIT_TRANSACTIONS OFF;";
+    SET IMPLICIT_TRANSACTIONS OFF; \
+    WHILE APPLOCK_MODE('public', N'graphql_orm_restore', 'Session') <> 'NoLock' \
+    EXEC sp_releaseapplock @Resource = N'graphql_orm_restore', @LockOwner = 'Session'; \
+    WHILE APPLOCK_MODE('public', N'graphql_orm_restore_marker_install', 'Session') <> 'NoLock' \
+    EXEC sp_releaseapplock @Resource = N'graphql_orm_restore_marker_install', @LockOwner = 'Session';";
 
 /// Ends an ORM transaction. A `COMMIT` that leaves `@@TRANCOUNT` above zero
 /// only decremented a nested transaction; nothing is durable yet. Roll back
@@ -514,7 +518,24 @@ impl MssqlPool {
         &self.inner.options
     }
 
+    /// Fetch rows in autocommit. The statement holds the shared restore lock
+    /// while it runs and is refused with
+    /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) during a
+    /// host-run restore; see [`MssqlRestore`].
     pub async fn fetch_rows(&self, sql: &str, values: &[SqlValue]) -> crate::Result<Vec<MssqlRow>> {
+        let result = self
+            .fetch_rows_ungated(&restore_gated(sql, true), values)
+            .await;
+        self.typed_restore_refusal(result).await
+    }
+
+    /// Fetch rows without taking the restore lock: for the restore machinery
+    /// itself, which must work while a restore is in progress.
+    async fn fetch_rows_ungated(
+        &self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<MssqlRow>> {
         let mut lease = self.acquire().await?;
         let result = self
             .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
@@ -528,11 +549,165 @@ impl MssqlPool {
         values: &[SqlValue],
     ) -> crate::Result<MssqlWriteResult> {
         self.require_external_writable()?;
+        // The statement must be the last of its batch: its row count is the
+        // batch's last one. The shared lock is therefore released by a
+        // control batch that follows it, before the connection is reused.
+        let gated = restore_gated(sql, false);
         let mut lease = self.acquire().await?;
         let result = self
-            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .bounded(execute_with_client(&mut lease.client, &gated, values))
             .await;
-        self.finish(lease, result).await
+        if result.is_ok()
+            && let Err(failure) = self
+                .bounded(execute_control_statement(
+                    &mut lease.client,
+                    RELEASE_SESSION_RESTORE_LOCK,
+                ))
+                .await
+        {
+            // The write is done, but this session may still hold the lock:
+            // close it rather than return it to the pool.
+            drop((lease, failure));
+            return result.map_err(|failure| failure.error);
+        }
+        // A refused or failed statement goes through the session reset in
+        // `finish`, which releases the lock.
+        let result = self.finish(lease, result).await;
+        self.typed_restore_refusal(result).await
+    }
+
+    /// Replace the server's refusal of the restore gate with a typed error:
+    /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) when a
+    /// restore holds the lock or its marker is present, and
+    /// [`RestoreStateUnavailable`](crate::graphql::orm::RestoreStateUnavailable)
+    /// when the gate could not read the marker at all.
+    async fn typed_restore_refusal<T>(&self, result: crate::Result<T>) -> crate::Result<T> {
+        match result {
+            Err(error) => match restore_refusal(&error) {
+                Some(RestoreRefusal::InProgress) => Err(self.restore_in_progress_error().await),
+                Some(RestoreRefusal::Unavailable(reason)) => {
+                    Err(restore_state_unavailable(reason, error))
+                }
+                None => Err(error),
+            },
+            ok => ok,
+        }
+    }
+
+    /// The refusal for a gate that saw a restore: its lock was held or its
+    /// marker present. The marker, read again, names the restore. A restore
+    /// that holds the lock but has not recorded its marker yet has no
+    /// identifier to report, and neither has one whose marker cannot be read
+    /// now (a timeout, or a role denied SELECT): the gate has already seen
+    /// the restore, so the refusal stays `RestoreInProgress` and never says
+    /// that no restore is running.
+    async fn restore_in_progress_error(&self) -> sqlx::Error {
+        let (restore_id, started_at) = self
+            .read_restore_marker()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        crate::graphql::orm::RestoreInProgress::new(restore_id, started_at).into_error()
+    }
+
+    /// Install the canonical infrastructure table as the schema owner, before
+    /// using the ORM. Runtime roles need SELECT; restore roles also need INSERT
+    /// and DELETE. This does not clear an existing marker.
+    ///
+    /// Idempotent and safe to run from several replicas at once: installs
+    /// serialise on an application lock, a table created by someone else in
+    /// the meantime (error 2714) counts as installed, and the table's shape is
+    /// verified afterwards, so a table of the wrong shape fails here rather
+    /// than at runtime.
+    ///
+    /// Needs a pool built with the explicit external-writable constructor.
+    pub async fn install_restore_marker(&self) -> crate::Result<()> {
+        self.require_external_writable()?;
+        let mut lease = self.acquire().await?;
+        let result = self
+            .bounded(execute_with_client(
+                &mut lease.client,
+                CREATE_RESTORE_MARKER,
+                &[],
+            ))
+            .await;
+        self.finish(lease, result).await.map(|_| ())
+    }
+
+    /// The restore marker row. Unreadable or missing infrastructure fails
+    /// closed with [`RestoreStateUnavailable`](crate::graphql::orm::RestoreStateUnavailable),
+    /// which says why.
+    pub(crate) async fn read_restore_marker(&self) -> crate::Result<Option<(String, i64)>> {
+        let rows = self
+            .fetch_rows_ungated(READ_RESTORE_MARKER, &[])
+            .await
+            .map_err(|error| restore_state_unavailable(classify_marker_error(&error), error))?;
+        rows.first()
+            .map(restore_marker_from_row)
+            .transpose()
+            .map_err(|error| {
+                restore_state_unavailable(
+                    crate::graphql::orm::RestoreStateUnavailableReason::Other,
+                    error,
+                )
+            })
+    }
+
+    /// Take the exclusive restore lock on a dedicated connection and record
+    /// (or, with `resume`, re-adopt) the marker of `restore_id`.
+    pub(crate) async fn begin_restore(
+        &self,
+        restore_id: &str,
+        wait: Duration,
+        resume: bool,
+    ) -> crate::Result<MssqlRestore> {
+        self.require_external_writable()?;
+        let mut lease = self.acquire().await?;
+        let wait_ms = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
+        let lock = format!(
+            "EXEC sp_getapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = {wait_ms}; \
+             IF APPLOCK_MODE('public', N'{RESTORE_LOCK_RESOURCE}', 'Session') <> 'Exclusive' BEGIN \
+             RAISERROR(N'{RESTORE_REFUSAL}: open transactions or another restore hold the restore lock', 16, 1); RETURN; END;"
+        );
+        // The lock wait is the caller's bound, not the pool's query timeout.
+        // On any failure the lease is dropped, which closes the connection
+        // and with it releases whatever the session held.
+        let locked = tokio::time::timeout(
+            wait + self.inner.options.connect_timeout,
+            execute_control_statement(&mut lease.client, &lock),
+        )
+        .await
+        .map_err(|_| timed_out("SQL Server restore lock was not granted in time"))?;
+        if let Err(failure) = locked {
+            drop(lease);
+            return self.typed_restore_refusal(Err(failure.error)).await;
+        }
+        let claimed = async {
+            let id = [SqlValue::String(restore_id.to_string())];
+            if !resume {
+                execute_with_client(&mut lease.client, INSERT_RESTORE_MARKER, &id).await?;
+            }
+            fetch_rows_with_client(&mut lease.client, READ_RESTORE_MARKER, &[]).await
+        };
+        let rows = self
+            .bounded(claimed)
+            .await
+            .map_err(|failure| marker_access_error(failure.error))?;
+        match rows.first().map(restore_marker_from_row).transpose()? {
+            Some((present, _)) if present == restore_id => Ok(MssqlRestore {
+                pool: self.clone(),
+                lease: Some(lease),
+                restore_id: restore_id.to_string(),
+            }),
+            // Another restore's marker: one that crashed, or was abandoned.
+            Some((present, started_at)) => {
+                Err(crate::graphql::orm::RestoreInProgress::new(present, started_at).into_error())
+            }
+            None => Err(sqlx::Error::Protocol(format!(
+                "no restore marker is present for restore {restore_id}"
+            ))),
+        }
     }
 
     pub(crate) async fn begin_transaction(
@@ -547,14 +722,22 @@ impl MssqlPool {
         };
         // Never nest inside a transaction raw SQL left open on this session:
         // its COMMIT would only decrement the count and nothing would be durable.
+        // The transaction takes the shared restore lock in the batch that
+        // begins it and holds it until it ends, so a restore cannot start
+        // under it and it cannot start under a restore.
         let begin = format!(
             "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
-             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;"
+             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION; {}",
+            restore_gate("Transaction", "ROLLBACK TRANSACTION;")
         );
         // A failed begin may have changed the isolation level; never reuse it.
-        self.bounded(execute_control_statement(&mut lease.client, &begin))
-            .await
-            .map_err(|failure| failure.error)?;
+        let begun = self
+            .bounded(execute_control_statement(&mut lease.client, &begin))
+            .await;
+        if let Err(failure) = begun {
+            drop(lease);
+            return self.typed_restore_refusal(Err(failure.error)).await;
+        }
         Ok(MssqlTransaction {
             pool: self.clone(),
             lease: Some(lease),
@@ -727,6 +910,332 @@ impl MssqlPool {
         }
         // Release the permit only once the connection is back in the idle list.
         drop(permit);
+    }
+}
+
+/// Application lock every ORM transaction and autocommit statement takes in
+/// shared mode, and a restore takes exclusively.
+const RESTORE_LOCK_RESOURCE: &str = "graphql_orm_restore";
+
+/// How long an ORM statement waits for the shared restore lock, in
+/// milliseconds, before it is refused. Shared holders never block each other,
+/// so the wait only occurs while a restore holds or is waiting for the lock.
+const RESTORE_LOCK_WAIT_MS: u32 = 250;
+
+/// Prefix of the message the restore gate raises.
+const RESTORE_REFUSAL: &str = "graphql-orm restore in progress";
+
+/// Prefix of the message the restore gate raises when it cannot read the
+/// marker. The server error number follows `error `.
+const RESTORE_UNAVAILABLE: &str = "graphql-orm restore state unavailable";
+
+const READ_RESTORE_MARKER: &str =
+    "SELECT restore_id, started_at FROM [dbo].[__graphql_orm_restore_marker]";
+
+/// Install batch for the marker table: serialised on a session application
+/// lock (not a transaction, which error 2714 would doom), tolerant of a
+/// concurrent creator (2714), and ending in a shape check.
+const CREATE_RESTORE_MARKER: &str = "\
+     DECLARE @gorm_install_lock INT, @gorm_install_error INT; \
+     EXEC @gorm_install_lock = sp_getapplock @Resource = N'graphql_orm_restore_marker_install', \
+         @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 30000; \
+     IF @gorm_install_lock < 0 \
+         THROW 50000, N'graphql-orm restore marker install: another installation held the install lock too long', 1; \
+     BEGIN TRY \
+         IF OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') IS NULL \
+         CREATE TABLE [dbo].[__graphql_orm_restore_marker] (\
+         marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), \
+         restore_id NVARCHAR(200) NOT NULL, \
+         started_at BIGINT NOT NULL); \
+     END TRY \
+     BEGIN CATCH \
+         SET @gorm_install_error = ERROR_NUMBER(); \
+         IF @gorm_install_error <> 2714 BEGIN \
+             EXEC sp_releaseapplock @Resource = N'graphql_orm_restore_marker_install', @LockOwner = 'Session'; \
+             THROW; \
+         END; \
+     END CATCH; \
+     EXEC sp_releaseapplock @Resource = N'graphql_orm_restore_marker_install', @LockOwner = 'Session'; \
+     IF OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') IS NULL \
+        OR (SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U')) <> 3 \
+        OR (SELECT COUNT(*) FROM sys.columns AS c JOIN sys.types AS t ON t.user_type_id = c.user_type_id \
+            WHERE c.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND c.is_nullable = 0 AND ( \
+                (c.name = N'marker_key' AND t.name = N'tinyint') \
+                OR (c.name = N'restore_id' AND t.name = N'nvarchar' AND c.max_length = 400) \
+                OR (c.name = N'started_at' AND t.name = N'bigint'))) <> 3 \
+        OR (SELECT COUNT(*) FROM sys.indexes AS i \
+            JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+            JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+            WHERE i.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND i.is_primary_key = 1) <> 1 \
+        OR NOT EXISTS (SELECT 1 FROM sys.indexes AS i \
+            JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+            JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+            WHERE i.object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') AND i.is_primary_key = 1 \
+              AND c.name = N'marker_key') \
+        OR NOT EXISTS (SELECT 1 FROM sys.check_constraints AS k \
+            WHERE k.parent_object_id = OBJECT_ID(N'dbo.__graphql_orm_restore_marker', N'U') \
+              AND k.is_disabled = 0 AND k.is_not_trusted = 0 \
+              AND REPLACE(REPLACE(REPLACE(k.definition, N' ', N''), N'(', N''), N')', N'') = N'[marker_key]=1') \
+         THROW 50000, N'dbo.__graphql_orm_restore_marker exists but does not have the documented shape', 1;";
+
+const INSERT_RESTORE_MARKER: &str = "INSERT INTO [dbo].[__graphql_orm_restore_marker] (marker_key, restore_id, started_at) \
+     SELECT 1, @P1, DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()) \
+     WHERE NOT EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker])";
+
+fn restore_marker_from_row(row: &MssqlRow) -> crate::Result<(String, i64)> {
+    Ok((row.try_get("restore_id")?, row.try_get("started_at")?))
+}
+
+/// T-SQL that takes the shared restore lock for `owner` (`Session` or
+/// `Transaction`) and refuses, after running `undo`, when the lock is not
+/// granted or a restore marker is present.
+///
+/// The lock makes the check race-free: a restore holds the lock exclusively,
+/// so it waits for every holder of the shared lock to finish, and nothing
+/// takes the shared lock while it runs. The marker covers a restore whose
+/// session died: its lock is gone, its partial rows are not.
+fn restore_gate(owner: &str, undo: &str) -> String {
+    let release = if owner == "Session" {
+        format!(
+            "EXEC sp_releaseapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockOwner = 'Session';"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "EXEC sp_getapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockMode = 'Shared', @LockOwner = '{owner}', @LockTimeout = {RESTORE_LOCK_WAIT_MS}; \
+         IF APPLOCK_MODE('public', N'{RESTORE_LOCK_RESOURCE}', '{owner}') = 'NoLock' BEGIN {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: the restore lock is held', 16, 1); RETURN; END; \
+         DECLARE @gorm_restore_present BIT, @gorm_restore_error INT; BEGIN TRY \
+         EXEC sp_executesql N'SELECT @present = CASE WHEN EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker]) THEN 1 ELSE 0 END', \
+         N'@present BIT OUTPUT', @present = @gorm_restore_present OUTPUT; \
+         END TRY BEGIN CATCH SET @gorm_restore_error = ERROR_NUMBER(); {release} {undo} \
+         RAISERROR(N'{RESTORE_UNAVAILABLE}: marker read failed with error %d', 16, 1, @gorm_restore_error); RETURN; END CATCH; \
+         IF @gorm_restore_present IS NULL OR @gorm_restore_present <> 0 BEGIN {release} {undo} \
+         RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END;"
+    )
+}
+
+/// Wrap an autocommit statement so it holds the shared restore lock while it
+/// runs. The lock is session-owned. A session that still holds one from a
+/// batch that ended early releases it first, and so does the session reset.
+///
+/// With `release_inline` the batch releases the lock after the statement.
+/// That makes the release the batch's last statement, whose row count SQL
+/// Server then reports, so a write leaves the release to its caller.
+///
+/// A statement that must be the first of its batch (`CREATE VIEW` and the
+/// like) reads and writes no rows and runs as it is.
+fn restore_gated(sql: &str, release_inline: bool) -> String {
+    if requires_own_batch(sql) {
+        return sql.to_string();
+    }
+    let gate = restore_gate("Session", "");
+    if release_inline {
+        format!(
+            "{RELEASE_SESSION_RESTORE_LOCK} {gate}\n{sql}\n;EXEC sp_releaseapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockOwner = 'Session';"
+        )
+    } else {
+        format!("{RELEASE_SESSION_RESTORE_LOCK} {gate}\n{sql}")
+    }
+}
+
+/// Releases every shared restore lock the session still owns.
+const RELEASE_SESSION_RESTORE_LOCK: &str = "WHILE APPLOCK_MODE('public', N'graphql_orm_restore', 'Session') <> 'NoLock' \
+     EXEC sp_releaseapplock @Resource = N'graphql_orm_restore', @LockOwner = 'Session';";
+
+/// Whether SQL Server requires the statement to be the only one in its batch.
+fn requires_own_batch(sql: &str) -> bool {
+    let mut words = sql
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_uppercase);
+    if !matches!(words.next().as_deref(), Some("CREATE" | "ALTER")) {
+        return false;
+    }
+    let mut object = words.next();
+    if object.as_deref() == Some("OR") {
+        // CREATE OR ALTER <object>
+        words.next();
+        object = words.next();
+    }
+    matches!(
+        object.as_deref(),
+        Some(
+            "PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER" | "VIEW" | "SCHEMA" | "DEFAULT" | "RULE"
+        )
+    )
+}
+
+/// What the restore gate's refusal reports.
+enum RestoreRefusal {
+    /// The restore lock is held or a marker row is present.
+    InProgress,
+    /// The marker could not be read.
+    Unavailable(crate::graphql::orm::RestoreStateUnavailableReason),
+}
+
+/// The restore gate's refusal carried by `error`, if it is one.
+fn restore_refusal(error: &sqlx::Error) -> Option<RestoreRefusal> {
+    let message = error.as_database_error()?.message();
+    if let Some(detail) = message.strip_prefix(RESTORE_UNAVAILABLE) {
+        let number = detail
+            .rsplit("error ")
+            .next()
+            .and_then(|digits| digits.trim().parse::<u32>().ok());
+        return Some(RestoreRefusal::Unavailable(marker_error_reason(number)));
+    }
+    message
+        .starts_with(RESTORE_REFUSAL)
+        .then_some(RestoreRefusal::InProgress)
+}
+
+/// Category of the server error number raised while reading the marker.
+fn marker_error_reason(number: Option<u32>) -> crate::graphql::orm::RestoreStateUnavailableReason {
+    use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+    match number {
+        // Invalid object name.
+        Some(208) => Reason::MarkerNotInstalled,
+        // SELECT, column and object permission denied, and the like.
+        Some(229 | 230 | 262 | 297 | 300) => Reason::PermissionDenied,
+        _ => Reason::Other,
+    }
+}
+
+/// Category of a failure to read the marker through the pool.
+fn classify_marker_error(
+    error: &sqlx::Error,
+) -> crate::graphql::orm::RestoreStateUnavailableReason {
+    use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+    match error {
+        sqlx::Error::Database(database) => {
+            marker_error_reason(database.code().and_then(|code| code.parse().ok()))
+        }
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed => Reason::ConnectionFailed,
+        _ => Reason::Other,
+    }
+}
+
+/// The typed refusal for restore state that cannot be read, with the cause
+/// kept as its source. Its message never includes the cause.
+fn restore_state_unavailable(
+    reason: crate::graphql::orm::RestoreStateUnavailableReason,
+    cause: sqlx::Error,
+) -> sqlx::Error {
+    crate::graphql::orm::RestoreStateUnavailable::new(reason, Some(Box::new(cause))).into_error()
+}
+
+/// A failure while claiming the marker: a missing table or a denied
+/// permission is reported as unavailable restore state, anything else as is.
+fn marker_access_error(error: sqlx::Error) -> sqlx::Error {
+    use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+    match classify_marker_error(&error) {
+        reason @ (Reason::MarkerNotInstalled | Reason::PermissionDenied) => {
+            restore_state_unavailable(reason, error)
+        }
+        _ => error,
+    }
+}
+
+/// A host-run restore of a SQL Server database, in progress.
+///
+/// Created by `Database::begin_restore` (or `resume_restore`). It owns one
+/// connection that holds the restore lock exclusively: while it lives, every
+/// ORM transaction and autocommit statement, in every process, is refused
+/// with [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) before
+/// it reads or writes. Run the restore's statements through
+/// [`Self::execute`] and [`Self::fetch_rows`], then call [`Self::finish`].
+///
+/// Dropping it without `finish`, or losing its connection, releases the lock
+/// but leaves the marker row, so statements stay refused until the restore
+/// is resumed and finished.
+pub struct MssqlRestore {
+    pool: MssqlPool,
+    lease: Option<Lease>,
+    restore_id: String,
+}
+
+impl MssqlRestore {
+    /// The identifier recorded in the marker.
+    pub fn restore_id(&self) -> &str {
+        &self.restore_id
+    }
+
+    fn connection(&mut self) -> crate::Result<&mut Lease> {
+        self.lease.as_mut().ok_or_else(|| {
+            sqlx::Error::Protocol(
+                "the restore connection was lost; its marker remains, resume the restore"
+                    .to_string(),
+            )
+        })
+    }
+
+    fn keep_if_reusable<T>(&mut self, result: Result<T, StatementFailure>) -> crate::Result<T> {
+        result.map_err(|failure| {
+            if !failure.reusable {
+                self.lease.take();
+            }
+            failure.error
+        })
+    }
+
+    /// Execute a restore statement on the connection that holds the lock.
+    /// Returns the statement's affected-row count.
+    pub async fn execute(&mut self, sql: &str, values: &[SqlValue]) -> crate::Result<u64> {
+        let pool = self.pool.clone();
+        let lease = self.connection()?;
+        let result = pool
+            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .await;
+        self.keep_if_reusable(result)
+            .map(MssqlWriteResult::rows_affected)
+    }
+
+    /// Fetch rows on the connection that holds the lock.
+    pub async fn fetch_rows(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<MssqlRow>> {
+        let pool = self.pool.clone();
+        let lease = self.connection()?;
+        let result = pool
+            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .await;
+        self.keep_if_reusable(result)
+    }
+
+    /// Clear the marker and release the lock: the restore is complete, or its
+    /// partial rows were removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails, leaving the marker, when the connection still has an open
+    /// transaction (commit or roll it back first) or was lost.
+    pub async fn finish(mut self) -> crate::Result<()> {
+        let pool = self.pool.clone();
+        let id = [SqlValue::String(self.restore_id.clone())];
+        let lease = self.connection()?;
+        let cleared = pool
+            .bounded(execute_with_client(
+                &mut lease.client,
+                "IF @@TRANCOUNT > 0 BEGIN RAISERROR(N'the restore connection has an open transaction; commit or roll it back before finishing the restore', 16, 1); RETURN; END; \
+                 DELETE FROM [dbo].[__graphql_orm_restore_marker] WHERE restore_id = @P1",
+                &id,
+            ))
+            .await;
+        self.keep_if_reusable(cleared)?;
+        // The reset releases the session's restore lock.
+        if let Some(mut lease) = self.lease.take()
+            && pool.reset(&mut lease.client).await
+        {
+            pool.release(lease);
+        }
+        Ok(())
     }
 }
 
@@ -1174,21 +1683,61 @@ impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
     }
 }
 
+/// Run one exchange with the driver, turning a panic inside it into an error.
+///
+/// The driver asserts on some values it cannot represent while it decodes a
+/// row, before the ORM sees the value: a non-NULL value in a column declared
+/// with scale 38 (`DECIMAL(38,38)`, #452) is one. A panic would unwind
+/// through the caller's task. Here it becomes a decode error instead. The
+/// stream is then in an unknown state, so the connection is never reused,
+/// and inside a transaction the failure ends the transaction. The process's
+/// panic hook still reports the assertion. A binary built with
+/// `panic = "abort"` cannot catch it and aborts.
+pub(super) async fn catch_driver_panic<T, E>(
+    exchange: impl std::future::Future<Output = Result<T, E>>,
+    into_error: impl FnOnce(sqlx::Error) -> E,
+) -> Result<T, E> {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(exchange).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|detail| (*detail).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "no detail".to_string());
+            Err(into_error(sqlx::Error::Decode(
+                format!(
+                    "the SQL Server driver could not decode a value in the result ({detail}); \
+                     the connection was closed"
+                )
+                .into(),
+            )))
+        }
+    }
+}
+
 async fn fetch_rows_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
 ) -> Result<Vec<MssqlRow>, StatementFailure> {
-    let mut query = Query::new(sql.to_string());
-    for value in values.iter().map(MssqlParamValue::from) {
-        query.bind(value);
-    }
-    let stream = query.query(client).await.map_err(statement_failure)?;
-    let rows = stream
-        .into_first_result()
-        .await
-        .map_err(statement_failure)?;
-    Ok(rows.into_iter().map(MssqlRow::new).collect())
+    catch_driver_panic(
+        async {
+            let mut query = Query::new(sql.to_string());
+            for value in values.iter().map(MssqlParamValue::from) {
+                query.bind(value);
+            }
+            let stream = query.query(client).await.map_err(statement_failure)?;
+            let rows = stream
+                .into_first_result()
+                .await
+                .map_err(statement_failure)?;
+            Ok(rows.into_iter().map(MssqlRow::new).collect())
+        },
+        StatementFailure::from,
+    )
+    .await
 }
 
 async fn execute_with_client(
@@ -1196,14 +1745,20 @@ async fn execute_with_client(
     sql: &str,
     values: &[SqlValue],
 ) -> Result<MssqlWriteResult, StatementFailure> {
-    let mut query = Query::new(sql.to_string());
-    for value in values.iter().map(MssqlParamValue::from) {
-        query.bind(value);
-    }
-    let result = query.execute(client).await.map_err(statement_failure)?;
-    Ok(MssqlWriteResult {
-        rows_affected: statement_rows_affected(result.rows_affected()),
-    })
+    catch_driver_panic(
+        async {
+            let mut query = Query::new(sql.to_string());
+            for value in values.iter().map(MssqlParamValue::from) {
+                query.bind(value);
+            }
+            let result = query.execute(client).await.map_err(statement_failure)?;
+            Ok(MssqlWriteResult {
+                rows_affected: statement_rows_affected(result.rows_affected()),
+            })
+        },
+        StatementFailure::from,
+    )
+    .await
 }
 
 /// The row count of the executed statement itself.
@@ -1223,14 +1778,20 @@ async fn execute_control_statement(
     client: &mut MssqlClient,
     sql: &str,
 ) -> Result<(), StatementFailure> {
-    client
-        .simple_query(sql)
-        .await
-        .map_err(statement_failure)?
-        .into_results()
-        .await
-        .map_err(statement_failure)?;
-    Ok(())
+    catch_driver_panic(
+        async {
+            client
+                .simple_query(sql)
+                .await
+                .map_err(statement_failure)?
+                .into_results()
+                .await
+                .map_err(statement_failure)?;
+            Ok(())
+        },
+        StatementFailure::from,
+    )
+    .await
 }
 
 /// Classify a driver error. Only a non-fatal error the server reported leaves
@@ -1318,6 +1879,33 @@ fn needs_instance_lookup(config: &Config) -> bool {
     rest.starts_with(", port: None,")
 }
 
+/// Whether `config` asks for `EncryptionLevel::On`, "encrypt if the server
+/// allows it".
+///
+/// The driver panics during prelogin when such a configuration meets a
+/// server that declines encryption, so the ORM refuses it before connecting.
+/// Only a caller-built `Config` under
+/// [`MssqlTransportPolicy::insecure_allow_login_only_encryption`] can carry
+/// it: every other policy raises the level to `Required`, and connection
+/// strings never produce `On`. The driver has no getter for the level, so it
+/// is read from the configuration's `Debug` form outside quoted values,
+/// which hides the password.
+fn requests_optional_encryption(config: &Config) -> bool {
+    let debug = format!("{config:?}");
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in debug.char_indices() {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted && debug[index..].starts_with(", encryption: On,") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Open the TCP stream for `config`.
 ///
 /// A named instance given without a port (`server=host\\INSTANCE`) has no
@@ -1347,6 +1935,14 @@ async fn open_tcp(config: &Config, redirected: bool) -> crate::Result<TcpStream>
 /// same transport policy against the redirected host name. A second redirect
 /// is an error.
 async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
+    if requests_optional_encryption(&config) {
+        return Err(sqlx::Error::Configuration(
+            "SQL Server EncryptionLevel::On is not supported: the driver panics when the \
+             server declines encryption. Use EncryptionLevel::Required, or Off with the \
+             login-only opt-in"
+                .into(),
+        ));
+    }
     let mut redirected = false;
     loop {
         let tcp = open_tcp(&config, redirected).await?;
@@ -1356,6 +1952,13 @@ async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
             Err(tiberius::error::Error::Routing { host, port }) if !redirected => {
                 redirected = true;
                 follow_route(&mut config, &host, port);
+            }
+            // The bound that keeps a routing loop from reconnecting forever.
+            Err(tiberius::error::Error::Routing { host, port }) => {
+                return Err(sqlx::Error::Protocol(format!(
+                    "SQL Server redirected the connection a second time, to {host}:{port}; \
+                     only one routing redirect is followed"
+                )));
             }
             Err(error) => return Err(map_tiberius_error(error)),
         }
@@ -1497,11 +2100,331 @@ mod tests {
         ));
     }
 
+    fn refusal(message: &str) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(MssqlServerError::new(50000, 1, 16, message)))
+    }
+
+    #[test]
+    fn the_gate_refusal_tells_unavailable_state_from_a_restore() {
+        use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+        let unavailable = |number: u32| {
+            restore_refusal(&refusal(&format!(
+                "{RESTORE_UNAVAILABLE}: marker read failed with error {number}"
+            )))
+        };
+        assert!(matches!(
+            unavailable(208),
+            Some(RestoreRefusal::Unavailable(Reason::MarkerNotInstalled))
+        ));
+        for number in [229, 230, 262, 297, 300] {
+            assert!(matches!(
+                unavailable(number),
+                Some(RestoreRefusal::Unavailable(Reason::PermissionDenied))
+            ));
+        }
+        assert!(matches!(
+            unavailable(207),
+            Some(RestoreRefusal::Unavailable(Reason::Other))
+        ));
+        for message in [
+            "the restore lock is held",
+            "a restore marker is present",
+            "open transactions or another restore hold the restore lock",
+        ] {
+            assert!(
+                matches!(
+                    restore_refusal(&refusal(&format!("{RESTORE_REFUSAL}: {message}"))),
+                    Some(RestoreRefusal::InProgress)
+                ),
+                "{message}"
+            );
+        }
+        assert!(restore_refusal(&refusal("something else")).is_none());
+        assert!(restore_refusal(&sqlx::Error::PoolTimedOut).is_none());
+    }
+
+    #[test]
+    fn marker_read_failures_are_classified_without_claiming_a_restore() {
+        use crate::graphql::orm::RestoreStateUnavailableReason as Reason;
+        let server = |number| {
+            sqlx::Error::Database(Box::new(MssqlServerError::new(number, 1, 16, "denied")))
+        };
+        assert_eq!(
+            classify_marker_error(&server(208)),
+            Reason::MarkerNotInstalled
+        );
+        assert_eq!(
+            classify_marker_error(&server(229)),
+            Reason::PermissionDenied
+        );
+        assert_eq!(classify_marker_error(&server(4060)), Reason::Other);
+        for error in [
+            timed_out("SQL Server statement exceeded the configured query timeout"),
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Tls("handshake".into()),
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert_eq!(classify_marker_error(&error), Reason::ConnectionFailed);
+        }
+        // The server's text is kept as the source, never put in the message.
+        let wrapped = restore_state_unavailable(
+            Reason::PermissionDenied,
+            sqlx::Error::Database(Box::new(MssqlServerError::new(
+                229,
+                1,
+                14,
+                "SELECT permission was denied on the object 'x'",
+            ))),
+        );
+        let message = wrapped.to_string();
+        assert!(!message.contains("was denied on the object"), "{message}");
+        assert!(message.contains("grant SELECT"), "{message}");
+        let unavailable =
+            crate::graphql::orm::RestoreStateUnavailable::from_error(&wrapped).expect("typed");
+        assert!(std::error::Error::source(unavailable).is_some());
+        assert!(crate::graphql::orm::RestoreInProgress::from_error(&wrapped).is_none());
+        // A claim failure other than a missing table or a denial stays as it was.
+        assert!(matches!(
+            marker_access_error(sqlx::Error::PoolTimedOut),
+            sqlx::Error::PoolTimedOut
+        ));
+        assert!(
+            crate::graphql::orm::RestoreStateUnavailable::from_error(&marker_access_error(server(
+                208
+            )))
+            .is_some()
+        );
+    }
+
     #[test]
     fn a_routing_redirect_changes_only_the_address() {
         let mut config = config();
         follow_route(&mut config, "node7.worker.database.example", 11042);
         assert_eq!(config.get_addr(), "node7.worker.database.example:11042");
+    }
+
+    /// The driver panics when `EncryptionLevel::On` meets a server that
+    /// declines encryption; the pool refuses that configuration before it
+    /// opens a connection.
+    #[tokio::test]
+    async fn optional_encryption_is_refused_before_connecting() {
+        use std::sync::atomic::Ordering;
+        let (port, logins, task) = fake_tds_endpoint(FakeLogin::Accept).await;
+        let mut config = Config::new();
+        config.host("127.0.0.1");
+        config.port(port);
+        config.authentication(tiberius::AuthMethod::sql_server("owned", "owned"));
+        for (level, refused) in [
+            (tiberius::EncryptionLevel::On, true),
+            (tiberius::EncryptionLevel::Off, false),
+            (tiberius::EncryptionLevel::NotSupported, false),
+            (tiberius::EncryptionLevel::Required, false),
+        ] {
+            config.encryption(level);
+            assert_eq!(requests_optional_encryption(&config), refused, "{level:?}");
+        }
+        // A value cannot imitate the field.
+        let mut odd = config.clone();
+        odd.host("a\", encryption: On, \"");
+        odd.encryption(tiberius::EncryptionLevel::Required);
+        assert!(!requests_optional_encryption(&odd));
+
+        config.encryption(tiberius::EncryptionLevel::On);
+        let pool = MssqlPool::with_options(
+            config,
+            MssqlPoolOptions::new()
+                .transport(MssqlTransportPolicy::verified().insecure_allow_login_only_encryption()),
+        );
+        let error = pool
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&error, sqlx::Error::Configuration(message) if message.to_string().contains("EncryptionLevel::On")),
+            "{error:?}"
+        );
+        assert_eq!(logins.load(Ordering::SeqCst), 0, "nothing was sent");
+        task.abort();
+    }
+
+    /// What a fake TDS endpoint answers a login with.
+    #[derive(Clone)]
+    enum FakeLogin {
+        /// Log the client in, then answer every request with an empty result.
+        Accept,
+        /// Send the client to this port on loopback, as an Azure SQL gateway
+        /// under the Redirect connection policy does.
+        Redirect(u16),
+    }
+
+    type FakeStream = tokio_util::compat::Compat<TcpStream>;
+
+    /// Read one TDS message: packets up to the one with the end-of-message bit.
+    async fn read_tds_message(stream: &mut FakeStream) -> std::io::Result<u8> {
+        use futures::io::AsyncReadExt;
+        loop {
+            let mut header = [0u8; 8];
+            stream.read_exact(&mut header).await?;
+            let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+            let mut body = vec![0u8; length.saturating_sub(8)];
+            stream.read_exact(&mut body).await?;
+            if header[1] & 0x01 != 0 {
+                return Ok(header[0]);
+            }
+        }
+    }
+
+    async fn write_tds_message(
+        stream: &mut FakeStream,
+        packet_type: u8,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        use futures::io::AsyncWriteExt;
+        let length = u16::try_from(body.len() + 8).expect("one small packet");
+        let mut packet = vec![packet_type, 0x01];
+        packet.extend_from_slice(&length.to_be_bytes());
+        packet.extend_from_slice(&[0, 0, 1, 0]);
+        packet.extend_from_slice(body);
+        stream.write_all(&packet).await
+    }
+
+    /// A final `DONE` token: status, current command and a TDS 7.2+ row count.
+    fn tds_done() -> Vec<u8> {
+        let mut token = vec![0xFD, 0, 0, 0, 0];
+        token.extend_from_slice(&0u64.to_le_bytes());
+        token
+    }
+
+    /// An `ENVCHANGE` routing token (type 20) naming `host:port`.
+    fn tds_routing(host: &str, port: u16) -> Vec<u8> {
+        let name = host.encode_utf16().collect::<Vec<_>>();
+        let mut value = vec![0u8]; // TCP
+        value.extend_from_slice(&port.to_le_bytes());
+        value.extend_from_slice(&u16::try_from(name.len()).unwrap().to_le_bytes());
+        for unit in &name {
+            value.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut body = vec![20u8];
+        body.extend_from_slice(&u16::try_from(value.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(&value);
+        body.extend_from_slice(&0u16.to_le_bytes()); // no old value
+        let mut token = vec![0xE3];
+        token.extend_from_slice(&u16::try_from(body.len()).unwrap().to_le_bytes());
+        token.extend_from_slice(&body);
+        token
+    }
+
+    /// A loopback TDS endpoint without TLS that counts the logins it sees.
+    async fn fake_tds_endpoint(
+        answer: FakeLogin,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let logins = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = logins.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let mut stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                let answer = answer.clone();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    // PRELOGIN: version 16.0, encryption not supported.
+                    assert_eq!(read_tds_message(&mut stream).await?, 0x12);
+                    let prelogin = [
+                        0x00, 0x00, 0x0B, 0x00, 0x06, // VERSION at 11, 6 bytes
+                        0x01, 0x00, 0x11, 0x00, 0x01, // ENCRYPTION at 17, 1 byte
+                        0xFF, 16, 0, 0, 0, 0, 0,    // version, sub-build
+                        0x02, // ENCRYPT_NOT_SUP
+                    ];
+                    write_tds_message(&mut stream, 0x04, &prelogin).await?;
+                    // LOGIN7.
+                    assert_eq!(read_tds_message(&mut stream).await?, 0x10);
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    match answer {
+                        FakeLogin::Redirect(port) => {
+                            let mut tokens = tds_routing("127.0.0.1", port);
+                            tokens.extend(tds_done());
+                            write_tds_message(&mut stream, 0x04, &tokens).await?;
+                        }
+                        FakeLogin::Accept => {
+                            write_tds_message(&mut stream, 0x04, &tds_done()).await?;
+                            while read_tds_message(&mut stream).await.is_ok() {
+                                write_tds_message(&mut stream, 0x04, &tds_done()).await?;
+                            }
+                        }
+                    }
+                    std::io::Result::Ok(())
+                });
+            }
+        });
+        (port, logins, task)
+    }
+
+    /// Under Azure SQL's Redirect connection policy the gateway logs the
+    /// client in and names the node to connect to (#518). The pool follows
+    /// that one redirect and runs its statements on the node; a second
+    /// redirect is refused rather than followed.
+    #[tokio::test]
+    async fn the_pool_follows_one_routing_redirect_to_the_node() {
+        use std::sync::atomic::Ordering;
+        // No TLS: the fake endpoints speak plain TDS. That needs both the
+        // code opt-in and a caller-built configuration.
+        let pool = |port: u16| {
+            let mut config = Config::new();
+            config.host("127.0.0.1");
+            config.port(port);
+            config.authentication(tiberius::AuthMethod::sql_server("owned", "owned"));
+            config.encryption(tiberius::EncryptionLevel::NotSupported);
+            MssqlPool::with_options(
+                config,
+                MssqlPoolOptions::new()
+                    .connect_timeout(Duration::from_secs(5))
+                    .transport(
+                        MssqlTransportPolicy::verified().insecure_allow_login_only_encryption(),
+                    ),
+            )
+        };
+
+        let (node, node_logins, node_task) = fake_tds_endpoint(FakeLogin::Accept).await;
+        let (gateway, gateway_logins, gateway_task) =
+            fake_tds_endpoint(FakeLogin::Redirect(node)).await;
+        let rows = pool(gateway)
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .expect("the redirected connection serves the statement");
+        assert!(rows.is_empty());
+        assert_eq!(gateway_logins.load(Ordering::SeqCst), 1);
+        assert_eq!(node_logins.load(Ordering::SeqCst), 1);
+
+        // A node that redirects again is not followed: the redirect bound is
+        // one hop, so a routing loop cannot keep the pool connecting.
+        let (second, second_logins, second_task) =
+            fake_tds_endpoint(FakeLogin::Redirect(node)).await;
+        let (first, first_logins, first_task) =
+            fake_tds_endpoint(FakeLogin::Redirect(second)).await;
+        let error = pool(first)
+            .fetch_rows("SELECT 1 AS one", &[])
+            .await
+            .err()
+            .expect("a second redirect is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("only one routing redirect is followed"),
+            "{error}"
+        );
+        assert_eq!(first_logins.load(Ordering::SeqCst), 1);
+        assert_eq!(second_logins.load(Ordering::SeqCst), 1);
+        assert_eq!(node_logins.load(Ordering::SeqCst), 1, "never reached");
+        for task in [node_task, gateway_task, second_task, first_task] {
+            task.abort();
+        }
     }
 
     /// A named instance without a port is resolved through SQL Server

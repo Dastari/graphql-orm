@@ -164,10 +164,15 @@ impl AiSupervisedAgentTurnPlan {
     ///
     /// # Errors
     /// Rejects non-native/client-deferred turns, different offered definitions, or a different session binding.
+    /// Returns [`AiError::Forbidden`] when the turn's hierarchical rules do not admit every
+    /// brokered static tool as an approval-free read tool.
     pub fn with_capability_delivery(
         mut self,
         delivery: crate::AiCapabilityDeliveryTurn,
     ) -> Result<Self, AiError> {
+        if !crate::orm_coordinator::brokered_static_tools_follow_rules(&delivery, &self.rules) {
+            return Err(AiError::Forbidden);
+        }
         if !self.native
             || delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred
             || !delivery.matches_offered_tools(self.provider_call.offered_tools())
@@ -1425,7 +1430,14 @@ impl AiSupervisedAgentCoordinator {
                 Box::pin(self.execute_provider_with_heartbeats(&mut lease, provider_plan)).await
             };
         let result = match provider_result {
-            Ok(result) => result,
+            Ok(result) => {
+                // Before any later check can fail the turn: the provider
+                // already holds the response.
+                self.run_control
+                    .record_retained_provider_response(&lease, &result)
+                    .await?;
+                result
+            }
             Err(SupervisedProviderTurnFailure::Provider) => {
                 if let Some((service, claim)) = &reclaimed {
                     let _ = service
