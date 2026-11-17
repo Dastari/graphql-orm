@@ -82,7 +82,9 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 - **No action** — Router 0.15.5: Only the wire tests change; router behavior, configuration and public APIs are unchanged. [migration](../../crates/graphql-orm-router/MIGRATION.md#0154-to-0155) · [changelog](../../crates/graphql-orm-router/CHANGELOG.md#0155-unreleased)
 - **No action** — ORM/macros 0.167.0: test-only; the macros unit tests no longer assume the SQLite backend [migration](../../MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests)
 
-Breaking batch, collected on `next/breaking` (ORM/macros 0.171.0, backup 0.27.0, AI 0.150.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.18.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+Breaking batch, collected on `next/breaking` (ORM/macros 0.171.0, backup 0.27.0, AI 0.150.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.19.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+
+- **No action — router 0.19.0:** the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default. [Migration](../../MIGRATION.md#router-0190-opt-in-refusal-outcome-764) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0180-to-0190)
 
 - **No action — router 0.18.0:** a code comment only; the composed scope-set cross-check is a secondary defence behind the name-based refusal. [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0160-to-0180)
 

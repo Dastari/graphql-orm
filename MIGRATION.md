@@ -24,6 +24,18 @@ assigns the final version numbers. A version named in an entry below is the
 integration placeholder its change was written against, not a published
 release.
 
+### Router 0.19.0: opt-in refusal outcome (#764)
+
+**No action.** `graphql-orm-router` only. The new `refusalOutcome` setting
+(`RouterConfig::with_refusal_outcome(true)`) is off by default and changes no
+response until a host enables it. With it, each error of an operation the
+router refused before sending any subgraph request carries
+`extensions.outcome: "refused"`, the value generated services send with
+`DatabaseBuilder::mutation_error_outcome(true)`, so a client handles both the
+same way. An absent `outcome` still means unknown. See the
+[router migration guide](crates/graphql-orm-router/MIGRATION.md#0180-to-0190)
+and the [shared vocabulary](docs/reference/graphql-orm/error-codes.md#router-refusal-outcome).
+
 ### Client page offsets are bounded at 10,000 by default (#456)
 
 **Action needed** only for clients or Rust reads that send a page offset above

@@ -3,12 +3,18 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-17
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
+
+Version 0.19.0 (breaking batch) adds the opt-in `refusalOutcome` setting
+(`RouterConfig::with_refusal_outcome`): each error of an operation the router
+refused before any subgraph request carries `extensions.outcome: "refused"`,
+in the vocabulary generated ORM services use. See
+[refusal outcome](docs/configuration.md#refusal-outcome).
 
 Version 0.18.0 (breaking batch) changes a code comment only: the composed
 scope-set cross-check is a secondary defence behind the name-based refusal.
