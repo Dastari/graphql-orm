@@ -10,13 +10,18 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.175.0 narrows the locking read of generated GraphQL `updateMany`
+Version 0.177.0 narrows the locking read of generated GraphQL `updateMany`
 and `deleteMany` by the SQL predicate of the row policy's `read_visibility`
 when no `write_target_prefilter` is declared, so rows outside the caller's
 read visibility are neither locked nor passed to row callbacks (#752). The
 root delete of a `dependent_deletes` entity now reports its `errorCode` under
 `mutation_error_codes` (#763). See the
-[migration guide](../../MIGRATION.md#01740-to-01750-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+[migration guide](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+
+Version 0.176.0 adds transitive-closure read predicates: `ReadPredicate::related_closure`,
+`related_closure_all` and `related_closure_within`, rendered as a recursive CTE on SQLite and
+PostgreSQL and refused on SQL Server.
+See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
 
 Version 0.174.0 adds fail-closed read-policy negation: `ReadPredicate::not_related`,
 `ReadPredicate::is_null` and `is_not_null`, and refuses `not()` over a predicate that renders
