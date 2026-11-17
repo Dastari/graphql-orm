@@ -393,28 +393,41 @@ async fn stale_relationship_binding_cannot_release_prior_provenance() {
 
 #[tokio::test]
 async fn nested_relation_selection_is_rejected_before_subscription_registration() {
-    let (schema, _, _) = setup().await;
-    for query in [
+    let (default_schema, db, _) = setup().await;
+    // The dedicated code is opt-in; without it the refusal keeps INVALID_INPUT.
+    let opted_in = schema_builder(db.with_subscription_selection_unsupported_code(true)).finish();
+    let cases = [
+        (&default_schema, "INVALID_INPUT"),
+        (
+            &opted_in,
+            graphql_orm::graphql::subscriptions::SUBSCRIPTION_SELECTION_UNSUPPORTED,
+        ),
+    ];
+    let queries = [
         "subscription { proofChildChanged { id proofChild { parent { owner } } } }",
         "subscription { proofChildChanged { outer: id child: proofChild { ...Nested } } } fragment Nested on ProofChild { hidden: parent { owner } }",
-    ] {
-        let mut stream =
-            Box::pin(schema.execute_stream(Request::new(query).data(AuthSubject::new("alice"))));
-        let response = timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(response.errors.len(), 1, "{response:?}");
-        assert_eq!(
-            response.errors[0].extensions.as_ref().unwrap().get("code"),
-            Some(&async_graphql::Value::from("INVALID_INPUT"))
-        );
-        assert!(
-            response.errors[0]
-                .message
-                .contains("persisted subscribable scalar")
-        );
-        assert_eq!(response.data, async_graphql::Value::Null);
+    ];
+    for (schema, code) in cases {
+        for query in queries {
+            let mut stream = Box::pin(
+                schema.execute_stream(Request::new(query).data(AuthSubject::new("alice"))),
+            );
+            let response = timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.errors.len(), 1, "{response:?}");
+            assert_eq!(
+                response.errors[0].extensions.as_ref().unwrap().get("code"),
+                Some(&async_graphql::Value::from(code))
+            );
+            assert!(
+                response.errors[0]
+                    .message
+                    .contains("persisted subscribable scalar")
+            );
+            assert_eq!(response.data, async_graphql::Value::Null);
+        }
     }
 }
 

@@ -70,7 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.170.0, `graphql-orm-macros` 0.170.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.147.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.5.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.171.0, `graphql-orm-macros` 0.171.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.147.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.5.
+
+- **No action** — ORM/macros 0.171.0: opt-in client error contract: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an unstreamable `Changed` selection (`DatabaseBuilder::subscription_selection_unsupported_code`), `extensions.outcome` on generated mutation errors (`DatabaseBuilder::mutation_error_outcome`), and `errorCode` on single-row results of entities declared with `mutation_error_codes`. Nothing changes without them. [Migration](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01710)
 
 ### workspace-2026.11.17.2
 

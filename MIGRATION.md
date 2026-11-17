@@ -3,12 +3,38 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.170.0 to 0.171.0: opt-in client error contract
+
+Upgrade ORM and macros together and recompile entities. Without the new
+settings, generated SDL, responses, operation catalogues and fingerprints are
+unchanged. See [one vocabulary with the router](docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router).
+
+- **Unsupported subscription selection code. No action.** Opt in with
+  `DatabaseBuilder::subscription_selection_unsupported_code(true)` to refuse an
+  unstreamable generated `Changed` selection with
+  `SUBSCRIPTION_SELECTION_UNSUPPORTED` instead of `INVALID_INPUT`. Before
+  enabling it, update clients that treat `INVALID_INPUT` on a stream as a
+  selection refusal.
+- **Mutation error outcome. No action.** Opt in with
+  `DatabaseBuilder::mutation_error_outcome(true)` to add `extensions.outcome`
+  (`refused`, `failed`, `committed` or `unknown`) to every generated mutation
+  root error. Under it, a bulk write whose commit fails returns a top-level
+  error instead of `success: false`; clients should read an absent `outcome`
+  as `unknown`. An `outcome` set by a host callback is replaced while the
+  setting is on.
+- **Mutation result error codes. No action.** Add `mutation_error_codes` to an
+  entity's `#[graphql_entity(...)]` to add a nullable `errorCode` to its
+  single-row results and a code to its bulk filter refusals. Refresh pinned
+  SDL and generated client types for that entity. Rust code that builds the
+  entity's `…Result` with a struct literal must then add `error_code: None`;
+  `ok` and `err` are unchanged.
 
 ## 0.169.0 to 0.170.0: input-object values on static schemas and bulk-write filter authority
 

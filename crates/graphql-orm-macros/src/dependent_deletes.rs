@@ -164,7 +164,11 @@ pub(crate) fn generate(
                 _ => None,
             })
             .ok_or_else(|| error("missing generated mutation coordinate"))?;
-        let mut body = method.block.clone();
+        // Generated roots wrap their body in an outcome tracker; the seams
+        // below work on the body itself.
+        let mut body = outcome_body(&method.block)
+            .ok_or_else(|| error("missing generated outcome boundary"))?
+            .clone();
         // The GraphQL Context deliberately retains the caller's root selection.
         // Internal writes must classify their own generated operation instead.
         struct ExplicitAssurance(syn::LitStr);
@@ -202,7 +206,9 @@ pub(crate) fn generate(
                         syn::Expr::Try(e) => commits(&e.expr),
                         syn::Expr::Await(e) => commits(&e.base),
                         syn::Expr::MethodCall(e) => {
-                            e.method == "commit_and_emit" || commits(&e.receiver)
+                            e.method == "commit_and_emit"
+                                || e.method == "commit_and_emit_tracked"
+                                || commits(&e.receiver)
                         }
                         _ => false,
                     }
@@ -232,6 +238,12 @@ pub(crate) fn generate(
                             .to_token_stream()
                             .to_string()
                             .contains("__release_graphql_mutation_output")
+                    {
+                        return false;
+                    }
+                    // The root's outcome marks stay with the root resolver.
+                    if matches!(stmt, syn::Stmt::Expr(syn::Expr::MethodCall(call), _)
+                        if matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("__gom_outcome")))
                     {
                         return false;
                     }
@@ -407,11 +419,13 @@ pub(crate) fn generate(
             }
         });
         if action == "delete" {
-            let boundary=method.block.stmts.iter().position(|s|matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="hook_ctx"))).ok_or_else(||error("missing direct transaction boundary"))?;
-            let end = method.block.stmts.iter().position(|s| matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="before_state"))).ok_or_else(||error("missing root authorization boundary"))?;
+            let root = outcome_body_mut(&mut method.block)
+                .ok_or_else(|| error("missing generated outcome boundary"))?;
+            let boundary=root.stmts.iter().position(|s|matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="hook_ctx"))).ok_or_else(||error("missing direct transaction boundary"))?;
+            let end = root.stmts.iter().position(|s| matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="before_state"))).ok_or_else(||error("missing root authorization boundary"))?;
             let mut admission = syn::Block {
                 brace_token: Default::default(),
-                stmts: method.block.stmts[..end].to_vec(),
+                stmts: root.stmts[..end].to_vec(),
             };
             admission.stmts.remove(boundary);
             struct UnlockedAdmission;
@@ -426,9 +440,12 @@ pub(crate) fn generate(
             }
             UnlockedAdmission.visit_block_mut(&mut admission);
             let admission = &admission.stmts;
-            method.block = syn::parse_quote! {{
+            // The plan's own writes and commit are not tracked here, so an
+            // error once it runs reports `unknown`.
+            *root = syn::parse_quote! {{
                 #(#admission)*
                 let registry=ctx.data::<::graphql_orm::graphql::orm::StaticDependentDeletes<#marker>>()?;
+                __gom_outcome.commit_started();
                 let __gom_root_rejection=registry.delete::<#name>(ctx,#name::__gom_key_values(&id).remove(0),__gom_expected_version).await?;
                 Ok(::std::default::Default::default())
             }};
@@ -451,11 +468,13 @@ pub(crate) fn generate(
     for item in &mut implementation.items {
         if let syn::ImplItem::Fn(method) = item {
             if method.sig.ident == "delete" {
-                let stmt = method.block.stmts.last_mut().unwrap();
+                let root = outcome_body_mut(&mut method.block)
+                    .ok_or_else(|| error("missing generated outcome boundary"))?;
+                let stmt = root.stmts.last_mut().unwrap();
                 *stmt = syn::Stmt::Expr(
                     syn::parse_quote! { Ok(match __gom_root_rejection {
                         Some(message) => #actual::err(message),
-                        None => #actual {success:true,error:None,entity:None},
+                        None => #actual::__gom_deleted(),
                     }) },
                     None,
                 );
@@ -516,4 +535,32 @@ pub(crate) fn generate(
             }
         }
     })
+}
+
+/// The body a generated mutation root runs inside its outcome tracker:
+/// `{ let __gom_outcome = ..; let __gom_result: _ = async { BODY }.await; .. }`.
+fn outcome_body(block: &syn::Block) -> Option<&syn::Block> {
+    let syn::Stmt::Local(local) = block.stmts.get(1)? else {
+        return None;
+    };
+    let syn::Expr::Await(awaited) = local.init.as_ref()?.expr.as_ref() else {
+        return None;
+    };
+    let syn::Expr::Async(inner) = awaited.base.as_ref() else {
+        return None;
+    };
+    Some(&inner.block)
+}
+
+fn outcome_body_mut(block: &mut syn::Block) -> Option<&mut syn::Block> {
+    let syn::Stmt::Local(local) = block.stmts.get_mut(1)? else {
+        return None;
+    };
+    let syn::Expr::Await(awaited) = local.init.as_mut()?.expr.as_mut() else {
+        return None;
+    };
+    let syn::Expr::Async(inner) = awaited.base.as_mut() else {
+        return None;
+    };
+    Some(&mut inner.block)
 }

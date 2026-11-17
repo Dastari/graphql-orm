@@ -100,6 +100,10 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     pagination_config: PaginationConfig,
     refuse_oversized_limit: bool,
     max_page_offset: Option<i64>,
+    /// Opt-in `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an unstreamable selection.
+    subscription_selection_unsupported_code: bool,
+    /// Opt-in `extensions.outcome` on generated mutation root errors.
+    mutation_error_outcome: bool,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
@@ -126,6 +130,8 @@ impl<B: OrmBackend> Clone for Database<B> {
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
+            subscription_selection_unsupported_code: self.subscription_selection_unsupported_code,
+            mutation_error_outcome: self.mutation_error_outcome,
             max_page_offset: self.max_page_offset,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
@@ -204,6 +210,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy,
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -237,6 +245,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -267,6 +277,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -297,6 +309,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -327,6 +341,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -360,6 +376,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -400,6 +418,8 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -445,6 +465,34 @@ impl<B: OrmBackend> Database<B> {
     /// Set whether oversized GraphQL page limits are refused instead of reduced.
     pub fn with_oversized_page_limit_refusal(mut self, refuse: bool) -> Self {
         self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Whether an unstreamable generated subscription selection is refused
+    /// with `SUBSCRIPTION_SELECTION_UNSUPPORTED`; see
+    /// [`DatabaseBuilder::subscription_selection_unsupported_code`].
+    pub fn subscription_selection_unsupported_code_enabled(&self) -> bool {
+        self.subscription_selection_unsupported_code
+    }
+
+    /// Return a copy of this handle that refuses an unstreamable generated
+    /// subscription selection with `SUBSCRIPTION_SELECTION_UNSUPPORTED`; see
+    /// [`DatabaseBuilder::subscription_selection_unsupported_code`].
+    pub fn with_subscription_selection_unsupported_code(mut self, enabled: bool) -> Self {
+        self.subscription_selection_unsupported_code = enabled;
+        self
+    }
+
+    /// Whether generated mutation root errors carry `extensions.outcome`; see
+    /// [`DatabaseBuilder::mutation_error_outcome`].
+    pub fn mutation_error_outcome_enabled(&self) -> bool {
+        self.mutation_error_outcome
+    }
+
+    /// Return a copy of this handle whose generated mutation root errors
+    /// carry `extensions.outcome`; see [`DatabaseBuilder::mutation_error_outcome`].
+    pub fn with_mutation_error_outcome(mut self, enabled: bool) -> Self {
+        self.mutation_error_outcome = enabled;
         self
     }
 
@@ -1639,7 +1687,10 @@ impl<B: OrmBackend> Database<B> {
         }
         fn after_commit(error: async_graphql::Error) -> async_graphql::Error {
             error.extend_with(|_, extensions| {
-                extensions.set("outcome", "committed");
+                extensions.set(
+                    "outcome",
+                    crate::graphql::errors::MutationOutcome::Committed.as_str(),
+                );
                 extensions.set("retryable", false);
             })
         }
@@ -2302,6 +2353,33 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     ) -> Self {
         self.database
             .set_subscription_authority_recheck_interval(interval);
+        self
+    }
+
+    /// Refuse a generated `Changed` subscription whose selection can never be
+    /// streamed (a relation, a computed field or an unavailable key) with
+    /// `extensions.code` `SUBSCRIPTION_SELECTION_UNSUPPORTED` instead of
+    /// `INVALID_INPUT`. Off by default, so clients that match
+    /// `INVALID_INPUT` keep working; the message is the same either way.
+    /// Other invalid stream input, such as a `Keys` list over its bound,
+    /// stays `INVALID_INPUT`.
+    pub fn subscription_selection_unsupported_code(mut self, enabled: bool) -> Self {
+        self.database.subscription_selection_unsupported_code = enabled;
+        self
+    }
+
+    /// Add `extensions.outcome` to every error a generated create, upsert,
+    /// update, delete, `updateMany` or `deleteMany` root raises: `refused`
+    /// (nothing was attempted), `failed` (attempted and rolled back),
+    /// `committed`, or `unknown` (for example a failed commit). Off by
+    /// default, so responses are unchanged; see
+    /// [`MutationOutcome`](crate::graphql::errors::MutationOutcome).
+    ///
+    /// With this set, a generated bulk write whose commit fails raises a
+    /// top-level error with `outcome: "unknown"` instead of returning
+    /// `success: false`, so `success: false` always means nothing was written.
+    pub fn mutation_error_outcome(mut self, enabled: bool) -> Self {
+        self.database.mutation_error_outcome = enabled;
         self
     }
 
