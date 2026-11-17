@@ -70,7 +70,13 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.174.0, `graphql-orm-macros` 0.174.0**; **`graphql-orm-operation-catalog` 0.9.0**; **`graphql-orm-storage` 0.17.0**; **`graphql-orm-backup` 0.27.0**; **`graphql-orm-ai-tool-profiles` 0.25.0**; **`graphql-orm-ai` 0.148.0**; **`graphql-orm-router-protocol` 0.3.0**; **`graphql-orm-router` 0.16.0**.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.174.0, `graphql-orm-macros` 0.174.0; `graphql-orm-operation-catalog` 0.9.0; `graphql-orm-storage` 0.17.0; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; `graphql-orm-ai` 0.148.0; `graphql-orm-router-protocol` 0.3.0; `graphql-orm-router` 0.16.0.
+
+### workspace-2026.11.17.4
+
+Commit `917077ed1a4e` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.17.4)
+
+Packages (changed in bold): **`graphql-orm` 0.174.0, `graphql-orm-macros` 0.174.0**; **`graphql-orm-operation-catalog` 0.9.0**; **`graphql-orm-storage` 0.17.0**; **`graphql-orm-backup` 0.27.0**; **`graphql-orm-ai-tool-profiles` 0.25.0**; **`graphql-orm-ai` 0.148.0**; **`graphql-orm-router-protocol` 0.3.0**; **`graphql-orm-router` 0.16.0**.
 
 - **No action** — ORM/macros 0.174.0: read-policy negation. `ReadPredicate::not_related` is the fail-closed "no related row matching P" (NULL keys and UNKNOWN related rows are not admitted); `ReadPredicate::is_null` and `is_not_null` state NULL handling explicitly. `not()` keeps SQL three-valued logic. [Migration](../../MIGRATION.md#01730-to-01740-read-policy-negation)
 - **Action needed** — ORM/macros 0.174.0: only for policies that call `.not()` on a predicate that can render the deny fallback `1 = 0`: an empty `in_list` or `or` list, a list over 1,000 operands, or an invalid filter value. Previously, negating such a predicate admitted all rows; it is now refused with `AUTHORIZATION_MISCONFIGURED`. Omit the term when the list is empty, use `is_not_null`, or keep the list within the operand limit. [Migration](../../MIGRATION.md#01730-to-01740-read-policy-negation)
@@ -83,6 +89,13 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 - **Action needed** — AI 0.148.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-ai/MIGRATION.md#01480)
 - **Action needed** — Router protocol 0.3.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-router-protocol/MIGRATION.md#030)
 - **Action needed** — Router 0.16.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-router/MIGRATION.md#0160)
+
+### workspace-2026.11.17.3
+
+Commit `97e5e764bd7c` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.17.3)
+
+Packages (changed in bold): **`graphql-orm` 0.172.0, `graphql-orm-macros` 0.172.0**; **`graphql-orm-operation-catalog` 0.8.1**; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.147.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.5.
+
 - **No action** — ORM/macros 0.172.0, operation catalogue 0.8.1: opt-in client-facing metadata. `schema_roots!(client_metadata: true)` emits a build-time client metadata export (`Changed` carried fields, `lifetime(...)` expiry fields, relationship key mappings); every `schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`; the pagination reference states that pages are independent reads (no snapshot token). Without the options, SDL, catalogues and fingerprints are unchanged. [Migration](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata)
 - **Action needed** — ORM/macros 0.172.0: only for clients of an entity you opt in with `changed_started = true` (its `Changed` event's `Action`, `ChangeKind`, `Id` and `Key` become nullable and it gains `Started`) or `aggregate_source = true` (its aggregate root returns `[<Entity>AggregateResultRow!]!`): regenerate typed client code and any approvals that name those types; and only if your `schema_roots!` scope already defines `graphql_orm_interpretation_fingerprint`: rename it. [Migration](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata)
 - **No action** — ORM/macros 0.171.0: opt-in client error contract: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an unstreamable `Changed` selection (`DatabaseBuilder::subscription_selection_unsupported_code`), `extensions.outcome` on generated mutation errors (`DatabaseBuilder::mutation_error_outcome`), and `errorCode` on single-row results of entities declared with `mutation_error_codes`. Nothing changes without them. [Migration](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01710)
