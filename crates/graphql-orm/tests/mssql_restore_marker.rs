@@ -571,3 +571,197 @@ async fn a_connection_failure_is_not_a_restore_in_progress()
     );
     Ok(())
 }
+
+/// Connection string for `login`, built from the owned server's.
+fn as_login(connection_string: &str, login: &str, password: &str) -> String {
+    connection_string
+        .split(';')
+        .map(|part| {
+            if part.starts_with("user id=") {
+                format!("user id={login}")
+            } else if part.starts_with("password=") {
+                format!("password={password}")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// #744: once the gate has seen a restore (its lock held), a follow-up marker
+/// read that fails does not turn the refusal into "not a restore in
+/// progress". It stays `RestoreInProgress`, with the identifier unknown.
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn a_seen_restore_stays_a_restore_when_its_marker_cannot_be_read()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "CREATE TABLE dbo.GraphqlOrmRestoredRecords (id NVARCHAR(100) NOT NULL PRIMARY KEY, value BIGINT NOT NULL);
+         CREATE LOGIN [marker_blind] WITH PASSWORD = 'Owned-marker-test-93!', CHECK_POLICY = OFF;
+         CREATE USER [marker_blind] FOR LOGIN [marker_blind];
+         GRANT SELECT, INSERT ON dbo.GraphqlOrmRestoredRecords TO [marker_blind];
+         DENY SELECT ON dbo.__graphql_orm_restore_marker TO [marker_blind];",
+    )
+    .await?;
+    let owner = writable(&server.connection_string).await?;
+    let blind = writable(&as_login(
+        &server.connection_string,
+        "marker_blind",
+        "Owned-marker-test-93!",
+    ))
+    .await?;
+    // No restore: the gate cannot read the marker, which is unavailable state.
+    let error = count(&blind).await.expect_err("marker unreadable");
+    assert_eq!(
+        RestoreStateUnavailable::from_error(&error).map(|value| value.reason),
+        Some(RestoreStateUnavailableReason::PermissionDenied),
+        "{error}"
+    );
+    // A restore holds the lock: the gate refuses because of it, and the
+    // marker read that would name it fails.
+    let restore = owner
+        .begin_restore("snapshot-hidden", Duration::from_secs(10))
+        .await?;
+    for (what, error) in [
+        ("read", count(&blind).await.expect_err("read")),
+        ("write", insert(&blind, "refused").await.expect_err("write")),
+        (
+            "transaction",
+            MutationContext::begin(&blind, TransactionMode::Default)
+                .await
+                .map(|_| ())
+                .expect_err("transaction"),
+        ),
+    ] {
+        let marker = RestoreInProgress::from_error(&error)
+            .unwrap_or_else(|| panic!("{what}: expected RestoreInProgress, got {error}"));
+        assert_eq!(marker.restore_id, "", "{what}: the identifier is unknown");
+        assert_eq!(marker.started_at, 0, "{what}");
+        assert!(
+            !error.to_string().contains("not a restore in progress"),
+            "{what}: {error}"
+        );
+    }
+    restore.finish().await?;
+    server.cleanup()?;
+    Ok(())
+}
+
+/// #744: the session reset also releases the marker install lock, so a
+/// session that still held it cannot block every later install.
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn the_session_reset_releases_the_install_lock() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable_with(
+        &server.connection_string,
+        graphql_orm::db::mssql::MssqlPoolOptions::new().max_connections(1),
+    )
+    .await?;
+    // A batch that takes the install lock for its session and then fails
+    // with a server error: the pool resets the session and keeps it.
+    let failed = pool
+        .fetch_rows(
+            "EXEC sp_getapplock @Resource = N'graphql_orm_restore_marker_install', \
+             @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0; \
+             SELECT 1 / 0 AS boom",
+            &[],
+        )
+        .await;
+    assert!(failed.is_err(), "the batch fails after taking the lock");
+    let rows = pool
+        .fetch_rows(
+            "SELECT APPLOCK_MODE('public', N'graphql_orm_restore_marker_install', 'Session') AS mode, @@SPID AS spid",
+            &[],
+        )
+        .await?;
+    assert_eq!(rows[0].try_get::<String, _>("mode")?, "NoLock");
+    // Another session installs at once instead of waiting 30 s for the lock.
+    let other =
+        graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(&server.connection_string)
+            .await?;
+    let started = std::time::Instant::now();
+    other.install_restore_marker().await?;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    server.cleanup()?;
+    Ok(())
+}
+
+/// #744: a hand-made marker table is accepted only with the primary key on
+/// `marker_key` and the `marker_key = 1` check.
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn a_marker_table_needs_its_key_and_check() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    let pool =
+        graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(&server.connection_string)
+            .await?;
+    for (shape, table) in [
+        (
+            "primary key on another column",
+            "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL CHECK (marker_key = 1), \
+             restore_id NVARCHAR(200) NOT NULL PRIMARY KEY, started_at BIGINT NOT NULL)",
+        ),
+        (
+            "composite primary key",
+            "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL CHECK (marker_key = 1), \
+             restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL, PRIMARY KEY (marker_key, started_at))",
+        ),
+        (
+            "no check",
+            "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY, \
+             restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)",
+        ),
+        (
+            "another check",
+            "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key > 0), \
+             restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)",
+        ),
+        (
+            "a check added WITH NOCHECK, which existing rows need not satisfy",
+            "CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY, \
+             restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL); \
+             ALTER TABLE dbo.__graphql_orm_restore_marker WITH NOCHECK \
+             ADD CONSTRAINT CK_gorm_marker_untrusted CHECK (marker_key = 1)",
+        ),
+    ] {
+        execute_batch(
+            &server.connection_string,
+            &format!("DROP TABLE IF EXISTS dbo.__graphql_orm_restore_marker; {table}"),
+        )
+        .await?;
+        let error = pool.install_restore_marker().await.expect_err(shape);
+        assert!(
+            error.to_string().contains("documented shape"),
+            "{shape}: {error}"
+        );
+    }
+    // A table-level form of the same check is accepted too.
+    execute_batch(
+        &server.connection_string,
+        "DROP TABLE dbo.__graphql_orm_restore_marker; \
+         CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL, \
+         restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL, \
+         CONSTRAINT PK_gorm_marker PRIMARY KEY (marker_key), CONSTRAINT CK_gorm_marker CHECK (marker_key = 1))",
+    )
+    .await?;
+    pool.install_restore_marker().await?;
+    // The documented DDL, written by hand, is accepted.
+    execute_batch(
+        &server.connection_string,
+        "DROP TABLE dbo.__graphql_orm_restore_marker; \
+         CREATE TABLE dbo.__graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), \
+         restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)",
+    )
+    .await?;
+    pool.install_restore_marker().await?;
+    server.cleanup()?;
+    Ok(())
+}

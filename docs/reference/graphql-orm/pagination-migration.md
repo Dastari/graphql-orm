@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -270,6 +270,27 @@ or call the helper on a handle with a raised maximum:
 `db.clone().with_pagination_config(db.pagination_config().with_max_limit(Some(n)))`.
 Either way the page is bounded by `n`, and `pageInfo.hasNextPage` and the end
 cursor page through a larger set.
+
+### Page offset: unbounded by default, bounded on request
+
+Every backend reads and discards the rows an offset skips, so a client that
+sends `page: { offset: 1000000000 }` costs a scan of that many rows. Offsets
+are unbounded by default, so existing responses do not change. Set
+`DatabaseBuilder::max_page_offset(Some(n))` (or
+`Database::with_max_page_offset(Some(n))`) to refuse an offset above `n`
+with `PAGE_LIMIT_EXCEEDED`, the code of a refused page limit, before any row
+is read. The message is `requested offset N exceeds the maximum page offset M`.
+`PaginationConfig::RECOMMENDED_MAX_OFFSET` is 10,000; page deeper with keyset
+cursors. The bound applies on SQLite, PostgreSQL and SQL Server to the same
+pages as the limit refusal: list roots, to-many relations and search
+connections, custom resolvers that use
+`ClientPaginationConfig::resolve_client_page` (or `admit_client_offset`), and
+the Rust reads that take a `PageInput` (`EntityQuery::paginate(page)` through
+`fetch_connection*`, and `EntitySearchQuery::paginate(page)`). An
+offset that trusted code sets with a builder's own `offset(n)`, including
+`search_db(...).offset(n)` and `EntitySearchQuery::offset`, is not bounded;
+`paginate` after `offset` makes the page's offset a client offset again.
+Keyset connections take no offset.
 
 ### What a keyset cursor is bound to
 
