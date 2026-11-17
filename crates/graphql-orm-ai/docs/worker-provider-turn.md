@@ -146,16 +146,20 @@ compares that stamp with the clock of the process that runs recovery.
 - **Host requirement.** Run every process that claims, heartbeats or recovers
   runs with synchronized clocks (NTP or equivalent), and keep the lease TTL
   well above the worst skew the deployment tolerates.
-- **Skew grace.** `AiRunServiceLimits::with_lease_recovery_grace(grace)` makes
-  recovery wait until a lease is `grace` past its stamped expiry. It is bounded
-  by the lease TTL and delays recovery of every genuinely dead lease by the
-  same amount. The default is zero: no margin is applied unless the host sets
-  one, so with the default a fast recovery clock can still close a live lease
-  early.
+- **Skew grace.** Recovery waits until a lease is the grace past its stamped
+  expiry. `AiRunServiceLimits::new` sets it to a quarter of the lease TTL in
+  whole seconds, at most 30 seconds: 15 seconds for a one-minute lease, 30
+  seconds for a lease of two minutes or more. A recovery clock that runs ahead
+  of the lease holder's by less than the grace therefore cannot close a live
+  lease. The grace delays recovery of every genuinely dead lease by the same
+  amount.
+- **Tuning.** `AiRunServiceLimits::with_lease_recovery_grace(grace)` replaces
+  the default with any value from zero up to the lease TTL. Set it to the
+  clock skew the deployment is prepared to tolerate; zero recovers a lease as
+  soon as it expires by the recovering process's clock.
 
-Set the grace to the clock skew the deployment is prepared to tolerate. Whether
-the crate should ship a non-zero default, or read time from the database, is an
-open maintainer decision (#536).
+The crate still has no database-time source, so a skew larger than the grace
+can close a live lease early. That affects availability only, as above.
 
 ## Current bounded-output behavior
 

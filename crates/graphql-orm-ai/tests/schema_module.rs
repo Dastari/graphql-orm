@@ -8,8 +8,24 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.82.0");
-    assert_eq!(catalog.entities().len(), 49);
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.83.0");
+    assert_eq!(catalog.entities().len(), 50);
+    // The stored-response ledger keeps its identifiers in backups so a
+    // restored deletion debt is not lost.
+    let ledger = catalog
+        .entities()
+        .iter()
+        .find(|entity| entity.table_name == "graphql_orm_ai_stored_provider_responses")
+        .expect("stored-response ledger should be module-owned");
+    assert_eq!(
+        ledger
+            .fields
+            .iter()
+            .find(|field| field.name == "provider_response_id")
+            .expect("response identifier column")
+            .backup_policy,
+        ColumnBackupPolicy::Include
+    );
     assert!(
         catalog
             .entities()

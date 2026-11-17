@@ -108,7 +108,9 @@ async fn fixture(retries: usize) -> Fixture {
     let runs = OrmAiRunService::new(
         database.clone(),
         Arc::new(clock.clone()),
-        AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, retries).unwrap(),
+        AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, retries)
+            .and_then(|limits| limits.with_lease_recovery_grace(Duration::ZERO))
+            .unwrap(),
     );
     let lease = runs.claim_next("heartbeat-worker").await.unwrap().unwrap();
     let lease = runs.start(&lease).await.unwrap();

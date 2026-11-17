@@ -83,7 +83,7 @@ impl AiRunServiceLimits {
             maximum_candidate_scan,
             maximum_run_retries,
             maximum_transaction_retries,
-            lease_recovery_grace: Duration::ZERO,
+            lease_recovery_grace: default_lease_recovery_grace(lease_ttl),
         })
     }
 
@@ -96,7 +96,11 @@ impl AiRunServiceLimits {
     /// runs ahead could otherwise close a live lease. Recovery treats a lease
     /// as expired only once it is older than this grace. Ownership never
     /// depends on it: every write remains fenced by attempt, generation and
-    /// row version. The default is zero, which preserves the previous timing.
+    /// row version.
+    ///
+    /// The default, set by [`Self::new`], is a quarter of the lease TTL in
+    /// whole seconds, at most 30 seconds. Pass [`Duration::ZERO`] to recover
+    /// a lease as soon as it expires by the recovering process's clock.
     ///
     /// # Errors
     ///
@@ -127,6 +131,16 @@ impl AiRunServiceLimits {
     pub const fn maximum_candidate_scan(&self) -> usize {
         self.maximum_candidate_scan
     }
+}
+
+/// Upper bound of the default expired-lease recovery grace.
+const MAXIMUM_DEFAULT_LEASE_RECOVERY_GRACE_SECONDS: i64 = 30;
+
+/// A quarter of the lease TTL in whole seconds, at most 30 seconds.
+fn default_lease_recovery_grace(lease_ttl: Duration) -> Duration {
+    Duration::seconds(
+        (lease_ttl.whole_seconds() / 4).clamp(0, MAXIMUM_DEFAULT_LEASE_RECOVERY_GRACE_SECONDS),
+    )
 }
 
 /// Exact in-memory proof of one current durable run claim.
@@ -444,6 +458,9 @@ pub(crate) struct PreparedProviderOutput {
     pub blocks: Vec<PreparedProviderBlock>,
     pub correlation_id: String,
     pub provider_response_id: Option<String>,
+    /// Logical profile of a response the provider retains, recorded in the
+    /// stored-response ledger with the output.
+    pub retained_response_profile: Option<String>,
     pub budget_reservation_id: Uuid,
     pub checkpoint_hash: String,
     pub expected_owner_principal_kind: String,
@@ -512,6 +529,9 @@ pub(crate) struct PreparedCoordinatorCheckpoint {
     pub provider_kind: String,
     pub provider_model: String,
     pub provider_response_id: Option<String>,
+    /// Logical profile of a response the provider retains, recorded in the
+    /// stored-response ledger with the checkpoint.
+    pub retained_response_profile: Option<String>,
     pub budget_reservation_id: Uuid,
     pub protected_state: serde_json::Value,
     pub checkpoint_hash: String,
@@ -1576,6 +1596,71 @@ impl OrmAiRunService {
         Ok(())
     }
 
+    /// Records a response the provider retains in the stored-response ledger
+    /// as soon as the turn returns.
+    ///
+    /// The response exists at the provider whatever happens to the turn next
+    /// (a rule or budget refusal, cancellation, lease loss or a failed write),
+    /// so this needs no live lease: it checks only that the result belongs to
+    /// the lease's run and session, and that the run belongs to that session.
+    /// Recording is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] when the result's run or session
+    /// differs from the lease's, so one run's response is never filed under
+    /// another session and deleted with it.
+    pub(crate) async fn record_retained_provider_response(
+        &self,
+        lease: &AiRunLease,
+        result: &crate::AiProviderCallResult,
+    ) -> Result<(), AiError> {
+        if result.run_id() != lease.run_id || result.session_id() != lease.session_id {
+            return Err(AiError::InvalidInput(
+                "provider result does not belong to the lease's run".to_owned(),
+            ));
+        }
+        let (Some(profile), Some(response_id)) = (
+            result.retained_response_profile(),
+            result.provider_response_id().map(str::to_owned),
+        ) else {
+            return Ok(());
+        };
+        let provider_kind = result.provider_kind().as_str().to_owned();
+        let run_id = lease.run_id.0;
+        let session_id = lease.session_id.0;
+        let now = canonical_second(self.clock.now()).unix_timestamp();
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let profile = profile.clone();
+            let response_id = response_id.clone();
+            let provider_kind = provider_kind.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if run.session_id != session_id {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        crate::orm_session_retention::record_retained_provider_response(
+                            tx,
+                            session_id,
+                            &provider_kind,
+                            &profile,
+                            &response_id,
+                            now,
+                        )
+                        .await
+                    })
+                })
+        })
+        .await
+        .map_err(map_transaction)
+    }
+
     pub(crate) async fn append_provider_output(
         &self,
         lease: &AiRunLease,
@@ -1670,7 +1755,7 @@ impl OrmAiRunService {
                             client_message_id: None,
                             content_hash: None,
                             run_id: Some(lease.run_id.0),
-                            provider_kind: Some(output.provider_kind),
+                            provider_kind: Some(output.provider_kind.clone()),
                             provider_model: Some(output.provider_model),
                             protected_preview: Some(output.protected_preview),
                             block_count: i64::try_from(output.blocks.len())
@@ -1681,6 +1766,20 @@ impl OrmAiRunService {
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
+                        if let (Some(profile), Some(response_id)) = (
+                            output.retained_response_profile.as_deref(),
+                            output.provider_response_id.as_deref(),
+                        ) {
+                            crate::orm_session_retention::record_retained_provider_response(
+                                tx,
+                                lease.session_id.0,
+                                &output.provider_kind,
+                                profile,
+                                response_id,
+                                now.unix_timestamp(),
+                            )
+                            .await?;
+                        }
                         tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
                             id: output.message_id,
                             run_id: lease.run_id.0,
@@ -2301,6 +2400,20 @@ impl OrmAiRunService {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                     };
+                    if let (Some(profile), Some(response_id)) = (
+                        checkpoint.retained_response_profile.as_deref(),
+                        checkpoint.provider_response_id.as_deref(),
+                    ) {
+                        crate::orm_session_retention::record_retained_provider_response(
+                            tx,
+                            lease.session_id.0,
+                            &checkpoint.provider_kind,
+                            profile,
+                            response_id,
+                            now.unix_timestamp(),
+                        )
+                        .await?;
+                    }
                     tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
                         id: checkpoint.id,
                         run_id: lease.run_id.0,
@@ -7799,7 +7912,10 @@ mod tests {
                 ..AccessTokenMetadata::default()
             },
         });
+        // These tests pin recovery at the instant a lease expires; the
+        // default clock-skew grace has its own test.
         let limits = AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
+            .and_then(|limits| limits.with_lease_recovery_grace(Duration::ZERO))
             .expect("test run limits should validate");
         let service = OrmAiRunService::new(database.clone(), Arc::new(clock.clone()), limits);
         Fixture {
@@ -8161,7 +8277,7 @@ mod tests {
                 run_id: lease.run_id().0,
                 attempt_id: lease.attempt_id(),
                 lease_generation: lease.lease_generation(),
-                provider_kind: "mock".to_owned(),
+                provider_kind: "openai".to_owned(),
                 provider_model: "checkpoint-test".to_owned(),
                 reasoning_effort: "unspecified".to_owned(),
                 pricing_policy_version: "checkpoint-pricing-v1".to_owned(),
@@ -8204,7 +8320,7 @@ mod tests {
                     message_id,
                     event_id: Uuid::new_v4(),
                     inbox_event_id: Uuid::new_v4(),
-                    provider_kind: "mock".to_owned(),
+                    provider_kind: "openai".to_owned(),
                     provider_model: "checkpoint-test".to_owned(),
                     protected_preview: serde_json::json!({"protected": true}),
                     protected_event: serde_json::json!({"protected": true}),
@@ -8218,6 +8334,7 @@ mod tests {
                     }],
                     correlation_id: budget_reservation_id.to_string(),
                     provider_response_id: Some(provider_response_id.to_owned()),
+                    retained_response_profile: Some("profile-openai".to_owned()),
                     budget_reservation_id,
                     checkpoint_hash,
                     expected_owner_principal_kind: "user".to_owned(),
@@ -8229,6 +8346,27 @@ mod tests {
             )
             .await
             .expect("output and checkpoint should commit atomically");
+        // The retained response joined the stored-response ledger in the same
+        // transaction, bound to its session and profile.
+        let ledger = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiStoredProviderResponseRecord>()
+                        .limit(4)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("ledger should load");
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].session_id, lease.session_id().0);
+        assert_eq!(ledger[0].provider_kind, "openai");
+        assert_eq!(ledger[0].provider_profile_id, "profile-openai");
+        assert_eq!(ledger[0].provider_response_id, provider_response_id);
+        assert_eq!(ledger[0].cleanup_state, "retained");
 
         fixture.clock.advance_seconds(61);
         let report = fixture
@@ -8427,6 +8565,7 @@ mod tests {
                     provider_kind: "openai".to_owned(),
                     provider_model: "checkpoint-test".to_owned(),
                     provider_response_id: provider_response_id.map(str::to_owned),
+                    retained_response_profile: None,
                     budget_reservation_id: reservation.id,
                     protected_state,
                     checkpoint_hash,
@@ -9013,6 +9152,238 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_returned_retained_response_is_recorded_even_after_the_lease_is_lost() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-retained")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let ledger = || async {
+            fixture
+                .database
+                .transaction(TransactionMode::Default, |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiStoredProviderResponseRecord>()
+                            .limit(4)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .expect("ledger should load")
+        };
+        // A provider that did not store the response records nothing.
+        let unstored = crate::AiProviderCallResult::test_result(&lease, None, "resp_kept", vec![]);
+        fixture
+            .service
+            .record_retained_provider_response(&lease, &unstored)
+            .await
+            .expect("nothing to record");
+        assert!(ledger().await.is_empty());
+
+        // The lease expires and is recovered before the coordinator records.
+        fixture.clock.advance_seconds(61);
+        fixture.service.recover_expired_leases().await.unwrap();
+        let stored = unstored.with_test_provider_retains_responses(true);
+        fixture
+            .service
+            .record_retained_provider_response(&lease, &stored)
+            .await
+            .expect("recording needs no live lease");
+        // Idempotent.
+        fixture
+            .service
+            .record_retained_provider_response(&lease, &stored)
+            .await
+            .unwrap();
+        let rows = ledger().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, lease.session_id().0);
+        assert_eq!(rows[0].provider_response_id, "resp_kept");
+        assert_eq!(rows[0].cleanup_state, "retained");
+    }
+
+    async fn stored_response_rows(fixture: &Fixture) -> Vec<AiStoredProviderResponseRecord> {
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiStoredProviderResponseRecord>()
+                        .limit(8)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("ledger should load")
+    }
+
+    #[tokio::test]
+    async fn a_retained_response_is_never_filed_under_another_run() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        seed_queued(&fixture).await;
+        let first = fixture
+            .service
+            .claim_next("worker-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let second = fixture
+            .service
+            .claim_next("worker-b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.session_id(), second.session_id());
+        let result = crate::AiProviderCallResult::test_result(&first, None, "resp_first", vec![])
+            .with_test_provider_retains_responses(true);
+        assert!(matches!(
+            fixture
+                .service
+                .record_retained_provider_response(&second, &result)
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        assert!(stored_response_rows(&fixture).await.is_empty());
+        fixture
+            .service
+            .record_retained_provider_response(&first, &result)
+            .await
+            .expect("the matching run records");
+        let rows = stored_response_rows(&fixture).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, first.session_id().0);
+    }
+
+    #[tokio::test]
+    async fn a_response_returned_after_session_deletion_is_due_at_once() {
+        for state in ["deleting", "deleted"] {
+            let fixture = fixture().await;
+            seed_queued(&fixture).await;
+            let lease = fixture
+                .service
+                .claim_next("worker-late")
+                .await
+                .unwrap()
+                .unwrap();
+            let session = AiSessionRecord::find_by_id(&fixture.database, &lease.session_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            AiSessionRecord::update_by_id(
+                &fixture.database,
+                &session.id,
+                UpdateAiSessionRecordInput {
+                    state: Some(state.to_owned()),
+                    deleted_at: Some(Some(fixture.clock.now().unix_timestamp())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let result =
+                crate::AiProviderCallResult::test_result(&lease, None, "resp_late", vec![])
+                    .with_test_provider_retains_responses(true);
+            fixture
+                .service
+                .record_retained_provider_response(&lease, &result)
+                .await
+                .expect("a late response still records");
+            let rows = stored_response_rows(&fixture).await;
+            assert_eq!(rows.len(), 1, "{state}");
+            if state == "deleted" {
+                // Retention releases only rows of deleting sessions, so a
+                // finalized session's row is due at once instead of staying
+                // retained forever.
+                assert_eq!(rows[0].cleanup_state, "delete_required");
+                assert_eq!(
+                    rows[0].cleanup_next_attempt_at,
+                    Some(fixture.clock.now().unix_timestamp())
+                );
+            } else {
+                // A deleting session keeps its purge cutoff: retention
+                // releases the row then, and finalization waits for it.
+                assert_eq!(rows[0].cleanup_state, "retained");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_limits_tolerate_a_recovery_clock_ahead_of_the_lease_holder() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        // A 60-second lease gets the default grace: a quarter of its TTL.
+        let limits = AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
+            .expect("default limits should validate");
+        assert_eq!(limits.lease_recovery_grace(), Duration::seconds(15));
+        let service = OrmAiRunService::new(
+            fixture.database.clone(),
+            Arc::new(fixture.clock.clone()),
+            limits,
+        );
+        service
+            .claim_next("worker-default-grace")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        // The recovering process's clock is ten seconds ahead of the lease
+        // holder's. By its clock the lease expired five seconds ago, while the
+        // holder still has five seconds left to heartbeat.
+        fixture.clock.advance_seconds(65);
+        assert_eq!(
+            service
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed")
+                .requeued,
+            0
+        );
+        assert_eq!(
+            run_record(&fixture, run_id).await.state,
+            AiRunState::Leased.as_str()
+        );
+        // Once the grace has also passed, the dead lease is recovered.
+        fixture.clock.advance_seconds(11);
+        assert_eq!(
+            service
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed")
+                .requeued,
+            1
+        );
+
+        // The default is capped at 30 seconds, rounds down to whole seconds,
+        // and a host can still opt out.
+        let limits = |ttl| AiRunServiceLimits::new(ttl, Duration::hours(1), 16, 2, 8).unwrap();
+        assert_eq!(
+            limits(Duration::hours(1)).lease_recovery_grace(),
+            Duration::seconds(30)
+        );
+        assert_eq!(
+            limits(Duration::seconds(10)).lease_recovery_grace(),
+            Duration::seconds(2)
+        );
+        assert_eq!(
+            limits(Duration::seconds(3)).lease_recovery_grace(),
+            Duration::ZERO
+        );
+        assert_eq!(
+            limits(Duration::hours(1))
+                .with_lease_recovery_grace(Duration::ZERO)
+                .unwrap()
+                .lease_recovery_grace(),
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
     async fn a_retry_after_a_lost_commit_acknowledgement_does_not_repeat_the_transition() {
         let fixture = fixture().await;
         let run_id = seed_queued(&fixture).await;
@@ -9180,6 +9551,7 @@ mod tests {
             database,
             Arc::new(fixture.clock.clone()),
             AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), scan, 2, 8)
+                .and_then(|limits| limits.with_lease_recovery_grace(Duration::ZERO))
                 .expect("run limits should validate"),
         )
     }
@@ -10214,6 +10586,7 @@ mod tests {
             provider_kind: "openai".to_owned(),
             provider_model: "reviewed-model".to_owned(),
             provider_response_id: Some("native-response".to_owned()),
+            retained_response_profile: None,
             budget_reservation_id: budget,
             protected_state,
             checkpoint_hash,

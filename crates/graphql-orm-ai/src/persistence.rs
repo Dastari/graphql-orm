@@ -2413,6 +2413,65 @@ pub(crate) struct AiAuditEventRecord {
     pub created_at: i64,
 }
 
+/// Provider-retained response the crate deletes once its session is deleted.
+///
+/// A row is written in the same transaction that first persists a retained
+/// OpenAI response identifier for a run. It never holds response content.
+/// Session retention moves it from `retained` to `delete_required` after the
+/// deleting-session cutoff; the stored-response cleanup pass then deletes the
+/// exact response through a host-installed deletion boundary. A confirmed
+/// deletion removes the row. After the bounded attempts it ends in the
+/// terminal `cleanup_unconfirmed` state, keeping the identifier for operator
+/// follow-up; it is never reported as deleted.
+#[backend_selected_graphql_entity(
+    table = "graphql_orm_ai_stored_provider_responses",
+    plural = "GraphqlOrmAiStoredProviderResponses",
+    default_sort = "created_at ASC",
+    keyset = "created_at asc, id asc"
+)]
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct AiStoredProviderResponseRecord {
+    /// Deterministic identity of the provider kind, profile and response.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Session whose deletion makes the response due.
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// Exact provider family that retains the response.
+    pub provider_kind: String,
+    /// Exact logical provider profile whose credential stored the response.
+    pub provider_profile_id: String,
+    /// Exact provider response identifier; never response content.
+    pub provider_response_id: String,
+    /// `retained`, `delete_required`, `cleanup_in_progress`,
+    /// `cleanup_backoff` or `cleanup_unconfirmed`.
+    #[filterable(type = "string")]
+    pub cleanup_state: String,
+    /// Monotonic cleanup claim generation.
+    pub cleanup_generation: i64,
+    /// Deadline after which another worker may reclaim an in-progress row.
+    #[filterable(type = "int64")]
+    pub cleanup_lease_expires_at: Option<i64>,
+    /// Earliest retry time after an unconfirmed deletion.
+    #[filterable(type = "int64")]
+    pub cleanup_next_attempt_at: Option<i64>,
+    /// Persisted intent written before the latest provider deletion request.
+    pub provider_delete_requested_at: Option<i64>,
+    /// Number of provider deletion intents, including interrupted calls.
+    pub provider_delete_attempts: i64,
+    #[sortable]
+    pub created_at: i64,
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
 /// Durable cleanup command for an obsolete or compensating secret reference.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_secret_cleanup",
@@ -2575,7 +2634,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.82.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.83.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2664,6 +2723,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiProviderWebhookReceiptRecord::metadata(),
                 AiAuditEventRecord::metadata(),
                 AiSecretCleanupRecord::metadata(),
+                AiStoredProviderResponseRecord::metadata(),
                 AiEgressEventRecord::metadata(),
                 AiRuntimeRecoveryRecord::metadata(),
             ]

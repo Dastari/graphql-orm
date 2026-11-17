@@ -3,14 +3,14 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-ai
 
-AI 0.150.0 (placeholder) documents that `AiSchemaModule::admit_index_replacements` matches a dropped legacy index by table and name only. No behavior change; see [migration guidance](MIGRATION.md#01490-to-01500-index-replacement-admission-documentation).
+AI 0.150.0 (placeholder) uses AI schema module `0.83.0`, which joins main's `0.82.0` stored-response ledger table with this batch's `0.82.0` unique indexes, reads the stored-response cleanup batch in pages within the database maximum, and documents that `AiSchemaModule::admit_index_replacements` matches a dropped legacy index by table and name only; see [migration guidance](MIGRATION.md#01490-to-01500-schema-module-0830-stored-response-candidate-paging-and-index-replacement-documentation).
 
 AI 0.149.0 (placeholder, **breaking**) is capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; and large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once. See the [migration guide](MIGRATION.md#01480-to-01490-capability-broker-version-2) and the [capability contract](docs/capability-discovery-and-execution.md).
 
@@ -19,6 +19,8 @@ AI 0.148.0 adopts tool profiles 0.25.0: UUID- and integer-keyed runtime collecti
 AI 0.147.0 adds `AiSchemaModule::admit_index_replacements`, which admits an upgrade plan whose only destructive steps replace a legacy AI webhook-receipt index; ORM 0.164.0 otherwise refuses the index drop. Requires `graphql-orm` 0.164.0. AI schema module stays `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission).
 
 AI 0.146.0 (placeholder, **breaking**) is the AI part of the single breaking release: fixed-broker provider sessions keep their binding across schema and catalogue changes, with `capability_stale` and the new `selection_stale` as separate recoverable model-facing codes; generated-operation fingerprints change once (catalogue 0.9.0); `HighImpact` approvals always require recent MFA and the approval lifetime cap has a 7-day ceiling; AI schema module `0.82.0` adds three unique indexes. Rebind, re-approve and migrate once; see the [migration guide](MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes).
+
+AI 0.147.0 gives lease recovery a default clock-skew grace (a quarter of the lease TTL, at most 30 seconds), completes Anthropic `max_tokens`, `model_context_window_exceeded` and `pause_turn` turns and chat-completions `length` turns with exact usage and a visible notice instead of failing after the spend, accepts dated-snapshot model echoes, never treats a provider-file 404 as proof of absence, and deletes OpenAI stored responses after their session is deleted through a fail-closed [stored-response ledger](docs/session-retention.md#stored-provider-responses). Apply AI schema module `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
 
 AI 0.146.0 keeps the model-facing capability surface flat as a catalogue grows: reviewed static read tools can sit behind the fixed broker instead of the provider surface, `describe` defines each repeated input type once, search no longer re-tokenises the catalogue, one oversized root no longer fails its target, and large surfaces can opt into the fixed broker over native deferred loading. It also adds an opt-in host-held [epoch anchor](docs/recovery-and-restore.md#detecting-a-file-level-restore-with-a-host-held-anchor) that keeps a file-level database restore closed, and an opt-in [dependent-effect policy](docs/security.md#dependent-effects-of-generated-deletes) for generated deletes. No schema change; see [migration guidance](MIGRATION.md#01450-to-01460-capability-scale).
 

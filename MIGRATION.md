@@ -403,7 +403,11 @@ Host steps:
 
 ### AI unique constraints, and migrations refuse repeated unique keys before DDL (#532)
 
-**Action needed.** Apply AI schema module `0.82.0` before starting workers.
+**Action needed.** Apply AI schema module `0.83.0` before starting workers.
+This change was written as module `0.82.0`; main's AI 0.147.0 used `0.82.0`
+for the stored-response ledger table, so the breaking release carries both as
+`0.83.0` (see the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01490-to-01500-schema-module-0830-stored-response-candidate-paging-and-index-replacement-documentation)).
 
 It adds three unique indexes and no table or column:
 

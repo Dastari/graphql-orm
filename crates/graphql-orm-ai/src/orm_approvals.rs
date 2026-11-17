@@ -3437,6 +3437,7 @@ mod tests {
                     provider_kind: "local_harness".to_owned(),
                     provider_model: "approval-test".to_owned(),
                     provider_response_id: Some("approval-response-1".to_owned()),
+                    retained_response_profile: None,
                     budget_reservation_id: budget_reservation.id,
                     protected_state,
                     checkpoint_hash,
