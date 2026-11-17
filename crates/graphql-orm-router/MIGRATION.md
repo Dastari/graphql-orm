@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.0 to 0.18.0
+
+**No action.** A code comment and the integration-branch renumbering only;
+router behavior, configuration and public APIs are unchanged from 0.16.0.
+
 ## 0.15.4 to 0.16.0
 
 **Action needed** for authenticated routers whose subgraph SDL carries

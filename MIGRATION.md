@@ -14,15 +14,43 @@ supersedes: []
 
 Every change that breaks hosts, or that invalidates stored fingerprints,
 bindings, approvals or sessions, is collected here and ships in one release.
-The versions named are placeholders until that release is cut. Each entry is
-marked **Action needed** or **No action**. Do the steps once, in the order
-below, when you take the release.
+Each entry is marked **Action needed** or **No action**. Do the steps once, in
+the order below, when you take the release.
 
 The breaking release upgrades ORM and macros, the operation catalogue, AI tool
-profiles, AI (AI schema module `0.82.0`), backup and the router. Upgrade them
-together; each section names the package it changes. Version numbers in the
-entries below are placeholders: each names the version its change was written
-against, and the release assigns the final numbers.
+profiles, AI (with a new AI schema module version), backup and the router.
+Upgrade them together; each section names the package it changes. The release
+assigns the final version numbers. A version named in an entry below is the
+integration placeholder its change was written against, not a published
+release.
+
+### Client page offsets are bounded at 10,000 by default (#456)
+
+**Action needed** only for clients or Rust reads that send a page offset above
+10,000. ORM and macros. No SDL, persistent schema or data migration.
+
+- `DatabaseBuilder::max_page_offset` (and `Database::with_max_page_offset`)
+  now defaults to `PaginationConfig::DEFAULT_MAX_OFFSET`, `Some(10_000)`
+  (`PaginationConfig::RECOMMENDED_MAX_OFFSET`). Release 0.169.0 added the
+  bound as an opt-in with an unbounded default. A client page offset above
+  the maximum is refused with `PAGE_LIMIT_EXCEEDED` and the message
+  `requested offset N exceeds the maximum page offset 10000`, before any row
+  is read. It covers the pages 0.169.0 listed: generated list roots, to-many
+  relation pages and search pages (the native index included), custom
+  resolvers that use `ClientPaginationConfig::resolve_client_page` or
+  `admit_client_offset`, `EntityQuery::paginate(page)` through
+  `fetch_connection*`, and `EntitySearchQuery::paginate(page)`.
+- To keep the old behaviour, opt out explicitly with
+  `DatabaseBuilder::max_page_offset(None)` (or
+  `Database::with_max_page_offset(None)`); set another maximum with
+  `max_page_offset(Some(n))`. Prefer keyset cursors for deep paging: every
+  backend reads and discards the rows an offset skips.
+- Unchanged: an offset that trusted code sets with a builder's own
+  `offset(n)` (`search_db(...).offset(n)`, `EntitySearchQuery::offset`,
+  repository `offset(n)`) is not bounded. A `ClientPaginationConfig` built
+  directly from a `PaginationConfig`, as a pool or transaction without a
+  `Database` uses, still has no offset maximum unless `with_max_offset` sets
+  one. Keyset connections take no offset.
 
 ### Capability broker version 2: compact signatures, entity capabilities and the fixed-broker default (#551)
 
@@ -375,7 +403,11 @@ Host steps:
 
 ### AI unique constraints, and migrations refuse repeated unique keys before DDL (#532)
 
-**Action needed.** Apply AI schema module `0.82.0` before starting workers.
+**Action needed.** Apply AI schema module `0.83.0` before starting workers.
+This change was written as module `0.82.0`; main's AI 0.147.0 used `0.82.0`
+for the stored-response ledger table, so the breaking release carries both as
+`0.83.0` (see the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01490-to-01500-schema-module-0830-stored-response-candidate-paging-and-index-replacement-documentation)).
 
 It adds three unique indexes and no table or column:
 
@@ -598,6 +630,107 @@ detect accidental divergence only; see
   profiles 0.25.0 accept the default `RuntimeInt64` and the legacy `Int`
   identity alike; AI 0.148.0 adopts them. See the
   [tool-profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-runtime-live-keys-under-default-identities).
+
+## 0.169.0 to 0.170.0: input-object values on static schemas and bulk-write filter authority
+
+Upgrade ORM and macros together and recompile entities. Generated SDL,
+operation catalogues and fingerprints are unchanged.
+
+- **Input-object values on generated `schema_builder` schemas. No action.**
+  A request that sends a scalar, list or enum where an input object is
+  expected (as a literal, a variable or a variable default, at any depth) is
+  now refused as a whole before any resolver runs, with message and
+  `extensions.code` `invalid_graphql_input`. It used to fail while that field
+  resolved, with an uncoded async-graphql coercion message, after earlier
+  fields had run. The check covers field arguments; directive arguments
+  (`@include`, `@skip` and custom directives) are left to async-graphql.
+  Spec-valid requests behave as before.
+- **Client documents with a variable at a position the GraphQL rule does not
+  allow. Action needed** only for clients that send such documents.
+  async-graphql 7.2.1 never applies the rule "All Variable Usages Are
+  Allowed" (its validator does not pass argument values on to it, in either
+  `ValidationMode`), so such a request used to run whenever its value happened
+  to coerce. Generated static schemas and runtime GraphQL schemas, whose
+  guard uses the same checker, now refuse it before any resolver runs.
+  Examples: a variable of another type, a nullable variable without a default
+  at a required argument, a list of nullable items where the items must be
+  non-null, and a nullable variable, or one that is `null` or omitted, as the
+  member of a oneof input object. To spot affected documents, look for
+  responses with `extensions.code` `invalid_graphql_input` and no data where
+  the same document used to run; declare each variable with the type of the
+  position it is used in. A variable that is not a list may still stand where
+  a list is expected when the list's item type admits it, since execution
+  coerces its value to a one-element list.
+- **Schemas built by hand from generated roots. Action needed.** Such a
+  schema does not get this check: generated roots do not install it
+  themselves. Add
+  `.extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`
+  to the `Schema::build(..)` chain. Without it the schema keeps async-graphql's
+  behaviour above.
+- **Bulk-write filter authority. No action.** Generated `updateMany` and
+  `deleteMany` keep authorizing every filter field with its read policy before
+  any SQL, as they have since 0.129.0, and report a denial in the payload
+  with the list query's message and code. This release adds SQLite and
+  PostgreSQL tests and reference documentation. The repository helpers
+  (`update_where`, `delete_where` and their bounded and `MutationContext`
+  forms) still run host-built filters without field read checks; a host
+  resolver that passes a client-supplied filter to one should call
+  `authorize_read_fields` first.
+
+## 0.167.0 to 0.169.0: SQL Server correctness and a client offset bound
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Client page offsets. No action.** `DatabaseBuilder::max_page_offset(Some(n))`
+  (or `Database::with_max_page_offset`) refuses a client page offset above `n`
+  with `PAGE_LIMIT_EXCEEDED` on every backend, for generated list roots,
+  to-many relation pages, search pages and custom resolvers that use
+  `ClientPaginationConfig::resolve_client_page`. Without it offsets stay
+  unbounded. Each backend scans the rows an offset skips, so public services
+  should set a bound, for example `PaginationConfig::RECOMMENDED_MAX_OFFSET`
+  (10,000), and page deeper with keyset cursors.
+- **Search page limit refusal. No action**, unless clients of a service with
+  `refuse_oversized_page_limit(true)` relied on a generated GraphQL search
+  over a native SQLite or PostgreSQL index reducing an oversized
+  `page.limit`: such a search is now refused with `PAGE_LIMIT_EXCEEDED`, as
+  the other generated pages and the scan path already were since 0.164.0.
+- **SQL Server `DECIMAL(38,38)`. No action.** A non-NULL value in a column
+  declared with scale 38 used to panic inside the driver while the row was
+  read. The statement now fails with `sqlx::Error::Decode` and its connection
+  is closed. The panic hook still reports the driver's assertion; cast such a
+  column in a view to read it.
+- **SQL Server introspection. Action needed** only for hosts that read
+  `introspect_mssql_schema` or diff it against a model. Tables now carry their
+  ordinary and unique indexes, so a model without them plans `DropIndex`. A
+  table without a primary key has an empty `primary_key`, `primary_keys` and
+  `default_sort` instead of `[id]`.
+- **SQL Server key strings. Action needed** only for hosts that compare
+  `ColumnDef::sql_type` of SQL Server entities or render DDL from them. A
+  `String` field that is a primary key, unique, a declared index or composite
+  unique member, or a foreign-key source is now `NVARCHAR(450)` (indexable)
+  instead of `NVARCHAR(MAX)`, and a Rust type with no mapping is
+  `NVARCHAR(MAX)` instead of `TEXT`. Recompile entities. Reads and writes are
+  unchanged. A plan against a live table now compares those columns with
+  `NVARCHAR(450)`: a live `NVARCHAR(MAX)` column (which SQL Server cannot
+  have indexed) plans an `AlterColumn` to `NVARCHAR(450)`, classified
+  `Risky` because it changes the column type; a live column of another length
+  plans one as before, with the new target.
+- **SQL Server `ALTER COLUMN`. No action.** A rendered alteration to a
+  character type is now an `EXEC sys.sp_executesql` batch that keeps the
+  column's live collation, instead of a plain `ALTER COLUMN` that reset it to
+  the database default. Review rendered plans with that in mind.
+- **SQL Server restore marker. Action needed** only for hosts that created
+  `dbo.__graphql_orm_restore_marker` by hand in a different shape:
+  `install_restore_marker` now also requires the primary key to be exactly
+  `marker_key` and the `CHECK (marker_key = 1)` constraint, as in the
+  documented DDL. Recreate such a table (while no restore is in progress). A
+  statement refused while a restore holds the lock now reports
+  `RestoreInProgress` with an empty `restore_id` when the marker cannot then
+  be read, where it used to report `RestoreStateUnavailable`.
+- **SQL Server routing. No action.** A second routing redirect is refused with
+  `sqlx::Error::Protocol` saying only one redirect is followed; the message
+  used to be the driver's.
 
 ## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
 

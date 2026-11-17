@@ -4581,6 +4581,7 @@ mod tests {
                         provider_kind: result.provider_kind().as_str().to_owned(),
                         provider_model: result.provider_model().to_owned(),
                         provider_response_id: result.provider_response_id().map(str::to_owned),
+                        retained_response_profile: None,
                         budget_reservation_id: result.budget_reservation_id().0,
                         protected_state,
                         checkpoint_hash,

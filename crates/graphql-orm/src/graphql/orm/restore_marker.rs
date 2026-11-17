@@ -32,9 +32,12 @@ pub const RESTORE_MARKER_TABLE: &str = "dbo.__graphql_orm_restore_marker";
 #[non_exhaustive]
 pub struct RestoreInProgress {
     /// The identifier the host gave the restore, for example a snapshot id.
-    /// Empty, with `started_at` zero, when the restore holds its lock but has
-    /// not recorded its marker yet. A marker that cannot be read is not
-    /// reported here but as [`RestoreStateUnavailable`].
+    /// Empty, with `started_at` zero, when the identifier is unknown: the
+    /// restore holds its lock but has not recorded its marker yet, or a
+    /// statement was refused because the restore holds its lock and the
+    /// marker could then not be read. When no restore is known to be
+    /// running, a marker that cannot be read is reported as
+    /// [`RestoreStateUnavailable`] instead.
     pub restore_id: String,
     /// When the restore started, as UTC Unix seconds on the database clock.
     pub started_at: i64,
@@ -277,8 +280,9 @@ impl crate::db::Database<super::MssqlBackend> {
     ///
     /// Fails when no marker is present, with an error carrying
     /// [`RestoreInProgress`] when the marker belongs to another restore or
-    /// the lock is not granted within `wait`, and with a database failure
-    /// otherwise.
+    /// the lock is not granted within `wait`, with an error carrying
+    /// [`RestoreStateUnavailable`] when the marker table is missing or the
+    /// role may not use it, and with a database failure otherwise.
     pub async fn resume_restore(
         &self,
         restore_id: &str,

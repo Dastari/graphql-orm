@@ -502,6 +502,10 @@ impl AiProviderFileDeletionRequest {
     }
 
     /// Whether the provider's recorded expiry had passed when cleanup was claimed.
+    ///
+    /// This is audit context, never proof of absence: a not-found answer
+    /// after the expiry is indistinguishable from one returned to a credential
+    /// that now addresses another provider project.
     pub const fn provider_expired(&self) -> bool {
         self.provider_expired
     }

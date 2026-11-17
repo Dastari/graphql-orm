@@ -578,6 +578,13 @@ fn site_requirement<'a>(
         return Err(unmapped(&site.0, site.1.as_deref()));
     }
     let declared = declared.sites.get(site).cloned().unwrap_or_default();
+    // A secondary defence only. Composition deduplicates alternatives, so a
+    // declaration whose scope sets another declaration repeats leaves the
+    // composed union unchanged, and this comparison cannot see it dropped.
+    // The primary defence is the name-based refusal in
+    // `federation::scope_sites`: every directive application composition
+    // could read as `@requiresScopes` or `@authenticated` must resolve to a
+    // recorded site, or the graph is refused before this point.
     let composed_sets = composed.scopes.iter().flatten().collect::<BTreeSet<_>>();
     let declared_sets = declared.iter().flatten().collect::<BTreeSet<_>>();
     if composed_sets != declared_sets {

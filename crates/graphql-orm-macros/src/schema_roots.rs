@@ -573,6 +573,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             .extension(::graphql_orm::graphql::errors::UncodedCallbackMessages(
                 database.exposes_uncoded_callback_messages(),
             ))
+            .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
             ));
@@ -792,6 +793,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             .extension(::graphql_orm::graphql::errors::UncodedCallbackMessages(
                 database.exposes_uncoded_callback_messages(),
             ))
+            .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
             ));

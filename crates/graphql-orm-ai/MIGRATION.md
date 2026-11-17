@@ -3,12 +3,34 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.149.0 to 0.150.0: schema module 0.83.0, stored-response candidate paging and index-replacement documentation
+
+**Action needed:** apply AI schema module `0.83.0`.
+
+- Main's AI 0.147.0 (below) introduced schema module `0.82.0` with the
+  `graphql_orm_ai_stored_provider_responses` table. This batch had already
+  used `0.82.0` for the three #532 unique indexes. The breaking release
+  carries both as `0.83.0`, since a module version is never reused. Apply it
+  like any module upgrade; from a store at main's `0.82.0` it adds the three
+  unique indexes (refused with `UniqueIndexDuplicates` before any DDL if
+  existing rows repeat a key; see the 0.145.0 to 0.146.0 entry), and from a
+  store at `0.81.0` or earlier it adds the table and the indexes together. No
+  data backfill.
+- **No action:** the stored-response cleanup pass now reads its candidate
+  batch in pages within the database's maximum page limit
+  (`keyset_window`), so a batch larger than the maximum is read completely
+  and never refused or shortened.
+- **No action:** `AiSchemaModule::admit_index_replacements` matches a dropped
+  legacy webhook-receipt index by table and name, without checking that the
+  live index is non-unique. If your host created its own index under one of
+  those names, review the upgrade plan before applying it.
 
 ## 0.148.0 to 0.149.0: capability broker version 2
 
@@ -153,6 +175,57 @@ In order:
    `authorization_denied`.
 
 No GraphQL SDL change.
+## 0.146.0 to 0.147.0: lease grace, provider stops and stored-response deletion
+
+Apply AI schema module `0.82.0` before starting workers. It adds one table,
+`graphql_orm_ai_stored_provider_responses`, and needs no data backfill.
+GraphQL SDL is unchanged.
+
+- **Lease recovery grace. Action needed** only for hosts that rely on a run
+  being recovered as soon as its lease expires. `AiRunServiceLimits::new` now
+  applies a clock-skew grace of a quarter of the lease TTL in whole seconds,
+  at most 30 seconds, so recovery of a dead lease is delayed by that much.
+  Call `with_lease_recovery_grace(Duration::ZERO)` to keep the previous
+  timing, or another value up to the lease TTL. Hosts that already set a grace
+  keep it. See [lease clocks](docs/worker-provider-turn.md#lease-clocks).
+- **Stored responses. Action needed** for hosts with
+  `OpenAiProviderConfig::store_responses = true` that want stored responses
+  deleted. Bind `OpenAiStoredResponseDeletionService` to the storing profile
+  with `with_provider_profile_id`, install it with
+  `OrmAiSessionRetentionService::with_stored_response_deletion_service`, and
+  schedule `delete_stored_provider_responses` next to the retention pass. Then
+  watch `AiStoredResponseCleanupReport::unconfirmed` and the
+  `cleanup_unconfirmed` ledger rows for operator follow-up. Without a
+  deletion boundary nothing is deleted, as before. A deleting session is now
+  finalized only after retention has released its retained responses to the
+  ledger, which the same pass does. Responses stored before the upgrade are
+  not in the ledger; delete them by identifier with
+  `OpenAiStoredResponseDeletionService::delete_and_confirm_absent` if needed.
+  See [stored provider responses](docs/session-retention.md#stored-provider-responses).
+- **Custom run control. Action needed** only for hosts that implement
+  `AiAgentRunControl` themselves instead of using `OrmAiRunService`. The new
+  provided method `record_retained_provider_response` defaults to recording
+  nothing, so stored responses of turns that fail after returning are not
+  tracked; delegate it to `OrmAiRunService` to track them. Checkpoints, final
+  outputs and background completions still record.
+- **Provider-file 404. No action.** A 404 to an OpenAI file `DELETE` no longer
+  proves absence after the recorded provider expiry. An artifact whose file
+  is really gone now retries and ends `cleanup_unconfirmed` instead of being
+  confirmed; follow up as for any unconfirmed artifact
+  ([unconfirmed provider-file cleanup](docs/attachments.md#unconfirmed-provider-file-cleanup)).
+- **Anthropic and chat-completions stops. No action.** Turns that ended at the
+  output limit, a full context window or a pause (Anthropic) or with `length`
+  (chat completions) used to fail after the tokens were spent. They now
+  complete with exact usage and a visible notice that the answer may be
+  incomplete, and a cut-off tool request is never run. Clients that render
+  assistant text show the notice as part of the answer.
+- **Model echo. No action.** Anthropic, OpenAI Responses (including xAI and
+  OpenAI-compatible routes) and chat completions accept a response naming a
+  dated snapshot of the requested model. Budgets, pricing and usage stay keyed
+  by the requested identifier, so price an alias at the rate of the snapshot
+  it resolves to. An `AnthropicProvider::with_model_snapshot` pin stays exact:
+  with a pin, only the requested identifier or the pinned snapshot is
+  accepted, as before. Pin an alias whose rate must not change silently.
 
 ## ORM/macros 0.166.0: guarded dependent deletes
 

@@ -1587,6 +1587,25 @@ impl PaginationConfig {
     /// Default row bound of a generated GraphQL bulk write; see
     /// [`Self::max_bulk_write_rows`].
     pub const DEFAULT_MAX_BULK_WRITE_ROWS: i64 = 10_000;
+    /// Recommended maximum client page offset, for
+    /// `DatabaseBuilder::max_page_offset`, and the value of
+    /// [`Self::DEFAULT_MAX_OFFSET`].
+    ///
+    /// Every backend reads and discards the rows an offset skips, so a large
+    /// one costs a scan of that many rows per request; page deeper with
+    /// keyset cursors. A client offset above a configured maximum is refused
+    /// with `PAGE_LIMIT_EXCEEDED`.
+    pub const RECOMMENDED_MAX_OFFSET: i64 = 10_000;
+    /// Default maximum client page offset of a `Database`
+    /// (`DatabaseBuilder::max_page_offset`): [`Self::RECOMMENDED_MAX_OFFSET`].
+    ///
+    /// `DatabaseBuilder::max_page_offset(None)` or
+    /// `Database::with_max_page_offset(None)` is the explicit opt-out that
+    /// leaves client offsets unbounded. A [`ClientPaginationConfig`] built
+    /// directly from a `PaginationConfig`, and so a pool or transaction
+    /// without a `Database`, has no offset maximum unless
+    /// [`ClientPaginationConfig::with_max_offset`] sets one.
+    pub const DEFAULT_MAX_OFFSET: Option<i64> = Some(Self::RECOMMENDED_MAX_OFFSET);
 
     /// Create a config that does not add a default limit and does not cap limits.
     ///
@@ -1787,12 +1806,14 @@ impl PaginationConfig {
 pub struct ClientPaginationConfig {
     config: PaginationConfig,
     refuse_oversized_limit: bool,
+    max_offset: Option<i64>,
 }
 impl From<PaginationConfig> for ClientPaginationConfig {
     fn from(config: PaginationConfig) -> Self {
         Self {
             config,
             refuse_oversized_limit: false,
+            max_offset: None,
         }
     }
 }
@@ -1812,6 +1833,63 @@ impl ClientPaginationConfig {
     pub fn with_oversized_limit_refusal(mut self, refuse: bool) -> Self {
         self.refuse_oversized_limit = refuse;
         self
+    }
+
+    /// Return a copy that refuses a client page offset above `max_offset`
+    /// with `PAGE_LIMIT_EXCEEDED`; `None` leaves offsets unbounded. A config
+    /// built from a `PaginationConfig` starts with `None`; a `Database`'s
+    /// [`client_pagination_config`](crate::db::Database::client_pagination_config)
+    /// starts with [`PaginationConfig::DEFAULT_MAX_OFFSET`].
+    pub fn with_max_offset(mut self, max_offset: Option<i64>) -> Self {
+        self.max_offset = max_offset;
+        self
+    }
+
+    /// The largest client page offset served, if one is configured.
+    pub fn max_offset(&self) -> Option<i64> {
+        self.max_offset
+    }
+
+    /// Check a client page offset against [`Self::with_max_offset`].
+    ///
+    /// Does nothing unless a maximum is configured. A negative offset is
+    /// read as `0`, as everywhere else.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrmErrorCode::PageLimitExceeded`](crate::graphql::errors::OrmErrorCode::PageLimitExceeded),
+    /// the code of a refused page limit, with a message naming the requested
+    /// offset and the maximum.
+    pub fn admit_client_offset(
+        &self,
+        offset: Option<i64>,
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        match (offset, self.max_offset) {
+            (Some(offset), Some(maximum)) if offset > maximum.max(0) => {
+                Err(crate::graphql::errors::OrmPublicError::with_message(
+                    crate::graphql::errors::OrmErrorCode::PageLimitExceeded,
+                    format!(
+                        "requested offset {offset} exceeds the maximum page offset {}",
+                        maximum.max(0)
+                    ),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Check a client page's limit and offset: [`Self::admit_client_limit`]
+    /// and [`Self::admit_client_offset`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `PAGE_LIMIT_EXCEEDED` as either check does.
+    pub fn admit_client_page(
+        &self,
+        page: Option<&PageInput>,
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        self.admit_client_limit(page.and_then(|page| page.limit))?;
+        self.admit_client_offset(page.and_then(|page| page.offset))
     }
 
     /// Check a client page limit against [`Self::with_oversized_limit_refusal`].
@@ -1846,20 +1924,20 @@ impl ClientPaginationConfig {
     }
 
     /// Resolve a client page like [`PaginationConfig::resolve_page`], after
-    /// [`Self::admit_client_limit`].
+    /// [`Self::admit_client_page`].
     ///
     /// Generated GraphQL resolvers use this. A custom resolver that takes a
-    /// client `PageInput` should too, so the opt-in refusal covers it.
+    /// client `PageInput` should too, so the opt-in refusals cover it.
     ///
     /// # Errors
     ///
-    /// Returns `PAGE_LIMIT_EXCEEDED` as [`Self::admit_client_limit`] does.
+    /// Returns `PAGE_LIMIT_EXCEEDED` as [`Self::admit_client_page`] does.
     pub fn resolve_client_page(
         &self,
         page: Option<&PageInput>,
         apply_default_limit: bool,
     ) -> Result<PaginationRequest, crate::graphql::errors::OrmPublicError> {
-        self.admit_client_limit(page.and_then(|page| page.limit))?;
+        self.admit_client_page(page)?;
         Ok(self.resolve_page(page, apply_default_limit))
     }
 }
@@ -3157,7 +3235,10 @@ fn render_grouped_aggregate_query_page(
             .iter()
             .map(|column| match dialect {
                 DatabaseBackend::Postgres => column.clone(),
-                _ => format!("MIN({column} COLLATE BINARY)"),
+                DatabaseBackend::Mssql => format!("MIN({column} COLLATE {MSSQL_BINARY_COLLATION})"),
+                DatabaseBackend::Sqlite | DatabaseBackend::Mysql => {
+                    format!("MIN({column} COLLATE BINARY)")
+                }
             })
             .collect::<Vec<_>>()
     } else {
@@ -3254,10 +3335,16 @@ fn render_grouped_aggregate_query_page(
     RenderedQuery { sql, values }
 }
 
+/// A binary SQL Server collation, for the explicit SQL Server arms of the
+/// group-page renderers. `fetch_group_page` refuses SQL Server before it
+/// renders, so these arms only keep the rendered text valid T-SQL.
+const MSSQL_BINARY_COLLATION: &str = "Latin1_General_100_BIN2";
+
 fn group_binary_comparison(dialect: DatabaseBackend, value: &str) -> String {
     match dialect {
         DatabaseBackend::Postgres => format!("({value}) COLLATE pg_catalog.\"C\""),
-        _ => format!("{value} COLLATE BINARY"),
+        DatabaseBackend::Mssql => format!("({value}) COLLATE {MSSQL_BINARY_COLLATION}"),
+        DatabaseBackend::Sqlite | DatabaseBackend::Mysql => format!("{value} COLLATE BINARY"),
     }
 }
 
@@ -3266,7 +3353,10 @@ fn group_ascii_comparison(dialect: DatabaseBackend, value: &str) -> String {
         DatabaseBackend::Postgres => format!(
             "pg_catalog.translate(({value})::pg_catalog.text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE pg_catalog.\"C\""
         ),
-        _ => format!("{value} COLLATE NOCASE"),
+        DatabaseBackend::Mssql => {
+            format!("LOWER({value}) COLLATE {MSSQL_BINARY_COLLATION}")
+        }
+        DatabaseBackend::Sqlite | DatabaseBackend::Mysql => format!("{value} COLLATE NOCASE"),
     }
 }
 
@@ -5011,6 +5101,10 @@ where
     /// honours `page.limit` exactly, or fails with
     /// `PAGE_LIMIT_EXCEEDED` when the limit is above the maximum page limit
     /// (or this query's [`Self::with_max_limit`]); it never reduces the limit.
+    /// A connection read (`fetch_connection*`) also treats `page.offset` as a
+    /// client offset and refuses one above the provider's maximum page offset
+    /// (`DatabaseBuilder::max_page_offset`, 10,000 by default on a
+    /// `Database`) with `PAGE_LIMIT_EXCEEDED`.
     /// An omitted limit uses the default limit on a connection read; a
     /// `fetch_all*` read without one reads every row. To apply GraphQL client page
     /// semantics to a client-supplied page, resolve it first with
@@ -5925,6 +6019,10 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         let pagination_config = self.connection_pagination_config(provider)?;
+        provider
+            .client_pagination_config()
+            .admit_client_offset(self.page.as_ref().and_then(|page| page.offset))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if self.requires_in_memory_filtering() {
             let nodes = self.fetch_unpaged_filtered(provider).await?;
             let total = nodes.len() as i64;
@@ -6021,6 +6119,10 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         let pagination_config = self.connection_pagination_config(provider)?;
+        provider
+            .client_pagination_config()
+            .admit_client_offset(self.page.as_ref().and_then(|page| page.offset))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         self.ensure_filter_valid()?;
         if self.requires_in_memory_filtering() || (selection.rows && selection.count) {
             return self.fetch_connection_with_auth(provider, auth).await;
@@ -6112,6 +6214,10 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         let pagination_config = self.connection_pagination_config(provider)?;
+        provider
+            .client_pagination_config()
+            .admit_client_offset(self.page.as_ref().and_then(|page| page.offset))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if self.requires_in_memory_filtering() {
             let nodes = self
                 .fetch_unpaged_filtered_with_auth(provider, auth)

@@ -1679,9 +1679,12 @@ impl SqlDialect for DatabaseBackend {
                 SpatialPredicate::Contains => format!("ST_Contains({column}, {geometry_expr})"),
                 SpatialPredicate::Overlaps => format!("ST_Overlaps({column}, {geometry_expr})"),
             },
-            DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
+            DatabaseBackend::Sqlite | DatabaseBackend::Mysql => {
                 format!("FALSE /* spatial unsupported on {} */", self.name())
             }
+            // T-SQL has no boolean literal. The macros refuse spatial fields
+            // on SQL Server, so this is only a valid false predicate.
+            DatabaseBackend::Mssql => "(1 = 0) /* spatial unsupported on mssql */".to_string(),
         }
     }
 }

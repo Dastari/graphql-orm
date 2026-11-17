@@ -859,6 +859,7 @@ mod tests {
                     }],
                     correlation_id: reservation_id.0.to_string(),
                     provider_response_id: Some("ui-intent-response".to_owned()),
+                    retained_response_profile: None,
                     budget_reservation_id: reservation_id.0,
                     checkpoint_hash: final_output_checkpoint_hash(
                         lease.run_id(),

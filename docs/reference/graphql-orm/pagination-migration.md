@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -287,6 +287,32 @@ on a search. A handle with a raised maximum works too:
 `db.clone().with_pagination_config(db.pagination_config().with_max_limit(Some(n)))`.
 Either way the page is bounded by `n`, and `pageInfo.hasNextPage` and the end
 cursor page through a larger set.
+
+### Page offset: bounded at 10,000 by default
+
+Every backend reads and discards the rows an offset skips, so a client that
+sends `page: { offset: 1000000000 }` costs a scan of that many rows. Since the
+breaking release a `Database` refuses a client offset above
+`PaginationConfig::DEFAULT_MAX_OFFSET` (`Some(10_000)`, the value of
+`PaginationConfig::RECOMMENDED_MAX_OFFSET`) with `PAGE_LIMIT_EXCEEDED`, the
+code of a refused page limit, before any row is read. Release 0.169.0 added
+the bound as an opt-in; it was unbounded by default until the breaking
+release. The message is `requested offset N exceeds the maximum page offset
+M`. Set another maximum with `DatabaseBuilder::max_page_offset(Some(n))` (or
+`Database::with_max_page_offset(Some(n))`), or opt out with
+`max_page_offset(None)` to leave client offsets unbounded; page deeper with
+keyset cursors. A `ClientPaginationConfig` built directly from a
+`PaginationConfig`, as a pool or transaction without a `Database` uses, has no
+offset maximum unless `with_max_offset` sets one. The bound applies on SQLite, PostgreSQL and SQL Server to the same
+pages as the limit refusal: list roots, to-many relations and search
+connections, custom resolvers that use
+`ClientPaginationConfig::resolve_client_page` (or `admit_client_offset`), and
+the Rust reads that take a `PageInput` (`EntityQuery::paginate(page)` through
+`fetch_connection*`, and `EntitySearchQuery::paginate(page)`). An
+offset that trusted code sets with a builder's own `offset(n)`, including
+`search_db(...).offset(n)` and `EntitySearchQuery::offset`, is not bounded;
+`paginate` after `offset` makes the page's offset a client offset again.
+Keyset connections take no offset.
 
 ### What a keyset cursor is bound to
 

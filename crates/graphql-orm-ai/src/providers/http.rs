@@ -107,6 +107,101 @@ pub(crate) fn provider_client(
     })
 }
 
+/// Whether the model a provider names in its response is the model requested.
+///
+/// Providers answer a request for a model alias with the dated snapshot the
+/// alias resolves to. This accepts the requested identifier itself, the
+/// requested identifier followed by `-YYYYMMDD` or `-YYYY-MM-DD`, and, for a
+/// request ending in `-latest`, the part before `-latest` followed by such a
+/// date. Every other answer is refused, including another model that shares a
+/// prefix, so a response can never be attributed to a different family.
+/// Budgets, pricing and usage stay keyed by the requested identifier.
+#[cfg(any(
+    feature = "provider-openai-core",
+    feature = "provider-anthropic-core",
+    feature = "provider-xai-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
+))]
+pub(crate) fn echoed_model_matches(requested: &str, echoed: &str) -> bool {
+    fn is_snapshot_date(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        match bytes.len() {
+            8 => bytes.iter().all(u8::is_ascii_digit),
+            10 => bytes.iter().enumerate().all(|(index, byte)| {
+                if index == 4 || index == 7 {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            }),
+            _ => false,
+        }
+    }
+    let dated = |base: &str| {
+        !base.is_empty()
+            && echoed
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(is_snapshot_date)
+    };
+    !requested.is_empty()
+        && (echoed == requested
+            || dated(requested)
+            || requested.strip_suffix("-latest").is_some_and(dated))
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "provider-openai-core",
+        feature = "provider-anthropic-core",
+        feature = "provider-xai-core",
+        feature = "provider-openai-compatible-core",
+        feature = "provider-chat-completions-core"
+    )
+))]
+mod model_echo_tests {
+    use super::echoed_model_matches;
+
+    #[test]
+    fn only_the_requested_model_or_its_dated_snapshot_matches() {
+        for (requested, echoed) in [
+            ("model-a", "model-a"),
+            ("model-a", "model-a-20250101"),
+            ("model-a", "model-a-2025-01-01"),
+            ("model-a-latest", "model-a-20250101"),
+            ("model-a-latest", "model-a-latest"),
+            ("model-a-20250101", "model-a-20250101"),
+        ] {
+            assert!(
+                echoed_model_matches(requested, echoed),
+                "{requested} {echoed}"
+            );
+        }
+        for (requested, echoed) in [
+            ("model-a", "model-b"),
+            ("model-a", "model-ab"),
+            ("model-a", "model-a-2025010"),
+            ("model-a", "model-a-202501011"),
+            ("model-a", "model-a-2025_01_01"),
+            ("model-a", "model-a-20250101-mini"),
+            ("model-a", "model-a-mini-20250101"),
+            ("model-a", "model-a20250101"),
+            ("model-a", ""),
+            ("model-a-20250101", "model-a-20250202"),
+            ("model-a-latest", "model-b-20250101"),
+            ("-latest", "-20250101"),
+            ("", ""),
+        ] {
+            assert!(
+                !echoed_model_matches(requested, echoed),
+                "{requested} {echoed}"
+            );
+        }
+    }
+}
+
 #[cfg(feature = "provider-tls-ring")]
 fn ring_client_config() -> Result<rustls::ClientConfig, ProviderError> {
     use rustls_platform_verifier::BuilderVerifierExt;

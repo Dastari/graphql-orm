@@ -647,3 +647,131 @@ async fn fail_closed_overflow_does_not_disclose_a_row_count() {
         public.message
     );
 }
+
+/// #456: `max_page_offset` bounds client page offsets only. An offset that
+/// trusted code sets on a search builder with `offset(n)` is served above
+/// the bound; the same offset in a client page given through `paginate` is
+/// refused with `PAGE_LIMIT_EXCEEDED`.
+#[tokio::test]
+async fn search_builder_offsets_are_trusted_and_client_page_offsets_are_bounded() {
+    let database = database().await;
+    let capped = database.clone().with_max_page_offset(Some(10));
+    let client = || PageInput {
+        limit: Some(5),
+        offset: Some(20),
+    };
+
+    // Trusted builder offsets above the bound, on both search builders.
+    let hits = LimitRow::search_db(&capped, search())
+        .offset(20)
+        .limit(5)
+        .fetch_all()
+        .await
+        .expect("a builder offset is not a client offset");
+    assert_eq!(hits.len(), 5);
+    let pool_search = || {
+        graphql_orm::graphql::orm::EntitySearchQuery::<LimitRow, LimitRowWhereInput, SqliteBackend>::new(
+            capped.pool(),
+            search(),
+        )
+        .client_pagination_config(capped.client_pagination_config())
+    };
+    let hits = pool_search()
+        .offset(20)
+        .limit(5)
+        .fetch_all()
+        .await
+        .expect("a builder offset is not a client offset");
+    assert_eq!(hits.len(), 5);
+    assert_eq!(
+        pool_search()
+            .offset(20)
+            .limit(5)
+            .fetch_connection()
+            .await
+            .expect("connection reads too")
+            .edges
+            .len(),
+        5
+    );
+
+    // A client page above the bound is refused, however it is read, and also
+    // when it replaces an earlier builder offset.
+    assert_code(
+        pool_search().paginate(client()).fetch_all().await,
+        OrmErrorCode::PageLimitExceeded,
+    );
+    assert_code(
+        pool_search()
+            .paginate(client())
+            .fetch_connection()
+            .await
+            .map(|connection| connection.edges.len()),
+        OrmErrorCode::PageLimitExceeded,
+    );
+    assert_code(
+        pool_search()
+            .offset(20)
+            .paginate(client())
+            .fetch_all()
+            .await,
+        OrmErrorCode::PageLimitExceeded,
+    );
+    // At the bound the client page is served.
+    let hits = pool_search()
+        .paginate(PageInput {
+            limit: Some(5),
+            offset: Some(10),
+        })
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 5);
+
+    // The breaking release bounds a `Database`'s client offsets by default;
+    // a trusted builder offset stays unbounded.
+    let default_maximum = graphql_orm::graphql::orm::PaginationConfig::RECOMMENDED_MAX_OFFSET;
+    assert_eq!(
+        database.client_pagination_config().max_offset(),
+        Some(default_maximum)
+    );
+    let default_search = || {
+        graphql_orm::graphql::orm::EntitySearchQuery::<LimitRow, LimitRowWhereInput, SqliteBackend>::new(
+            database.pool(),
+            search(),
+        )
+        .client_pagination_config(database.client_pagination_config())
+    };
+    let hits = default_search()
+        .offset(default_maximum + 1)
+        .limit(5)
+        .fetch_all()
+        .await
+        .expect("a builder offset is not a client offset");
+    assert!(hits.is_empty());
+    assert_code(
+        default_search()
+            .paginate(PageInput {
+                limit: Some(5),
+                offset: Some(default_maximum + 1),
+            })
+            .fetch_all()
+            .await,
+        OrmErrorCode::PageLimitExceeded,
+    );
+    let unbounded = database.clone().with_max_page_offset(None);
+    let hits = graphql_orm::graphql::orm::EntitySearchQuery::<
+        LimitRow,
+        LimitRowWhereInput,
+        SqliteBackend,
+    >::new(unbounded.pool(), search())
+    .client_pagination_config(unbounded.client_pagination_config())
+    .paginate(PageInput {
+        limit: Some(5),
+        offset: Some(default_maximum + 1),
+    })
+    .fetch_all()
+    .await
+    .expect("max_page_offset(None) leaves client offsets unbounded");
+    assert!(hits.is_empty());
+}

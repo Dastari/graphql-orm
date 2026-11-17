@@ -4988,17 +4988,20 @@ impl SchemaAbi {
     }
 }
 
-/// One pending [`SchemaStage`] planned against the stage before it, or against
-/// the live schema for the first pending stage.
+/// One pending [`SchemaStage`] planned against the schema before it: the
+/// previous stage's target, or, for the first pending stage, the target of
+/// the last stage recorded as applied (the live schema when none is).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedSchemaStage {
     pub version: String,
     pub description: String,
     pub target_schema_hash: String,
     pub plan: MigrationPlan,
-    /// The schema this stage is planned against: the introspected live schema,
-    /// restricted to stage-declared tables, for the first pending stage, and
-    /// the previous stage's target for each later one.
+    /// The schema this stage is planned against. For the first pending stage
+    /// it is the target of the last stage recorded as applied or, when no
+    /// stage is recorded yet, the introspected live schema restricted to
+    /// stage-declared tables. For each later stage it is the previous stage's
+    /// target.
     pub source_schema: SchemaModel,
 }
 
