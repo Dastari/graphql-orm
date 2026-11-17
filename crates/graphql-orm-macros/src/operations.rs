@@ -2591,9 +2591,29 @@ fn generate_graphql_operations_unfiltered(
         } else {
             quote! { pub }
         };
+    // Compile-time inputs to the schema's interpretation fingerprint (#671):
+    // whether the entity serves `NodeId` (encoded from the entity name and key
+    // values) and the exact keyset order fingerprint its cursors are bound to.
+    // The runtime adds the entity name, the effective default sort and the
+    // key fields. Hashed, never served as text.
+    let interpretation_source = format!(
+        "node_id={};keyset={}",
+        entity_meta.node_id.is_some(),
+        keyset_parts
+            .as_deref()
+            .map(keyset_order_fingerprint)
+            .unwrap_or_default(),
+    );
+    let changed_started_signal = entity_meta.changed_started;
     let subscription_key_method = quote! {
         #[doc(hidden)]
         pub const __GOM_CHANGED_ROOT_NAME: &'static str = #subscription_name;
+
+        #[doc(hidden)]
+        pub const __GOM_CHANGED_STARTED_SIGNAL: bool = #changed_started_signal;
+
+        #[doc(hidden)]
+        pub const __GOM_INTERPRETATION_SOURCE: &'static str = #interpretation_source;
 
         #[doc(hidden)]
         #subscription_key_visibility fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
@@ -4147,6 +4167,122 @@ fn generate_graphql_operations_unfiltered(
     let update_input_str = format!("Update{}Input", struct_name);
     let result_type_str = format!("{}Result", struct_name);
     let changed_event_str = format!("{}ChangedEvent", struct_name);
+    // Opt-in started signal (#341). The root gains `Started: Boolean` and,
+    // when a subscriber passes true, sends one frame with `Started: true` once
+    // the stream is authorized and its event receiver is subscribed. The
+    // frame type keeps the event's GraphQL name; only the fields a started
+    // frame cannot fill (`Action`, `ChangeKind`, `Id`, `Key`) become nullable.
+    // The internal event DTO and broadcast channel are unchanged.
+    let changed_started = entity_meta.changed_started;
+    let changed_frame =
+        syn::Ident::new(&format!("{}ChangedFrame", struct_name), struct_name.span());
+    let changed_payload_type = if changed_started {
+        quote! { #changed_frame }
+    } else {
+        quote! { #changed_event }
+    };
+    let subscription_started_arg_name = apply_graphql_case("started", argument_case);
+    let subscription_started_arg = if changed_started {
+        quote! {
+            #[graphql(name = #subscription_started_arg_name, desc = "Send one frame with Started true once the stream is authorized and listening; every change committed after it is delivered")] started: Option<bool>,
+        }
+    } else {
+        quote! {}
+    };
+    let changed_payload_value = if changed_started {
+        quote! { #changed_frame::from(__gom_event) }
+    } else {
+        quote! { __gom_event }
+    };
+    let prepend_started_frame = if changed_started {
+        quote! {
+            let events = ::graphql_orm::futures::stream::iter(started.unwrap_or(false).then_some(()))
+                .filter_map(move |()| async move {
+                    ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_frame::__gom_started(), ctx)
+                        .await
+                        .map(Ok)
+                })
+                .chain(events);
+        }
+    } else {
+        quote! {}
+    };
+    let changed_frame_object = if changed_started {
+        let frame_key_field = if has_composite_primary_key {
+            quote! { pub key: Option<#key_type>, }
+        } else {
+            quote! {}
+        };
+        let frame_key_from = if has_composite_primary_key {
+            quote! { key: Some(event.key), }
+        } else {
+            quote! {}
+        };
+        let frame_key_started = if has_composite_primary_key {
+            quote! { key: None, }
+        } else {
+            quote! {}
+        };
+        let object = crate::wrapper_object::wrapper_object(quote! {
+            /// Subscription change event for this entity, or the started frame.
+            #[derive(Debug, Clone)]
+            #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+            pub struct #changed_frame {
+                /// True only on the started frame, which carries no change.
+                pub started: bool,
+                pub action: Option<::graphql_orm::graphql::orm::ChangeAction>,
+                #[graphql(name = #change_kind_field_name)]
+                pub change_kind: Option<::graphql_orm::graphql::orm::ChangeKind>,
+                pub id: Option<#subscription_identity_type>,
+                #frame_key_field
+                #[graphql(name = #source_entity_field_name)]
+                pub source_entity: Option<String>,
+                #[graphql(name = #source_id_field_name)]
+                pub source_id: Option<String>,
+                pub path: Vec<String>,
+                #[graphql(name = #entity_result_field_name)]
+                pub entity: Option<#struct_name>,
+            }
+        });
+        quote! {
+            #object
+
+            impl ::std::convert::From<#changed_event> for #changed_frame {
+                fn from(event: #changed_event) -> Self {
+                    Self {
+                        started: false,
+                        action: Some(event.action),
+                        change_kind: Some(event.change_kind),
+                        id: Some(event.id),
+                        #frame_key_from
+                        source_entity: event.source_entity,
+                        source_id: event.source_id,
+                        path: event.path,
+                        entity: event.entity,
+                    }
+                }
+            }
+
+            impl #changed_frame {
+                #[doc(hidden)]
+                fn __gom_started() -> Self {
+                    Self {
+                        started: true,
+                        action: None,
+                        change_kind: None,
+                        id: None,
+                        #frame_key_started
+                        source_entity: None,
+                        source_id: None,
+                        path: Vec::new(),
+                        entity: None,
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
     let has_search = fields
         .iter()
         .filter_map(|f| parse_field_metadata(f).ok())
@@ -5401,7 +5537,7 @@ fn generate_graphql_operations_unfiltered(
         let mut order_tokens = Vec::new();
         let mut cursor_tokens = Vec::new();
         let mut cursor_field_metadata = Vec::new();
-        let mut fingerprint_parts = Vec::new();
+        let fingerprint = keyset_order_fingerprint(parts);
         for (field, ty, column, ascending, nulls_first) in parts {
             let quoted_column = backend_render_identifier_path(backend, column);
             let source = fields
@@ -5435,16 +5571,6 @@ fn generate_graphql_operations_unfiltered(
                 direction
             };
             order_tokens.push(order);
-            fingerprint_parts.push(format!(
-                "{}:{}:{}",
-                column,
-                if *ascending { "asc" } else { "desc" },
-                if *nulls_first {
-                    "nulls_first"
-                } else {
-                    "nulls_last"
-                }
-            ));
             let (inner, optional) = option_inner_type(ty)
                 .map(|inner| (inner, true))
                 .unwrap_or((ty, false));
@@ -5481,7 +5607,6 @@ fn generate_graphql_operations_unfiltered(
                 quote! {{ let value = &entity.#field; #value }}
             });
         }
-        let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
         // Without an orderable field there is no `OrderField` enum to take.
         let runtime_ordered_method = if runtime_ordered_arms.is_empty() {
             quote! {}
@@ -6526,6 +6651,8 @@ fn generate_graphql_operations_unfiltered(
 
             #changed_event_object
 
+            #changed_frame_object
+
             #[derive(Default)]
             pub struct #mutations_struct;
 
@@ -6548,7 +6675,8 @@ fn generate_graphql_operations_unfiltered(
                     #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
                     #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: Option<#key_type>,
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
-                ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
+                #subscription_started_arg
+                ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>>>> {
                     use ::graphql_orm::futures::StreamExt;
                     ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -6601,7 +6729,7 @@ fn generate_graphql_operations_unfiltered(
                                 Ok(count) => count,
                                 Err(error) => return Some(Err(error)),
                             };
-                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
+                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
                                 if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
@@ -6639,7 +6767,7 @@ fn generate_graphql_operations_unfiltered(
                                 };
                                 match authorize_current().await {
                                     Ok(row) => {
-                                        let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_event {
+                                        let __gom_event = #changed_event {
                                             action: event.action,
                                             change_kind: event.change_kind,
                                             id: event.id.clone(),
@@ -6648,7 +6776,8 @@ fn generate_graphql_operations_unfiltered(
                                             source_id: event.source_id.clone(),
                                             path: event.path.clone(),
                                             entity: Some(row),
-                                        }, ctx).await?;
+                                        };
+                                        let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_payload_value, ctx).await?;
                                         // Successful serialization can itself await or revoke authority.
                                         // Recheck the complete current release contract before yielding.
                                         match authorize_current().await {
@@ -6667,6 +6796,7 @@ fn generate_graphql_operations_unfiltered(
                             delivered.map(Ok)
                         }
                     });
+                    #prepend_started_frame
                     Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
                         events, interval, move || {
                             let db = timer_db.clone();
@@ -7961,8 +8091,65 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
 
+    if entity_meta.aggregate_source && !entity_meta.aggregate {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "aggregate_source = true requires aggregate = true",
+        ));
+    }
+    // Opt-in source entity (#372): the aggregate root returns a per-entity row
+    // type whose always-null `SourceEntity` field has the entity as its type,
+    // so a pulled schema names the entity an aggregate reads.
+    let aggregate_row = syn::Ident::new(
+        &format!("{}AggregateResultRow", struct_name),
+        struct_name.span(),
+    );
+    let aggregate_row_str = aggregate_row.to_string();
+    let aggregate_row_type = if entity_meta.aggregate_source {
+        quote! { #aggregate_row }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::GraphqlAggregateResultRow }
+    };
+    let aggregate_rows_value = if entity_meta.aggregate_source {
+        quote! {
+            rows.into_iter()
+                .map(|row| #aggregate_row::from(::graphql_orm::graphql::orm::GraphqlAggregateResultRow::from(row)))
+                .collect()
+        }
+    } else {
+        quote! { rows.into_iter().map(Into::into).collect() }
+    };
+    let aggregate_row_object = if entity_meta.aggregate_source {
+        let object = crate::wrapper_object::wrapper_object(quote! {
+            /// One generated aggregate result group of this entity.
+            #[derive(Clone, Debug)]
+            #[graphql(name = #aggregate_row_str, rename_fields = #field_case_rule)]
+            pub struct #aggregate_row {
+                /// Group keys in requested order.
+                pub groups: Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultValue>,
+                /// Metrics in requested order.
+                pub metrics: Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultValue>,
+                /// Always null. The field's type is the entity this aggregate reads.
+                #[graphql(name = #source_entity_field_name)]
+                pub source_entity: Option<#struct_name>,
+            }
+        });
+        quote! {
+            #object
+
+            impl ::std::convert::From<::graphql_orm::graphql::orm::GraphqlAggregateResultRow> for #aggregate_row {
+                fn from(row: ::graphql_orm::graphql::orm::GraphqlAggregateResultRow) -> Self {
+                    Self { groups: row.groups, metrics: row.metrics, source_entity: None }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
     let aggregate_definitions = if entity_meta.aggregate {
         quote! {
+            #aggregate_row_object
+
             /// One reviewed aggregate expression for this entity.
             #[derive(Clone, Debug, ::graphql_orm::async_graphql::InputObject)]
             #[graphql(rename_fields = #field_case_rule)]
@@ -7987,7 +8174,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #group_by_arg_name, desc = #group_by_arg_description)] group_by: Vec<#aggregate_field>,
                 #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: Vec<#aggregate_metric_input>,
                 #[graphql(name = #group_limit_arg_name, desc = #group_limit_arg_description)] group_limit: i32,
-            ) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow>> {
+            ) -> ::graphql_orm::async_graphql::Result<Vec<#aggregate_row_type>> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #aggregate_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -8027,7 +8214,7 @@ fn generate_graphql_operations_unfiltered(
                 let rows = query.fetch_with_graphql_context(ctx).await.map_err(
                     ::graphql_orm::graphql::errors::graphql_error_from_sqlx
                 )?;
-                Ok(rows.into_iter().map(Into::into).collect())
+                Ok(#aggregate_rows_value)
             }
         }
     } else {
@@ -8150,7 +8337,7 @@ fn generate_graphql_operations_unfiltered(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Aggregate },
                 &aggregate_query_name,
                 &aggregate_operation_description,
-                quote! { Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow> },
+                quote! { Vec<#aggregate_row_type> },
                 &aggregate_operation_authorization,
             ),
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Aggregate },
@@ -8221,7 +8408,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Subscription },
             &subscription_name,
             &subscription_operation_description,
-            quote! { #changed_event },
+            quote! { #changed_payload_type },
             &subscription_operation_authorization,
         )
     };
@@ -8532,7 +8719,8 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
                 #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: Option<#key_type>,
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
-            ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
+                #subscription_started_arg
+            ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>>>> {
                 use ::graphql_orm::futures::StreamExt;
                     ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -8586,7 +8774,7 @@ fn generate_graphql_operations_unfiltered(
                                 Ok(count) => count,
                                 Err(error) => return Some(Err(error)),
                             };
-                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
+                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
                                 if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
@@ -8624,7 +8812,7 @@ fn generate_graphql_operations_unfiltered(
                                 };
                                 match authorize_current().await {
                                     Ok(row) => {
-                                        let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_event {
+                                        let __gom_event = #changed_event {
                                             action: event.action,
                                             change_kind: event.change_kind,
                                             id: event.id.clone(),
@@ -8633,7 +8821,8 @@ fn generate_graphql_operations_unfiltered(
                                             source_id: event.source_id.clone(),
                                             path: event.path.clone(),
                                             entity: Some(row),
-                                        }, ctx).await?;
+                                        };
+                                        let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_payload_value, ctx).await?;
                                         // Successful serialization can itself await or revoke authority.
                                         // Recheck the complete current release contract before yielding.
                                         match authorize_current().await {
@@ -8652,6 +8841,7 @@ fn generate_graphql_operations_unfiltered(
                             delivered.map(Ok)
                         }
                     });
+                    #prepend_started_frame
                     Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
                         events, interval, move || {
                             let db = timer_db.clone();
@@ -8730,6 +8920,7 @@ fn generate_graphql_operations_unfiltered(
             });
             quote! {
                 #changed_event_object
+                #changed_frame_object
                 #generated_subscription_surface
                 impl #struct_name {
                     #subscription_key_method
@@ -9484,6 +9675,8 @@ fn generate_graphql_operations_unfiltered(
         #upsert_result_definition
 
         #changed_event_object
+
+        #changed_frame_object
 
         #delete_many_result_object
 
@@ -12121,4 +12314,27 @@ mod write_transform_rejection_tests {
             .expect_err("write transforms must not be silently bypassed");
         assert!(error.to_string().contains("transform(write"));
     }
+}
+
+/// The keyset order fingerprint a generated keyset cursor is bound to:
+/// each order column with its direction and null placement, primary-key
+/// suffix included. `KEYSET_FINGERPRINT` and the interpretation fingerprint
+/// (#671) both use it, so they cannot drift apart.
+fn keyset_order_fingerprint(parts: &[(syn::Ident, syn::Type, String, bool, bool)]) -> String {
+    let parts = parts
+        .iter()
+        .map(|(_, _, column, ascending, nulls_first)| {
+            format!(
+                "{}:{}:{}",
+                column,
+                if *ascending { "asc" } else { "desc" },
+                if *nulls_first {
+                    "nulls_first"
+                } else {
+                    "nulls_last"
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("v1:{}", parts.join(","))
 }

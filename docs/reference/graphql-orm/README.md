@@ -3,7 +3,7 @@ title: GraphQL ORM runtime reference index
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -38,6 +38,7 @@ guidance for the core ORM package.
 - [Read projections](read-projections.md)
 - [Binary keys and indexes](binary-keys-and-indexes.md)
 - [Resolver operation metadata](resolver-operation-metadata.md)
+- [Client-facing schema metadata](client-metadata.md) — client metadata export, started signal, aggregate source entity and interpretation fingerprint
 - [Pagination migration](pagination-migration.md)
 - [Typed grouped aggregates](typed-aggregates.md)
 

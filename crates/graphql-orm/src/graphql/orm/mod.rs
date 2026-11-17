@@ -13,6 +13,8 @@ mod backend;
     all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
 ))]
 mod backup;
+mod client_metadata;
+pub use client_metadata::*;
 mod core;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod default_equivalence;

@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.172.0 adds opt-in client-facing metadata: a build-time client
+metadata export (`schema_roots!(client_metadata: true)`) with `Changed` stream
+carried fields, lifetime fields and relationship key mappings, an opt-in
+`Changed` started signal, an opt-in aggregate source entity, and
+`graphql_orm_interpretation_fingerprint`. Defaults are unchanged. See
+[client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md)
+and the [migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
 Version 0.171.0 adds an opt-in client error contract with one code vocabulary
 shared with the router: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an
 unstreamable `Changed` selection

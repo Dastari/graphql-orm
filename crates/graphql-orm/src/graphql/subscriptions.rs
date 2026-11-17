@@ -813,6 +813,35 @@ fn subscription_keys_available<T: Entity, B: OrmBackend>() -> bool {
     })
 }
 
+/// The entity fields a generated `Changed` stream's entity payload may select,
+/// in the entity's public field order, and whether the event's `Id`/`Key` may
+/// be selected. This is exactly what [`validate_subscription_selection`]
+/// admits, so the published list and the subscribe-time check cannot differ.
+pub(crate) fn changed_stream_carried_fields<T: Entity, B: OrmBackend>() -> (Vec<String>, bool) {
+    let identity = subscription_keys_available::<T, B>();
+    let fields = T::graphql_semantic_metadata()
+        .map(|entity| {
+            entity
+                .fields
+                .iter()
+                .filter(|field| field.selectable && field.relationship.is_none())
+                .filter(|field| {
+                    let name = persisted_field_name::<T>(&field.field_name);
+                    if is_node_identity::<T>(name) {
+                        identity
+                    } else {
+                        T::columns().iter().any(|column| column.api_name == name)
+                            && T::subscription_field_policy(name)
+                                .is_some_and(|(_, available, _)| available)
+                    }
+                })
+                .map(|field| field.field_name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    (fields, identity)
+}
+
 /// The persisted field behind a selected name: the fixed record version name
 /// stands for the declared managed version field.
 fn persisted_field_name<T: Entity>(name: &str) -> &str {

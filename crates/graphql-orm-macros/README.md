@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.172.0 accepts the entity options `lifetime(...)`,
+`changed_started` and `aggregate_source`, and the `schema_roots!` option
+`client_metadata`, and emits `graphql_orm_interpretation_fingerprint` from
+every `schema_roots!`. Without them generated output is unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
 Version 0.171.0 accepts `#[graphql_entity(mutation_error_codes)]`, which adds
 a nullable `errorCode` to the entity's generated single-row results and a code
 to its bulk filter refusals, and wraps generated mutation roots so their

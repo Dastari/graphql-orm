@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -561,6 +561,21 @@ Counts and probes are separate statements and can differ under concurrent
 writes according to backend isolation; they always include the same SQL
 visibility restriction. A permission change during one request has the same
 request-local decision boundary as other authorization checks.
+
+Each page of a generated list, keyset connection, scan or search is an
+independent read of the data as it is when that page runs. A row written
+between two page reads can be skipped or repeated, and nothing on a page says
+that the data changed since the previous one. A client that must see each row
+exactly once reads the range again and drops duplicates, or reads inside one
+Rust repository transaction. The ORM deliberately offers no snapshot token
+that pins later pages to the first page's point in time (#673): serving one
+across requests would hold a database transaction open per token (a
+PostgreSQL exported snapshot, an SQLite read transaction that blocks WAL
+checkpoints, or SQL Server snapshot isolation), which exhausts the pool,
+blocks vacuum and checkpoints, does not work across replicas and is a
+denial-of-service surface. A weaker per-page revision value is deferred: it
+needs a per-entity revision source that is correct across replicas and does
+not reveal hidden writes.
 
 SQLite, PostgreSQL, and SQL Server use the shared parameterized renderer and
 bounded backend execution. The generated keyset capability currently requires
