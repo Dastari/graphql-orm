@@ -31,7 +31,7 @@ service objects in schema data:
 
 `OrmAiInboxService` is the SQLite/PostgreSQL implementation. A missing inbox
 service fails closed; registration is never inferred from the session service.
-The optional `graphql-case-pascal` feature exposes the coherent
+The optional `GRAPHQL_ORM_AI_CASE=PascalCase` build setting exposes the coherent
 `AiInboxEventPage` and `AiInboxEvents` spellings with PascalCase arguments and
 fields, without lowercase aliases.
 

@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.151.0
+
+GraphQL naming is selected by environment variables (#508). Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#graphql-naming-is-selected-by-environment-variables-not-features-508).
+
+- **Breaking (build configuration):** the `graphql-case-pascal` feature is removed. The new build script gives the AI types the coherent PascalCase contract when `GRAPHQL_ORM_AI_CASE=PascalCase`, and refuses the build unless `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` are `PascalCase` too, which the feature used to force. Unset or `camelCase` keeps camelCase AI names, as before without the feature. No GraphQL SDL, persistent schema or data migration change.
+
 ## Unreleased - 0.150.0
 
 Merges AI 0.147.0 from main (lease grace, provider stops, stored-response ledger) into the breaking batch. See the [migration guide](MIGRATION.md#01490-to-01500-schema-module-0830-stored-response-candidate-paging-and-index-replacement-documentation).

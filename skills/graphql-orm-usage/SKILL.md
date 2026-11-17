@@ -39,7 +39,7 @@ For an entity `Order` with `plural = "Orders"`, in the default naming:
 | Subscription | `orderChanged` |
 | Rust | `Order::insert`, `update_by_id`, `delete_by_id`, `find_many`, `count` and more, plus `CreateOrderInput`, `UpdateOrderInput` and `OrderWhereInput` |
 
-The `resolver-case-*`, `argument-case-*` and `field-case-*` features change these names. Check your
+The `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` build environment variables change these names. Check your
 own SDL with `schema.sdl()`.
 
 ## Decide in this order
@@ -518,7 +518,9 @@ for the snapshot scope and validation contract.
   split multi-root operations or expect `subscription_root_limit_exceeded` before sources open.
   Generated builders install admission. Hand-built schemas must install
   `GeneratedSubscriptionAdmission(vec!["recordChanged"])` with every actual Changed field name;
-  missing or misconfigured admission refuses with `SUBSCRIPTION_ADMISSION_REQUIRED`.
+  missing or misconfigured admission refuses with `SUBSCRIPTION_ADMISSION_REQUIRED`. They must
+  also install `graphql_orm::graphql::input_validation::GeneratedInputValidation`: without it every
+  generated resolver that takes an input object refuses with `INPUT_VALIDATION_REQUIRED`.
 - **Set `propagate_change = "up"`** on relations whose parent views show child state, rather than
   computing parent invalidations in hooks or keeping dependency tables in the frontend. The parent's
   stream gets a `PROPAGATED` event with `sourceEntity`, `sourceId` and `path`, limited to 16 hops and

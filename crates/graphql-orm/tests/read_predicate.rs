@@ -215,8 +215,9 @@ async fn negation_preserves_null_and_relation_truth_tables() {
     let rows = query.fetch_all(&db).await.unwrap();
     assert_eq!(rows.iter().map(|r| r.rank).collect::<Vec<_>>(), vec![3]);
     assert_eq!(query.count(&db).await.unwrap(), 1);
-    // A relation from secret to rank: NULL has no related row, 1 is matching,
-    // 2 exists but does not match. Absent OR matching must admit only 1 and 2.
+    // A relation from secret to rank: NULL is UNKNOWN (#770), 1 is matching,
+    // 2 exists but does not match. Absent OR matching admits only 2: the NULL
+    // key stays UNKNOWN on both sides of the OR.
     let exists = || {
         ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
             &[("secret", "rank")],
@@ -241,8 +242,8 @@ async fn negation_preserves_null_and_relation_truth_tables() {
         .map(|r| r.rank)
         .collect::<Vec<_>>();
     ids.sort();
-    assert_eq!(ids, vec![1, 2]);
-    assert_eq!(query.count(&db).await.unwrap(), 2);
+    assert_eq!(ids, vec![2]);
+    assert_eq!(query.count(&db).await.unwrap(), 1);
     // The related row for source 2 has a NULL secret: it must not match.
     let nullable_match =
         ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
@@ -261,7 +262,7 @@ async fn negation_preserves_null_and_relation_truth_tables() {
         .map(|r| r.rank)
         .collect::<Vec<_>>();
     ids.sort();
-    assert_eq!(ids, vec![1, 3]);
+    assert_eq!(ids, vec![3]);
     db.set_row_policy(PredicatePolicy(allowed));
     let page = EntityQuery::<PredicateRecord>::new()
         .fetch_authorized_keyset(
@@ -276,15 +277,85 @@ async fn negation_preserves_null_and_relation_truth_tables() {
         )
         .await
         .unwrap();
-    assert_eq!(page.edges[0].node.rank, 1);
-    assert_eq!(page.page_info.total_count, Some(2));
-    assert!(page.page_info.has_next_page);
+    assert_eq!(page.edges[0].node.rank, 2);
+    assert_eq!(page.page_info.total_count, Some(1));
+    assert!(!page.page_info.has_next_page);
     let groups = PredicateRecord::aggregate(&db)
         .count_rows()
         .unwrap()
         .fetch()
         .await
         .unwrap();
-    assert_eq!(groups[0].metrics[0].value, AggregateValue::Count(2));
+    assert_eq!(groups[0].metrics[0].value, AggregateValue::Count(1));
+    owner.cleanup().unwrap();
+}
+
+/// `related(P)` is three-valued (#770): UNKNOWN when a source key is NULL or
+/// when no related row has `P` TRUE but one has it UNKNOWN. Positive results
+/// are unchanged, and the negation never admits a row on either UNKNOWN.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+async fn related_negation_fails_closed_on_null_keys_and_unknown_targets() {
+    let (db, mut owner) = fixture().await.unwrap();
+    let id_type = match DefaultBackend::DIALECT {
+        DatabaseBackend::Sqlite => "TEXT",
+        DatabaseBackend::Postgres => "UUID",
+        DatabaseBackend::Mssql => "UNIQUEIDENTIFIER",
+        other => panic!("unsupported test backend: {other:?}"),
+    };
+    execute(&db, &format!("CREATE TABLE predicate_records (id {id_type} PRIMARY KEY, rank BIGINT NOT NULL, secret BIGINT NULL, label VARCHAR(40) NOT NULL)")).await.unwrap();
+    // secret -> rank. Rank 1 has a NULL key. Rank 2 points at rank 1, whose
+    // own secret is NULL. Rank 3 points at rank 2 (secret 1). Rank 4 points
+    // at a rank with no row.
+    execute(&db, "INSERT INTO predicate_records VALUES ('00000000-0000-0000-0000-000000000001', 1, NULL, 'null'), ('00000000-0000-0000-0000-000000000002', 2, 1, 'unknown'), ('00000000-0000-0000-0000-000000000003', 3, 2, 'match'), ('00000000-0000-0000-0000-000000000004', 4, 9, 'absent')").await.unwrap();
+    let related = || {
+        ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+            &[("secret", "rank")],
+            column("secret", 1).unwrap(),
+        )
+        .unwrap()
+    };
+    let ranks = |predicate: ReadPredicate| {
+        let db = db.clone();
+        async move {
+            let query = EntityQuery::<PredicateRecord>::new()
+                .with_read_visibility(&ReadVisibility::Complete(predicate))
+                .unwrap();
+            let mut ranks = query
+                .fetch_all(&db)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.rank)
+                .collect::<Vec<_>>();
+            ranks.sort();
+            assert_eq!(query.count(&db).await.unwrap(), ranks.len() as i64);
+            ranks
+        }
+    };
+    // Positive: only the row whose related row has secret = 1 TRUE.
+    assert_eq!(ranks(related()).await, vec![3]);
+    // Negation: the NULL key (1) and the UNKNOWN related value (2) stay
+    // UNKNOWN and are not admitted; the absent relation (4) is FALSE, so its
+    // negation admits it.
+    assert_eq!(ranks(related().not().unwrap()).await, vec![4]);
+    // Double negation is the identity.
+    assert_eq!(
+        ranks(related().not().unwrap().not().unwrap()).await,
+        vec![3]
+    );
+    // Rank 3's related row (rank 2, secret 1) has `secret = 2` FALSE, so the
+    // negation admits it. Rank 2's related row (rank 1, secret NULL) has it
+    // UNKNOWN, so the negation does not.
+    let other = ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+        &[("secret", "rank")],
+        column("secret", 2).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ranks(other.clone()).await, Vec::<i64>::new());
+    assert_eq!(ranks(other.not().unwrap()).await, vec![3, 4]);
     owner.cleanup().unwrap();
 }

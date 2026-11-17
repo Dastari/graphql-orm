@@ -408,10 +408,10 @@ mod tests {
     fn drift_scanners_read_every_declaration_form() {
         let source = r#"
             #[cfg_attr(
-                feature = "graphql-case-pascal",
+                graphql_case_pascal,
                 Object(rename_fields = "PascalCase")
             )]
-            #[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+            #[cfg_attr(not(graphql_case_pascal), Object)]
             impl AiFirstRoot {}
             #[async_graphql::Subscription]
             impl<T: Send> AiSecondQuery<T> {}

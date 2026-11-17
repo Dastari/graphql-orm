@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.150.0 to 0.151.0: naming by environment variable
+
+**Action needed** only if you enabled `graphql-case-pascal`. Remove the
+feature and set `GRAPHQL_ORM_AI_CASE=PascalCase` together with
+`GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+`GRAPHQL_ORM_FIELD_CASE` set to `PascalCase`, usually in the host workspace's
+`.cargo/config.toml` `[env]`. The names are unchanged. See the root
+[migration guide](../../MIGRATION.md#graphql-naming-is-selected-by-environment-variables-not-features-508).
+
 ## 0.149.0 to 0.150.0: schema module 0.83.0, stored-response candidate paging and index-replacement documentation
 
 **Action needed:** apply AI schema module `0.83.0`.

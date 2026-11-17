@@ -435,10 +435,16 @@ check covers field arguments; directive arguments (`@include`, `@skip` and
 custom directives) are left to async-graphql. Runtime GraphQL schemas use the
 same checker.
 
-A schema built by hand from generated roots does not get this check unless it
-installs the extension:
+A schema built by hand from generated roots must install the extension:
 `Schema::build(..).extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`.
-Without it such a schema keeps async-graphql's behaviour described above.
+The extension sets a private request mark, and every generated resolver that
+takes an input object (lists, keyset and scan pages, search, aggregates,
+`Changed` subscriptions, create, upsert, update, bulk update and delete, and
+to-many relation fields) refuses with `INPUT_VALIDATION_REQUIRED` before
+authorization or any database work when the mark is missing, the way
+[`GeneratedSubscriptionAdmission`](#subscription-release-authorization) fails closed.
+Resolvers with only scalar arguments, such as single reads and delete by id,
+do not need it (#753).
 
 ## Relation target auth mode and operation scopes
 
@@ -1011,7 +1017,7 @@ Use `#[relation(target = "Link", from = "id", to = "parent_id", multiple, filter
 to expose the relation name in the source's generated `WhereInput`. For example,
 `where: {links: [{targetId: {inList: ["x", "y"]}}]}` matches parents with any authorized
 matching link. The member is the relation field's GraphQL name, so a relation called `linked_to`
-is `LinkedTo` under `field-case-pascal` or `rename_fields = "PascalCase"`. The filter members of
+is `LinkedTo` under `GRAPHQL_ORM_FIELD_CASE=PascalCase` or `rename_fields = "PascalCase"`. The filter members of
 one alternative apply to one link row: `{TargetKind: {eq: "person"}, TargetId: {inList: ["a"]}}`
 matches a parent with a person link `a`, not a parent with a person link and a device `a`.
 Omitting the member applies no filter. An empty list matches no parents. Each alternative is a typed target

@@ -8307,12 +8307,11 @@ pub(crate) mod tests {
             .map(|argument| format!("{}: {}", argument.graphql_name(), argument.graphql_type()))
             .collect::<Vec<_>>()
             .join(", ");
-        let (page_argument, page_first, page_info, total_count) =
-            if cfg!(feature = "graphql-case-pascal") {
-                ("Page", "First", "PageInfo", "TotalCount")
-            } else {
-                ("page", "first", "pageInfo", "totalCount")
-            };
+        let (page_argument, page_first, page_info, total_count) = if cfg!(graphql_case_pascal) {
+            ("Page", "First", "PageInfo", "TotalCount")
+        } else {
+            ("page", "first", "pageInfo", "totalCount")
+        };
         let sdl = format!(
             r#"
             schema {{ query: Query }}

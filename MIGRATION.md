@@ -24,6 +24,120 @@ assigns the final version numbers. A version named in an entry below is the
 integration placeholder its change was written against, not a published
 release.
 
+### GraphQL naming is selected by environment variables, not features (#508)
+
+**Action needed** only for builds that enable a `resolver-case-*`,
+`argument-case-*` or `field-case-*` feature of `graphql-orm` or
+`graphql-orm-macros`, or the `graphql-case-pascal` feature of
+`graphql-orm-ai`. ORM/macros 0.172.0 and AI 0.151.0 (placeholders). No SDL,
+persistent schema or data migration: the same settings produce the same names.
+
+The 15 mutually exclusive naming features are removed, because Cargo features
+must be additive: two dependants that enabled different case features failed
+to compile. The build scripts of `graphql-orm` and `graphql-orm-macros` read
+one value per group instead:
+
+| Removed feature | Set instead |
+| --- | --- |
+| `resolver-case-pascal`, `-snake`, `-screaming-snake`, `-lower`, `-upper` | `GRAPHQL_ORM_RESOLVER_CASE` = `PascalCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `lowercase`, `UPPERCASE` |
+| `argument-case-*` (same five) | `GRAPHQL_ORM_ARGUMENT_CASE` (same values) |
+| `field-case-*` (same five) | `GRAPHQL_ORM_FIELD_CASE` (same values) |
+| `graphql-orm-ai/graphql-case-pascal` | `GRAPHQL_ORM_AI_CASE=PascalCase` plus all three ORM variables `PascalCase` |
+
+1. Remove the case features from every `Cargo.toml` that enables them. Cargo
+   refuses an unknown feature, so a missed one fails the build loudly.
+2. Set the variables once for the whole build, usually in the host
+   workspace's `.cargo/config.toml`:
+
+   ```toml
+   [env]
+   GRAPHQL_ORM_RESOLVER_CASE = "PascalCase"
+   GRAPHQL_ORM_ARGUMENT_CASE = "PascalCase"
+   GRAPHQL_ORM_FIELD_CASE = "PascalCase"
+   # Only if graphql-orm-ai enabled graphql-case-pascal:
+   GRAPHQL_ORM_AI_CASE = "PascalCase"
+   ```
+
+   Unset or empty means `camelCase`, the old default. An unknown value fails
+   the build. Set them in CI and in any tool that builds the crate outside
+   the workspace (an IDE, a container build) too, or those builds use
+   camelCase.
+3. Code that tested the features with `cfg(feature = "field-case-pascal")`
+   can only see its own crate's features; use the generated GraphQL names or
+   the SDL instead. Inside graphql-orm's own tests the build script sets
+   `cfg(graphql_orm_field_case = "pascal")` (and `resolver`/`argument`), with
+   values `camel`, `pascal`, `snake`, `screaming_snake`, `lower` and `upper`.
+
+`graphql-orm-ai` keeps its camelCase types unless `GRAPHQL_ORM_AI_CASE` is
+`PascalCase`, exactly as before when its feature was off, so an ORM-only
+PascalCase build keeps camelCase AI names.
+
+The trybuild compile contracts of `graphql-orm` now run in one test binary,
+`compile_ui`; run one with `cargo test -p graphql-orm --test compile_ui
+<module>::` (the module is the old binary's name, for example
+`dependent_delete_ui`). See
+[naming configuration](docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
+
+### Hand-built schemas must install `GeneratedInputValidation` (#753)
+
+**Action needed** only for hosts that build an `async_graphql::Schema` by hand
+from generated roots (`QueryRoot`, `MutationRoot`, `SubscriptionRoot` or an
+entity's generated query, mutation or subscription objects) instead of a
+generated `schema_builder`. ORM/macros 0.172.0 (placeholder). No SDL,
+persistent schema or data migration.
+
+Generated resolvers that take an input object (lists, keyset and scan pages,
+search, aggregates, `Changed` subscriptions, create, upsert, update, bulk
+update and delete, and to-many relation fields) now refuse with
+`INPUT_VALIDATION_REQUIRED` before authorization or any database work when the
+schema does not install `GeneratedInputValidation`, the same way
+`GeneratedSubscriptionAdmission` fails closed. Without the extension, a scalar,
+list or enum sent for an input object passed async-graphql's validation and
+failed at the field, uncoded, after earlier root fields of the operation may
+already have written. Resolvers with only scalar arguments (single reads,
+delete by id) are unchanged.
+
+Add one line to each hand-built schema:
+
+```rust
+Schema::build(QueryRoot::default(), MutationRoot::default(), SubscriptionRoot::default())
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+    // ... the rest of your builder
+```
+
+Generated `schema_builder`, `schema_builder_with_limits` and
+`try_schema_builder_with_limits` already install it. See
+[input object values](docs/reference/graphql-orm/entities-and-relations.md#input-object-values).
+
+### `ReadPredicate::related` is three-valued; its negation fails closed (#770)
+
+**Action needed** only for row policies that negate
+`ReadPredicate::related(..)`, directly or inside an `and`/`or` tree, for
+example `related(keys, p).not()?`. ORM/macros 0.172.0 (placeholder). No SDL,
+persistent schema or data migration.
+
+`related(keys, target)` now renders as `(CASE WHEN <a source key IS NULL>
+THEN NULL WHEN EXISTS (<related rows where target>) THEN 1 WHEN EXISTS
+(<related rows where target is not FALSE>) THEN NULL ELSE 0 END) = 1` on
+SQLite, PostgreSQL and SQL Server, instead of a plain `EXISTS`. For each
+source row it is UNKNOWN when a key column is NULL, TRUE when a related row
+has `target` TRUE, UNKNOWN when none does but one has `target` UNKNOWN, and
+FALSE otherwise.
+
+- Positive uses admit exactly the same rows as before, because only TRUE
+  admits a row.
+- A negation no longer admits a row whose relation key is NULL, or whose
+  related rows only leave `target` UNKNOWN (for example `secret = 1` on a
+  NULL `secret`). It used to render as `NOT EXISTS` and admit both, so such a
+  policy can now return fewer rows. A policy that means to admit NULL keys
+  must say so with an explicit `or` over a NULL test of the key, for example
+  a generated `isNull: true` filter on it through `ReadPredicate::from_filter`.
+- Each `related` predicate binds the target's values twice, in order, so a
+  rendered clause has twice the target's bind parameters.
+
+Review each negated relation policy, and add the explicit NULL alternative
+where rows without a relation key should stay visible.
+
 ### Router 0.19.0: opt-in refusal outcome (#764)
 
 **No action.** `graphql-orm-router` only. The new `refusalOutcome` setting

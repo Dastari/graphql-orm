@@ -4793,6 +4793,7 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #upsert_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -5988,6 +5989,7 @@ fn generate_graphql_operations_unfiltered(
                 #runtime_keyset_argument
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #keyset_list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -6013,6 +6015,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
             ) -> ::graphql_orm::async_graphql::Result<#scan_connection_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #keyset_list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -6077,6 +6080,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #search_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -6413,6 +6417,7 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -6618,6 +6623,7 @@ fn generate_graphql_operations_unfiltered(
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                     use ::graphql_orm::futures::StreamExt;
                     ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
+                    ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                     #subscription_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -8058,6 +8064,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: Vec<#aggregate_metric_input>,
                 #[graphql(name = #group_limit_arg_name, desc = #group_limit_arg_description)] group_limit: i32,
             ) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow>> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #aggregate_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -8605,6 +8612,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                 use ::graphql_orm::futures::StreamExt;
                     ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #subscription_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -8896,6 +8904,7 @@ fn generate_graphql_operations_unfiltered(
                     #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#order_by_input>>,
                     #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
+                    ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -9103,6 +9112,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
                 #expected_version_param
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
@@ -9307,6 +9317,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#update_many_result_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -9588,6 +9599,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#order_by_input>>,
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #list_scope_enforcement
@@ -9902,6 +9914,7 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
+                ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery};
 
                 #reject_unplanned_delete_effects

@@ -375,6 +375,7 @@ async fn schema() -> async_graphql::Schema<QueryRoot, MutationRoot, Subscription
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db)
     .data(owned)
     .data(AuthSubject::builder("reader").build())
@@ -630,6 +631,7 @@ async fn projection_queries_bind_prepared_count_order_values() {
         async_graphql::EmptyMutation,
         async_graphql::EmptySubscription,
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db)
     .data(owned)
     .data(AuthSubject::builder("reader").build())

@@ -11,7 +11,7 @@ use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
 
 fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "field-case-pascal") {
+    if cfg!(graphql_orm_field_case = "pascal") {
         pascal
     } else {
         camel
@@ -19,7 +19,7 @@ fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
 }
 
 fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "argument-case-pascal") {
+    if cfg!(graphql_orm_argument_case = "pascal") {
         pascal
     } else {
         camel

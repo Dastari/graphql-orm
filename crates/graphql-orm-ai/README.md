@@ -641,7 +641,6 @@ See the [session reliability adoption contract](docs/session-reliability-adoptio
 | `provider-*` | No | Opt-in OpenAI, Anthropic, xAI, Ollama, or managed OpenAI-compatible adapters. |
 | `local-harness` | No | Installed sandboxed JSON-lines v2 driver; not a generic subprocess launcher. |
 | `provider-codex-app-server` | No | Experimental local adapter; deployment owns sandboxing, credentials, and network policy. |
-| `graphql-case-pascal` | No | Changes the public GraphQL naming contract. |
 
 Provider features do not configure a model, authorize egress, or disclose
 data. Tool discovery and registration are not authorization. Every provider

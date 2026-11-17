@@ -771,9 +771,11 @@ must select an explicit backend when Cargo feature unification enables more
 than one. `mysql` exists as a macro feature but the runtime package does not
 offer a MySQL backend in this release; do not use it as application support.
 
-The independent `resolver-case-*`, `argument-case-*`, and `field-case-*`
-groups each permit at most one feature: `pascal`, `snake`,
-`screaming-snake`, `lower`, or `upper`.
+Generated GraphQL naming is selected per build by the
+`GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+`GRAPHQL_ORM_FIELD_CASE` environment variables, which replaced the
+`*-case-*` features. See
+[naming configuration](../../docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
 
 ## Minimum use
 

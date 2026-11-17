@@ -753,6 +753,7 @@ fn unbatched_schema(db: &Database) -> AppSchema {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
     .finish()
 }

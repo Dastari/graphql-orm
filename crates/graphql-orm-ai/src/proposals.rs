@@ -239,7 +239,7 @@ impl AiProposalCatalog {
 /// Human review state for a proposal/item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Enum)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiProposalReviewDecision {
     /// Accepted as proposed.
     Accept,
@@ -308,7 +308,7 @@ pub trait AiProposalOutcomeRecorder: Send + Sync {
 
 /// Bounded proposal shell and authorized structured content.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiProposalView {
     /// Proposal identifier.
     pub id: Uuid,
@@ -352,7 +352,7 @@ pub struct AiProposalView {
 
 /// Proposal connection edge.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiProposalEdge {
     /// Proposal node.
     pub node: AiProposalView,
@@ -362,7 +362,7 @@ pub struct AiProposalEdge {
 
 /// Bounded proposal connection.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiProposalConnection {
     /// Bounded edges.
     pub edges: Vec<AiProposalEdge>,
@@ -372,7 +372,7 @@ pub struct AiProposalConnection {
 
 /// Whole-proposal review input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct ReviewAiProposalInput {
     /// Proposal identifier.
     pub id: Uuid,
@@ -420,10 +420,10 @@ pub trait AiProposalService: AiProposalOutcomeRecorder + Send + Sync {
 pub struct AiProposalQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiProposalQueryRoot {
     /// Returns a bounded proposal window for one visible session.
     async fn ai_proposals(
@@ -459,10 +459,10 @@ impl AiProposalQueryRoot {
 pub struct AiProposalMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiProposalMutationRoot {
     /// Reviews staged AI-owned data; it never performs the domain mutation.
     async fn review_ai_proposal(

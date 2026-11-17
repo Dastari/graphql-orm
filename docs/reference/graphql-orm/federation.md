@@ -105,8 +105,9 @@ therefore generates one such resolver per declared key on `{Entity}Queries`,
 and renames each argument to the entity's exported field name.
 
 That rename is load-bearing. The ORM configures argument case
-(`argument-case-*`) independently of field case (`field-case-*`). Under
-`field-case-pascal` with `argument-case-snake` the generated single read takes
+(`GRAPHQL_ORM_ARGUMENT_CASE`) independently of field case
+(`GRAPHQL_ORM_FIELD_CASE`). Under `PascalCase` fields with `snake_case`
+arguments the generated single read takes
 `zone_id` while the entity exports `ZoneId`; a resolver that accepted the
 default argument name would export `@key(fields: "zone_id slot")`, naming
 fields that do not exist.

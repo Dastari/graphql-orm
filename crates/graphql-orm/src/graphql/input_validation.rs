@@ -521,8 +521,10 @@ fn document_nodes(document: &ExecutableDocument) -> usize {
 /// either mode.
 ///
 /// Generated `schema_builder` helpers install this automatically. A schema
-/// built by hand from generated roots does not get the check unless it
-/// installs this extension.
+/// built by hand from generated roots must install it too: the extension
+/// installs a private request mark, and generated resolvers that take an input
+/// object refuse with `INPUT_VALIDATION_REQUIRED` when the mark is missing,
+/// before authorization or any database work.
 ///
 /// ```
 /// use graphql_orm::graphql::input_validation::GeneratedInputValidation;
@@ -541,6 +543,35 @@ impl ExtensionFactory for GeneratedInputValidation {
     }
 }
 
+/// The private request mark [`GeneratedInputValidation`] installs. Request
+/// data is server-side, so a client cannot supply it.
+struct InputValidationMark;
+
+/// The stable code of a generated resolver refused because its schema does not
+/// install [`GeneratedInputValidation`].
+pub const INPUT_VALIDATION_REQUIRED: &str = "INPUT_VALIDATION_REQUIRED";
+
+/// Require [`GeneratedInputValidation`]'s private request mark before any
+/// generated resolver that takes an input object does work.
+///
+/// A schema built by hand from generated roots without the extension would let
+/// a scalar, list or enum reach an input-object argument and fail at the field
+/// with an uncoded message, after earlier root fields may already have run.
+/// Without the mark this fails closed with `INPUT_VALIDATION_REQUIRED`.
+#[doc(hidden)]
+pub fn require_generated_input_validation(
+    ctx: &async_graphql::Context<'_>,
+) -> async_graphql::Result<()> {
+    if ctx.data_opt::<InputValidationMark>().is_some() {
+        return Ok(());
+    }
+    use async_graphql::ErrorExtensions;
+    Err(async_graphql::Error::new(
+        "Generated resolvers that take input objects require GeneratedInputValidation",
+    )
+    .extend_with(|_, extensions| extensions.set("code", INPUT_VALIDATION_REQUIRED)))
+}
+
 struct InputValidation {
     selected: Mutex<Option<String>>,
     parsed: Mutex<Option<(ExecutableDocument, Variables)>>,
@@ -554,7 +585,7 @@ impl Extension for InputValidation {
         request: async_graphql::Request,
         next: NextPrepareRequest<'_>,
     ) -> async_graphql::ServerResult<async_graphql::Request> {
-        let request = next.run(ctx, request).await?;
+        let request = next.run(ctx, request.data(InputValidationMark)).await?;
         *self.selected.lock().map_err(|_| invalid_input_error())? = request.operation_name.clone();
         Ok(request)
     }

@@ -67,21 +67,43 @@ cargo tree -p graphql-orm --locked --no-default-features --features mssql
 cargo tree --duplicates --workspace --locked
 ```
 
-## GraphQL case features
+## GraphQL naming lanes
+
+Generated names follow the `GRAPHQL_ORM_RESOLVER_CASE`,
+`GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` build variables
+([naming configuration](../reference/graphql-orm/macros-and-attributes.md#naming-configuration)).
+The build scripts turn them into `cfg(graphql_orm_resolver_case = "...")`,
+`cfg(graphql_orm_argument_case = "...")` and `cfg(graphql_orm_field_case =
+"...")`, with the values `camel`, `pascal`, `snake`, `screaming_snake`,
+`lower` and `upper`, which tests can use too.
 
 Tests that build GraphQL documents spell names through
 `crates/graphql-orm/tests/support/graphql_case.rs`. Its `resolver_name`,
 `argument_name` and `field_name` take the default camelCase spelling, and apply
-the same `convert_case` conversion the derive macros use for the enabled
-`resolver-case-*`, `argument-case-*` or `field-case-*` feature. Fixed wire names
-such as `NodeId` and `RecordVersion` are written literally. The CI
-`orm-case-features` job runs `managed_version`, `keyed_changed_subscriptions`,
-`node_ids`, `grouped_aggregates` and `record_version_ui` with all three
-snake-case features:
+the same `convert_case` conversion the derive macros use for the selected
+case. Fixed wire names such as `NodeId` and `RecordVersion` are written
+literally. The CI `orm-case-features` job runs `managed_version`,
+`keyed_changed_subscriptions`, `node_ids`, `grouped_aggregates` and the
+`record_version_ui` compile contract with all three variables set to
+`snake_case`:
 
 ```sh
-cargo test -p graphql-orm --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui
+export GRAPHQL_ORM_RESOLVER_CASE=snake_case GRAPHQL_ORM_ARGUMENT_CASE=snake_case GRAPHQL_ORM_FIELD_CASE=snake_case
+cargo test -p graphql-orm --no-default-features --features sqlite --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates
+cargo test -p graphql-orm --no-default-features --features sqlite --test compile_ui record_version_ui
 ```
+
+A different value rebuilds graphql-orm and everything above it in the same
+target directory. Use a separate `CARGO_TARGET_DIR` per naming lane when you
+switch often.
+
+## Compile contracts
+
+The trybuild compile-fail and compile-pass contracts run in one test binary,
+`crates/graphql-orm/tests/compile_ui/`, with one module per area (they share
+the `support/ui.rs` lock and ran one at a time before). Select a module with a
+filter, for example
+`cargo test -p graphql-orm --test compile_ui dependent_delete_ui::`.
 
 ## Required authorization and privacy regressions
 

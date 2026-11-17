@@ -90,7 +90,7 @@ The roots expose:
 - `publishAiSkillVersion` / `PublishAiSkillVersion`;
 - `setAiSkillEnabled` / `SetAiSkillEnabled`.
 
-The selected names depend on `graphql-case-pascal`; lowercase aliases are not
+The selected names depend on `GRAPHQL_ORM_AI_CASE`; lowercase aliases are not
 added. Hosts remain responsible for authenticating requests, constructing the
 current `AuthPrincipal`, implementing scope policy, choosing recent-MFA
 requirements, and configuring content protection through their ordinary

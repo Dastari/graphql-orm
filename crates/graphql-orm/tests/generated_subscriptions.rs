@@ -296,6 +296,7 @@ async fn generated_subscriptions_fail_explicitly_when_database_runtime_is_missin
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     .extension(
         graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![

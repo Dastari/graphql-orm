@@ -261,8 +261,9 @@ async fn preloaded_and_loader_relation_failures_are_sanitized()
 -> Result<(), Box<dyn std::error::Error>> {
     let (db, mut owner) = fixture().await?;
     for use_loader in [false, true] {
-        let builder =
-            Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription).data(db.clone());
+        let builder = Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription)
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+            .data(db.clone());
         let schema = if use_loader {
             builder
                 .data(graphql_orm::graphql::loaders::relation_data_loader::<
@@ -399,8 +400,9 @@ async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() 
     }
     for use_loader in [false, true] {
         let db = Database::new(pool.clone());
-        let builder =
-            Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription).data(db.clone());
+        let builder = Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription)
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+            .data(db.clone());
         let schema = if use_loader {
             builder
                 .data(graphql_orm::graphql::loaders::relation_data_loader::<
@@ -465,6 +467,7 @@ async fn generated_descriptions_are_expanded_and_singular() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .finish();
     let sdl = schema.sdl();
     assert!(!sdl.contains('#'), "template residue in SDL: {sdl}");

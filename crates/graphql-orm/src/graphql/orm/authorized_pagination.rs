@@ -87,9 +87,11 @@ impl ReadPredicate {
     }
 
     /// SQL negation: UNKNOWN (NULL) remains UNKNOWN and cannot authorize a row.
-    /// EXISTS relations negate to NOT EXISTS. To allow absent or matching rows,
-    /// compose `exists_any.not()?.or(exists_matching)?`. Empty inner fragments
-    /// are refused rather than interpreted as an authorization grant.
+    /// [`Self::related`] is three-valued too, so its negation never admits a
+    /// row whose relation key is NULL or whose related rows leave the target
+    /// UNKNOWN. To allow absent or matching rows, compose
+    /// `exists_any.not()?.or(exists_matching)?`. Empty inner fragments are
+    /// refused rather than interpreted as an authorization grant.
     #[allow(clippy::should_implement_trait)] // Fallible policy construction.
     pub fn not(self) -> async_graphql::Result<Self> {
         fn supported(expression: &FilterExpression) -> bool {
@@ -134,12 +136,35 @@ impl ReadPredicate {
         })
     }
 
-    /// A parameterized EXISTS join over validated persisted columns. `keys`
-    /// maps source columns to target columns; composite keys are supported.
-    /// Target restrictions come from a typed target predicate. This is an
-    /// explicit equality relation, not a named relation resolver: include any
-    /// discriminator constraints in source/target predicates yourself. Target
-    /// entity/row policies are not implicit grants; the policy owns this join.
+    /// A parameterized relation test over validated persisted columns: "some
+    /// related row matches `target`". `keys` maps source columns to target
+    /// columns; composite keys are supported. Target restrictions come from a
+    /// typed target predicate. This is an explicit equality relation, not a
+    /// named relation resolver: include any discriminator constraints in
+    /// source/target predicates yourself. Target entity/row policies are not
+    /// implicit grants; the policy owns this join.
+    ///
+    /// The result is three-valued, so it composes with [`Self::not`], `and`
+    /// and `or` under the same rule as every other predicate. For each source
+    /// row it is:
+    ///
+    /// - UNKNOWN when any source key column is NULL: the relation cannot be
+    ///   evaluated;
+    /// - TRUE when a related row has `target` TRUE;
+    /// - UNKNOWN when no related row has `target` TRUE but one has it UNKNOWN
+    ///   (it might match);
+    /// - FALSE otherwise, including when there is no related row at all.
+    ///
+    /// Only TRUE admits a row, so the positive form admits exactly the rows a
+    /// plain `EXISTS` would. Its negation is fail-closed: `related(..).not()`
+    /// never admits a row whose key is NULL or whose related rows only leave
+    /// `target` UNKNOWN. To admit rows with a NULL key, add an explicit NULL
+    /// test with `or`.
+    ///
+    /// It renders as `(CASE WHEN <key IS NULL> THEN NULL WHEN EXISTS (<related
+    /// rows where target>) THEN 1 WHEN EXISTS (<related rows where target is
+    /// not FALSE>) THEN NULL ELSE 0 END) = 1` on SQLite, PostgreSQL and SQL
+    /// Server. The target's bind values appear twice, in that order.
     pub fn related<B, S, T>(keys: &[(&str, &str)], target: Self) -> async_graphql::Result<Self>
     where
         B: OrmBackend,
@@ -149,7 +174,9 @@ impl ReadPredicate {
         if keys.is_empty() || target.entity != TypeId::of::<T>() || target.backend != B::DIALECT {
             return Err(invalid());
         }
+        let source_table = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
         let mut joins = Vec::new();
+        let mut null_keys = Vec::new();
         for (source, destination) in keys {
             if !S::columns().iter().any(|c| c.name == *source)
                 || !T::columns().iter().any(|c| c.name == *destination)
@@ -157,29 +184,45 @@ impl ReadPredicate {
                 return Err(invalid());
             }
             joins.push(format!(
-                "__gom_visibility.{} = {}.{}",
+                "__gom_visibility.{} = {source_table}.{}",
                 B::DIALECT.quote_identifier(destination),
-                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
+                B::DIALECT.quote_identifier(source)
+            ));
+            null_keys.push(format!(
+                "{source_table}.{} IS NULL",
                 B::DIALECT.quote_identifier(source)
             ));
         }
-        let mut values = Vec::new();
+        let mut target_values = Vec::new();
         let predicate = render_filter_expression(
             DatabaseBackend::Sqlite,
             &target.expression,
             &mut 1,
-            &mut values,
+            &mut target_values,
         );
-        let clause = format!(
-            "EXISTS (SELECT 1 FROM (SELECT * FROM {} WHERE {}) AS __gom_visibility WHERE {})",
-            B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
-            predicate,
-            joins.join(" AND ")
-        );
+        let target_table = B::DIALECT.render_table_identifier_path(T::TABLE_NAME);
+        let joins = joins.join(" AND ");
+        let exists = |predicate: &str| {
+            format!(
+                "EXISTS (SELECT 1 FROM (SELECT * FROM {target_table} WHERE {predicate}) AS __gom_visibility WHERE {joins})"
+            )
+        };
+        let matching = exists(&predicate);
+        let possible = exists(&format!(
+            "CASE WHEN NOT ({predicate}) THEN 0 ELSE 1 END = 1"
+        ));
+        let mut values = target_values.clone();
+        values.extend(target_values);
         Ok(Self {
             entity: TypeId::of::<S>(),
             backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(clause, values),
+            expression: FilterExpression::trusted_fragment(
+                format!(
+                    "(CASE WHEN {} THEN NULL WHEN {matching} THEN 1 WHEN {possible} THEN NULL ELSE 0 END) = 1",
+                    null_keys.join(" OR ")
+                ),
+                values,
+            ),
         })
     }
 

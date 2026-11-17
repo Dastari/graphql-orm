@@ -22,7 +22,7 @@ use crate::{AiError, AiRunRetryAdmission};
 
 /// Closed owner-authored disposition of one failed run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiRunDisposition {
     /// A new run was authored over the same durable user message.
     Retried,
@@ -51,7 +51,7 @@ impl AiRunDisposition {
 
 /// Exact owner request to author a new run for a failed run's user message.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct RetryAiRunInput {
     /// Owning session.
     pub session_id: Uuid,
@@ -63,7 +63,7 @@ pub struct RetryAiRunInput {
 
 /// Exact owner request to dismiss a failed run without retrying it.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AcknowledgeAiRunFailureInput {
     /// Owning session.
     pub session_id: Uuid,
@@ -75,7 +75,7 @@ pub struct AcknowledgeAiRunFailureInput {
 
 /// Authoritative result of an accepted disposition request.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiRunDispositionView {
     /// Owning session.
     pub session_id: Uuid,
@@ -95,7 +95,7 @@ pub struct AiRunDispositionView {
 
 /// Why a retry request was refused, without disclosing provider detail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiRunRetryRefusal {
     /// The source run is not in a terminal failed state.
     NotFailed,

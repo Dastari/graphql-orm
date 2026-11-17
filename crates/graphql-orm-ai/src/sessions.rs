@@ -18,7 +18,7 @@ use crate::{
 
 /// Scope input for session creation/configuration.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiScopeInput {
     /// Host-defined scope kind.
     pub kind: String,
@@ -40,7 +40,7 @@ impl From<AiScopeInput> for AiScope {
 
 /// Bounded session shell.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionView {
     /// Immutable admitted execution choice; absent for legacy unbound sessions.
     pub execution_selection: Option<crate::AiSessionExecutionSelection>,
@@ -66,7 +66,7 @@ pub struct AiSessionView {
 
 /// Session connection edge.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionEdge {
     /// Session node.
     pub node: AiSessionView,
@@ -76,7 +76,7 @@ pub struct AiSessionEdge {
 
 /// Bounded session connection.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionConnection {
     /// Bounded edges.
     pub edges: Vec<AiSessionEdge>,
@@ -105,7 +105,7 @@ pub enum AiSessionActivityState {
 
 /// Metadata-only activity for one authorized session.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionActivity {
     /// Authorized session identity.
     pub session_id: Uuid,
@@ -121,7 +121,7 @@ pub struct AiSessionActivity {
 
 /// Bounded, current-principal activity snapshot paired with a session-list page.
 #[derive(Clone, Debug, Default, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionActivitySnapshot {
     /// Stable principal-inbox horizon around the metadata reads. Ignore older replay
     /// for this snapshot; later activity events invalidate it rather than replacing
@@ -133,7 +133,7 @@ pub struct AiSessionActivitySnapshot {
 
 /// Message shell; large content remains in separately windowed blocks.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiMessageView {
     /// Message ID.
     pub id: Uuid,
@@ -161,7 +161,7 @@ pub struct AiMessageView {
 
 /// Message connection edge.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiMessageEdge {
     /// Message shell.
     pub node: AiMessageView,
@@ -171,7 +171,7 @@ pub struct AiMessageEdge {
 
 /// Bounded bidirectional message connection.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiMessageConnection {
     /// Bounded edges.
     pub edges: Vec<AiMessageEdge>,
@@ -184,7 +184,7 @@ pub struct AiMessageConnection {
 /// `content` is what the reading principal may see now, including what an
 /// entity reference resolved to for that reader. `Debug` never prints it.
 #[derive(Clone, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiMessageBlockView {
     /// Block ID.
     pub id: Uuid,
@@ -219,7 +219,7 @@ impl std::fmt::Debug for AiMessageBlockView {
 
 /// Durable event view.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionEventView {
     /// Event ID.
     pub id: Uuid,
@@ -239,7 +239,7 @@ pub struct AiSessionEventView {
 
 /// Bounded durable event catch-up page.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionEventPage {
     /// Events after the requested sequence.
     pub events: Vec<AiSessionEventView>,
@@ -253,7 +253,7 @@ pub struct AiSessionEventPage {
 
 /// Safe authoritative run state included in conversation bootstrap.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiConversationRunSummary {
     /// Run identifier.
     pub id: Uuid,
@@ -278,7 +278,7 @@ pub struct AiConversationRunSummary {
 
 /// Safe current tool-call state included in conversation bootstrap.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiConversationToolCallSummary {
     /// Tool-call identifier.
     pub id: Uuid,
@@ -302,7 +302,7 @@ pub struct AiConversationToolCallSummary {
 
 /// Safe provider activity necessary to render an active/recent turn.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiConversationProviderActivitySummary {
     /// Owning run.
     pub run_id: Uuid,
@@ -318,7 +318,7 @@ pub struct AiConversationProviderActivitySummary {
 
 /// One bounded owner-authorized authoritative conversation bootstrap.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiConversationBootstrap {
     /// Current session shell and scope.
     pub session: AiSessionView,
@@ -348,7 +348,7 @@ pub struct AiConversationBootstrap {
 
 /// Session creation input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct CreateAiSessionInput {
     /// Requested immutable choice, admitted by the host resolver.
     pub execution_selection: Option<crate::AiSessionExecutionSelectionInput>,
@@ -360,7 +360,7 @@ pub struct CreateAiSessionInput {
 
 /// Closed, server-controlled source for a session title update.
 #[derive(Clone, Copy, Debug, Enum, PartialEq, Eq)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiSessionTitleActor {
     /// An authenticated owner used the ordinary rename mutation.
     User,
@@ -380,7 +380,7 @@ impl AiSessionTitleActor {
 
 /// Owner-authorized session-title update.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct RenameAiSessionInput {
     /// Session receiving the title.
     pub session_id: Uuid,
@@ -394,7 +394,7 @@ pub struct RenameAiSessionInput {
 
 /// Message submission input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SendAiMessageInput {
     /// Session ID.
     pub session_id: Uuid,
@@ -417,7 +417,7 @@ pub struct SendAiMessageInput {
 
 /// Accepted message/run references.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SendAiMessagePayload {
     /// Persisted user message.
     pub message_id: Uuid,
@@ -574,10 +574,10 @@ pub trait AiSessionService: Send + Sync {
 pub struct AiQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiQueryRoot {
     /// Returns one owner-authorized bounded authoritative bootstrap. Clients
     /// begin durable replay strictly after the returned watermark, drain to
@@ -745,10 +745,10 @@ impl AiQueryRoot {
 pub struct AiMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiMutationRoot {
     /// Requests an owner-authorized durable cancellation for one active run.
     async fn cancel_ai_run(

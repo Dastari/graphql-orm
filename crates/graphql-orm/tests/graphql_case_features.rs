@@ -144,25 +144,25 @@ async fn generated_schema_respects_crate_wide_case_features() {
     assert!(!federation.query_fields().is_empty());
     assert!(!federation.objects.contains_key("QueryRoot"));
 
-    #[cfg(feature = "resolver-case-pascal")]
+    #[cfg(graphql_orm_resolver_case = "pascal")]
     assert!(federation.query_fields().contains("CaseCollections"));
 
     #[cfg(not(any(
-        feature = "resolver-case-pascal",
-        feature = "resolver-case-snake",
-        feature = "resolver-case-screaming-snake",
-        feature = "resolver-case-lower",
-        feature = "resolver-case-upper",
-        feature = "argument-case-pascal",
-        feature = "argument-case-snake",
-        feature = "argument-case-screaming-snake",
-        feature = "argument-case-lower",
-        feature = "argument-case-upper",
-        feature = "field-case-pascal",
-        feature = "field-case-snake",
-        feature = "field-case-screaming-snake",
-        feature = "field-case-lower",
-        feature = "field-case-upper"
+        graphql_orm_resolver_case = "pascal",
+        graphql_orm_resolver_case = "snake",
+        graphql_orm_resolver_case = "screaming_snake",
+        graphql_orm_resolver_case = "lower",
+        graphql_orm_resolver_case = "upper",
+        graphql_orm_argument_case = "pascal",
+        graphql_orm_argument_case = "snake",
+        graphql_orm_argument_case = "screaming_snake",
+        graphql_orm_argument_case = "lower",
+        graphql_orm_argument_case = "upper",
+        graphql_orm_field_case = "pascal",
+        graphql_orm_field_case = "snake",
+        graphql_orm_field_case = "screaming_snake",
+        graphql_orm_field_case = "lower",
+        graphql_orm_field_case = "upper"
     )))]
     {
         assert_has(
@@ -192,9 +192,9 @@ async fn generated_schema_respects_crate_wide_case_features() {
     }
 
     #[cfg(all(
-        feature = "resolver-case-pascal",
-        feature = "argument-case-pascal",
-        feature = "field-case-pascal"
+        graphql_orm_resolver_case = "pascal",
+        graphql_orm_argument_case = "pascal",
+        graphql_orm_field_case = "pascal"
     ))]
     {
         assert_has(
@@ -226,9 +226,9 @@ async fn generated_schema_respects_crate_wide_case_features() {
     }
 
     #[cfg(all(
-        feature = "resolver-case-pascal",
-        feature = "argument-case-pascal",
-        feature = "field-case-snake"
+        graphql_orm_resolver_case = "pascal",
+        graphql_orm_argument_case = "pascal",
+        graphql_orm_field_case = "snake"
     ))]
     {
         assert_has(
@@ -283,40 +283,50 @@ fn column_api_names_follow_the_active_naming_configuration() {
     assert_eq!(override_value.api_name, "OverrideValue");
 
     #[cfg(not(any(
-        feature = "field-case-pascal",
-        feature = "field-case-snake",
-        feature = "field-case-screaming-snake",
-        feature = "field-case-lower",
-        feature = "field-case-upper"
+        graphql_orm_field_case = "pascal",
+        graphql_orm_field_case = "snake",
+        graphql_orm_field_case = "screaming_snake",
+        graphql_orm_field_case = "lower",
+        graphql_orm_field_case = "upper"
     )))]
     {
         // Default camelCase; serde renames are honored when no case feature is active.
         assert_eq!(api("cover_stored_file_id"), "coverStoredFileId");
         assert_eq!(api("serde_named_field"), "SerdeExact");
     }
-    #[cfg(feature = "field-case-pascal")]
+    #[cfg(graphql_orm_field_case = "pascal")]
     {
         assert_eq!(api("cover_stored_file_id"), "CoverStoredFileId");
         assert_eq!(api("serde_named_field"), "SerdeNamedField");
     }
-    #[cfg(feature = "field-case-snake")]
+    #[cfg(graphql_orm_field_case = "snake")]
     {
         assert_eq!(api("cover_stored_file_id"), "cover_stored_file_id");
         assert_eq!(api("serde_named_field"), "serde_named_field");
     }
-    #[cfg(feature = "field-case-screaming-snake")]
+    #[cfg(graphql_orm_field_case = "screaming_snake")]
     {
         assert_eq!(api("cover_stored_file_id"), "COVER_STORED_FILE_ID");
         assert_eq!(api("serde_named_field"), "SERDE_NAMED_FIELD");
     }
-    #[cfg(feature = "field-case-lower")]
+    #[cfg(graphql_orm_field_case = "lower")]
     {
         assert_eq!(api("cover_stored_file_id"), "coverstoredfileid");
         assert_eq!(api("serde_named_field"), "serdenamedfield");
     }
-    #[cfg(feature = "field-case-upper")]
+    #[cfg(graphql_orm_field_case = "upper")]
     {
         assert_eq!(api("cover_stored_file_id"), "COVERSTOREDFILEID");
         assert_eq!(api("serde_named_field"), "SERDENAMEDFIELD");
     }
+}
+
+/// graphql-orm and graphql-orm-macros read the naming variables with the same
+/// build script, so the runtime types and the generated code agree (#508).
+#[test]
+fn naming_build_scripts_are_identical() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let orm = std::fs::read_to_string(root.join("build.rs")).unwrap();
+    let macros = std::fs::read_to_string(root.join("../graphql-orm-macros/build.rs")).unwrap();
+    assert_eq!(orm, macros);
 }

@@ -82,6 +82,7 @@ fn generated_where_can_filter_a_collection() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .finish()
     .sdl();
     let input = sdl
@@ -287,6 +288,7 @@ async fn setup_options(callback: bool, include_denied: bool) -> Schema {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db)
     .data(AuthSubject::builder("reader").build());
     #[cfg(any(feature = "postgres", feature = "mssql"))]
@@ -475,18 +477,30 @@ fn exists_sql_is_quoted_and_parameterized_for_the_selected_backend() {
     let query = EntityQuery::<FilterLink, Backend>::new()
         .with_read_visibility(&ReadVisibility::Complete(predicate))
         .unwrap();
-    assert_eq!(query.values, vec![SqlValue::String(value.into())]);
+    // The three-valued relation (#770) binds the target's values once per
+    // EXISTS: the matching test, then the not-FALSE test.
+    assert_eq!(
+        query.values,
+        vec![
+            SqlValue::String(value.into()),
+            SqlValue::String(value.into())
+        ]
+    );
     let sql = query.where_clauses.join(" AND ");
     assert!(sql.contains("EXISTS (SELECT 1 FROM"), "{sql}");
+    assert!(
+        sql.contains("\"target_id\" IS NULL") || sql.contains("[target_id] IS NULL"),
+        "{sql}"
+    );
     assert!(!sql.contains(value), "{sql}");
     #[cfg(feature = "mssql")]
     assert!(
-        sql.contains("[filter_targets]") && sql.contains("@P1"),
+        sql.contains("[filter_targets]") && sql.contains("@P1") && sql.contains("@P2"),
         "{sql}"
     );
     #[cfg(feature = "postgres")]
     assert!(
-        sql.contains("\"filter_targets\"") && sql.contains("$1"),
+        sql.contains("\"filter_targets\"") && sql.contains("$1") && sql.contains("$2"),
         "{sql}"
     );
     #[cfg(feature = "sqlite")]

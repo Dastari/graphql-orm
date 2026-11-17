@@ -1196,12 +1196,12 @@ impl ParityQuery {
 }
 #[tokio::test]
 #[cfg(not(any(
-    feature = "field-case-pascal",
-    feature = "field-case-snake",
-    feature = "resolver-case-pascal",
-    feature = "resolver-case-snake",
-    feature = "argument-case-pascal",
-    feature = "argument-case-snake"
+    graphql_orm_field_case = "pascal",
+    graphql_orm_field_case = "snake",
+    graphql_orm_resolver_case = "pascal",
+    graphql_orm_resolver_case = "snake",
+    graphql_orm_argument_case = "pascal",
+    graphql_orm_argument_case = "snake"
 )))]
 async fn derived_and_runtime_share_identity_version_and_changed_client_shapes() {
     let f = Fixture::new().await;

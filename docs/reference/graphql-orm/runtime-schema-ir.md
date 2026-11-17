@@ -469,7 +469,7 @@ derives and available on `ColumnDef`/`FieldMetadata` and `RelationMetadata`:
   ORM-owned getters retain their generated behavior. Metadata-only repository
   declarations retain ordinary readable columns. Relation implementation skips
   are handled independently;
-- `api_name` — the public GraphQL field name after rename attributes and case features;
+- `api_name` — the public GraphQL field name after rename attributes and the naming variables;
 - `is_sortable` — the derive generated an order-input term;
 - `is_date_time` — the column is a `#[date_field]`; its `logical_type` remains `String` so backup
   and existing schema hashes are unaffected.
