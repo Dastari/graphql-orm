@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.175.0 to 0.176.0: transitive read-policy closures
+
+Upgrade ORM and macros together. Generated code is unchanged. See
+[read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+- **`ReadPredicate::related_closure`, `related_closure_all` and
+  `related_closure_within` (#772). No action.** These are new, additive
+  constructors. A policy that collects a closure in memory and turns it into
+  an OR term per row can switch to `related_closure_all::<Backend,
+  Entity>(&[("parent_id", "id")], p)` ("no reachable row fails `p`") or
+  `related_closure` ("some reachable row matches `p`"). Both are available on
+  SQLite and PostgreSQL. On SQL Server they are refused with
+  `AUTHORIZATION_MISCONFIGURED`, so keep the existing approach there.
+
 ## 0.173.0 to 0.174.0: read-policy negation
 
 Upgrade ORM and macros together. Generated code is unchanged. See

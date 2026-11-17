@@ -108,6 +108,42 @@ fn contains_match_nothing(clause: &str) -> bool {
     })
 }
 
+/// Hops a closure predicate follows when the caller gives no bound: see
+/// [`ReadPredicate::related_closure`].
+pub const READ_PREDICATE_CLOSURE_DEFAULT_DEPTH: u32 = 64;
+
+/// The largest hop bound [`ReadPredicate::related_closure_within`] accepts.
+/// A larger bound is refused with `AUTHORIZATION_MISCONFIGURED`.
+pub const READ_PREDICATE_CLOSURE_MAX_DEPTH: u32 = 1024;
+
+/// How a closure predicate quantifies over the rows it reaches: see
+/// [`ReadPredicate::related_closure_within`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadPredicateQuantifier {
+    /// Some reached row matches (existential).
+    Any,
+    /// Every reached row matches, and the walk is complete (universal).
+    All,
+}
+
+/// The nesting level for a new closure CTE: one above any closure already
+/// rendered inside `predicate`, so nested closures never shadow each other.
+fn closure_level(predicate: &str) -> usize {
+    predicate
+        .match_indices("__gom_closure_")
+        .filter_map(|(start, marker)| {
+            predicate[start + marker.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<usize>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 /// A validated key relation from `S` to `T` with its rendered target predicate
 /// (anonymous placeholders) and bind values.
 struct Relation {
@@ -379,6 +415,247 @@ impl ReadPredicate {
                 ),
                 values,
             ),
+        })
+    }
+
+    /// Existential closure: "some row reachable from this one matches
+    /// `target`", following at most [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`]
+    /// hops.
+    ///
+    /// The same as [`Self::related_closure_within`] with
+    /// [`ReadPredicateQuantifier::Any`] and the default bound. See there for
+    /// the walk, the NULL, cycle and depth rules, and visibility.
+    pub fn related_closure<B, T>(keys: &[(&str, &str)], target: Self) -> async_graphql::Result<Self>
+    where
+        B: OrmBackend,
+        T: Entity + 'static,
+    {
+        Self::related_closure_within::<B, T>(
+            ReadPredicateQuantifier::Any,
+            keys,
+            target,
+            READ_PREDICATE_CLOSURE_DEFAULT_DEPTH,
+        )
+    }
+
+    /// Universal closure: "every row reachable from this one matches
+    /// `target`", that is "no reachable row fails `target`", following at
+    /// most [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`] hops.
+    ///
+    /// The same as [`Self::related_closure_within`] with
+    /// [`ReadPredicateQuantifier::All`] and the default bound. It is
+    /// fail-closed: an UNKNOWN `target` anywhere in the closure, or a walk
+    /// that cannot be completed, never admits the row.
+    pub fn related_closure_all<B, T>(
+        keys: &[(&str, &str)],
+        target: Self,
+    ) -> async_graphql::Result<Self>
+    where
+        B: OrmBackend,
+        T: Entity + 'static,
+    {
+        Self::related_closure_within::<B, T>(
+            ReadPredicateQuantifier::All,
+            keys,
+            target,
+            READ_PREDICATE_CLOSURE_DEFAULT_DEPTH,
+        )
+    }
+
+    /// A transitive-closure relation over one entity `T`, quantified over
+    /// the rows it reaches and bounded to `max_depth` hops.
+    ///
+    /// **The walk.** `keys` maps pointer columns to key columns, in the
+    /// `(source, target)` order of [`Self::related`]: one hop goes from a
+    /// row to every row whose key columns equal this row's pointer columns.
+    /// A parent chain is `&[("parent_id", "id")]`; swapping the pair walks
+    /// to descendants instead. Composite keys are supported, and columns are
+    /// validated as for `related`. The closure is reflexive: it holds the
+    /// row itself (depth 0) and every row reached in 1 to `max_depth` hops.
+    /// A pointer reaches every row with an equal key, so with a non-unique
+    /// key the walk fans out exactly as `related` does for one hop. Use a
+    /// unique key, normally the primary key, for a parent chain.
+    ///
+    /// **Three-valued result.** Per row, with "complete" defined below:
+    ///
+    /// - [`ReadPredicateQuantifier::Any`] is TRUE when some reached row has
+    ///   `target` TRUE; FALSE when the walk is complete and every reached row
+    ///   has `target` FALSE; UNKNOWN otherwise.
+    /// - [`ReadPredicateQuantifier::All`] is FALSE when some reached row has
+    ///   `target` FALSE; TRUE when the walk is complete and every reached row
+    ///   has `target` TRUE; UNKNOWN otherwise.
+    ///
+    /// Only TRUE admits a row, so an UNKNOWN `target` anywhere in the
+    /// closure, or an incomplete walk, never admits under `All` and never
+    /// lets a negation admit. The forms are duals: `All(p)` admits exactly
+    /// the rows `Any(p.not()?).not()?` admits. Both compose with
+    /// [`Self::not`], `and` and `or` under the same rule as every other
+    /// predicate. "No reachable row fails `p`" is `All(p)`; `Any(p).not()?`
+    /// admits a row only when the walk is complete and no reached row has
+    /// `p` TRUE or UNKNOWN.
+    ///
+    /// **Complete walk.** The walk is complete when every pointer it found
+    /// was followed to an existing row. It is incomplete, and the result is
+    /// therefore never FALSE for `Any` or TRUE for `All`, when a reached row
+    /// has:
+    ///
+    /// - a partially NULL composite pointer (an ambiguous step);
+    /// - a non-NULL pointer that no row's key matches (an unreachable step);
+    /// - a non-NULL pointer at depth `max_depth` that leads outside the rows
+    ///   already reached (the depth bound cut the walk short).
+    ///
+    /// A pointer whose columns are all NULL ends the walk at that row: this
+    /// is how a root is represented, and it is complete.
+    ///
+    /// **Cycles** terminate: the walk is bounded by `max_depth`, and the
+    /// recursive CTE discards duplicate rows. A cycle, a self-loop included,
+    /// is complete, because every pointer on it leads back to a reached row.
+    ///
+    /// **Depth bound.** `max_depth` must be between 1 and
+    /// [`READ_PREDICATE_CLOSURE_MAX_DEPTH`]; the shorthand constructors use
+    /// [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`]. The work per evaluated row
+    /// is at most `max_depth` times the rows the walk can reach. Hitting the
+    /// bound makes the walk incomplete: `All` is then never TRUE (it fails
+    /// closed), and `Any` is TRUE only if a matching row was found within
+    /// the bound, otherwise UNKNOWN, so the row is not admitted and a
+    /// negation does not admit it either.
+    ///
+    /// **Visibility.** As with `related`, the policy owns the walk: no row
+    /// policy is imported, and a row hidden by its own policy is reached,
+    /// tested and followed like any other. Hop by hop the result reveals
+    /// what `related` and [`Self::not_related`] reveal: whether a reached row
+    /// matches `target`, and whether one might (UNKNOWN). It also reveals
+    /// whether the walk was complete. Those extra facts only ever make the
+    /// result UNKNOWN, so they can deny a row, never admit one. Neither form
+    /// returns columns of reached rows.
+    ///
+    /// **Rendering.** A correlated scalar subquery with `WITH RECURSIVE` on
+    /// SQLite and PostgreSQL, used wherever the policy clause is applied:
+    /// reads, counts, aggregates, keyset and connection pages, search and
+    /// subscription delivery re-reads. `target`'s bind values appear four
+    /// times, in order. SQL Server does not allow a common table expression
+    /// inside a subquery, so there the closure cannot be correlated with the
+    /// row; it is refused when the policy is built rather than evaluated in
+    /// memory. Other backends are refused too.
+    ///
+    /// Refused with `AUTHORIZATION_MISCONFIGURED`: SQL Server and other
+    /// unsupported backends, `max_depth` outside the range above, empty or
+    /// unknown key columns, a target for another entity or backend, and an
+    /// empty target. A target that renders the deny fallback `1 = 0` is
+    /// accepted, as for `related`, because the positive forms only deny with
+    /// it; [`Self::not`] refuses to negate such a closure.
+    pub fn related_closure_within<B, T>(
+        quantifier: ReadPredicateQuantifier,
+        keys: &[(&str, &str)],
+        target: Self,
+        max_depth: u32,
+    ) -> async_graphql::Result<Self>
+    where
+        B: OrmBackend,
+        T: Entity + 'static,
+    {
+        if !matches!(
+            B::DIALECT,
+            DatabaseBackend::Sqlite | DatabaseBackend::Postgres
+        ) || !(1..=READ_PREDICATE_CLOSURE_MAX_DEPTH).contains(&max_depth)
+            || !negatable(&target.expression)
+        {
+            return Err(invalid());
+        }
+        let relation = Relation::new::<B, T, T>(keys, &target)?;
+        if relation.predicate.trim().is_empty() {
+            return Err(invalid());
+        }
+        let dialect = B::DIALECT;
+        let table = dialect.render_table_identifier_path(T::TABLE_NAME);
+        let cte = format!("__gom_closure_{}", closure_level(&relation.predicate));
+        let join = |items: Vec<String>, separator: &str| items.join(separator);
+        let indexed = |render: &dyn Fn(usize, &str, &str) -> String| {
+            keys.iter()
+                .enumerate()
+                .map(|(index, &(pointer, key))| render(index, pointer, key))
+                .collect::<Vec<_>>()
+        };
+        let pointers = join(
+            indexed(&|_, pointer, _| format!("{table}.{}", dialect.quote_identifier(pointer))),
+            ", ",
+        );
+        let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
+        let predicate = &relation.predicate;
+        // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
+        let truth =
+            format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END");
+        // The anchor has no FROM, so `table` is the row being authorized.
+        // In the step, the unaliased join makes `table` the reached row, so
+        // the target (including any nested relation) is evaluated on it.
+        let step = join(
+            indexed(&|index, _, key| {
+                format!(
+                    "{table}.{} = {cte}.__gom_p{index}",
+                    dialect.quote_identifier(key)
+                )
+            }),
+            " AND ",
+        );
+        let followed = join(
+            indexed(&|index, _, _| format!("__gom_node.__gom_p{index} IS NOT NULL")),
+            " AND ",
+        );
+        let ambiguous = if keys.len() > 1 {
+            format!(
+                "(NOT ({followed}) AND ({})) OR ",
+                join(
+                    indexed(&|index, _, _| format!("__gom_node.__gom_p{index} IS NOT NULL")),
+                    " OR ",
+                )
+            )
+        } else {
+            String::new()
+        };
+        let resolves = join(
+            indexed(&|index, _, key| {
+                format!(
+                    "__gom_target.{} = __gom_node.__gom_p{index}",
+                    dialect.quote_identifier(key)
+                )
+            }),
+            " AND ",
+        );
+        let seen = join(
+            indexed(&|index, _, _| {
+                format!("__gom_seen.__gom_p{index} = __gom_node.__gom_p{index}")
+            }),
+            " AND ",
+        );
+        let incomplete = format!(
+            "EXISTS (SELECT 1 FROM {cte} AS __gom_node WHERE {ambiguous}({followed} AND (\
+             NOT EXISTS (SELECT 1 FROM {table} AS __gom_target WHERE {resolves}) \
+             OR (__gom_node.__gom_depth = {max_depth} AND NOT EXISTS (SELECT 1 FROM {cte} AS __gom_seen \
+             WHERE {seen} AND __gom_seen.__gom_depth < {max_depth})))))"
+        );
+        let verdict = match quantifier {
+            ReadPredicateQuantifier::Any => format!(
+                "CASE WHEN MAX(__gom_truth) = 2 THEN 1 WHEN MAX(__gom_truth) = 1 OR {incomplete} THEN NULL ELSE 0 END"
+            ),
+            ReadPredicateQuantifier::All => format!(
+                "CASE WHEN MIN(__gom_truth) = 0 THEN 0 WHEN MIN(__gom_truth) = 1 OR {incomplete} THEN NULL ELSE 1 END"
+            ),
+        };
+        let clause = format!(
+            "(WITH RECURSIVE {cte} ({columns}, __gom_depth, __gom_truth) AS (\
+             SELECT {pointers}, 0, {truth} \
+             UNION SELECT {pointers}, {cte}.__gom_depth + 1, {truth} FROM {cte} JOIN {table} ON {step} \
+             WHERE {cte}.__gom_depth < {max_depth}) \
+             SELECT {verdict} FROM {cte}) = 1"
+        );
+        let mut values = Vec::with_capacity(relation.values.len() * 4);
+        for _ in 0..4 {
+            values.extend(relation.values.iter().cloned());
+        }
+        Ok(Self {
+            entity: TypeId::of::<T>(),
+            backend: B::DIALECT,
+            expression: FilterExpression::trusted_fragment(clause, values),
         })
     }
 
