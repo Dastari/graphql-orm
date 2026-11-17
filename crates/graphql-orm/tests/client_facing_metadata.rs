@@ -19,7 +19,7 @@
 use graphql_orm::async_graphql::{Request, Response};
 use graphql_orm::futures::{Stream, StreamExt};
 use graphql_orm::graphql::orm::{
-    DefaultBackend, GraphqlClientMetadata, GraphqlLifetimeEncoding, GraphqlRelationshipKeyMapping,
+    AuthorizedKeysetEntity, DefaultBackend, GraphqlClientMetadata, GraphqlLifetimeEncoding, GraphqlRelationshipKeyMapping,
     GraphqlRelationshipNotBatchableReason, InterpretationEntity, interpretation_fingerprint,
 };
 use graphql_orm::prelude::*;
@@ -108,6 +108,8 @@ struct MetaChild {
     parent_id: String,
     #[graphql_orm(read_policy = "child.restricted_key")]
     hidden_parent_id: String,
+    #[graphql_orm(sensitive)]
+    sensitive_parent_id: String,
     kind: i32,
     valid_until: Option<String>,
     /// Batchable: public key fields on both sides.
@@ -123,6 +125,15 @@ struct MetaChild {
         emit_fk = false
     )]
     hidden_parent: Option<MetaParent>,
+    /// No exposed key: the source key is classified secret.
+    #[graphql(skip)]
+    #[relation(
+        target = "MetaParent",
+        from = "sensitive_parent_id",
+        to = "id",
+        emit_fk = false
+    )]
+    sensitive_parent: Option<MetaParent>,
     /// Not batchable: the relation has a source condition.
     #[graphql(skip)]
     #[relation(
@@ -143,7 +154,8 @@ struct MetaChild {
         backend = "sqlite",
         table = "meta_plains",
         plural = "MetaPlains",
-        aggregate = true
+        aggregate = true,
+        keyset = "label asc, id asc"
     )
 )]
 #[cfg_attr(
@@ -152,7 +164,8 @@ struct MetaChild {
         backend = "postgres",
         table = "meta_plains",
         plural = "MetaPlains",
-        aggregate = true
+        aggregate = true,
+        keyset = "label asc, id asc"
     )
 )]
 struct MetaPlain {
@@ -161,6 +174,7 @@ struct MetaPlain {
     #[filterable(type = "string")]
     #[sortable]
     id: String,
+    #[sortable]
     label: String,
 }
 
@@ -388,6 +402,10 @@ fn client_metadata_export_matches_its_golden() -> TestResult {
         GraphqlRelationshipKeyMapping::NoExposedKey
     );
     assert_eq!(
+        mapping("sensitiveParent"),
+        GraphqlRelationshipKeyMapping::NoExposedKey
+    );
+    assert_eq!(
         mapping("kindParent"),
         GraphqlRelationshipKeyMapping::NotBatchable {
             reason: GraphqlRelationshipNotBatchableReason::Conditional,
@@ -399,6 +417,8 @@ fn client_metadata_export_matches_its_golden() -> TestResult {
     let relationships = serde_json::to_string(&child.relationships)?;
     assert!(!relationships.contains(field_name("hiddenParentId")));
     assert!(!relationships.contains("hidden_parent_id"));
+    assert!(!relationships.contains(field_name("sensitiveParentId")));
+    assert!(!relationships.contains("sensitive_parent_id"));
     assert!(!exported.contains("wner"));
 
     // Entities without a fact still report their stream, and nothing else.
@@ -466,11 +486,24 @@ fn interpretation_fingerprint_is_stable_and_follows_its_inputs() {
         interpretation_fingerprint(dialect, &entities(), None),
         unsalted
     );
-    // Each input changes the value: a keyset or sort change, a different
-    // entity set, entity order and the backend dialect.
+    // The hashed keyset input is exactly the fingerprint keyset cursors are
+    // bound to, and an entity without a keyset order hashes none.
+    assert_eq!(
+        MetaPlain::__GOM_INTERPRETATION_SOURCE,
+        format!(
+            "node_id=false;keyset={}",
+            <MetaPlain as AuthorizedKeysetEntity>::KEYSET_FINGERPRINT
+        )
+    );
+    assert_eq!(
+        MetaParent::__GOM_INTERPRETATION_SOURCE,
+        "node_id=false;keyset="
+    );
+    // Each input changes the value: a keyset order change, a different
+    // entity set and the backend dialect.
     let mut changed = entities();
-    changed[0] = InterpretationEntity::of::<MetaParent, DefaultBackend>(
-        "node_type=MetaParent;node_id=false;keyset=label asc;default_sort=",
+    changed[2] = InterpretationEntity::of::<MetaPlain, DefaultBackend>(
+        "node_id=false;keyset=v1:label:desc:nulls_last,id:asc:nulls_last",
     );
     assert_ne!(
         interpretation_fingerprint(dialect, &changed, None),
@@ -480,9 +513,10 @@ fn interpretation_fingerprint_is_stable_and_follows_its_inputs() {
         interpretation_fingerprint(dialect, &entities()[..2], None),
         unsalted
     );
+    // The order of `entities:` does not matter.
     let mut reordered = entities();
     reordered.reverse();
-    assert_ne!(
+    assert_eq!(
         interpretation_fingerprint(dialect, &reordered, None),
         unsalted
     );

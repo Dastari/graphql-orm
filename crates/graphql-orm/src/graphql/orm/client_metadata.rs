@@ -229,9 +229,11 @@ fn relationship_key_mapping(
 #[derive(serde::Serialize)]
 pub struct InterpretationEntity {
     entity: &'static str,
-    /// Compile-time facts: the `NodeId` type identity, the declared keyset
-    /// order and the default sort.
+    /// Compile-time facts: whether the entity serves `NodeId`, and the exact
+    /// keyset order fingerprint its keyset cursors are bound to.
     generated: &'static str,
+    /// The effective default sort, which orders offset pages.
+    default_sort: &'static str,
     /// Primary-key fields in key order: public name, logical value kind and
     /// column type.
     keys: Vec<(&'static str, String, &'static str)>,
@@ -259,6 +261,7 @@ impl InterpretationEntity {
         Self {
             entity: T::entity_name(),
             generated,
+            default_sort: T::DEFAULT_SORT,
             keys,
         }
     }
@@ -271,11 +274,13 @@ impl InterpretationEntity {
 /// - [`GRAPHQL_ORM_INTERPRETATION_ALGORITHM`] and
 ///   [`GRAPHQL_ORM_CURSOR_FORMAT_VERSION`];
 /// - the backend dialect name;
-/// - for each entity, in the order `schema_roots!` lists them: its name, its
-///   `NodeId` type identity (`stable_type_id`, else the entity name) and
-///   whether it serves `NodeId`, its declared `keyset` order, its default
-///   sort, and each primary-key field's public name, logical value kind and
-///   column type, in key order;
+/// - for each entity, sorted by entity name so the order of `entities:` does
+///   not matter: its name (which `NodeId` values and keyset cursor bindings
+///   encode), whether it serves `NodeId`, the keyset order fingerprint its
+///   keyset cursors are bound to (every order column with direction and null
+///   placement, key suffix included), its effective default sort, and each
+///   primary-key field's public name, logical value kind and column type, in
+///   key order;
 /// - the SHA-256 of the host salt, when one is given.
 ///
 /// It names no secret, host, path or version string. Column names and sort
@@ -293,9 +298,11 @@ pub fn interpretation_fingerprint(
         algorithm: &'static str,
         cursor_format: u32,
         dialect: &'static str,
-        entities: &'a [InterpretationEntity],
+        entities: Vec<&'a InterpretationEntity>,
         salt: Option<String>,
     }
+    let mut entities = entities.iter().collect::<Vec<_>>();
+    entities.sort_by_key(|entity| entity.entity);
     let input = Input {
         algorithm: GRAPHQL_ORM_INTERPRETATION_ALGORITHM,
         cursor_format: GRAPHQL_ORM_CURSOR_FORMAT_VERSION,

@@ -23,7 +23,8 @@ fingerprints are unchanged. See
   catalogue by its fingerprint. It lists the fields each generated `Changed`
   stream can carry, each declared lifetime field and each public relationship's
   key mapping (`batchable`, `not_batchable` for conditional or policy-guarded
-  relationships, or `no_exposed_key`). Export it at build time with
+  relationships, or `no_exposed_key` when a key field is not public, has a
+  field policy or is classified `secret`). Export it at build time with
   `GraphqlClientMetadata::export_json`. The semantic catalogue is unchanged.
 - **Lifetime fields (#670). No action.**
   `#[graphql_entity(lifetime(field = "...", format = "..."))]` names the field
@@ -44,13 +45,15 @@ fingerprints are unchanged. See
   `[GraphqlAggregateResultRow!]!`. Documents keep validating; typed client
   code and AI capability approvals that name the result type must be
   regenerated.
-- **Interpretation fingerprint (#671). No action.** Every `schema_roots!`
-  emits `graphql_orm_interpretation_fingerprint(salt)`. It changes when a
-  release may read existing cursors, keys or `NodeId` values differently. The
-  ORM does not serve it; a host may serve it as the `graphql-orm-interpretation`
-  response header and in `connection_ack`. A host whose own items are named
-  `graphql_orm_interpretation_fingerprint` or `graphql_orm_client_metadata` in
-  the `schema_roots!` module must rename them.
+- **Interpretation fingerprint (#671). Action needed** only if a host already
+  defines an item named `graphql_orm_interpretation_fingerprint` in the
+  `schema_roots!` scope: rename it, because every `schema_roots!` now emits a
+  function of that name (and, with `client_metadata: true`,
+  `graphql_orm_client_metadata`). The fingerprint changes when a release may
+  read existing cursors, keys or `NodeId` values differently, and does not
+  depend on the order of `entities:`. The ORM does not serve it; a host may
+  serve it as the `graphql-orm-interpretation` response header and in
+  `connection_ack`.
 - **Operation catalogue 0.8.1. No action.** The client metadata types are
   additive (`GraphqlClientMetadata` and its members, all non-exhaustive with
   constructors). No existing type, wire format or fingerprint changes.

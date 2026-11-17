@@ -150,9 +150,10 @@ Each public relationship field of an entity reports one `key_mapping`:
   condition is never published.
 - `not_batchable` with `reason: "field_policy"`: the relationship field has a
   field policy, which a read of the target's list root does not apply.
-- `no_exposed_key`: a key field on either side is not a public field without a
-  field policy, or the target entity is not in this schema. No key name is
-  published.
+- `no_exposed_key`: a key field on either side is not a public field, has a
+  field policy, is classified `secret` (for example `#[graphql_orm(sensitive)]`),
+  or the target entity is not in this schema. No key name is published, and a
+  client is never told to batch with secret values.
 
 A batch read through the target's list root is authorized as a list read of
 the target: the list root's entity, row and field policies apply, not the
@@ -182,6 +183,16 @@ existing types. The frame is an ordinary subscription payload, so the router
 passes it through unchanged. Lag and authority ends are unchanged
 (`SUBSCRIPTION_CONTINUITY_LOST`, `SUBSCRIPTION_SOURCE_CLOSED`, `FORBIDDEN`);
 the signal adds no error code.
+
+Two shapes that keep the event's fields non-null were considered and
+rejected. A union of the event and a started type would change the root's
+result type, so every existing document selecting the event's fields
+directly would stop validating. A separate opt-in root that streams frames
+would add a second subscription root per entity, with its own catalogue,
+authorization and root-collision entries, and duplicate the generated stream
+body. Loosening nullability on opted-in entities keeps every existing
+document valid, and subscribers that never pass `Started: true` never receive
+a null.
 
 ## Aggregate source entity
 
@@ -217,12 +228,19 @@ It returns lowercase hex SHA-256 over canonical JSON of exactly these inputs:
    and global `NodeId` values. A release that changes how any existing one is
    read increments it.
 2. The backend dialect name (`sqlite`, `postgres` or `mssql`).
-3. For each entity, in the order `schema_roots!` lists them:
-   - the entity name;
-   - its `NodeId` type identity (`stable_type_id`, otherwise the entity
-     name) and whether it serves `NodeId`;
-   - its declared `keyset` order and its declared `default_sort`, as written
-     in the attribute;
+3. For each entity, sorted by entity name, so reordering `entities:` does not
+   change the value:
+   - the entity name. `NodeId` values encode it with the key values
+     (`encode_node_id`), and keyset cursors are bound to it, so it is the
+     identity both use. `stable_type_id` is not an input, because neither
+     encoding uses it;
+   - whether it serves `NodeId`;
+   - the keyset order fingerprint its keyset cursors are bound to
+     (`AuthorizedKeysetEntity::KEYSET_FINGERPRINT`): every order column, with
+     its direction and null placement, primary-key suffix included. The
+     derive computes both from one function, so they cannot differ;
+   - its effective default sort (`DatabaseEntity::DEFAULT_SORT`, the declared
+     `default_sort` or the primary-key default), which orders offset pages;
    - each primary-key field, in key order: its public GraphQL name, logical
      value kind and column type.
 4. The SHA-256 of the host salt, when one is given.

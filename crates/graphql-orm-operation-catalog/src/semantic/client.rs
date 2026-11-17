@@ -239,8 +239,9 @@ pub enum GraphqlRelationshipKeyMapping {
         /// Why.
         reason: GraphqlRelationshipNotBatchableReason,
     },
-    /// A key field on either side is not public, is hidden by a field policy,
-    /// or is unknown to this catalogue. No key name is published.
+    /// A key field on either side is not public, is classified secret, is
+    /// hidden by a field policy, or is unknown to this catalogue. No key name
+    /// is published.
     NoExposedKey,
 }
 
@@ -548,11 +549,7 @@ fn validate_lifetime(
     entity: &GraphqlEntitySemanticMetadata,
     lifetime: &GraphqlEntityLifetimeMetadata,
 ) -> Result<(), GraphqlSemanticError> {
-    let valid = semantic_field(entity, &lifetime.field).is_some_and(|field| {
-        is_plain_leaf(field)
-            && !field.has_field_policy
-            && field.classification < super::GraphqlSemanticClassification::Secret
-    });
+    let valid = semantic_field(entity, &lifetime.field).is_some_and(is_exposed_leaf);
     if !valid {
         return Err(GraphqlSemanticError::new(
             "client metadata lifetime does not match the catalogue",
@@ -626,8 +623,8 @@ pub fn relationship_target_filterable(
 }
 
 /// Whether `field_name` names a selectable, non-list scalar or enum field of
-/// `entity_name` with no field policy: a key field a client can read and send
-/// back. Producers use this to choose
+/// `entity_name` with no field policy and a classification below secret: a
+/// key field a client can read and send back. Producers use this to choose
 /// [`GraphqlRelationshipKeyMapping::NoExposedKey`].
 pub fn relationship_key_field_exposed(
     catalog: &GraphqlSemanticCatalog,
@@ -639,7 +636,15 @@ pub fn relationship_key_field_exposed(
         .iter()
         .find(|entity| entity.entity_name == entity_name)
         .and_then(|entity| semantic_field(entity, field_name))
-        .is_some_and(|field| is_plain_leaf(field) && !field.has_field_policy)
+        .is_some_and(is_exposed_leaf)
+}
+
+/// A plain leaf a client may read and send back: no field policy, and not
+/// classified secret. Lifetime fields and relationship key fields share it.
+fn is_exposed_leaf(field: &GraphqlSemanticFieldMetadata) -> bool {
+    is_plain_leaf(field)
+        && !field.has_field_policy
+        && field.classification < super::GraphqlSemanticClassification::Secret
 }
 
 #[cfg(test)]
@@ -692,6 +697,9 @@ mod tests {
     fn catalog() -> GraphqlSemanticCatalog {
         let mut policy_key = field("SecretParentId", scalar("String", false));
         policy_key.has_field_policy = true;
+        let mut secret_key = field("SensitiveParentId", scalar("String", false));
+        secret_key.classification = GraphqlSemanticClassification::Secret;
+        secret_key.export = GraphqlSemanticExport::NeverExport;
         let mut parent = field(
             "Parent",
             GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, true),
@@ -708,6 +716,7 @@ mod tests {
                 field("Id", scalar("String", false)),
                 field("ParentId", scalar("String", false)),
                 policy_key,
+                secret_key,
                 field(
                     "Tags",
                     GraphqlSemanticTypeRef::list(false, Some(8), scalar("String", false)),
@@ -880,5 +889,25 @@ mod tests {
             "Child",
             "SecretParentId"
         ));
+        // A secret-classified key is not exposed, so no mapping may name it,
+        // and it cannot be a lifetime field either.
+        assert!(!relationship_key_field_exposed(
+            &catalog,
+            "Child",
+            "SensitiveParentId"
+        ));
+        let secret_key = GraphqlClientEntityMetadata::new("Child").with_relationship(
+            GraphqlRelationshipKeyMetadata::new(
+                "Parent",
+                "Parent",
+                GraphqlRelationshipKeyMapping::Batchable {
+                    source_fields: vec!["SensitiveParentId".into()],
+                    target_fields: vec!["Id".into()],
+                    target_filterable: false,
+                },
+            ),
+        );
+        assert!(compose(secret_key).is_err());
+        assert!(compose(lifetime("SensitiveParentId")).is_err());
     }
 }

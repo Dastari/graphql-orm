@@ -2561,17 +2561,17 @@ fn generate_graphql_operations_unfiltered(
             quote! { pub }
         };
     // Compile-time inputs to the schema's interpretation fingerprint (#671):
-    // the `NodeId` type identity, whether `NodeId` is served, the declared
-    // keyset order and the default sort. Hashed, never served as text.
+    // whether the entity serves `NodeId` (encoded from the entity name and key
+    // values) and the exact keyset order fingerprint its cursors are bound to.
+    // The runtime adds the entity name, the effective default sort and the
+    // key fields. Hashed, never served as text.
     let interpretation_source = format!(
-        "node_type={};node_id={};keyset={};default_sort={}",
-        entity_meta
-            .stable_type_id
-            .clone()
-            .unwrap_or_else(|| struct_name.to_string()),
+        "node_id={};keyset={}",
         entity_meta.node_id.is_some(),
-        entity_meta.keyset.as_deref().unwrap_or(""),
-        entity_meta.default_sort.as_deref().unwrap_or(""),
+        keyset_parts
+            .as_deref()
+            .map(keyset_order_fingerprint)
+            .unwrap_or_default(),
     );
     let changed_started_signal = entity_meta.changed_started;
     let subscription_key_method = quote! {
@@ -5500,7 +5500,7 @@ fn generate_graphql_operations_unfiltered(
         let mut order_tokens = Vec::new();
         let mut cursor_tokens = Vec::new();
         let mut cursor_field_metadata = Vec::new();
-        let mut fingerprint_parts = Vec::new();
+        let fingerprint = keyset_order_fingerprint(parts);
         for (field, ty, column, ascending, nulls_first) in parts {
             let quoted_column = backend_render_identifier_path(backend, column);
             let source = fields
@@ -5534,16 +5534,6 @@ fn generate_graphql_operations_unfiltered(
                 direction
             };
             order_tokens.push(order);
-            fingerprint_parts.push(format!(
-                "{}:{}:{}",
-                column,
-                if *ascending { "asc" } else { "desc" },
-                if *nulls_first {
-                    "nulls_first"
-                } else {
-                    "nulls_last"
-                }
-            ));
             let (inner, optional) = option_inner_type(ty)
                 .map(|inner| (inner, true))
                 .unwrap_or((ty, false));
@@ -5580,7 +5570,6 @@ fn generate_graphql_operations_unfiltered(
                 quote! {{ let value = &entity.#field; #value }}
             });
         }
-        let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
         // Without an orderable field there is no `OrderField` enum to take.
         let runtime_ordered_method = if runtime_ordered_arms.is_empty() {
             quote! {}
@@ -12200,4 +12189,27 @@ mod write_transform_rejection_tests {
             .expect_err("write transforms must not be silently bypassed");
         assert!(error.to_string().contains("transform(write"));
     }
+}
+
+/// The keyset order fingerprint a generated keyset cursor is bound to:
+/// each order column with its direction and null placement, primary-key
+/// suffix included. `KEYSET_FINGERPRINT` and the interpretation fingerprint
+/// (#671) both use it, so they cannot drift apart.
+fn keyset_order_fingerprint(parts: &[(syn::Ident, syn::Type, String, bool, bool)]) -> String {
+    let parts = parts
+        .iter()
+        .map(|(_, _, column, ascending, nulls_first)| {
+            format!(
+                "{}:{}:{}",
+                column,
+                if *ascending { "asc" } else { "desc" },
+                if *nulls_first {
+                    "nulls_first"
+                } else {
+                    "nulls_last"
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("v1:{}", parts.join(","))
 }
