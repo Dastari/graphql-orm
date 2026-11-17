@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.149.0
+
+- **Providers (OpenAI Responses, also xAI and OpenAI-compatible routes):** a streamed `response.incomplete` with `incomplete_details.reason = "max_output_tokens"` completes the turn with exact usage and a visible notice that the response may be incomplete, instead of ending the stream with no usage after the tokens were spent. Function-call events are held until the response finishes; a request in a turn cut off this way is dropped and never dispatched, including one whose arguments had finished, and the notice says no tool was run. The notice counts against the visible-text bound. Other incomplete reasons, and a provider-run built-in call that did not finish, stay refused. Fixes #749.
+- **Providers (Ollama):** a final chunk with `done_reason = "length"` completes the turn with the same notice instead of silently as if the answer were whole. Tool requests are held until the final chunk and dropped by a `length` stop. Visible text, including the notice, is bounded by the 16 MiB stream bound (#749).
+- **Stored responses:** an output-limit stop now returns a result, so a response stored with `store: true` is recorded in the stored-response ledger and deleted with its session; before, the failed stream left it unrecorded. Such a response may hold a cut-off function call. No later turn continues from it: the turn has no tool calls, so no `AiAgentContinuation` can follow it, and stateless replay never persists the call. See [OpenAI output-limit stops](docs/read-only-tool-loop.md#openai-output-limit-stops) (#749).
+- **Fixed (conversation bootstrap):** the tool-call window is read whole, up to the requested `tool_call_limit` (at most 500), in pages no larger than the database's maximum page limit. It used to be clamped to that maximum (100 by default), so a conversation with more tool calls than the maximum always returned `reset_required = true`. `reset_required` from tool calls now means only that the selected runs hold more calls than the requested window. Fixes #754.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`. See the [migration guide](MIGRATION.md#01480-to-01490-output-limit-stops-and-the-bootstrap-tool-call-window).
+
 ## Unreleased - 0.148.0
 
 Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.

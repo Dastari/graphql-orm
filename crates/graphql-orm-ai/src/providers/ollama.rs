@@ -19,6 +19,15 @@ use crate::{
 
 const MAXIMUM_NDJSON_LINE_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_STREAM_BYTES: usize = 16 * 1024 * 1024;
+/// Visible text, including an incomplete-answer notice. Text decoded from the
+/// stream can never exceed the stream's own bound, so only a notice can reach
+/// this one.
+const MAXIMUM_VISIBLE_TEXT_BYTES: usize = MAXIMUM_STREAM_BYTES;
+/// Appended when a turn stopped at the output-token limit.
+const OUTPUT_LIMIT_NOTICE: &str =
+    "The response stopped at the output limit, so it may be incomplete.";
+/// Appended when that stop cut off one or more tool requests.
+const DROPPED_TOOL_NOTICE: &str = " A tool request was cut off, so no tool was run.";
 const DEFAULT_MAXIMUM_STREAM_CHUNKS: usize = 1_048_576;
 const MAXIMUM_SCHEMA_BYTES: usize = 1024 * 1024;
 const MAXIMUM_KEEP_ALIVE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -522,9 +531,7 @@ where
     Box::pin(async_stream::try_stream! {
         let mut chunks = Box::pin(chunks);
         let mut buffer = Vec::new();
-        let mut started = false;
-        let mut completed = false;
-        let mut tool_call_count = 0usize;
+        let mut state = ChunkState::default();
         let mut stream_bytes = 0usize;
         let mut stream_chunks = 0usize;
         while let Some(chunk) = chunks.next().await {
@@ -551,19 +558,12 @@ where
                 if line.is_empty() {
                     continue;
                 }
-                if line.len() > MAXIMUM_NDJSON_LINE_BYTES || completed {
+                if line.len() > MAXIMUM_NDJSON_LINE_BYTES || state.completed {
                     Err(ProviderError::Rejected)?;
                 }
                 let value: Value = serde_json::from_slice(&line)
                     .map_err(|_| ProviderError::Rejected)?;
-                for event in normalize_chunk(
-                    &value,
-                    &expected_model,
-                    &offered_tools,
-                    &mut started,
-                    &mut completed,
-                    &mut tool_call_count,
-                )? {
+                for event in normalize_chunk(&value, &expected_model, &offered_tools, &mut state)? {
                     yield event;
                 }
             }
@@ -572,37 +572,41 @@ where
             if buffer.last() == Some(&b'\r') {
                 buffer.pop();
             }
-            if buffer.len() > MAXIMUM_NDJSON_LINE_BYTES || completed {
+            if buffer.len() > MAXIMUM_NDJSON_LINE_BYTES || state.completed {
                 Err(ProviderError::Rejected)?;
             }
             let value: Value = serde_json::from_slice(&buffer)
                 .map_err(|_| ProviderError::Rejected)?;
-            for event in normalize_chunk(
-                &value,
-                &expected_model,
-                &offered_tools,
-                &mut started,
-                &mut completed,
-                &mut tool_call_count,
-            )? {
+            for event in normalize_chunk(&value, &expected_model, &offered_tools, &mut state)? {
                 yield event;
             }
         }
-        if !completed {
+        if !state.completed {
             Err(ProviderError::Unavailable)?;
         }
     })
+}
+
+/// Normalization state carried across one NDJSON stream.
+#[derive(Default)]
+struct ChunkState {
+    started: bool,
+    completed: bool,
+    tool_call_count: usize,
+    visible_bytes: usize,
+    /// Tool events held until the final chunk shows the turn finished: a
+    /// `length` stop can cut a request off, and a started call cannot be
+    /// withdrawn once it reaches the executor.
+    held_tool_events: Vec<ProviderEvent>,
 }
 
 fn normalize_chunk(
     value: &Value,
     expected_model: &str,
     offered_tools: &BTreeMap<String, String>,
-    started: &mut bool,
-    completed: &mut bool,
-    tool_call_count: &mut usize,
+    state: &mut ChunkState,
 ) -> Result<Vec<ProviderEvent>, ProviderError> {
-    if value.get("error").is_some() || *completed {
+    if value.get("error").is_some() || state.completed {
         return Err(ProviderError::Rejected);
     }
     let model = value
@@ -638,21 +642,32 @@ fn normalize_chunk(
         .get("done")
         .and_then(Value::as_bool)
         .ok_or(ProviderError::Rejected)?;
+    let done_reason = match value.get("done_reason") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(reason)) => Some(reason.as_str()),
+        Some(_) => return Err(ProviderError::Rejected),
+    };
     let mut events = Vec::new();
-    if !*started {
-        *started = true;
+    if !state.started {
+        state.started = true;
         events.push(ProviderEvent::ResponseStarted { response_id: None });
     }
     if !content.is_empty() {
+        state.visible_bytes = state
+            .visible_bytes
+            .checked_add(content.len())
+            .filter(|bytes| *bytes <= MAXIMUM_VISIBLE_TEXT_BYTES)
+            .ok_or(ProviderError::Rejected)?;
         events.push(ProviderEvent::TextDelta {
             text: content.to_owned(),
         });
     }
     for call in tool_calls {
-        *tool_call_count = tool_call_count
+        state.tool_call_count = state
+            .tool_call_count
             .checked_add(1)
             .ok_or(ProviderError::Rejected)?;
-        if *tool_call_count > 64 {
+        if state.tool_call_count > 64 {
             return Err(ProviderError::Rejected);
         }
         let function = call
@@ -672,11 +687,13 @@ fn normalize_chunk(
             .cloned()
             .ok_or(ProviderError::Rejected)?;
         let call_id = format!("ollama-{}", uuid::Uuid::new_v4());
-        events.push(ProviderEvent::ToolCallStarted {
+        state.held_tool_events.push(ProviderEvent::ToolCallStarted {
             call_id: call_id.clone(),
             tool_id: tool_id.clone(),
         });
-        events.push(ProviderEvent::ToolCallCompleted { call_id, arguments });
+        state
+            .held_tool_events
+            .push(ProviderEvent::ToolCallCompleted { call_id, arguments });
     }
     if done {
         let input_tokens = value
@@ -687,13 +704,38 @@ fn normalize_chunk(
             .get("eval_count")
             .and_then(Value::as_u64)
             .ok_or(ProviderError::Rejected)?;
+        if done_reason == Some("length") {
+            // The model spent the tokens and stopped early. The turn completes
+            // metered with what was said and a visible notice; a tool request
+            // in it is dropped, never dispatched, because the stop can cut it
+            // off.
+            let dropped = !state.held_tool_events.is_empty();
+            state.held_tool_events.clear();
+            let mut text = String::new();
+            if state.visible_bytes > 0 {
+                text.push_str("\n\n");
+            }
+            text.push_str(OUTPUT_LIMIT_NOTICE);
+            if dropped {
+                text.push_str(DROPPED_TOOL_NOTICE);
+            }
+            // The notice is visible text and counts against the same bound.
+            state.visible_bytes = state
+                .visible_bytes
+                .checked_add(text.len())
+                .filter(|bytes| *bytes <= MAXIMUM_VISIBLE_TEXT_BYTES)
+                .ok_or(ProviderError::Rejected)?;
+            events.push(ProviderEvent::TextDelta { text });
+        } else {
+            events.append(&mut state.held_tool_events);
+        }
         events.push(ProviderEvent::Usage {
             input_tokens,
             output_tokens,
             cached_input_tokens: 0,
         });
         events.push(ProviderEvent::ResponseCompleted { response_id: None });
-        *completed = true;
+        state.completed = true;
     }
     Ok(events)
 }
@@ -1367,6 +1409,115 @@ mod tests {
                 && started.starts_with("ollama-")
                 && tool_id == "records.read"
                 && arguments == &json!({"id": 55})
+        ));
+    }
+
+    async fn normalize_lines(
+        lines: &'static [&'static str],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let chunks = futures::stream::iter(lines.iter().map(|line| Ok(line.as_bytes())));
+        normalized_chunks(
+            chunks,
+            "local-test".to_owned(),
+            BTreeMap::from([("records_read".to_owned(), "records.read".to_owned())]),
+            DEFAULT_MAXIMUM_STREAM_CHUNKS,
+        )
+        .try_collect::<Vec<_>>()
+        .await
+    }
+
+    fn visible_text(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #749: a `length` stop completes metered and says the answer may be
+    /// incomplete, and a tool request in that turn never runs.
+    #[tokio::test]
+    async fn a_length_stop_completes_metered_with_a_notice_and_drops_tool_requests() {
+        let events = normalize_lines(&[
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"partial\"},\"done\":false}\n",
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":3,\"eval_count\":16}\n",
+        ])
+        .await
+        .expect("a length stop completes the turn");
+        let text = visible_text(&events);
+        assert!(text.starts_with("partial\n\n"), "{text:?}");
+        assert!(text.contains("may be incomplete"), "{text:?}");
+        assert!(!text.contains("no tool was run"), "{text:?}");
+        assert_eq!(
+            events[events.len() - 2..],
+            [
+                ProviderEvent::Usage {
+                    input_tokens: 3,
+                    output_tokens: 16,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ]
+        );
+
+        let events = normalize_lines(&[
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"type\":\"function\",\"function\":{\"name\":\"records_read\",\"arguments\":{\"id\":55}}}]},\"done\":false}\n",
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":3,\"eval_count\":16}\n",
+        ])
+        .await
+        .expect("a cut-off tool turn completes without the tool");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ToolCallStarted { .. } | ProviderEvent::ToolCallCompleted { .. }
+            )),
+            "{events:?}"
+        );
+        let text = visible_text(&events);
+        assert!(text.starts_with("The response stopped"), "{text:?}");
+        assert!(text.contains("no tool was run"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn tool_requests_are_released_only_by_a_finished_turn() {
+        let events = normalize_lines(&[
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"type\":\"function\",\"function\":{\"name\":\"records_read\",\"arguments\":{\"id\":55}}}]},\"done\":false}\n",
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"prompt_eval_count\":3,\"eval_count\":4}\n",
+        ])
+        .await
+        .expect("a finished tool turn without a reason keeps working");
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted { call_id: started, tool_id },
+                ProviderEvent::ToolCallCompleted { call_id: completed, .. },
+                ProviderEvent::Usage { .. },
+                ProviderEvent::ResponseCompleted { response_id: None }
+            ] if started == completed && tool_id == "records.read"
+        ));
+        assert!(!visible_text(&events).contains("may be incomplete"));
+    }
+
+    #[test]
+    fn the_length_notice_counts_against_the_visible_text_bound() {
+        let mut state = ChunkState {
+            visible_bytes: MAXIMUM_VISIBLE_TEXT_BYTES - 8,
+            ..ChunkState::default()
+        };
+        let done = json!({
+            "model": "local-test",
+            "message": {"role": "assistant", "content": ""},
+            "done": true,
+            "done_reason": "length",
+            "prompt_eval_count": 1,
+            "eval_count": 1
+        });
+        assert!(matches!(
+            normalize_chunk(&done, "local-test", &BTreeMap::new(), &mut state),
+            Err(ProviderError::Rejected)
         ));
     }
 }

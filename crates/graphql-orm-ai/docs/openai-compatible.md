@@ -30,7 +30,9 @@ model-selected endpoints, and runtime endpoint changes are unavailable. A
 request using an undeclared capability fails before transport. The shared
 Responses normalizer requires SSE, exact response/model/status identity,
 bounded output and tool-call state, exact usage, and one unambiguous terminal
-completion.
+completion. An output-limit stop completes the turn with a visible notice and
+drops any tool request in it, as described in
+[OpenAI output-limit stops](read-only-tool-loop.md#openai-output-limit-stops).
 
 ## GraphQL-managed profile
 

@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.173.0, `graphql-orm-macros` 0.173.0**; **`graphql-orm-operation-catalog` 0.9.0**; **`graphql-orm-storage` 0.17.0**; **`graphql-orm-backup` 0.27.0**; **`graphql-orm-ai-tool-profiles` 0.25.0**; **`graphql-orm-ai` 0.148.0**; **`graphql-orm-router-protocol` 0.3.0**; **`graphql-orm-router` 0.16.0**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.173.0, `graphql-orm-macros` 0.173.0**; **`graphql-orm-operation-catalog` 0.9.0**; **`graphql-orm-storage` 0.17.0**; **`graphql-orm-backup` 0.27.0**; **`graphql-orm-ai-tool-profiles` 0.25.0**; **`graphql-orm-ai` 0.149.0**; **`graphql-orm-router-protocol` 0.3.0**; **`graphql-orm-router` 0.16.0**.
 
 - **Action needed** — ORM/macros 0.173.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../MIGRATION.md#01720-to-01730-process-and-toolchain)
 - **Action needed** — ORM/macros 0.173.0 release operations: scoped publication and router distribution require a same-repository merged PR or approved-review URL. [migration](../../MIGRATION.md#01720-to-01730-process-and-toolchain)
@@ -79,6 +79,7 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 - **Action needed** — Backup 0.27.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-backup/MIGRATION.md#0270)
 - **Action needed** — AI tool profiles 0.25.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0250)
 - **Action needed** — AI 0.148.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-ai/MIGRATION.md#01480)
+- **No action** — AI 0.149.0: OpenAI Responses (also xAI and OpenAI-compatible) `response.incomplete` output-limit stops and Ollama `length` stops complete with exact usage and a visible notice, and a cut-off tool request is never run; the conversation bootstrap reads its whole tool-call window, so `reset_required` no longer fires just because a conversation holds more tool calls than the page maximum. No schema change. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01480-to-01490-output-limit-stops-and-the-bootstrap-tool-call-window) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01490)
 - **Action needed** — Router protocol 0.3.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-router-protocol/MIGRATION.md#030)
 - **Action needed** — Router 0.16.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../crates/graphql-orm-router/MIGRATION.md#0160)
 - **No action** — ORM/macros 0.172.0, operation catalogue 0.8.1: opt-in client-facing metadata. `schema_roots!(client_metadata: true)` emits a build-time client metadata export (`Changed` carried fields, `lifetime(...)` expiry fields, relationship key mappings); every `schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`; the pagination reference states that pages are independent reads (no snapshot token). Without the options, SDL, catalogues and fingerprints are unchanged. [Migration](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata)
