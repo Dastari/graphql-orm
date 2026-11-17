@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.173.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
+
 Version 0.172.0 accepts the entity options `lifetime(...)`,
 `changed_started` and `aggregate_source`, and the `schema_roots!` option
 `client_metadata`, and emits `graphql_orm_interpretation_fingerprint` from

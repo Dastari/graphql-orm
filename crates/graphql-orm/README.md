@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.173.0 adds fail-closed read-policy negation: `ReadPredicate::not_related`,
+`ReadPredicate::is_null` and `is_not_null`, and refuses `not()` over an empty list.
+See [read-predicate negation and NULLs](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls).
+
 Version 0.172.0 adds opt-in client-facing metadata: a build-time client
 metadata export (`schema_roots!(client_metadata: true)`) with `Changed` stream
 carried fields, lifetime fields and relationship key mappings, an opt-in

@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.172.0 to 0.173.0: read-policy negation
+
+Upgrade ORM and macros together. Generated code is unchanged. See
+[read-predicate negation and NULLs](docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls).
+
+- **`ReadPredicate::not_related`, `is_null` and `is_not_null` (#766). No
+  action.** `not_related::<Backend, Source, Target>(keys, target)` is the
+  fail-closed "no related row matching `target`": a row with a NULL key, or
+  with a related row whose target predicate is UNKNOWN, is not admitted; add
+  `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?` to admit NULL keys.
+  `is_null` and `is_not_null` validate the column like `column`.
+- **Negating an empty list is refused (#766). Action needed** only if a policy
+  calls `.not()` on a predicate that can contain an empty `in_list`, an empty
+  `or` list or a relation over one, for example a deny list computed per
+  request. Such a policy previously admitted every row whenever the list was
+  empty; it now fails the request with `AUTHORIZATION_MISCONFIGURED`. When the
+  list is empty, omit the negated term, use `ReadPredicate::is_not_null` to
+  admit every row with a value, or return `ReadVisibility::Unrestricted`
+  deliberately. Policies that never negate an empty list are unaffected.
+- **NULL rule (#766). No action.** `not()` keeps SQL three-valued logic: a
+  NULL compared column stays UNKNOWN and is never admitted by negation.
+  `related(..).not()` is unchanged (two-valued `NOT EXISTS`, which admits rows
+  with a NULL key or only UNKNOWN related rows); switch absence policies to
+  `not_related` if those rows must be denied.
+
 ## ORM/macros 0.172.0 and operation catalogue 0.8.1: client-facing metadata
 
 Upgrade ORM and macros together and recompile entities. Without the new
