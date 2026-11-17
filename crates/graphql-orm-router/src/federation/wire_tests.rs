@@ -1699,17 +1699,46 @@ fn prometheus_exporter_binds_ipv6_and_can_omit_operation_names() {
     prometheus_exporter_case("[::1]:0", true);
 }
 
+/// Reserves a port for the exporter on `bind`, and the same port on the public
+/// loopback address, which the test owns until it finishes.
+///
+/// The exporter port is only chosen on its own address, so a parallel test's
+/// listener can hold the same port number on `127.0.0.1` and answer HTTP there.
+/// Holding that port on the public address keeps the "nothing serves the
+/// exporter on the public address" assertion about the router alone.
+/// Returns `None`, after logging why, when `bind` cannot be bound on this host.
+fn reserve_exporter_address(bind: &str) -> Option<(SocketAddr, TcpListener)> {
+    for _ in 0..64 {
+        let reserved = match TcpListener::bind(bind) {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                eprintln!("skipping: cannot bind the exporter address {bind} here: {error}");
+                return None;
+            }
+        };
+        let address = reserved.local_addr().unwrap();
+        if let Ok(guard) = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, address.port())) {
+            // Hive binds the exporter itself, so release it first.
+            drop(reserved);
+            return Some((address, guard));
+        }
+    }
+    panic!("no port is free on both {bind} and the public loopback address");
+}
+
 fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
+    // IPv6 loopback is optional on a host (containers and some CI runners
+    // disable it); there is nothing to prove there. Hosts that have it still
+    // run the full case.
+    let Some((metrics, public_guard)) = reserve_exporter_address(bind) else {
+        return;
+    };
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
     let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
     let reviews_sdl = LoopbackSdl::start(REVIEWS);
-    // The public listener binds 127.0.0.1. Reserve a port on another loopback
-    // address for the exporter; Hive binds it itself, so release it first.
-    let metrics = {
-        let reserved = TcpListener::bind(bind).expect("second loopback address");
-        reserved.local_addr().unwrap()
-    };
+    // The public listener binds 127.0.0.1; the exporter binds `bind`, which
+    // `reserve_exporter_address` chose.
     let mut command = Command::new(env::current_exe().expect("test executable path"));
     if omit_operation_name {
         command.env(OMIT_OPERATION_NAME_ENV, "true");
@@ -1773,10 +1802,31 @@ fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
 
     // The exporter is not on the public IP address, and the public listener
     // does not serve the scrape path.
+    // `public_guard` holds the exporter's port on the public address and only
+    // accepts and drops connections, so any HTTP answer there would be the
+    // router's, and an exporter bound to the wildcard address would not have
+    // been able to bind at all.
     let public_ip_metrics = std::net::SocketAddr::new(router.address.ip(), metrics.port());
+    assert_eq!(public_guard.local_addr().unwrap(), public_ip_metrics);
+    public_guard.set_nonblocking(true).unwrap();
+    let stop_guard = Arc::new(AtomicBool::new(false));
+    let guard_thread = {
+        let stop_guard = Arc::clone(&stop_guard);
+        thread::spawn(move || {
+            while !stop_guard.load(Ordering::SeqCst) {
+                match public_guard.accept() {
+                    Ok((connection, _)) => drop(connection),
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        })
+    };
+    let public_ip_scrape = raw_http(public_ip_metrics, "GET", "/internal/metrics", &[], None);
+    stop_guard.store(true, Ordering::SeqCst);
+    guard_thread.join().unwrap();
     assert!(
-        raw_http(public_ip_metrics, "GET", "/internal/metrics", &[], None).is_err(),
-        "nothing listens on the public IP address at the exporter port"
+        public_ip_scrape.is_err(),
+        "nothing serves the exporter on the public IP address at the exporter port"
     );
     assert_ne!(router.probe("/internal/metrics"), 200);
     router.stop();

@@ -70,15 +70,14 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.167.0, `graphql-orm-macros` 0.167.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.146.0; `graphql-orm-router-protocol` 0.2.1; **`graphql-orm-router` 0.15.5**.
 
-### workspace-2026.11.16.3
+- **No action** — Router 0.15.5: Only the wire tests change; router behavior, configuration and public APIs are unchanged. [migration](../../crates/graphql-orm-router/MIGRATION.md#0154-to-0155) · [changelog](../../crates/graphql-orm-router/CHANGELOG.md#0155-unreleased)
+- **No action** — ORM/macros 0.167.0: test-only; the macros unit tests no longer assume the SQLite backend [migration](../../MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests)
 
-Commit `cd8072d8e576` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.3)
+Breaking batch, collected on `next/breaking` (ORM/macros 0.168.0, backup 0.27.0, AI 0.149.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.16.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
 
-Packages (changed in bold): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
-
-Breaking batch, collected on `next/breaking` (ORM/macros 0.167.0, backup 0.27.0, AI 0.148.0, catalogue 0.9.0, AI tool profiles 0.25.0, router 0.16.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+- **Action needed — AI 0.149.0, AI tool profiles 0.26.0:** capability broker version 2 (compact signatures and `describe_type`, one entity capability per entity, inverted-index search) and the fixed broker by default for large surfaces, with an opt-out. Retained fixed-broker sessions rebind once; host capability policy must decide entity entries. [Migration](../../MIGRATION.md#capability-broker-version-2-compact-signatures-entity-capabilities-and-the-fixed-broker-default-551) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01480-to-01490-capability-broker-version-2)
 
 - **Action needed — router 0.16.0:** composed `@authenticated` and `@requiresScopes` are enforced on nested fields, fragments, aliases, interfaces and unions; a refused selection refuses the whole operation before any subgraph request. [Migration](../../MIGRATION.md#router-0160-nested-authenticated-and-requiresscopes-are-enforced) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0154-to-0160)
 
@@ -90,14 +89,11 @@ Breaking batch, collected on `next/breaking` (ORM/macros 0.167.0, backup 0.27.0,
 - **Action needed — ORM/macros 0.166.0:** lossy type conversions and integrity-removing migration steps require the existing destructive gate. Re-plan and review pending migrations. [Risk classification](../../MIGRATION.md#migration-plans-undeclared-tables-lossy-type-changes-and-integrity-removal).
 - **Action needed — ORM 0.166.0:** re-install PostgreSQL journal recorders; TRUNCATE and cascades into tables without recorders fail closed. [Journal upgrade](../../MIGRATION.md#postgresql-change-journal-truncate-and-unjournaled-cascades-are-refused).
 - **Action needed — backup 0.27.0:** deletion results expose snapshot ids, and result/error types are non-exhaustive with a dedicated snapshot admission error. Update literals and exhaustive matches. [Backup API](../../MIGRATION.md#backup-result-and-error-types).
-- **Action needed** — ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.24.0: generated-operation fingerprints no longer include the Rust module path; every operation, catalogue and router-export fingerprint changes once [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../CHANGELOG.md#unreleased---breaking-release-ormmacros-01600-catalogue-090-ai-tool-profiles-0240-ai-01460)
+- **Action needed** — ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.24.0: generated-operation fingerprints no longer include the Rust module path; every operation, catalogue and router-export fingerprint changes once [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../CHANGELOG.md#unreleased---breaking-release-ormmacros-01600-catalogue-090-ai-tool-profiles-0260-ai-01490)
 - **Action needed** — AI 0.146.0: fixed-broker provider sessions rebind once, then survive catalogue changes; `capability_stale` and `selection_stale` are separate codes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **Action needed** — AI 0.146.0: `HighImpact` approvals always require recent MFA; approval lifetime cap has a 7-day ceiling [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **Action needed** — AI 0.146.0 (schema module `0.82.0`), ORM/macros 0.160.0: three AI unique indexes; applying a migration refuses repeated unique keys before any DDL [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 
-- **Action needed** — ORM/macros 0.165.0: MSSQL hosts must install the canonical restore marker table (`MssqlPool::install_restore_marker()` on an external-writable pool) and grant the runtime role SELECT on it; until then every statement is refused with `RestoreStateUnavailable`, which names the missing install or grant (it is not `RestoreInProgress`). Hosts restoring runtime search must backfill after restore; ignored field-write denials now preserve stored values. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01650-backup-0260)
-- **No action** — ORM/macros 0.165.0: SQLite and PostgreSQL snapshot restores now commit atomically. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials)
-- **Action needed** — Backup 0.26.0: opt in to host-held snapshot records and record snapshot ids before deletion to prevent replay of pruned snapshots. Existing APIs remain source compatible (**No action** to keep compiling). [Migration](../../crates/graphql-orm-backup/MIGRATION.md#to-0260-host-held-snapshot-records) · [changelog](../../crates/graphql-orm-backup/CHANGELOG.md)
 - **Action needed** — ORM/macros 0.167.0: declare the schema page maximum and migrate oversized internal reads, including host `EntityQuery::paginate`/`EntitySearchQuery::paginate` reads, to exact-or-refused paging; resolve client pages in custom resolvers with `resolve_client_page` (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.167.0: handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches, and match it instead of `ResourceLimit` plus `detail()` (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.167.0: use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#breaking-release-unreleased)
@@ -107,6 +103,28 @@ Breaking batch, collected on `next/breaking` (ORM/macros 0.167.0, backup 0.27.0,
 - **Action needed** — ORM/macros 0.167.0: keep subgraph guards and policies on nested fields; released routers never enforced nested `@authenticated`/`@requiresScopes` (#485 correction, PR #733), and router 0.16.0 in this batch now does (#729). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **No action** — Tool profiles 0.25.0 and AI 0.148.0: runtime live key inputs compile under default string identities. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-runtime-live-keys-under-default-identities)
 - **No action** — AI 0.148.0: the runtime's own keyset windows (message and list windows, bootstraps, retention and cleanup scans) larger than a host's page maximum are read completely in pages instead of being refused. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01470-to-01480-runtime-live-keys-under-default-identities)
+
+### workspace-2026.11.16.4
+
+Commit `9674f5c71677` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.4)
+
+Packages (changed in bold): **`graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+- **No action** — ORM/macros 0.166.0: opt-in dependent-delete effect verification and transaction-bound row limits; unsupported plans refuse [migration](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes)
+- **No action** — AI 0.146.0: delivery selection stays unchanged unless the host opts into `prefer_fixed_broker_for_large_surfaces`; opting in requires a retained-session rebind [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — AI 0.146.0: fixed-broker `describe` returns each repeated input type once under `planSchema.types`; execute arguments and fingerprints are unchanged [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — AI 0.146.0: opt-in reviewed static read tools behind the fixed broker, host-held epoch anchor for file-level restores, and dependent-effect policy for generated deletes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — Tool profiles 0.24.0: one oversized generated root is excluded and reported instead of failing its target; opt-in strict query roots; shared type dictionary rendering; precomputed search terms [migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale) · [changelog](../../crates/graphql-orm-ai-tool-profiles/CHANGELOG.md#unreleased---0240)
+
+### workspace-2026.11.16.3
+
+Commit `cd8072d8e576` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.3)
+
+Packages (changed in bold): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+- **Action needed** — ORM/macros 0.165.0: MSSQL hosts must install the canonical restore marker table (`MssqlPool::install_restore_marker()` on an external-writable pool) and grant the runtime role SELECT on it; until then every statement is refused with `RestoreStateUnavailable`, which names the missing install or grant (it is not `RestoreInProgress`). Hosts restoring runtime search must backfill after restore; ignored field-write denials now preserve stored values. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01650-backup-0260)
+- **No action** — ORM/macros 0.165.0: SQLite and PostgreSQL snapshot restores now commit atomically. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials)
+- **Action needed** — Backup 0.26.0: opt in to host-held snapshot records and record snapshot ids before deletion to prevent replay of pruned snapshots. Existing APIs remain source compatible (**No action** to keep compiling). [Migration](../../crates/graphql-orm-backup/MIGRATION.md#to-0260-host-held-snapshot-records) · [changelog](../../crates/graphql-orm-backup/CHANGELOG.md)
 
 ### workspace-2026.11.16.2
 

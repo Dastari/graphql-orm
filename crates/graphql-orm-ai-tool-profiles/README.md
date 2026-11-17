@@ -20,6 +20,13 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version `0.26.0` (**breaking index**) groups the generated query roots of each
+entity into one entity capability, so the index holds one entry per entity;
+each root keeps its own entry and fingerprint. Search uses an inverted index
+with unchanged fixed per-entry weights, and `AiCapabilitySignature` renders
+compact typed signatures for capability broker version 2. See the
+[migration guide](MIGRATION.md#0250-to-0260-entity-capabilities-and-compact-signatures).
+
 Version `0.25.0` compiles runtime live key inputs under both ORM identity
 modes: the default `RuntimeInt64` strings and the opt-in legacy `Int`. A
 UUID-keyed runtime collection with live subscriptions and a node identity no
@@ -30,6 +37,11 @@ and ORM/macros 0.160.0. Operation contracts and tool manifests record the
 generated-operation algorithm `graphql-orm-sha256-len-v2`, which no longer
 includes the Rust module path; regenerate manifests bound under version 1. See
 the [migration guide](MIGRATION.md#0230-to-0240-operation-fingerprint-algorithm-v2).
+
+Version `0.24.0` adds a shared type dictionary rendering of plan schemas,
+precomputed capability search terms, per-root exclusion of oversized schemas,
+an opt-in strict query-root list and a startup benchmark example. See the
+[changelog](CHANGELOG.md).
 
 Version `0.23.0` requires operation catalogue 0.8.0 and ORM/macros 0.149.0
 producer metadata. It closes handwritten input objects by default. Every input object

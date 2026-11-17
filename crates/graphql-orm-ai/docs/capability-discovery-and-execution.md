@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-23
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -32,6 +32,24 @@ and exact source fingerprints. Entity, field, relationship, argument and root
 descriptions come directly from semantic metadata; changing one changes the
 semantic, capability, entry and index fingerprints.
 
+### Entity capabilities
+
+Index version 3 (`AI_CAPABILITY_INDEX_VERSION`) holds one entry per entity,
+not one per root. Every generated query root of one entity becomes a member of
+one `AiCapabilityKind::GeneratedEntity` entry (shape `Entity`), listed in its
+`operations`. The entity entry carries the entity's scalar, relationship and
+aggregate summaries once; its capability fingerprint covers every member
+root's ID and fingerprint. A root without an entity stays a standalone
+`GeneratedQuery` entry. The entry count and byte limits, per index and per
+set, count discoverable entries only, so they grow with entities.
+
+Each grouped root keeps everything it had: its own `GeneratedQuery` entry,
+capability ID, capability fingerprint, entry fingerprint and plan compiler.
+`entry(root_id)` resolves it, `operation_entry(entity_id, operation)` finds it
+by its root field name, and `entity_entry_of(root_id)` goes back.
+`entries()` lists discoverable entries only. Mutation and subscription roots
+are not grouped and stay outside the broker.
+
 The index contains no argument schema, GraphQL document or SDL, database
 coordinate, resolver URL, auth mechanism, policy expression, token, delegated
 authority, hidden field, secret classification or protected value. It is a
@@ -46,6 +64,49 @@ globally, while load and execute recover the sole owning index and revalidate
 that target's schema, semantic catalogue, target policy, capability, and
 current resolver authority. A host-authored combined fingerprint is neither
 needed nor accepted.
+
+### Roots a catalogue leaves out
+
+A generated capability catalogue compiles one capability per admitted root.
+Two things can leave a root out while the rest of its target compiles:
+
+- **An oversized schema.** A root whose compact plan schema is larger than the
+  fixed provider-contract ceiling for one capability (1 MiB) is excluded. It
+  used to fail the whole catalogue. `excluded_capabilities()` on the query,
+  mutation and subscription catalogues lists each excluded root with its
+  schema size and the ceiling, and `AiToolCatalog` logs one warning per
+  excluded root when the catalogue is registered. An excluded root is absent
+  from the catalogue fingerprint, the index and discovery. Check the list at
+  startup: nothing else tells an operator that a root the schema exposes is
+  unavailable to the model.
+- **Strict query roots.** By default every exportable public Query root
+  becomes a capability once the target policy calls `allow_queries()`.
+  `AiGraphqlQueryCapabilityOptions::with_strict_query_roots` switches a query
+  catalogue to opt-in: only the listed root field names are compiled, so any
+  other root is never registered, indexed, discovered or executable as a
+  generated capability. A listed name that is not an exportable public Query
+  root fails compilation. The list selects roots only. Fields and
+  relationship paths under an admitted root are still governed by the ORM's
+  export and classification metadata and by resolver authorization.
+
+```rust,no_run
+# fn options() -> Result<graphql_orm_ai::AiGraphqlQueryCapabilityOptions, graphql_orm_ai::AiError> {
+graphql_orm_ai::AiGraphqlQueryCapabilityOptions::default()
+    .with_strict_query_roots(["Records", "RecordById"])
+# }
+```
+
+### Startup cost
+
+`cargo run --release -p graphql-orm-ai-tool-profiles --example
+capability_startup_benchmark -- 250 500 1000` compiles a synthetic target at
+each size and prints catalogue and index compile time, search latency and
+peak resident memory, with the per-entity slope. CI runs it and publishes the
+result as the `capability-startup-benchmark` artefact. Capabilities of one
+catalogue share one copy of the finished schema and semantic catalogue, so
+catalogue memory grows linearly with the number of roots. Catalogue compile
+time is still more than linear in the number of roots; read the artefact
+before sizing a very large target.
 
 ```rust,no_run
 # use std::sync::Arc;
@@ -74,7 +135,22 @@ tie-breaking. Narrow, explicit list, details, search, keyset-page, or aggregate
 intent ranks the matching compiler-owned operation shape before entity,
 target/namespace and lexical-description relevance. Every result must retain a
 positive lexical match, and relevant non-matching shapes are not discarded. It
-needs no embeddings or external database. A host may later
+needs no embeddings or external database.
+
+Compiling an index builds an inverted index: each term maps to the posting
+list of entries that hold it, with that entry's fixed field weights. A search
+tokenises only its query and scores only the entries in its terms' posting
+lists, so its cost follows the matches, not the catalogue. Scores are fixed
+per-entry field weights. No inverse document frequency, BM25 or other
+catalogue-wide statistic is computed, so an entry's score never depends on
+how many other entries hold a term, and the rank of an entry a principal may
+see carries no information about entries it may not. An entity entry is also
+found by its roots' operation names and descriptions, and matches a shape
+intent when any of its roots has that shape. Each root's contribution is
+recorded separately, so after host policy the broker scores an entity on its
+own metadata and its admitted roots only (`rank_admitted`).
+`AiCapabilityIndexSet::ranked_operation_matches` ranks each executable root
+on its own metadata, for delivery that installs one definition per root. A host may later
 implement the closed current-index-set and authority traits with a reviewed
 search service, but returned IDs and fingerprints must still bind to the
 canonical set and the candidate's exact owning index.
@@ -116,8 +192,17 @@ negotiation metadata, never authority.
 | --- | --- | --- |
 | `EagerExact` | All already-filtered exact definitions | Small sets within exact count and byte limits |
 | `ClientDeferred` | Exact static bootstrap plus discovery; freshly loaded generated-query definitions on the next continuation | Stateless/local or client-executed search |
-| `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search |
-| `FixedBroker` | Exact static bootstrap plus frozen discover/describe/execute definitions | Retained sessions whose generated definitions cannot change |
+| `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search, including large non-frozen surfaces unless the broker preference is enabled |
+| `FixedBroker` | Exact static bootstrap plus frozen discover/describe/describe_type/execute definitions | Retained sessions, and large surfaces by default |
+
+Above the eager count or byte limit, a provider that supports both
+`ProviderDeferred` and `FixedBroker` gets `FixedBroker` by default
+(`AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` is
+`true`), so no selected mode's request size grows with the catalogue. To keep
+native deferred loading for large surfaces, set the field to `false` or call
+`with_provider_deferred_for_large_surfaces()`. The mode is part of the
+retained binding, so changing this setting rebinds retained sessions. A
+provider that supports only `ProviderDeferred` keeps it.
 
 Provider-session bindings admit at most 128 exact static bootstrap fingerprints.
 Grok SDK and Codex dynamic tools independently enforce 128-definition ceilings
@@ -130,6 +215,55 @@ arguments use a closed scalar argument list and public selection paths; the
 selected capability's authoritative compiler validates every name and type.
 No broker accepts arbitrary GraphQL, target, alias, fragment, introspection,
 SQL, URL or callback.
+
+### Reviewed static tools behind the fixed broker
+
+A reviewed static read tool can be reached through the fixed broker instead
+of being offered as a bootstrap definition. Such a tool is not a provider
+definition: it does not count against the 128 static bootstrap fingerprints
+or a provider's definition ceiling, and adding or removing one never changes
+the session binding or the four broker definitions.
+
+```rust,ignore
+let session = AiCapabilityBrokerSession::new(delivery_limits)?
+    .with_brokered_static_tools(brokered_descriptor_fingerprints)?;
+```
+
+List each tool either in the session binding's bootstrap fingerprints or
+here, never both; `AiCapabilityDeliveryTurn::select` refuses an overlap and
+refuses the list in any mode other than `FixedBroker`. The static descriptors
+must be in the compiled index, as before.
+
+The model finds a brokered tool with discover (an unfiltered search returns
+generated queries and brokered static tools together), loads it with
+describe and runs it with execute:
+
+- describe returns the tool's risk, approval and classification metadata and
+  one operation whose signature renders the tool's reviewed argument schema
+  and ends in `-> fixed`;
+- execute takes the arguments as the same flattened name and value entries a
+  generated query uses, and an empty `selections` list. The tool's document
+  and result are fixed, so a selection, relationship argument or bound is
+  refused as invalid input.
+
+The exact-definition review contract is unchanged. The fingerprint in the
+list must equal the indexed entry's and the registered descriptor's
+fingerprint at discover, describe and execute, or the call fails closed. Each
+call rehydrates the principal and applies host capability policy to the exact
+entry. Execute then validates the arguments against the registered schema,
+applies current tool authorization, runs the ordinary resolver path and
+applies the tool's own static disclosure schema. The coordinator refuses a
+turn whose hierarchical rules do not admit every listed fingerprint as an
+approval-free read tool, so a rule that lists allowed tool fingerprints
+applies to a brokered tool exactly as to an offered one.
+
+Only an approval-free, read-only, idempotent application query whose maximum
+classification is below `Restricted` and which declares no result media can
+be brokered. Anything else in the list is never discoverable and never
+executable through the broker; keep it a bootstrap definition. A brokered
+call carries no `AiToolExecutionProvenance`, so a host executor that requires
+provenance refuses it. Mutations and subscriptions keep their own approval
+and wait contracts and cannot enter the broker.
 
 ### Coordinator construction and dispatch
 
@@ -170,7 +304,7 @@ let turn = AiReadOnlyAgentTurnPlan::new(
 ```
 
 The host composes `OrmAiApplicationToolCallService` as the coordinator's
-ordinary tool executor. The coordinator recognizes only the three frozen IDs
+ordinary tool executor. The coordinator recognizes only the four frozen IDs
 from the exact offered surface and dispatches them through that service; a
 host executor retains a fail-closed default and does not gain broker execution
 implicitly.
@@ -192,15 +326,73 @@ not application authority: the execute operation still rehydrates the current
 principal and passes the selected generated query through the ordinary policy,
 delegation, resolver and disclosure boundary.
 
-Fixed-broker `describe` returns the exact compact planning schema only on
-demand. It also reports conservative compiler-owned maximum root and total
+### Broker version 2: signatures, `describe_type` and entity operations
+
+`AI_CAPABILITY_BROKER_VERSION` is 2. Its four definitions are discover,
+describe, `graphql.capabilities.describe_type` and execute.
+
+- **Discover** returns, for an entity, one `generated_entity` candidate with
+  its `operations` (each root's name and shape). A root without an entity and
+  a brokered static tool are candidates of their own. `kind` filters:
+  `generated_query` (every generated read), `generated_entity` or
+  `reviewed_static`.
+- **Describe** loads the candidate and returns one entry per operation under
+  `operations`: the root's shape, description, result-record cost and a
+  compact typed signature, for example
+  `Records(where?: RecordWhereInput|null, page?: PageInput) -> select`, with
+  `select` (the top level of the selection tree, relationships as
+  `name{…}`), `maximumItems` and `inputTypes`. Every GraphQL input type is
+  named, never inlined. There is no `planSchema` unless the run sets
+  `AiCapabilityBrokerSession::with_inline_describe_schema`, which adds each
+  operation's inline schema when it fits the bound.
+- **`describe_type`** takes the `loadedReference`, the `operation` and a type
+  name: one from `inputTypes`, `select`, or `select.<path>` for a
+  relationship path. It returns the type's fields (name, type, whether
+  required, description), an enum's values, or a selection level (scalars,
+  and relationships with their arguments and `maximumItems`; the root level
+  also carries each field's index description), at most 128 per page with
+  `offset` and `nextOffset`.
+- **Execute** takes `operation` and the same flattened arguments and
+  selection paths as before. `operation` may be omitted when the description
+  admitted exactly one operation.
+
+Host policy decides the entity and each root. Discover sends each matching
+entity entry followed by its grouped roots in one `authorize_discovery`
+batch. An entity is returned only with the roots admitted, its `operations`
+list only those, and it is ranked again on its own metadata and the admitted
+roots alone (`AiCapabilityIndexSet::rank_admitted`), so a denied root's name,
+description or shape decides neither whether nor where the entity appears.
+An entity with no admitted root is not listed. Describe asks about the entity
+and then each root entry, and lists only the roots admitted (none admitted
+refuses the load); its entity-level `resultDescription` and
+`resultRecordCost` count only those roots. `describe_type` and execute
+re-check the entity and the chosen root, including their fingerprints and the
+policy fingerprints recorded at describe, before anything runs.
+Client-deferred discovery ranks each root on its own metadata
+(`ranked_operation_matches`) and sends a grouped root's entity before the
+root; a root is returned, loaded and executed only while both are admitted. The
+chosen root's own capability, fingerprint and plan compiler execute the plan,
+then the ordinary resolver path and disclosure schema apply. An `operation`
+the description did not return is `invalid_arguments` with a fixed
+correction (`AI_CAPABILITY_OPERATION_INVALID`), as is an undefined type name
+(`AI_CAPABILITY_TYPE_UNKNOWN`).
+
+The signature is model-facing only. `AiCapabilitySignature` renders it from
+`AiSharedTypePlanSchema::compile_named`, which expands back to the compact
+schema exactly. Plan validation, the capability fingerprint and the eager and
+client-deferred definitions are unchanged. Hosts can render the same
+signature with `AiGraphqlQueryCapability::capability_signature`.
+
+Describe also reports conservative compiler-owned maximum root and total
 result-record costs plus whether the plan must choose a positive root bound;
 these values are planning metadata, not execution authority or observed row
-counts. The complete description, including that schema, is bounded by
+counts. The complete description, including its signatures, is bounded by
 `AiCapabilityDeliveryLimits::maximum_describe_bytes` (512 KiB by default and
-4 MiB at the compiled ceiling). An oversized schema is not truncated or
-partially exposed: the response sets `planSchemaAvailable` to `false`, and the
-provider must choose another reviewed capability or return a bounded answer.
+4 MiB at the compiled ceiling), and so is each `describe_type` page. Nothing
+is truncated or partially exposed: an inline `planSchema` that does not fit is
+dropped first, then the signatures, and the response sets
+`signaturesAvailable` to `false`; an oversized type page is refused so the
+model asks for a smaller `limit`.
 
 ### Turn amplification
 
@@ -211,7 +403,7 @@ Delivery work consumes normal bounded-loop capacity:
 | Eager exact | 0 |
 | Provider deferred | Provider-native discovery only; exact application call still counts normally |
 | Client deferred, newly selected capability | 1 discover, then the exact application call |
-| Fixed broker, novel capability | discover + describe + execute = 3 |
+| Fixed broker, novel capability | discover + describe + execute = 3, plus one `describe_type` per expanded type |
 | Fixed broker, still-loaded capability | execute = 1 |
 
 Every completed broker result is ordinary provider input, so stateless loops
@@ -230,9 +422,13 @@ What else the binding covers depends on the mode:
 | Mode | Also bound | A schema or catalogue change |
 | --- | --- | --- |
 | `EagerExact`, `ProviderDeferred`, `ClientDeferred` | the complete canonical index set | rebinds the retained session |
-| `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` | keeps the retained session |
+| `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` (2) | keeps the retained session |
 
-The three fixed broker definitions are the same for every catalogue, so a
+Bumping the broker version changes the fixed broker definitions and every
+fixed-broker binding, so a session bound under version 1 matches no current
+binding and rebinds once; the Grok registration check also refuses a tool set
+that carries the version 1 definitions. The four fixed broker definitions are
+the same for every catalogue, so a
 retained fixed-broker session, and the chat it carries, survives a schema
 change in any target. The index is checked where it matters instead: every
 describe and execute compares the current index-set, index, schema, semantic
@@ -246,7 +442,7 @@ Both outcomes are retryable, execute nothing, and carry a fixed `correction`
 
 | Model-facing code | When | Model recovery |
 | --- | --- | --- |
-| `capability_stale` | The run holds the candidate or loaded capability, and a fingerprint above has changed since. | Discover again, describe the new candidate, use the new `planSchema` and `loadedReference`. |
+| `capability_stale` | The run holds the candidate or loaded capability, and a fingerprint above has changed since (at describe, `describe_type` or execute). | Discover again, describe the new candidate, use the new signatures and `loadedReference`. |
 | `selection_stale` | The run does not hold the selection: discovery never returned that candidate to it, or the `loadedReference` is unknown or expired. | Discover (or describe) again. |
 
 `capability_stale` is reported only for a candidate the current principal was

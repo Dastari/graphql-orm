@@ -3,7 +3,7 @@ title: "Security Model"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -75,6 +75,74 @@ every application resolver, around checkpoint protection, and at adoption.
 Changed rules fail before an external effect where possible; after transport,
 stale rule or actual-usage evidence requires recovery and cannot be replayed.
 Legacy/unbound checkpoints are not adoption authority.
+
+## Dependent effects of generated deletes
+
+A generated delete root carries its own AI execution policy. Deleting a row
+can also delete or rewrite rows of other entities, through declared dependent
+deletes or physical foreign-key actions, and the root's policy says nothing
+about those entities.
+
+`AiRuntimeBuilder::dependent_effect_policy` installs an
+`AiDependentEffectPolicy` that decides those effects before execution. It is
+opt-in: without it a generated delete is decided by its own classification,
+as before. With it, every generated `Delete` or `DeleteMany` capability is
+checked when it is prepared (before any approval is requested) and again
+immediately before it executes:
+
+- The host declares, per logical target and root entity, the complete set of
+  dependent effects the delete can cause: a cascade delete of a dependent
+  entity, or a set-null of a named field of a dependent entity. An empty set
+  declares that the delete touches nothing else.
+- A root with no declaration is unproven and is refused.
+- A cascade needs the dependent entity's own generated `Delete` capability,
+  and a set-null its own generated `Update` capability, registered and
+  admitted by the generated target policy. The dependent's execution policy
+  must be no stricter than the root's: an automatic root needs automatic
+  dependents, and an approval-required root accepts automatic or
+  approval-required dependents. A dependent entity whose own operation is
+  prohibited or absent refuses the root. Nothing is inherited from the root.
+- `with_maximum_dependent_rows` additionally refuses an effect that declares
+  no row bound or one above the ceiling.
+
+```rust,ignore
+let policy = AiDependentEffectPolicy::new()
+    .declare_delete(target.clone(), "Folder", [
+        AiDependentEffect::delete("Document")?.with_maximum_rows(500),
+        AiDependentEffect::set_null("Bookmark", "folderId")?.with_maximum_rows(500),
+    ])?
+    .declare_delete(target, "Document", [])?
+    .with_maximum_dependent_rows(1_000);
+```
+
+The declaration is checked against ORM 0.166.0's introspected physical graph
+and locked dependent row plan before any write. Every transitive cascade and
+set-null must match, including effects with zero current rows. Row bounds are
+execution limits: exceeding one aborts the transaction and rolls everything back.
+Restrict edges with matching rows refuse through the ORM planner.
+
+The authenticated executor must implement
+`execute_registered_with_effect_guard`, attach the supplied guard clone to
+GraphQL request data, and preserve the ordinary binding and authorization.
+Unsupported executors refuse by default, before anything runs. After the
+executor returns, the bridge checks the ORM commit receipt
+(`DependentDeleteGuard::was_committed`) and refuses the result with
+`Authorization` when it is missing.
+
+That receipt check is detection, not prevention. A host executor that
+implements the guarded method but skips attaching the guard breaches the host
+contract: the ORM then runs an ordinary unguarded delete, which commits, and
+the missing receipt is detected only after that write. The refusal keeps the
+result from the model and the run, but it cannot undo the delete. Test the host
+executor's guard attachment before enabling generated deletes. Use `StaticDependentDeletes` with all participating entities registered.
+Unknown physical dependents, unmanaged relation semantics and ORM-managed
+relations that this planner cannot prove refuse. Physical opt-out and bulk
+deletes also refuse when guarded; they cannot silently bypass the policy.
+This is option B where planning is supported, with option A as the fallback.
+
+AI admission is independent of GraphQL entity, row and field authorization.
+The ORM still authorizes every write. Reviewed static mutation tools remain
+host-authored operations outside this generated-delete policy.
 
 ## Content protection scope
 

@@ -9,22 +9,26 @@
 
 mod canonical_json;
 mod capability_index;
+mod capability_signature;
 mod data;
 mod disclosure;
 mod error;
 mod execution;
 mod execution_rejection;
+mod plan_schema_types;
 mod profiles;
 mod query_plans;
 mod tool_media;
 mod tools;
 
 pub use capability_index::*;
+pub use capability_signature::*;
 pub use data::*;
 pub use disclosure::*;
 pub use error::*;
 pub use execution::*;
 pub use execution_rejection::*;
+pub use plan_schema_types::*;
 pub use profiles::*;
 pub use query_plans::*;
 pub use tool_media::*;

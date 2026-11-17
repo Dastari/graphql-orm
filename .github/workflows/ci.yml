@@ -115,6 +115,17 @@ jobs:
       - run: cargo test -p graphql-orm-storage
       - run: cargo test -p graphql-orm-backup --features orm-sqlite
       - run: cargo test -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles
+      - name: Measure capability startup against the number of roots
+        run: |
+          mkdir -p target/capability-startup-benchmark
+          cargo run --release -p graphql-orm-ai-tool-profiles --example capability_startup_benchmark -- 250 500 1000 \
+            > target/capability-startup-benchmark/capability-startup-benchmark.json
+          cat target/capability-startup-benchmark/capability-startup-benchmark.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: capability-startup-benchmark
+          path: target/capability-startup-benchmark/
+          if-no-files-found: error
 
   s3-security:
     name: Owned S3 transport and single-attempt deletion

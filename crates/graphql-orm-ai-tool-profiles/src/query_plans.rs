@@ -4,7 +4,10 @@
 //! typed plan; this module validates it and emits one exact server-owned
 //! GraphQL document, variables object, disclosure schema, and drift binding.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
+};
 
 use async_graphql_parser::{parse_schema, types::TypeSystemDefinition};
 use graphql_orm_operation_catalog::{
@@ -21,9 +24,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AiApprovalRule, AiDisclosureListIdentity, AiDisclosureRule, AiDisclosureSchema,
-    AiDisclosureShape, AiError, AiToolDescriptor, AiToolId, AiToolOperationKind, AiToolRisk,
-    DataClassification, GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
-    canonical_json::canonical_json_bytes,
+    AiDisclosureShape, AiError, AiSharedTypePlanSchema, AiToolDescriptor, AiToolId,
+    AiToolOperationKind, AiToolRisk, DataClassification, GraphqlExecutionTargetId,
+    GraphqlOperationContract, ToolMaturity, canonical_json::canonical_json_bytes,
 };
 
 /// Current automatic query-capability contract version.
@@ -38,6 +41,21 @@ pub const AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION: u16 = 1;
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAXIMUM_DESCRIPTION_BYTES: usize = 1_024;
 const MAXIMUM_PROVIDER_SCHEMA_BYTES: usize = 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static PROVIDER_SCHEMA_BYTES_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Fixed provider-contract ceiling for one compact capability schema.
+fn maximum_provider_schema_bytes() -> usize {
+    #[cfg(test)]
+    if let Some(maximum) = PROVIDER_SCHEMA_BYTES_OVERRIDE.with(std::cell::Cell::get) {
+        return maximum;
+    }
+    MAXIMUM_PROVIDER_SCHEMA_BYTES
+}
 // Per opaque JSON scalar, including its root container/null/scalar node.
 const MAXIMUM_JSON_SCALAR_BYTES: usize = 65_536;
 const MAXIMUM_JSON_SCALAR_NODES: usize = 4_096;
@@ -87,6 +105,8 @@ pub struct AiGraphqlQueryCapabilityOptions {
     maximum_relationship_argument_depth: u8,
     #[serde(default, skip_serializing_if = "AiCustomInputDisclosure::is_empty")]
     custom_input_disclosure: AiCustomInputDisclosure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strict_query_roots: Option<BTreeSet<String>>,
 }
 
 #[derive(Deserialize)]
@@ -95,14 +115,20 @@ struct AiGraphqlQueryCapabilityOptionsWire {
     maximum_relationship_argument_depth: u8,
     #[serde(default)]
     custom_input_disclosure: AiCustomInputDisclosure,
+    #[serde(default)]
+    strict_query_roots: Option<BTreeSet<String>>,
 }
 
 impl TryFrom<AiGraphqlQueryCapabilityOptionsWire> for AiGraphqlQueryCapabilityOptions {
     type Error = AiError;
 
     fn try_from(value: AiGraphqlQueryCapabilityOptionsWire) -> Result<Self, Self::Error> {
-        Ok(Self::new(value.maximum_relationship_argument_depth)?
-            .with_custom_input_disclosure(value.custom_input_disclosure))
+        let options = Self::new(value.maximum_relationship_argument_depth)?
+            .with_custom_input_disclosure(value.custom_input_disclosure);
+        match value.strict_query_roots {
+            Some(roots) => options.with_strict_query_roots(roots),
+            None => Ok(options),
+        }
     }
 }
 
@@ -402,6 +428,7 @@ impl AiGraphqlQueryCapabilityOptions {
         Ok(Self {
             maximum_relationship_argument_depth,
             custom_input_disclosure: AiCustomInputDisclosure::default(),
+            strict_query_roots: None,
         })
     }
 
@@ -422,6 +449,47 @@ impl AiGraphqlQueryCapabilityOptions {
     pub fn custom_input_disclosure(&self) -> &AiCustomInputDisclosure {
         &self.custom_input_disclosure
     }
+
+    /// Switches generated query capabilities to strict opt-in mode.
+    ///
+    /// By default every exportable public Query root becomes a capability.
+    /// In strict mode only the listed public root field names do: any other
+    /// root is absent from the catalogue, so it is never registered, indexed,
+    /// discovered, described, or executable as a generated capability. An
+    /// empty list compiles an empty query catalogue.
+    ///
+    /// The list selects roots. It does not narrow what an admitted root can
+    /// reach: scalar fields and relationship paths under an admitted root are
+    /// still governed by the ORM's export and classification metadata and by
+    /// ordinary resolver authorization. The list applies to query catalogues
+    /// only; mutation and subscription catalogues already admit only roots
+    /// that declare their own execution or replay policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a name that is not a GraphQL name. A listed root
+    /// that the finished schema does not expose, or whose result is not
+    /// provider-exportable, fails catalogue compilation instead of being
+    /// ignored.
+    pub fn with_strict_query_roots<I, S>(mut self, roots: I) -> Result<Self, AiError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let roots = roots.into_iter().map(Into::into).collect::<BTreeSet<_>>();
+        for root in &roots {
+            validate_graphql_name(root)
+                .map_err(|_| configuration_error("strict query root name is invalid"))?;
+        }
+        self.strict_query_roots = Some(roots);
+        Ok(self)
+    }
+
+    /// Returns the strict-mode root allow-list, or `None` in the default
+    /// mode where every exportable public Query root is offered.
+    pub fn strict_query_roots(&self) -> Option<&BTreeSet<String>> {
+        self.strict_query_roots.as_ref()
+    }
 }
 
 impl Default for AiGraphqlQueryCapabilityOptions {
@@ -429,6 +497,7 @@ impl Default for AiGraphqlQueryCapabilityOptions {
         Self {
             maximum_relationship_argument_depth: 8,
             custom_input_disclosure: AiCustomInputDisclosure::default(),
+            strict_query_roots: None,
         }
     }
 }
@@ -638,10 +707,14 @@ pub struct AiGraphqlQueryCapability {
     fingerprint: String,
     schema_fingerprint: String,
     target_id: GraphqlExecutionTargetId,
-    semantic_catalog: GraphqlSemanticCatalog,
-    schema: FinishedSchema,
+    // Shared by every capability of one catalogue. A private copy per
+    // capability made catalogue memory and compile time quadratic in the
+    // number of roots.
+    semantic_catalog: Arc<GraphqlSemanticCatalog>,
+    schema: Arc<FinishedSchema>,
     limits: AiGraphqlQueryCapabilityLimits,
     output: QueryOutput,
+    relationship_argument_depth: u8,
 }
 
 impl AiGraphqlQueryCapability {
@@ -670,6 +743,70 @@ impl AiGraphqlQueryCapability {
         &self.compact_argument_schema
     }
 
+    /// Renders [`Self::compact_argument_schema`] with each repeated input
+    /// type defined once in a shared type dictionary.
+    ///
+    /// The rendering is lossless and model-facing only:
+    /// [`AiSharedTypePlanSchema::expand`] returns the compact schema, the
+    /// capability fingerprint is unaffected, and plans are still validated
+    /// against the unchanged closed schema. Dictionary entries are named
+    /// after the GraphQL input types they were generated from.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the compact schema cannot be rendered.
+    pub fn shared_type_plan_schema(&self) -> Result<AiSharedTypePlanSchema, AiError> {
+        AiSharedTypePlanSchema::compile(&self.compact_argument_schema, &self.input_type_names())
+    }
+
+    /// Compact typed signature of this capability for broker version 2.
+    ///
+    /// The signature renders [`Self::compact_argument_schema`] with every
+    /// GraphQL input type referenced by name, plus the selection tree. It is
+    /// model-facing only: plans are validated against the unchanged closed
+    /// schema and the capability fingerprint is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the compact schema cannot be rendered.
+    pub fn capability_signature(&self) -> Result<crate::AiCapabilitySignature, AiError> {
+        crate::AiCapabilitySignature::compile(
+            self.field_name(),
+            AiSharedTypePlanSchema::compile_named(
+                &self.compact_argument_schema,
+                &self.input_type_names(),
+            )?,
+        )
+    }
+
+    /// GraphQL input-type names of the compact schema's subschemas, keyed for
+    /// [`AiSharedTypePlanSchema::compile`].
+    fn input_type_names(&self) -> BTreeMap<String, String> {
+        // Names are recovered by regenerating the compact schema with a
+        // recorder, so no per-capability name table is retained. A schema
+        // that does not regenerate identically still shares its types under
+        // positional names.
+        let (regenerated, names) = record_input_type_names(|| {
+            AiGraphqlQueryCapabilityOptions::new(self.relationship_argument_depth).and_then(
+                |options| {
+                    build_compact_plan_schema(
+                        &self.schema,
+                        &self.semantic_catalog,
+                        &self.operation,
+                        &self.output,
+                        self.limits,
+                        &options,
+                    )
+                },
+            )
+        });
+        if regenerated.is_ok_and(|schema| schema == self.compact_argument_schema) {
+            names
+        } else {
+            BTreeMap::new()
+        }
+    }
+
     /// Returns the complete capability fingerprint.
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
@@ -678,6 +815,17 @@ impl AiGraphqlQueryCapability {
     /// Returns the exact public GraphQL root field.
     pub fn field_name(&self) -> &str {
         &self.operation.field_name
+    }
+
+    /// Returns the public entity this root was generated for, when it is a
+    /// generated entity operation.
+    pub fn generated_entity_name(&self) -> Option<&str> {
+        self.operation.generated_entity_name.as_deref()
+    }
+
+    /// Returns the generated operation category of this root, when it has one.
+    pub fn generated_category(&self) -> Option<GeneratedGraphqlOperationCategory> {
+        self.operation.generated_category
     }
 
     /// Returns the exact logical execution target.
@@ -1374,6 +1522,7 @@ fn aggregate_result_list(
 #[derive(Clone, Debug)]
 pub struct AiGraphqlQueryCapabilityCatalog {
     diagnostics: Vec<AiGraphqlCapabilityDiagnostic>,
+    excluded: Vec<AiGraphqlCapabilityExclusion>,
     semantic_catalog_fingerprint: String,
     finished_schema_fingerprint: String,
     capabilities: BTreeMap<AiToolId, AiGraphqlQueryCapability>,
@@ -1387,11 +1536,20 @@ impl AiGraphqlQueryCapabilityCatalog {
         &self.diagnostics
     }
 
+    /// Returns every root left out because its compact schema exceeds the
+    /// provider contract. The rest of the target compiled normally. Report
+    /// these to operators: an excluded root is unavailable to the model.
+    pub fn excluded_capabilities(&self) -> &[AiGraphqlCapabilityExclusion] {
+        &self.excluded
+    }
+
     /// Compiles every exposed public query root into exactly one segment.
     ///
-    /// Unsupported or excessive roots fail readiness. A root requiring an
-    /// undisclosed generated member is omitted with a host-only diagnostic. Mutations and
-    /// subscriptions are ignored by this query-only contract.
+    /// Unsupported roots and excessive root counts fail readiness. A root
+    /// requiring an undisclosed generated member is omitted with a host-only
+    /// diagnostic, and a root whose compact schema exceeds the provider
+    /// contract is omitted and listed by [`Self::excluded_capabilities`].
+    /// Mutations and subscriptions are ignored by this query-only contract.
     ///
     /// # Errors
     ///
@@ -1443,8 +1601,13 @@ impl AiGraphqlQueryCapabilityCatalog {
             return Err(configuration_error("finished GraphQL SDL is too large"));
         }
         validate_limits(limits)?;
-        let schema = FinishedSchema::parse(finished_sdl)?
-            .bind_custom_input_disclosure(options.custom_input_disclosure(), semantic_catalog)?;
+        let schema = Arc::new(
+            FinishedSchema::parse(finished_sdl)?.bind_custom_input_disclosure(
+                options.custom_input_disclosure(),
+                semantic_catalog,
+            )?,
+        );
+        let shared_semantic_catalog = Arc::new(semantic_catalog.clone());
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
         let schema_query_roots = schema.query_root_fields()?;
         let semantic_query_roots = semantic_catalog
@@ -1459,7 +1622,7 @@ impl AiGraphqlQueryCapabilityCatalog {
             ));
         }
         let finished_schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
-        let operations = semantic_catalog
+        let mut operations = semantic_catalog
             .operations
             .iter()
             .filter(|operation| {
@@ -1467,6 +1630,24 @@ impl AiGraphqlQueryCapabilityCatalog {
                     && operation_result_is_provider_exportable(operation)
             })
             .collect::<Vec<_>>();
+        if let Some(strict_roots) = options.strict_query_roots() {
+            // Strict mode offers only the roots the host listed. A listed
+            // root that cannot be offered is a configuration error, never a
+            // silently shorter catalogue.
+            let exportable = operations
+                .iter()
+                .map(|operation| operation.field_name.as_str())
+                .collect::<BTreeSet<_>>();
+            if strict_roots
+                .iter()
+                .any(|root| !exportable.contains(root.as_str()))
+            {
+                return Err(configuration_error(
+                    "strict query root is not an exportable public Query root",
+                ));
+            }
+            operations.retain(|operation| strict_roots.contains(&operation.field_name));
+        }
         let (operations, diagnostics) =
             admit_input_capabilities(&schema, semantic_catalog, operations, limits, &options)?;
         let expected_capabilities = operations.len();
@@ -1476,18 +1657,25 @@ impl AiGraphqlQueryCapabilityCatalog {
             ));
         }
         let mut capabilities = BTreeMap::new();
+        let mut excluded = Vec::new();
         for operation in operations {
-            let capability = compile_capability(
+            let capability = match compile_capability(
                 subgraph_id,
                 target_id.clone(),
                 &schema,
                 &finished_schema_fingerprint,
-                semantic_catalog,
+                &shared_semantic_catalog,
                 operation,
                 limits,
                 &options,
                 GraphqlOperationKind::Query,
-            )?;
+            )? {
+                CompiledCapability::Included(capability) => *capability,
+                CompiledCapability::Excluded(exclusion) => {
+                    excluded.push(exclusion);
+                    continue;
+                }
+            };
             if capabilities
                 .insert(capability.id.clone(), capability)
                 .is_some()
@@ -1495,7 +1683,7 @@ impl AiGraphqlQueryCapabilityCatalog {
                 return Err(configuration_error("query capability identity collides"));
             }
         }
-        if capabilities.len() != expected_capabilities {
+        if capabilities.len() + excluded.len() != expected_capabilities {
             return Err(configuration_error(
                 "query capability coverage is incomplete",
             ));
@@ -1526,6 +1714,7 @@ impl AiGraphqlQueryCapabilityCatalog {
         }));
         Ok(Self {
             diagnostics,
+            excluded,
             semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
             finished_schema_fingerprint,
             capabilities,
@@ -1622,6 +1811,18 @@ impl AiGraphqlMutationCapability {
         self.execution_policy
     }
 
+    /// Returns the public entity this mutation was generated for, when it is
+    /// a generated entity operation.
+    pub fn generated_entity_name(&self) -> Option<&str> {
+        self.base.generated_entity_name()
+    }
+
+    /// Returns the generated operation category of this mutation, when it
+    /// has one.
+    pub fn generated_category(&self) -> Option<GeneratedGraphqlOperationCategory> {
+        self.base.generated_category()
+    }
+
     /// Returns conservative result-record bounds owned by the closed compiler.
     pub fn result_record_cost_estimate(&self) -> AiGraphqlResultRecordCostEstimate {
         self.base.result_record_cost_estimate()
@@ -1696,6 +1897,7 @@ impl AiGraphqlMutationCapability {
 #[derive(Clone, Debug)]
 pub struct AiGraphqlMutationCapabilityCatalog {
     diagnostics: Vec<AiGraphqlCapabilityDiagnostic>,
+    excluded: Vec<AiGraphqlCapabilityExclusion>,
     semantic_catalog_fingerprint: String,
     finished_schema_fingerprint: String,
     capabilities: BTreeMap<AiToolId, AiGraphqlMutationCapability>,
@@ -1707,6 +1909,12 @@ impl AiGraphqlMutationCapabilityCatalog {
     /// These coordinates are never part of provider-facing schemas or exports.
     pub fn diagnostics(&self) -> &[AiGraphqlCapabilityDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns every mutation left out because its compact schema exceeds
+    /// the provider contract. The rest of the target compiled normally.
+    pub fn excluded_capabilities(&self) -> &[AiGraphqlCapabilityExclusion] {
+        &self.excluded
     }
 
     /// Compiles every exposed mutation explicitly classified for AI execution.
@@ -1756,8 +1964,13 @@ impl AiGraphqlMutationCapabilityCatalog {
             return Err(configuration_error("finished GraphQL SDL is too large"));
         }
         validate_limits(limits)?;
-        let schema = FinishedSchema::parse(finished_sdl)?
-            .bind_custom_input_disclosure(options.custom_input_disclosure(), semantic_catalog)?;
+        let schema = Arc::new(
+            FinishedSchema::parse(finished_sdl)?.bind_custom_input_disclosure(
+                options.custom_input_disclosure(),
+                semantic_catalog,
+            )?,
+        );
+        let shared_semantic_catalog = Arc::new(semantic_catalog.clone());
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
         let schema_mutation_roots = schema.mutation_root_fields()?;
         let semantic_mutations = semantic_catalog
@@ -1796,21 +2009,28 @@ impl AiGraphqlMutationCapabilityCatalog {
         }
         let finished_schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
         let mut capabilities = BTreeMap::new();
+        let mut excluded = Vec::new();
         for operation in executable {
             let execution_policy = operation
                 .ai_mutation_execution
                 .ok_or_else(|| configuration_error("mutation execution policy is absent"))?;
-            let base = compile_capability(
+            let base = match compile_capability(
                 subgraph_id,
                 target_id.clone(),
                 &schema,
                 &finished_schema_fingerprint,
-                semantic_catalog,
+                &shared_semantic_catalog,
                 operation,
                 limits,
                 &options,
                 GraphqlOperationKind::Mutation,
-            )?;
+            )? {
+                CompiledCapability::Included(base) => *base,
+                CompiledCapability::Excluded(exclusion) => {
+                    excluded.push(exclusion);
+                    continue;
+                }
+            };
             let capability = AiGraphqlMutationCapability {
                 base,
                 execution_policy,
@@ -1834,6 +2054,7 @@ impl AiGraphqlMutationCapabilityCatalog {
         }));
         Ok(Self {
             diagnostics,
+            excluded,
             semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
             finished_schema_fingerprint,
             capabilities,
@@ -2157,6 +2378,94 @@ impl std::fmt::Debug for AiGraphqlCapabilityDiagnostic {
     }
 }
 
+/// Why one root was left out of a compiled capability catalogue.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
+pub enum AiGraphqlCapabilityExclusionReason {
+    /// The root's compact provider schema is larger than the fixed
+    /// provider-contract ceiling for one capability.
+    ProviderSchemaTooLarge,
+}
+
+/// One root left out of a catalogue while the rest of its target compiled.
+///
+/// An excluded root is absent from the catalogue and its fingerprint: it is
+/// never registered, indexed, discovered, or executable as a generated
+/// capability. The value holds public schema names and sizes only, so a host
+/// may log it. Report exclusions to operators at startup: nothing else tells
+/// them that a root the schema exposes is unavailable to the model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiGraphqlCapabilityExclusion {
+    operation_kind: GraphqlOperationKind,
+    field_name: String,
+    reason: AiGraphqlCapabilityExclusionReason,
+    schema_bytes: usize,
+    maximum_schema_bytes: usize,
+}
+
+impl AiGraphqlCapabilityExclusion {
+    /// Root kind of the excluded capability.
+    pub const fn operation_kind(&self) -> GraphqlOperationKind {
+        self.operation_kind
+    }
+
+    /// Public root field of the excluded capability.
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    /// Why the root was excluded.
+    pub const fn reason(&self) -> AiGraphqlCapabilityExclusionReason {
+        self.reason
+    }
+
+    /// Serialized size of the compact schema that was refused.
+    pub const fn schema_bytes(&self) -> usize {
+        self.schema_bytes
+    }
+
+    /// Ceiling the compact schema exceeded.
+    pub const fn maximum_schema_bytes(&self) -> usize {
+        self.maximum_schema_bytes
+    }
+}
+
+impl std::fmt::Display for AiGraphqlCapabilityExclusion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "generated capability for root `{}` was excluded: its compact schema is {} bytes and the provider contract allows {}",
+            self.field_name, self.schema_bytes, self.maximum_schema_bytes
+        )
+    }
+}
+
+/// Outcome of compiling one admitted root.
+enum CompiledCapability {
+    Included(Box<AiGraphqlQueryCapability>),
+    Excluded(AiGraphqlCapabilityExclusion),
+}
+
+/// Returns the exclusion for a compact schema above the provider ceiling.
+fn oversized_provider_schema(
+    operation: &GraphqlSemanticOperationDescriptor,
+    compact_schema: &Value,
+) -> Result<Option<AiGraphqlCapabilityExclusion>, AiError> {
+    let schema_bytes = serde_json::to_vec(compact_schema)
+        .map_err(|_| configuration_error("compact capability schema cannot be serialized"))?
+        .len();
+    let maximum_schema_bytes = maximum_provider_schema_bytes();
+    Ok(
+        (schema_bytes > maximum_schema_bytes).then(|| AiGraphqlCapabilityExclusion {
+            operation_kind: operation.kind,
+            field_name: operation.field_name.clone(),
+            reason: AiGraphqlCapabilityExclusionReason::ProviderSchemaTooLarge,
+            schema_bytes,
+            maximum_schema_bytes,
+        }),
+    )
+}
+
 // Follow only fields that the closed plan schema actually offers. A hidden
 // optional container cannot make an otherwise usable root require its children.
 fn offered_input_types(
@@ -2304,6 +2613,7 @@ fn admit_input_capabilities<'a>(
 #[derive(Clone, Debug)]
 pub struct AiGraphqlSubscriptionCapabilityCatalog {
     diagnostics: Vec<AiGraphqlCapabilityDiagnostic>,
+    excluded: Vec<AiGraphqlCapabilityExclusion>,
     semantic_catalog_fingerprint: String,
     finished_schema_fingerprint: String,
     capabilities: BTreeMap<AiToolId, AiGraphqlSubscriptionCapability>,
@@ -2315,6 +2625,13 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
     /// These coordinates are never part of provider-facing schemas or exports.
     pub fn diagnostics(&self) -> &[AiGraphqlCapabilityDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns every replayable subscription left out because its compact
+    /// schema exceeds the provider contract. The rest of the target compiled
+    /// normally.
+    pub fn excluded_capabilities(&self) -> &[AiGraphqlCapabilityExclusion] {
+        &self.excluded
     }
 
     /// Validates every finished-SDL Subscription root and compiles exactly the
@@ -2370,8 +2687,13 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
         if finished_sdl.len() > limits.query.maximum_schema_bytes as usize {
             return Err(configuration_error("finished GraphQL SDL is too large"));
         }
-        let schema = FinishedSchema::parse(finished_sdl)?
-            .bind_custom_input_disclosure(options.custom_input_disclosure(), semantic_catalog)?;
+        let schema = Arc::new(
+            FinishedSchema::parse(finished_sdl)?.bind_custom_input_disclosure(
+                options.custom_input_disclosure(),
+                semantic_catalog,
+            )?,
+        );
+        let shared_semantic_catalog = Arc::new(semantic_catalog.clone());
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
         let schema_roots = schema.subscription_root_fields()?;
         let operations = semantic_catalog
@@ -2414,6 +2736,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
             .collect::<BTreeSet<_>>();
         let schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
         let mut capabilities = BTreeMap::new();
+        let mut excluded = Vec::new();
         for operation in operations {
             let observation = operation
                 .subscription_observation
@@ -2436,17 +2759,23 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 .maximum_events
                 .ok_or_else(|| configuration_error("subscription event count is unbounded"))?
                 .min(limits.maximum_events);
-            let mut base = compile_capability(
+            let mut base = match compile_capability(
                 subgraph_id,
                 target_id.clone(),
                 &schema,
                 &schema_fingerprint,
-                semantic_catalog,
+                &shared_semantic_catalog,
                 operation,
                 limits.query,
                 &options,
                 GraphqlOperationKind::Subscription,
-            )?;
+            )? {
+                CompiledCapability::Included(base) => *base,
+                CompiledCapability::Excluded(exclusion) => {
+                    excluded.push(exclusion);
+                    continue;
+                }
+            };
             base.id = AiToolId::parse(stable_subscription_capability_id(
                 subgraph_id,
                 &operation.field_name,
@@ -2469,14 +2798,17 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 maximum_duration_seconds,
                 maximum_events,
             )?;
-            if serde_json::to_vec(&base.compact_argument_schema)
-                .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
-                .unwrap_or(true)
-                || jsonschema::validator_for(&base.argument_schema).is_err()
+            if let Some(exclusion) =
+                oversized_provider_schema(operation, &base.compact_argument_schema)?
+            {
+                excluded.push(exclusion);
+                continue;
+            }
+            if jsonschema::validator_for(&base.argument_schema).is_err()
                 || jsonschema::validator_for(&base.compact_argument_schema).is_err()
             {
                 return Err(configuration_error(
-                    "compact subscription schema exceeds the provider contract",
+                    "generated subscription plan schema is invalid",
                 ));
             }
             base.fingerprint = sha256_json(&json!({
@@ -2531,6 +2863,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
         }));
         Ok(Self {
             diagnostics,
+            excluded,
             semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
             finished_schema_fingerprint: schema_fingerprint,
             capabilities,
@@ -3084,14 +3417,14 @@ impl FinishedSchema {
 fn compile_capability(
     subgraph_id: &str,
     target_id: GraphqlExecutionTargetId,
-    schema: &FinishedSchema,
+    schema: &Arc<FinishedSchema>,
     schema_fingerprint: &str,
-    semantic_catalog: &GraphqlSemanticCatalog,
+    semantic_catalog: &Arc<GraphqlSemanticCatalog>,
     operation: &GraphqlSemanticOperationDescriptor,
     limits: AiGraphqlQueryCapabilityLimits,
     options: &AiGraphqlQueryCapabilityOptions,
     expected_kind: GraphqlOperationKind,
-) -> Result<AiGraphqlQueryCapability, AiError> {
+) -> Result<CompiledCapability, AiError> {
     let root_field = schema.operation_root_field(expected_kind, &operation.field_name)?;
     validate_operation_against_schema(operation, root_field, expected_kind)?;
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
@@ -3105,14 +3438,11 @@ fn compile_capability(
         options,
     )?;
     // Only the compact projection is sent as the provider contract. The closed
-    // execution schema can be larger for a wide, finitely bounded graph.
-    if serde_json::to_vec(&compact_argument_schema)
-        .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
-        .unwrap_or(true)
-    {
-        return Err(configuration_error(
-            "compact query capability schema exceeds the provider contract",
-        ));
+    // execution schema can be larger for a wide, finitely bounded graph. One
+    // oversized root is left out with an operator-visible exclusion instead
+    // of failing every other root of its target.
+    if let Some(exclusion) = oversized_provider_schema(operation, &compact_argument_schema)? {
+        return Ok(CompiledCapability::Excluded(exclusion));
     }
     jsonschema::validator_for(&argument_schema)
         .map_err(|_| configuration_error("generated query plan schema is invalid"))?;
@@ -3142,20 +3472,23 @@ fn compile_capability(
         "compact_argument_schema": compact_argument_schema,
         "limits": limits,
     }));
-    Ok(AiGraphqlQueryCapability {
-        id,
-        operation: operation.clone(),
-        description: operation.description.clone(),
-        argument_schema,
-        compact_argument_schema,
-        fingerprint,
-        schema_fingerprint: schema_fingerprint.to_owned(),
-        target_id,
-        semantic_catalog: semantic_catalog.clone(),
-        schema: schema.clone(),
-        limits,
-        output,
-    })
+    Ok(CompiledCapability::Included(Box::new(
+        AiGraphqlQueryCapability {
+            id,
+            operation: operation.clone(),
+            description: operation.description.clone(),
+            argument_schema,
+            compact_argument_schema,
+            fingerprint,
+            schema_fingerprint: schema_fingerprint.to_owned(),
+            target_id,
+            semantic_catalog: Arc::clone(semantic_catalog),
+            schema: Arc::clone(schema),
+            limits,
+            output,
+            relationship_argument_depth: options.maximum_relationship_argument_depth(),
+        },
+    )))
 }
 
 fn validate_operation_against_schema(
@@ -4289,7 +4622,9 @@ fn input_type_schema(
                     "query enum has no exportable semantic values",
                 ));
             }
-            json!({ "type": "string", "enum": values })
+            let value = json!({ "type": "string", "enum": values });
+            note_input_type_name(named, &value);
+            value
         }
         Some(SchemaType::InputObject(fields)) => {
             if ancestry.iter().any(|name| name == named) {
@@ -4310,6 +4645,7 @@ fn input_type_schema(
                 false,
             )?;
             ancestry.pop();
+            note_input_type_name(named, &value);
             value
         }
         Some(SchemaType::Object(_)) | Some(SchemaType::Unsupported) => {
@@ -4327,6 +4663,45 @@ fn input_type_schema(
     };
     insert_description(&mut value, description)?;
     Ok(nullable_schema(value, !is_non_null(graphql_type)))
+}
+
+thread_local! {
+    /// GraphQL input-type names of the schemas emitted on this thread while
+    /// [`record_input_type_names`] runs. Schema generation is synchronous,
+    /// so the recorder never spans an await or another capability.
+    static INPUT_TYPE_NAMES: std::cell::RefCell<Option<BTreeMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs one schema generation and returns the GraphQL input-type name of
+/// every enum and input-object schema it emitted, keyed for
+/// [`AiSharedTypePlanSchema::compile`]. Nested calls are not supported.
+fn record_input_type_names<T>(generate: impl FnOnce() -> T) -> (T, BTreeMap<String, String>) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INPUT_TYPE_NAMES.with(|names| names.borrow_mut().take());
+        }
+    }
+    INPUT_TYPE_NAMES.with(|names| *names.borrow_mut() = Some(BTreeMap::new()));
+    let reset = Reset;
+    let generated = generate();
+    let names = INPUT_TYPE_NAMES
+        .with(|names| names.borrow_mut().take())
+        .unwrap_or_default();
+    drop(reset);
+    (generated, names)
+}
+
+fn note_input_type_name(name: &str, schema: &Value) {
+    INPUT_TYPE_NAMES.with(|names| {
+        if let Some(names) = names.borrow_mut().as_mut() {
+            // Two types with one shape keep the first name seen.
+            names
+                .entry(AiSharedTypePlanSchema::type_name_key(schema))
+                .or_insert_with(|| name.to_owned());
+        }
+    });
 }
 
 fn restrict_input_fields(
@@ -8817,8 +9192,8 @@ mod tests {
                     .is_valid(&nested)
             );
             let mut staged = public.clone();
-            staged.schema = schema.clone();
-            staged.semantic_catalog = semantics.clone();
+            staged.schema = Arc::new(schema.clone());
+            staged.semantic_catalog = Arc::new(semantics.clone());
             for result in [staged.compile_compact(compact), staged.compile(nested)] {
                 assert!(matches!(
                     result,
@@ -9893,8 +10268,8 @@ mod tests {
                 "{helper}/{fields}"
             );
             let mut staged = capability.clone();
-            staged.schema = FinishedSchema::parse(&malicious).unwrap();
-            staged.semantic_catalog = changed;
+            staged.schema = Arc::new(FinishedSchema::parse(&malicious).unwrap());
+            staged.semantic_catalog = Arc::new(changed);
             let supplied = json!({"where": {"id": value}}).as_object().unwrap().clone();
             let mut context = CompileContext::new(&staged);
             let root = staged
@@ -11337,12 +11712,163 @@ mod tests {
             .search(&crate::AiCapabilitySearchQuery {
                 text: "customer-facing display name".to_owned(),
                 namespace: Some("inventory".to_owned()),
-                kind: Some(crate::AiCapabilityKind::GeneratedQuery),
+                kind: Some(crate::AiCapabilityKind::GeneratedEntity),
                 entity_or_operation: None,
                 maximum_results: 3,
             })
             .expect("new field description should be searchable");
         assert!(!result.candidates.is_empty());
+        // Roots of one entity are found through their entity capability.
+        assert!(
+            result
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.operations.is_empty())
+        );
+    }
+
+    #[test]
+    fn capability_signature_is_compact_and_expands_every_named_type() {
+        let catalogue = catalog();
+        for capability in catalogue.capabilities() {
+            let signature = capability.capability_signature().expect("signature");
+            assert_eq!(
+                &signature.plan_schema().expand().expect("expanded"),
+                capability.compact_argument_schema(),
+                "the signature is rendered from the unchanged closed schema"
+            );
+            let summary = signature.summary();
+            assert!(
+                summary["signature"]
+                    .as_str()
+                    .expect("signature text")
+                    .starts_with(&format!("{}(", capability.field_name()))
+            );
+            let summary_bytes = serde_json::to_vec(&summary).expect("summary").len();
+            let schema_bytes = serde_json::to_vec(capability.compact_argument_schema())
+                .expect("schema")
+                .len();
+            assert!(
+                summary_bytes < schema_bytes,
+                "{}: {summary_bytes} >= {schema_bytes}",
+                capability.field_name()
+            );
+            for name in signature.type_names() {
+                let page = signature
+                    .describe_type(&name, 0, crate::AI_CAPABILITY_TYPE_PAGE_MAXIMUM)
+                    .unwrap_or_else(|| panic!("{name} expands"));
+                assert_eq!(page["type"], name.as_str());
+            }
+            // Every input type the summary names is a GraphQL input type.
+            for name in summary["inputTypes"].as_array().into_iter().flatten() {
+                assert!(
+                    !name.as_str().expect("type name").starts_with("Type"),
+                    "{name} is named after its GraphQL input type"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_roots_of_one_entity_share_one_entity_capability() {
+        let semantics = semantic_catalog();
+        let catalogue = catalog();
+        let target = GraphqlExecutionTargetId::parse("inventory.graphql").expect("target");
+        let index = crate::AiCapabilityIndex::compile(
+            target,
+            catalogue.finished_schema_fingerprint(),
+            &semantics,
+            Some(&catalogue),
+            None,
+            None,
+            Vec::new(),
+            "target-policy-v1",
+            crate::AiCapabilityIndexLimits::default(),
+        )
+        .expect("index");
+        let roots = catalogue.capabilities().collect::<Vec<_>>();
+        let mut entities = BTreeSet::new();
+        for root in &roots {
+            // Each root keeps its own query entry, identity and fingerprint.
+            let entry = index.entry(root.id()).expect("root entry");
+            assert_eq!(entry.kind, crate::AiCapabilityKind::GeneratedQuery);
+            assert_eq!(entry.capability_fingerprint, root.fingerprint());
+            assert!(entry.operations.is_empty());
+            let Some(entity) = index.entity_entry_of(root.id()) else {
+                assert!(entry.entity_name.is_none());
+                continue;
+            };
+            entities.insert(entity.id.clone());
+            assert_eq!(entity.kind, crate::AiCapabilityKind::GeneratedEntity);
+            assert_eq!(entity.entity_name, entry.entity_name);
+            assert_eq!(
+                entity.operation_shape,
+                crate::AiCapabilityOperationShape::Entity
+            );
+            assert!(entity.id.as_str().starts_with("inventory.entity."));
+            assert_eq!(
+                index.operation_entry(&entity.id, root.field_name()),
+                Some(entry)
+            );
+            // A grouped root is never a discoverable entry of its own.
+            assert!(index.entries().all(|listed| &listed.id != root.id()));
+        }
+        assert!(!entities.is_empty());
+        let standalone = roots
+            .iter()
+            .filter(|root| index.entity_entry_of(root.id()).is_none())
+            .count();
+        assert_eq!(
+            index.entries().len(),
+            entities.len() + standalone,
+            "the index holds one entry per entity, not one per root"
+        );
+        assert_eq!(
+            index
+                .entries()
+                .filter(|entry| entry.kind == crate::AiCapabilityKind::GeneratedEntity)
+                .count(),
+            entities.len()
+        );
+        // Deserialization rebuilds the grouped root entries exactly.
+        let decoded: crate::AiCapabilityIndex =
+            serde_json::from_str(&serde_json::to_string(&index).expect("encode")).expect("decode");
+        assert_eq!(decoded, index);
+        for root in &roots {
+            assert_eq!(decoded.entry(root.id()), index.entry(root.id()));
+        }
+        // An index set resolves grouped roots to their owning index, and the
+        // per-root ranking lists roots, never entity entries.
+        let set = crate::AiCapabilityIndexSet::compile([std::sync::Arc::new(index.clone())])
+            .expect("set");
+        for root in &roots {
+            assert_eq!(
+                set.entry(root.id()).map(|(_, entry)| entry),
+                index.entry(root.id())
+            );
+        }
+        let query = crate::AiCapabilitySearchQuery {
+            text: "parent".to_owned(),
+            namespace: None,
+            kind: Some(crate::AiCapabilityKind::GeneratedQuery),
+            entity_or_operation: None,
+            maximum_results: 32,
+        };
+        let operations = set.ranked_operation_matches(&query).expect("operations");
+        assert!(!operations.is_empty());
+        assert!(operations.iter().all(|candidate| {
+            candidate.entry().kind == crate::AiCapabilityKind::GeneratedQuery
+        }));
+        let entity_matches = set
+            .ranked_matches(&crate::AiCapabilitySearchQuery {
+                kind: None,
+                ..query
+            })
+            .expect("entities");
+        assert!(entity_matches.iter().any(|candidate| {
+            candidate.entry().kind == crate::AiCapabilityKind::GeneratedEntity
+                && candidate.candidate().operations.len() == candidate.entry().operations.len()
+        }));
     }
 
     fn custom_input_fixture() -> (String, GraphqlSemanticCatalog) {
@@ -12498,5 +13024,266 @@ mod tests {
                 "maximumItems": 5
             }))
             .expect("exact exportable field still aggregates");
+    }
+
+    /// Sets the provider-contract ceiling for the current test thread.
+    struct ProviderSchemaCeiling;
+
+    impl ProviderSchemaCeiling {
+        fn set(maximum: usize) -> Self {
+            PROVIDER_SCHEMA_BYTES_OVERRIDE.with(|value| value.set(Some(maximum)));
+            Self
+        }
+    }
+
+    impl Drop for ProviderSchemaCeiling {
+        fn drop(&mut self) {
+            PROVIDER_SCHEMA_BYTES_OVERRIDE.with(|value| value.set(None));
+        }
+    }
+
+    fn compact_bytes(capability: &AiGraphqlQueryCapability) -> usize {
+        serde_json::to_vec(capability.compact_argument_schema())
+            .expect("schema")
+            .len()
+    }
+
+    fn two_root_catalog(
+        options: AiGraphqlQueryCapabilityOptions,
+    ) -> Result<AiGraphqlQueryCapabilityCatalog, AiError> {
+        AiGraphqlQueryCapabilityCatalog::compile_with_options(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &SDL.replace("schema { query: Query, mutation: Mutation }", "schema { query: Query }")
+                .replace(
+                    "        type Mutation {\n          CreateParent(input: ParentMutationInput!): Parent!\n          UpdateParent(input: ParentMutationInput!): Parent!\n          DeleteParent(id: ID!): Parent\n          HiddenMutation: String!\n        }\n",
+                    "",
+                ),
+            &aggregate_semantic_catalog(),
+            AiGraphqlQueryCapabilityLimits::default(),
+            options,
+        )
+    }
+
+    #[test]
+    fn an_oversized_query_schema_excludes_only_its_own_root() {
+        let complete =
+            two_root_catalog(AiGraphqlQueryCapabilityOptions::default()).expect("catalogue");
+        assert!(complete.excluded_capabilities().is_empty());
+        let mut sized = complete
+            .capabilities()
+            .map(|capability| (compact_bytes(capability), capability.clone()))
+            .collect::<Vec<_>>();
+        sized.sort_by_key(|(bytes, _)| *bytes);
+        assert_eq!(sized.len(), 2);
+        let (small_bytes, small) = &sized[0];
+        let (large_bytes, large) = &sized[1];
+        assert!(small_bytes < large_bytes);
+
+        let _ceiling = ProviderSchemaCeiling::set(*small_bytes);
+        let isolated =
+            two_root_catalog(AiGraphqlQueryCapabilityOptions::default()).expect("catalogue");
+        // The other root of the target still compiles, with the same identity.
+        assert_eq!(isolated.capabilities().count(), 1);
+        assert_eq!(
+            isolated
+                .capability(small.id())
+                .expect("retained capability")
+                .fingerprint(),
+            small.fingerprint()
+        );
+        assert!(isolated.capability(large.id()).is_none());
+        assert_ne!(isolated.fingerprint(), complete.fingerprint());
+        // The exclusion is visible to operators.
+        let [exclusion] = isolated.excluded_capabilities() else {
+            panic!("one exclusion expected");
+        };
+        assert_eq!(exclusion.operation_kind(), GraphqlOperationKind::Query);
+        assert_eq!(exclusion.field_name(), large.field_name());
+        assert_eq!(
+            exclusion.reason(),
+            AiGraphqlCapabilityExclusionReason::ProviderSchemaTooLarge
+        );
+        assert_eq!(exclusion.schema_bytes(), *large_bytes);
+        assert_eq!(exclusion.maximum_schema_bytes(), *small_bytes);
+        assert!(exclusion.to_string().contains(large.field_name()));
+    }
+
+    #[test]
+    fn oversized_mutation_and_subscription_schemas_are_excluded_not_fatal() {
+        let _ceiling = ProviderSchemaCeiling::set(64);
+        let mutations = AiGraphqlMutationCapabilityCatalog::compile_with_options(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            SDL,
+            &mutation_semantic_catalog(),
+            AiGraphqlQueryCapabilityLimits::default(),
+            AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                AiCustomInputDisclosure::new()
+                    .with_exportable_field("ParentMutationInput", "name")
+                    .expect("declared field"),
+            ),
+        )
+        .expect("mutation catalogue");
+        assert_eq!(mutations.capabilities().count(), 0);
+        assert_eq!(
+            mutations
+                .excluded_capabilities()
+                .iter()
+                .map(|exclusion| (exclusion.operation_kind(), exclusion.field_name()))
+                .collect::<Vec<_>>(),
+            [
+                (GraphqlOperationKind::Mutation, "CreateParent"),
+                (GraphqlOperationKind::Mutation, "UpdateParent"),
+            ]
+        );
+
+        let subscriptions = AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &subscription_sdl(),
+            &subscription_semantic_catalog(GraphqlSubscriptionReplayMode::ReplayThenLive),
+            AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("subscription catalogue");
+        assert_eq!(subscriptions.capabilities().count(), 0);
+        let [exclusion] = subscriptions.excluded_capabilities() else {
+            panic!("one exclusion expected");
+        };
+        assert_eq!(
+            exclusion.operation_kind(),
+            GraphqlOperationKind::Subscription
+        );
+        assert_eq!(exclusion.field_name(), "ParentChanged");
+    }
+
+    #[test]
+    fn strict_query_roots_offer_only_the_listed_roots() {
+        let open = two_root_catalog(AiGraphqlQueryCapabilityOptions::default()).expect("open");
+        assert_eq!(
+            open.capabilities()
+                .map(AiGraphqlQueryCapability::field_name)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["ParentAggregate", "ReadParent"])
+        );
+
+        let strict = two_root_catalog(
+            AiGraphqlQueryCapabilityOptions::default()
+                .with_strict_query_roots(["ReadParent"])
+                .expect("options"),
+        )
+        .expect("strict");
+        let [capability] = strict.capabilities().collect::<Vec<_>>()[..] else {
+            panic!("one strict capability expected");
+        };
+        assert_eq!(capability.field_name(), "ReadParent");
+        // Strict mode selects roots; it does not change an admitted root.
+        assert_eq!(
+            capability.fingerprint(),
+            open.capability(capability.id())
+                .expect("open root")
+                .fingerprint()
+        );
+        assert_ne!(strict.fingerprint(), open.fingerprint());
+        assert!(strict.excluded_capabilities().is_empty());
+
+        let none = two_root_catalog(
+            AiGraphqlQueryCapabilityOptions::default()
+                .with_strict_query_roots(Vec::<String>::new())
+                .expect("options"),
+        )
+        .expect("empty strict catalogue");
+        assert_eq!(none.capabilities().count(), 0);
+    }
+
+    #[test]
+    fn strict_query_roots_refuse_unknown_and_malformed_names() {
+        for root in ["MissingRoot", "readparent"] {
+            assert!(matches!(
+                two_root_catalog(
+                    AiGraphqlQueryCapabilityOptions::default()
+                        .with_strict_query_roots([root])
+                        .expect("options"),
+                ),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "strict query root is not an exportable public Query root"
+            ));
+        }
+        assert!(
+            AiGraphqlQueryCapabilityOptions::default()
+                .with_strict_query_roots(["Read Parent"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn strict_query_roots_survive_serialization_and_default_options_are_unchanged() {
+        let default = serde_json::to_value(AiGraphqlQueryCapabilityOptions::default())
+            .expect("default options");
+        assert_eq!(default, json!({"maximumRelationshipArgumentDepth": 8}));
+        assert_eq!(
+            serde_json::from_value::<AiGraphqlQueryCapabilityOptions>(default)
+                .expect("decode")
+                .strict_query_roots(),
+            None
+        );
+
+        let strict = AiGraphqlQueryCapabilityOptions::default()
+            .with_strict_query_roots(["ReadParent"])
+            .expect("options");
+        let encoded = serde_json::to_value(&strict).expect("strict options");
+        assert_eq!(encoded["strictQueryRoots"], json!(["ReadParent"]));
+        assert_eq!(
+            serde_json::from_value::<AiGraphqlQueryCapabilityOptions>(encoded).expect("decode"),
+            strict
+        );
+        assert!(
+            serde_json::from_value::<AiGraphqlQueryCapabilityOptions>(json!({
+                "maximumRelationshipArgumentDepth": 8,
+                "strictQueryRoots": ["not a name"],
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shared_type_plan_schema_names_graphql_input_types_and_is_lossless() {
+        let (sdl, semantics) = input_collision_fixture(false);
+        let catalog = input_collision_capabilities(&sdl, &semantics);
+        let capability = catalog.capabilities().next().expect("capability");
+        let shared = capability.shared_type_plan_schema().expect("shared types");
+
+        assert_eq!(
+            &shared.expand().expect("expanded"),
+            capability.compact_argument_schema()
+        );
+        // The scalar filter is used by several fields and defined once,
+        // under its GraphQL input type name.
+        let filter = shared
+            .type_definition("StringFilterInput")
+            .expect("named scalar filter");
+        assert!(filter["properties"].get("eq").is_some());
+        let model_schema = shared.to_model_schema();
+        let encoded = serde_json::to_string(&model_schema).expect("model schema");
+        assert!(encoded.contains("\"#/types/StringFilterInput\""));
+        assert!(
+            encoded.len()
+                < serde_json::to_string(capability.compact_argument_schema())
+                    .expect("compact")
+                    .len()
+        );
+        assert_eq!(
+            model_schema[crate::AI_PLAN_SCHEMA_TYPES_KEY]["StringFilterInput"],
+            *filter
+        );
+        // Rendering never touches the fingerprinted contract.
+        assert_eq!(
+            capability.fingerprint(),
+            input_collision_capabilities(&sdl, &semantics)
+                .capabilities()
+                .next()
+                .expect("capability")
+                .fingerprint()
+        );
     }
 }

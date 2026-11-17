@@ -38,7 +38,7 @@ for historical context.
 - Column UNIQUE/primary-key removal requires destructive admission. Of the append-only steps, only enabling retention purge does: `SetAppendOnly { enabled: true, retention_purge: true }` is `Destructive` on a table that is already append-only and when the prior state is unknown, and `Additive` on an unprotected table; enabling enforcement without purge stays `Additive`. Schema stages classify against the schema they are planned from (the new `PlannedSchemaStage::source_schema` field) instead of an empty schema. Type widening respects backend value domains: on SQL Server, Unicode `NVARCHAR` into code-page `VARCHAR`/`CHARACTER VARYING`/`TEXT` and changes into a length-less `VARCHAR`/`NVARCHAR`/`CHAR`/`NCHAR` are `Destructive`; bare `DECIMAL`/`NUMERIC` is `(18,0)` on SQL Server and SQLite; SQLite `INTEGER` is 64-bit. PostgreSQL validation reports live cascade gaps added outside the ORM.
 - See the [migration guide](MIGRATION.md#breaking-release-unreleased).
 
-## Unreleased - breaking release: ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.24.0, AI 0.146.0
+## Unreleased - breaking release: ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.26.0, AI 0.149.0
 
 Collected on the `next/breaking` integration branch; versions are placeholders.
 Host steps are in the [migration guide](MIGRATION.md#breaking-release-unreleased).
@@ -46,7 +46,22 @@ Host steps are in the [migration guide](MIGRATION.md#breaking-release-unreleased
 - **Breaking (fingerprints, #683):** generated-operation fingerprints no longer include the Rust module path. `GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` is `graphql-orm-sha256-len-v2`; the catalogue is ordered by entity name and table, not by Rust path. Moving or re-exporting an entity no longer changes any fingerprint. Every operation, catalogue and router-export fingerprint changes once. `stable_type_id` is still accepted and no longer affects fingerprints. AI tool profiles 0.24.0 writes and requires the new algorithm name in tool manifests.
 - **Added (migrations, #532):** `SchemaManager::apply_migration` and `apply_schema_target` refuse a plan, before any statement runs, when existing rows repeat the key of a unique index the plan creates. The error is read with `UniqueIndexDuplicates::from_error` and names the table, index and key columns only. Previously the database rejected the `CREATE UNIQUE INDEX` statement during the apply and the transaction rolled back with an untyped error.
 - **Fixed (migrations):** conditional unique-index duplicate preflights skip indexes whose predicate column is added by the same plan. Existing-column predicates still restrict the duplicate check to included rows.
+- **AI 0.149.0, AI tool profiles 0.26.0 (#551):** capability broker version 2. Describe returns compact typed signatures and `describe_type` expands one named type at a time; discovery returns one entity capability per entity with the root chosen per call; search uses an inverted index with fixed per-entry weights; large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once.
 - **AI 0.146.0:** fixed-broker sessions survive catalogue changes, `capability_stale` and `selection_stale` are separate model-facing codes (#551), HighImpact approvals force step-up and the approval lifetime cap has a 7-day ceiling (#465), and AI schema module `0.82.0` adds three unique indexes (#532). See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md).
+
+## Unreleased - ORM/macros 0.167.0
+
+- Test-only: the macros unit tests for update assignments and write-transform rejection name no backend, so `cargo test -p graphql-orm-macros --no-default-features --features postgres` and `--features mssql` pass as well as the default SQLite run (#735). Generated code and runtime behavior do not change; the version moves because the macros package archive carries its unit tests. See the [migration guide](MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests).
+
+## Unreleased - ORM/macros 0.166.0
+
+- Add request-local `DependentDeleteGuard`: compare admitted effects with the
+  introspected dependent-delete graph and enforce row bounds inside the write
+  transaction. Unknown and unsupported effect paths refuse. No default change.
+
+## Unreleased - AI 0.146.0, tool profiles 0.24.0
+
+- AI capability scale (part of #551): reviewed static read tools can sit behind the fixed broker instead of the provider surface, fixed-broker `describe` defines each repeated input type once, capability search no longer re-tokenises the catalogue, one oversized generated root no longer fails its target, large surfaces can opt into the fixed broker over native deferred loading, and a startup benchmark is published from CI. Also adds an opt-in host-held epoch anchor that keeps a file-level database restore closed (#572), an opt-in dependent-effect policy for generated deletes (#389), and opt-in strict query roots (#463). No schema change, and no fingerprint changes for a host that changes nothing. Opting into the delivery preference requires rebinding; see the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460) and [migration guidance](MIGRATION.md#ai-01450-to-01460-and-tool-profiles-0230-to-0240-capability-scale).
 
 ## Unreleased - ORM/macros 0.165.0, backup 0.26.0
 

@@ -211,7 +211,21 @@ async fn runtime_collections_reach_the_capability_index() {
             .find(|entry| entry.entity_name.as_deref() == Some(entity))
             .expect("runtime collection is indexed")
     };
-    let invoice = entry("Invoice");
+    let invoice_entity = entry("Invoice");
+    // One entity capability groups the collection's roots; each root keeps
+    // its own entry.
+    assert_eq!(invoice_entity.kind, AiCapabilityKind::GeneratedEntity);
+    assert_eq!(invoice_entity.description, "Customer invoice");
+    assert!(
+        invoice_entity
+            .operations
+            .iter()
+            .any(|operation| operation.operation_name == "invoices")
+    );
+    let invoice = index
+        .operation_entry(&invoice_entity.id, "invoices")
+        .expect("the invoices root keeps its entry");
+    assert_eq!(invoice.kind, AiCapabilityKind::GeneratedQuery);
     assert_eq!(invoice.operation_name, "invoices");
     assert_eq!(invoice.description, "Page through Invoice records");
     assert_eq!(

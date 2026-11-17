@@ -3,12 +3,23 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.26.0
+
+Capability index version 3 and compact signatures for broker version 2 (#551, asks 5B, 3B and 2B). Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+- **Breaking (index, 5B):** `AI_CAPABILITY_INDEX_VERSION` is `3`. `AiCapabilityIndex::compile` groups every generated query root of one entity into one `AiCapabilityKind::GeneratedEntity` entry (shape `AiCapabilityOperationShape::Entity`) whose `operations` list each root (`AiCapabilityOperationMember`). The index and its limits count one entry per entity. Each root keeps its own `GeneratedQuery` entry, identity, capability fingerprint and entry fingerprint: `entry(root_id)` still resolves it, and `operation_entry` and `entity_entry_of` navigate between them. Roots without an entity stay standalone entries. Index and index-set fingerprints change once; the entity capability fingerprint (`AI_CAPABILITY_ENTITY_VERSION`) covers every root's ID and fingerprint.
+- **Breaking (API):** new `AiCapabilityKind` and `AiCapabilityOperationShape` variants; new `operations` fields on `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` (`AiCapabilityCandidateOperation`). `entries()` lists discoverable entries only, so grouped roots are not listed there.
+- **Added:** `AiCapabilityIndexSet::ranked_operation_matches` ranks every executable root on its own metadata, exactly as a standalone entry, for delivery that installs one definition per root.
+- **Added:** `AiCapabilityIndexSet::rank_admitted` ranks matches again after host policy, scoring each entity entry on its own metadata and its admitted roots only. `AiCapabilityRankedMatch::operations`, `entity` and `admitted_candidate`, and `AiCapabilityIndexEntry::admitted_result_description` and `admitted_result_record_cost`, expose the same admitted-only view.
+- **Performance (3B):** search uses an inverted index built when the index is compiled: a query scores only the posting lists of its terms. Scores are the same fixed per-field weights as before; an entity entry is also found by its roots' operation names and descriptions. No IDF, BM25 or other catalogue-wide statistic contributes, so an entry's score never depends on other entries.
+- **Added (2B):** `AiCapabilitySignature` renders a plan schema as a compact typed signature and expands one named input type, `select` or `select.<path>` at a time, in pages (`AI_CAPABILITY_TYPE_PAGE_MAXIMUM`). `AiGraphqlQueryCapability::capability_signature` builds it; `AiSharedTypePlanSchema::compile_named` defines every named GraphQL input type once. Both are model-facing renderings: plans are still validated against the unchanged closed schema and no capability fingerprint changes.
 
 ## Unreleased - 0.25.0
 
@@ -17,6 +28,18 @@ supersedes: []
 ## Unreleased - 0.24.0
 
 - **Breaking (fingerprints, #683):** requires operation catalogue 0.9.0, whose generated-operation fingerprint algorithm is `graphql-orm-sha256-len-v2`. Operation contracts and tool manifests record that name. A manifest or contract bound under `graphql-orm-sha256-len-v1` is refused as stale; regenerate it. No Rust API change. See the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+- Preserve root description, title, examples and default through shared-schema compilation and expansion.
+
+Capability scale (part of #551). Capability, catalogue and index fingerprints are unchanged for existing inputs.
+
+- **Added:** `AiSharedTypePlanSchema` renders a compact plan schema with each repeated subschema defined once in a dictionary and referenced as `{"$ref": "#/types/<Name>"}`. The rendering is lossless (`expand` returns the input) and deterministic. `AiGraphqlQueryCapability::shared_type_plan_schema` names dictionary entries after the GraphQL input types they were generated from.
+- **Performance:** `AiCapabilityIndex` computes each entry's search terms once, when the index is compiled, and interns them per index. A search tokenises only its query. Ranking, scores and tie-breaking are unchanged, and the terms are not part of the serialized index or its fingerprint; a deserialized index rebuilds them on first search.
+- **Performance:** capabilities of one catalogue share one copy of the finished schema and the semantic catalogue. Each capability used to hold its own copy, which made catalogue memory and compile time quadratic in the number of roots.
+- **Changed:** a root whose compact schema exceeds the 1 MiB provider contract is excluded from its query, mutation or subscription catalogue and reported by `excluded_capabilities()` (`AiGraphqlCapabilityExclusion`, `AiGraphqlCapabilityExclusionReason`). It used to fail the whole catalogue. The catalogue fingerprint covers the capabilities that compiled.
+- **Added (opt-in):** `AiGraphqlQueryCapabilityOptions::with_strict_query_roots` compiles only the listed public Query roots (#463). The default still offers every exportable root. A listed name that is not an exportable public Query root is an error. The optional `strictQueryRoots` wire member is omitted when unset.
+- **Added:** `generated_entity_name` and `generated_category` on `AiGraphqlQueryCapability` and `AiGraphqlMutationCapability`.
+- **Added:** the `capability_startup_benchmark` example measures catalogue and index compile time, search latency and peak memory against the number of roots.
 
 ## Unreleased - 0.23.0
 

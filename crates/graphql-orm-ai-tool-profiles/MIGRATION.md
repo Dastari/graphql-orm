@@ -3,12 +3,38 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.25.0 to 0.26.0: entity capabilities and compact signatures
+
+**Action needed.** Part of the single breaking release; upgrade together with
+AI 0.149.0. No SDL or data migration.
+
+- **Index fingerprints change once.** `AI_CAPABILITY_INDEX_VERSION` is 3 and
+  the generated query roots of each entity become one `GeneratedEntity`
+  entry, so every index and index-set fingerprint that holds generated
+  queries changes. Recompile indexes; do not compare them with stored
+  version 2 fingerprints. Generated query capability fingerprints are
+  unchanged.
+- **Code.** Handle `AiCapabilityKind::GeneratedEntity` and
+  `AiCapabilityOperationShape::Entity` in exhaustive matches. Struct literals
+  of `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` need
+  `operations` (empty for every kind but an entity).
+- **Lookups.** `entries()` no longer lists the roots an entity groups. Look a
+  root up with `entry(root_id)`, which still resolves it, or with
+  `operation_entry(entity_id, operation_name)`. Code that searched with
+  `kind: Some(GeneratedQuery)` to find entity roots should search for
+  `GeneratedEntity`, or use `ranked_operation_matches` for one match per root.
+- **Search.** Ranking order for standalone entries is unchanged. Entity
+  entries score as one entry, including their roots' operation names and
+  descriptions. **No action.**
+- **Signatures.** `AiCapabilitySignature` and
+  `AiSharedTypePlanSchema::compile_named` are additions. **No action.**
 
 ## 0.24.0 to 0.25.0: runtime live keys under default identities
 
@@ -26,6 +52,31 @@ Regenerate tool manifests and operation contracts from the upgraded catalogue;
 ones bound under `graphql-orm-sha256-len-v1` are refused as stale. No Rust API
 or data change. Host steps are in the root
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+## 0.23.0 to 0.24.0: capability scale
+
+No SDL or data migration is needed. Capability, catalogue and index
+fingerprints are unchanged for inputs that compiled before.
+
+- **Excluded capabilities. No action**, but read the new diagnostic. A root
+  whose compact schema exceeds the 1 MiB provider contract no longer fails
+  catalogue compilation. It is left out, and `excluded_capabilities()` on the
+  query, mutation and subscription catalogues lists it. A host that relied on
+  the compile error to detect an oversized root should check that list
+  instead. Only a catalogue that used to fail is affected.
+- **Strict query roots. No action.** The default is unchanged: every
+  exportable public Query root is offered. To opt in, build the options with
+  `with_strict_query_roots([...])`. The strict catalogue has a different
+  fingerprint from the open one because it holds fewer capabilities; each
+  admitted capability keeps its own fingerprint.
+- **Search terms. No action.** `AiCapabilityIndex` serializes exactly as
+  before. Ranking is unchanged.
+- **Shared type dictionary. No action.** Root annotations (description, title,
+  examples and default) now round-trip without loss. `compact_argument_schema` is
+  unchanged; `shared_type_plan_schema` is an additional rendering.
+
+`AiGraphqlQueryCapabilityOptions` gains a private field. Code that builds it
+through `new`, `default` or deserialization is unaffected.
 
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 

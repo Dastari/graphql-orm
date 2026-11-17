@@ -9557,10 +9557,19 @@ pub(crate) mod tests {
     #[test]
     fn fixed_broker_definitions_project_their_nullable_scalar_unions_for_codex() {
         let definitions = crate::capability_broker_definitions();
-        assert_eq!(definitions.len(), 3);
+        assert_eq!(definitions.len(), 4);
         let projected = project_codex_dynamic_tools(&definitions)
             .expect("every crate-authored fixed broker schema should project");
-        assert_eq!(projected.protocol_values.len(), 3);
+        assert_eq!(projected.protocol_values.len(), 4);
+        let describe_type = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_describe_type")))
+            .expect("describe_type projection should exist");
+        assert_eq!(
+            describe_type.pointer("/inputSchema/required"),
+            Some(&json!(["loadedReference", "type"]))
+        );
 
         let discover = projected
             .protocol_values
@@ -9573,7 +9582,12 @@ pub(crate) mod tests {
         );
         assert_eq!(
             discover.pointer("/inputSchema/properties/kind/enum"),
-            Some(&json!(["generated_query", null]))
+            Some(&json!([
+                "generated_query",
+                "generated_entity",
+                "reviewed_static",
+                null
+            ]))
         );
 
         let execute = projected

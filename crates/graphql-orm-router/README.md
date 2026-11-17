@@ -18,6 +18,10 @@ operation with `UNAUTHENTICATED` or `FORBIDDEN` and its response path. See
 [MIGRATION.md](MIGRATION.md#0154-to-0160) and
 [nested directive authorization](docs/configuration.md#nested-directive-authorization).
 
+Version 0.15.5 changes only the wire tests: the Prometheus exporter test no
+longer depends on which listeners other tests hold on the public loopback
+address. Router behavior, configuration and public APIs are unchanged.
+
 Version 0.15.4 changes only the wire tests, which now complete the WebSocket
 closing handshake before reconnecting. Router behavior, configuration and
 public APIs are unchanged.

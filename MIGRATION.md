@@ -20,10 +20,64 @@ below, when you take the release.
 
 The breaking release upgrades ORM and macros, the operation catalogue, AI tool
 profiles, AI (AI schema module `0.82.0`), backup and the router. Upgrade them
-together; each section names the package it changes. Placeholder versions:
-ORM and macros 0.167.0, operation catalogue 0.9.0, AI tool profiles 0.25.0,
-AI 0.148.0, backup 0.27.0, router 0.16.0. Entries may name the earlier
-placeholder each change was written against.
+together; each section names the package it changes. Version numbers in the
+entries below are placeholders: each names the version its change was written
+against, and the release assigns the final numbers.
+
+### Capability broker version 2: compact signatures, entity capabilities and the fixed-broker default (#551)
+
+**Action needed.** AI 0.149.0 and AI tool profiles 0.26.0. No SDL,
+persistent schema or data migration.
+
+What changes for the model: discover returns one `generated_entity`
+candidate per entity, listing its operations; describe returns one compact
+typed signature per operation instead of the plan schema; the new
+`graphql.capabilities.describe_type` operation expands one named input type,
+`select` or `select.<path>` at a time, in pages; and `describe_type` and
+execute take the entity's `operation`. Plans are still validated against the
+unchanged closed schema. Discovery scores only the posting lists of the
+query's terms, with the same fixed per-entry weights and no catalogue-wide
+statistic.
+
+Fingerprints, bindings and sessions:
+
+- `AI_CAPABILITY_BROKER_VERSION` is `2`. The fixed broker definitions (now
+  four) and every `FixedBroker` session binding change once, so each retained
+  fixed-broker session rebinds once through cleanup-and-rebind. This is the
+  only new rebind; nothing else was added to the binding, and catalogue or
+  schema changes still keep fixed-broker sessions.
+- The capability index is version 3 and groups each entity's query roots, so
+  index and index-set fingerprints change once. Bindings of `EagerExact`,
+  `ProviderDeferred` and `ClientDeferred` sessions hash the index set; they
+  already rebind once in this release for the fingerprint v2 change (#683).
+- Generated query capability fingerprints, tool manifests and approvals are
+  not changed by this entry. Mutations do not join the broker.
+- A selection or loaded reference from before the upgrade is
+  `selection_stale`; after a catalogue change a held one is
+  `capability_stale`, at describe, `describe_type` and execute alike.
+
+Host steps:
+
+1. Deploy AI and tool profiles together, and admit the four new broker
+   definition fingerprints wherever you list them by value.
+2. Make host capability policy decide `GeneratedEntity` entries as well as
+   root entries, in every delivery mode. Discover asks about each matching
+   entity and its grouped roots in one batch and lists, and ranks on, only
+   the roots you admit; describe, `describe_type` and execute ask about the
+   entity and each root again; client-deferred discovery, load and execute
+   need a root's entity admitted too. A policy that admits only root IDs
+   discovers nothing until it decides entity entries.
+3. Large surfaces now default to the fixed broker when the provider supports
+   both it and `ProviderDeferred`. To keep native deferred loading, set
+   `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+   `false` (or call `with_provider_deferred_for_large_surfaces()`); a stored
+   configuration without the field now reads as `true`. Changing the mode
+   rebinds retained sessions, so decide before the upgrade's single rebind.
+4. Update exhaustive matches and struct literals, and any model guidance that
+   names `planSchema`. Details: the
+   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01480-to-01490-capability-broker-version-2)
+   and the
+   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0250-to-0260-entity-capabilities-and-compact-signatures).
 
 ### Router 0.16.0: nested `@authenticated` and `@requiresScopes` are enforced
 
@@ -544,6 +598,45 @@ detect accidental divergence only; see
   profiles 0.25.0 accept the default `RuntimeInt64` and the legacy `Int`
   identity alike; AI 0.148.0 adopts them. See the
   [tool-profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240-to-0250-runtime-live-keys-under-default-identities).
+
+## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
+
+**No action.** Generated code, schemas and runtime behavior are unchanged. The
+macros unit tests no longer assume the SQLite backend (#735).
+
+## ORM/macros 0.166.0: guarded dependent deletes
+
+**No action** for unchanged hosts. No data or schema migration is needed.
+For the opt-in AI dependent-effect policy, implement the authenticated
+executor's `execute_registered_with_effect_guard` method and attach its guard
+to request data. The ORM checks the physical graph and locked row counts before
+writes; mismatched or unknown effects refuse and excess bounds roll back.
+Unsupported physical opt-out, bulk and unprovable ORM-managed paths refuse.
+
+The opt-in epoch anchor now requires atomic `compare_exchange` and an exclusive
+`lock_rotation` lease shared across processes through commit and finalization.
+Existing unanchored hosts are unaffected.
+
+## AI 0.145.0 to 0.146.0 and tool profiles 0.23.0 to 0.24.0: capability scale
+
+Upgrade AI and tool profiles together. No SDL, schema or data migration, and
+ORM/macros 0.166.0 provide transaction-bound effect verification. Details are in the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale)
+and the
+[tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale).
+
+- **Delivery-mode selection. No action.** Existing hosts keep native deferred
+  selection and their exact retained binding. Opt in with
+  `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+  prefer the fixed broker above the eager limits; opting in requires rebinding.
+- **Describe output. No action.** Fixed-broker `describe` returns repeated
+  input types once under `planSchema.types`. Execute arguments and all
+  fingerprints are unchanged.
+- **Oversized generated roots. No action.** One oversized root is excluded
+  and reported instead of failing its target; check
+  `excluded_capabilities()` at startup.
+- **Static tools behind the broker, epoch anchor, dependent-effect policy,
+  strict query roots. No action.** All four are opt-in.
 
 ## 0.164.0 to 0.165.0: atomic restore, search reset and kept values on ignored denials
 
