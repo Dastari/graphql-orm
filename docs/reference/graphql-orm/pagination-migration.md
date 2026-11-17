@@ -230,6 +230,82 @@ these. Single-record, mutation, aggregate and legacy transaction APIs retain the
 separate authorization contracts. Generated protected search now consumes the
 same SQL visibility contract; residual callbacks still require implementation.
 
+### Read-predicate transitive closures
+
+A closure predicate admits a row based on every row reachable from it through
+a self-referencing key: merge chains, parent hierarchies, alias chains. It is
+evaluated in SQL by a recursive CTE, so the cost follows the rows a walk
+reaches, not the size of the table, and no closure is collected in Rust.
+
+```rust
+// Some row in the chain (the row itself included) matches `p`.
+ReadPredicate::related_closure::<Backend, Entity>(&[("parent_id", "id")], p)?;
+// Every row in the chain matches `p`: "no reachable row fails p".
+ReadPredicate::related_closure_all::<Backend, Entity>(&[("parent_id", "id")], p)?;
+// Either form with an explicit hop bound.
+ReadPredicate::related_closure_within::<Backend, Entity>(
+    ReadPredicateQuantifier::All, &[("parent_id", "id")], p, 16)?;
+```
+
+- **The walk.** Each `(pointer, key)` pair follows the `(source, target)`
+  order of `related`: one hop goes from a row to every row whose key columns
+  equal its pointer columns. Composite keys are supported, and every column is
+  validated as for `related`. The closure is reflexive: it holds the row
+  (depth 0) and every row reached in up to `max_depth` hops. A pointer reaches
+  every row with an equal key, so a non-unique key fans out exactly as
+  `related` does for one hop. Use a unique key, normally the primary key.
+  The walk follows references: every non-NULL pointer is expected to name a
+  row.
+- **Three-valued result.** `Any` (from `related_closure`) is TRUE when some
+  reached row has `P` TRUE, FALSE when the walk is complete and every reached
+  row has `P` FALSE, and UNKNOWN otherwise. `All` (from `related_closure_all`)
+  is FALSE when some reached row has `P` FALSE, TRUE when the walk is complete
+  and every reached row has `P` TRUE, and UNKNOWN otherwise. Only TRUE admits
+  a row. So an UNKNOWN `P` anywhere in the closure never admits under `All`,
+  and never lets a negation admit. The forms are duals: `All(p)` admits
+  exactly the rows `Any(p.not()?).not()?` admits, and `Any(p).not()?` admits
+  a row only when the walk is complete and no reached row has `P` TRUE or
+  UNKNOWN. Both compose with `not`, `and` and `or` like every other
+  predicate.
+- **Complete walk.** A walk is incomplete, so `Any` is never FALSE and `All`
+  never TRUE, when a reached row has a partially NULL composite pointer (an
+  ambiguous step), a non-NULL pointer that names no row (an unreachable
+  step), or a non-NULL pointer at depth `max_depth` leading outside the rows
+  already reached (the depth bound cut the walk short). A pointer whose
+  columns are all NULL ends the walk: that is how a root is represented.
+- **Cycles** terminate. The walk is bounded, and the CTE uses `UNION`, which
+  discards duplicate rows. A cycle, a self-loop included, is complete once
+  `max_depth` is at least its length, because every pointer on it then leads
+  back to a reached row.
+- **Depth bound.** The default is `READ_PREDICATE_CLOSURE_DEFAULT_DEPTH` (64)
+  hops. `related_closure_within` accepts 1 to
+  `READ_PREDICATE_CLOSURE_MAX_DEPTH` (1,024) and refuses anything else with
+  `AUTHORIZATION_MISCONFIGURED`. Each evaluated row costs at most `max_depth`
+  times the rows its walk can reach. Hitting the bound makes the walk
+  incomplete. `All` then fails closed. `Any` is TRUE only if it found a
+  matching row within the bound, and otherwise UNKNOWN, so neither the
+  existential form nor its negation admits the row.
+- **Visibility.** As with `related`, the policy owns the walk: no row policy
+  is imported, and a row hidden by its own policy is reached, tested and
+  followed like any other. Hop by hop the result reveals what `related` and
+  `not_related` reveal: whether a reached row matches `P`, and whether one
+  might (UNKNOWN). It also reveals whether the walk was complete. Those extra
+  facts only ever make the result UNKNOWN, so they can deny a row, never admit
+  one. Neither form returns columns of reached rows.
+- **Negation.** `not()` follows the rules above. Use `All(p)` for "no reachable
+  row fails `p`". A closure whose target renders the deny fallback `1 = 0` is
+  accepted, since the positive forms only deny with it, but `not()` refuses to
+  negate it.
+- **Rendering and backends.** A correlated scalar subquery with
+  `WITH RECURSIVE`, on SQLite and PostgreSQL, applied wherever the policy
+  clause is applied: reads, counts, aggregates, keyset and connection pages,
+  search and subscription delivery re-reads. `P`'s bind values appear four
+  times, in order. Nested closures get distinct CTE names. **SQL Server is
+  refused** with `AUTHORIZATION_MISCONFIGURED` when the policy is built: SQL
+  Server does not allow a common table expression inside a subquery, so the
+  closure cannot be correlated with the row being authorized. It is never
+  evaluated in memory instead. Other backends are refused too.
+
 ### Exact offsets remain compatible
 
 Generated ordinary list resolvers use database pagination and selected authorized

@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.176.0 pairs with the runtime transitive-closure read predicates; generated code is unchanged.
+
 Version 0.174.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
 
 Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies

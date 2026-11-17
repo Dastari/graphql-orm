@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.176.0 adds transitive-closure read predicates: `ReadPredicate::related_closure`,
+`related_closure_all` and `related_closure_within`, rendered as a recursive CTE on SQLite and
+PostgreSQL and refused on SQL Server.
+See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
 Version 0.174.0 adds fail-closed read-policy negation: `ReadPredicate::not_related`,
 `ReadPredicate::is_null` and `is_not_null`, and refuses `not()` over a predicate that renders
 the deny fallback `1 = 0` (an empty, over-limit or invalid filter list or value).
