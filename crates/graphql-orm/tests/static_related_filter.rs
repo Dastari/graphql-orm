@@ -493,16 +493,20 @@ fn exists_sql_is_quoted_and_parameterized_for_the_selected_backend() {
         "{sql}"
     );
     assert!(!sql.contains(value), "{sql}");
+    // Fragment placeholders are rebased by occurrence when the statement is
+    // rendered, so the two copies of the target bind two values.
     #[cfg(feature = "mssql")]
     assert!(
-        sql.contains("[filter_targets]") && sql.contains("@P1") && sql.contains("@P2"),
+        sql.contains("[filter_targets]") && sql.matches("@P").count() == 2,
         "{sql}"
     );
     #[cfg(feature = "postgres")]
     assert!(
-        sql.contains("\"filter_targets\"") && sql.contains("$1") && sql.contains("$2"),
+        sql.contains("\"filter_targets\"") && sql.matches('$').count() == 2,
         "{sql}"
     );
+    #[cfg(feature = "sqlite")]
+    assert_eq!(sql.matches('?').count(), 2, "{sql}");
     #[cfg(feature = "sqlite")]
     assert!(
         sql.contains("\"filter_targets\"") && sql.contains('?'),

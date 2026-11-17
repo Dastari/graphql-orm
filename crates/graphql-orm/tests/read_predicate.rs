@@ -357,5 +357,37 @@ async fn related_negation_fails_closed_on_null_keys_and_unknown_targets() {
     .unwrap();
     assert_eq!(ranks(other.clone()).await, Vec::<i64>::new());
     assert_eq!(ranks(other.not().unwrap()).await, vec![3, 4]);
+    // A generated-filter target renders backend placeholders; both copies
+    // bind in order beside other bound terms.
+    let filtered = || {
+        ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+            &[("secret", "rank")],
+            ReadPredicate::from_filter::<DefaultBackend, _>(&PredicateRecordWhereInput {
+                rank: Some(graphql_orm::graphql::filters::IntFilter {
+                    eq: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        ranks(column("rank", 1).unwrap().or(filtered()).unwrap()).await,
+        vec![1, 3]
+    );
+    assert_eq!(
+        ranks(
+            column("rank", 4)
+                .unwrap()
+                .not()
+                .unwrap()
+                .and(filtered().not().unwrap())
+                .unwrap()
+        )
+        .await,
+        vec![2]
+    );
     owner.cleanup().unwrap();
 }
