@@ -151,14 +151,7 @@ persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
 `Lt`, `Lte`, `Gt`, and `Gte`; NULL comparisons use ordinary SQL semantics.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
-`predicate.not()?` uses SQL `NOT`: TRUE becomes FALSE, FALSE becomes TRUE,
-and NULL/UNKNOWN remains UNKNOWN (denied in WHERE). It never treats UNKNOWN as
-FALSE before negating. Empty SQL fragments and empty conjunctions fail closed; an empty disjunction
-is the supported constant FALSE. Relation
-EXISTS is two-valued: `exists_any.not()?.or(exists_matching)?` means absent or
-matching. For a present related row whose comparison is UNKNOWN, matching does
-not grant access. Avoid `not(exists(not(matches)))` when NULL must be denied:
-NULL comparisons inside EXISTS do not match rows.
+
 `ReadPredicate::related::<Backend, Source, Target>(&[("source_column",
 "target_column")], target_predicate)` provides a validated, parameterized
 EXISTS equality relation, including composite key mappings. Column names are
@@ -167,6 +160,68 @@ an explicit key relation, not a named relationship resolver. Include any
 source/target discriminator conditions in the respective predicates. Target
 row/entity policies are not automatically imported into the source policy.
 Self-relations are supported; arbitrary join expressions are not.
+
+### Read-predicate negation and NULLs
+
+Read predicates use SQL three-valued logic: each row evaluates to TRUE, FALSE
+or UNKNOWN, and only TRUE admits it. These rules hold on SQLite, PostgreSQL and
+SQL Server, and in every place a policy applies: ordinary and generated reads,
+counts, aggregates, keyset and connection pages, authorized scans, search and
+subscription delivery. Each renders the same SQL clause; no path evaluates a
+policy in Rust.
+
+- `predicate.not()?` renders `NOT (...)` with the inner bind values in their
+  original order. It is TRUE exactly when the inner predicate is FALSE. A
+  comparison with a NULL column is UNKNOWN, and `NOT` keeps it UNKNOWN, so
+  negation does not admit a row because a compared column is NULL:
+  `column("secret", Eq, 1).not()?` admits rows whose `secret` holds another
+  value, never rows where it is NULL. A row is admitted only when the inner
+  predicate is FALSE whatever value its NULL columns held: with `a` NULL and
+  `b = 3`, `not(a = 1 AND b = 2)` admits the row because `b = 2` is FALSE.
+  Double negation is the identity, and the rule holds inside any `and`/`or`
+  tree.
+- Ask for NULL rows explicitly:
+  `p.not()?.or(ReadPredicate::is_null::<Backend, Entity>("column")?)?`.
+  `ReadPredicate::is_null` and `is_not_null` validate the column like
+  `column` and are two-valued.
+- **Empty lists and other deny fallbacks.** A generated filter renders the
+  deny fallback `1 = 0`, which admits nothing, for an empty `in_list` or `or`
+  list, for a filter that fails validation (such as a list over
+  `MAX_FILTER_LIST_OPERANDS`, 1,000, operands) and for an invalid filter
+  value. `not()` refuses with `AUTHORIZATION_MISCONFIGURED` any predicate that
+  renders `1 = 0` anywhere, a relation over one included, because the
+  negation would grant every row. Before 0.174.0, negating such a predicate
+  admitted all rows; it is now refused when the policy is built, so the
+  request fails instead. When a computed deny list is empty, omit the term,
+  use `is_not_null` to admit every row with a value, or return
+  `ReadVisibility::Unrestricted` deliberately. Split or bound a deny list that
+  can exceed the operand limit. Empty fragments and empty conjunctions are
+  refused as before.
+- **Absence of a related row.** `ReadPredicate::not_related::<Backend, Source,
+  Target>(&[("source_column", "target_column")], target_predicate)` is the
+  fail-closed "no related row matching P". For each source row it is UNKNOWN
+  when a source key column is NULL, FALSE when a related row has `P` TRUE,
+  UNKNOWN when no related row has `P` TRUE but one has it UNKNOWN (it might
+  match), and TRUE otherwise, including when there is no related row. It
+  renders a `CASE` over two correlated `EXISTS` subqueries (related rows where
+  `P`, and related rows where `P` is not FALSE), so the target's bind values
+  appear twice. `not_related(k, p).not()?` admits the same rows as
+  `related(k, p)`. Add `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?`
+  to admit rows with a NULL key. A target predicate rendering the deny
+  fallback is refused, as for `not()`.
+- `related(k, p).not()?` is plain `NOT EXISTS`, which is two-valued: it admits
+  a row with a NULL key, or whose related rows all have `P` UNKNOWN. This form
+  is unchanged since 0.92; prefer `not_related` for absence policies.
+- **Visibility of related rows.** As with `related`, the policy owns the join:
+  the target's row policy is not applied inside `related` or `not_related`, so
+  a target row the caller cannot read counts like any other. `not_related(P)`
+  reveals what `related(P)` reveals (does some related row match) plus one more
+  fact: whether some related row, hidden or not, has `P` UNKNOWN. That fact
+  fails closed: it can only deny a source row, never admit one. Neither form
+  returns target columns.
+  Generated client relation filters keep their own rule: they always AND the
+  target's complete SQL visibility into the subquery, so hidden rows never
+  count there.
 
 Entity access, resolver authentication, exact operation scopes, assurance,
 GraphQL field policies, database session authorization, and repository field

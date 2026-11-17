@@ -70,8 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.173.0, `graphql-orm-macros` 0.173.0**; **`graphql-orm-operation-catalog` 0.9.0**; **`graphql-orm-storage` 0.17.0**; **`graphql-orm-backup` 0.27.0**; **`graphql-orm-ai-tool-profiles` 0.25.0**; **`graphql-orm-ai` 0.148.0**; **`graphql-orm-router-protocol` 0.3.0**; **`graphql-orm-router` 0.16.0**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.174.0, `graphql-orm-macros` 0.174.0**; **`graphql-orm-operation-catalog` 0.9.0**; **`graphql-orm-storage` 0.17.0**; **`graphql-orm-backup` 0.27.0**; **`graphql-orm-ai-tool-profiles` 0.25.0**; **`graphql-orm-ai` 0.148.0**; **`graphql-orm-router-protocol` 0.3.0**; **`graphql-orm-router` 0.16.0**.
 
+- **No action** — ORM/macros 0.174.0: read-policy negation. `ReadPredicate::not_related` is the fail-closed "no related row matching P" (NULL keys and UNKNOWN related rows are not admitted); `ReadPredicate::is_null` and `is_not_null` state NULL handling explicitly. `not()` keeps SQL three-valued logic. [Migration](../../MIGRATION.md#01730-to-01740-read-policy-negation)
+- **Action needed** — ORM/macros 0.174.0: only for policies that call `.not()` on a predicate that can render the deny fallback `1 = 0`: an empty `in_list` or `or` list, a list over 1,000 operands, or an invalid filter value. Previously, negating such a predicate admitted all rows; it is now refused with `AUTHORIZATION_MISCONFIGURED`. Omit the term when the list is empty, use `is_not_null`, or keep the list within the operand limit. [Migration](../../MIGRATION.md#01730-to-01740-read-policy-negation)
 - **Action needed** — ORM/macros 0.173.0: build with Rust 1.97.1 or newer; no data migration. [migration](../../MIGRATION.md#01720-to-01730-process-and-toolchain)
 - **Action needed** — ORM/macros 0.173.0 release operations: scoped publication and router distribution require a same-repository merged PR or approved-review URL. [migration](../../MIGRATION.md#01720-to-01730-process-and-toolchain)
 - **Action needed** — Operation catalogue 0.9.0: build with Rust 1.97.1 or newer; serialized contracts are unchanged. [changelog](../../CHANGELOG.md#unreleased---ormmacros-01730)
