@@ -3,12 +3,23 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.147.0
+
+- **Changed (leases):** `AiRunServiceLimits::new` now sets a lease-recovery clock-skew grace of a quarter of the lease TTL in whole seconds, at most 30 seconds (15 seconds for a one-minute lease). `recover_expired_leases` waits that long past a lease's stamped expiry, so a recovering process whose clock runs ahead of the lease holder's by less than the grace can no longer close a live lease. Recovery of a dead lease is delayed by the same amount; `with_lease_recovery_grace(Duration::ZERO)` restores the previous timing. The approval half of #536 (approvals closed with their run, decisions refused once the run leaves `WaitingApproval`, the lease renewed during tool execution) shipped in 0.138.0. Fixes #536.
+- **Providers (Anthropic):** `max_tokens`, `model_context_window_exceeded` and `pause_turn` stops complete the turn with exact usage instead of being refused after the tokens were spent. The adapter appends a visible notice that the response may be incomplete. Tool requests are held until the stop reason arrives; one cut off by such a stop is dropped and never dispatched, and the notice says no tool was run. A response naming a dated snapshot of the requested model (`-YYYYMMDD` or `-YYYY-MM-DD`, or the base of a `-latest` alias followed by a date) is accepted when no pin is declared. A pin declared with `with_model_snapshot` stays exact: only the requested identifier or the pinned one is accepted. Fixes #470.
+- **Providers (same shape elsewhere):** the OpenAI Responses adapter (also used for xAI and OpenAI-compatible routes), its background acknowledgement and retrieval, and the chat-completions adapter accept the same dated-snapshot model echo. A chat-completions `length` stop completes with the same notice and drops a cut-off tool request; `content_filter` and other finish reasons stay refused (#470).
+- **Fixed (provider files):** a 404 to an OpenAI file `DELETE` is never proof of absence, also at or after the artifact's recorded provider expiry: a credential that now addresses another project gets the same answer while the file still exists. Such cleanup now retries and ends `cleanup_unconfirmed` like any other unconfirmed outcome. `AiProviderFileDeletionRequest::provider_expired` is audit context only (#468).
+- **Added (stored responses):** OpenAI responses sent with `store: true` (`store_responses = true`) are recorded in a stored-response ledger and deleted after their session is deleted. A response is recorded as soon as its turn returns to an agent coordinator, through the new provided `AiAgentRunControl::record_retained_provider_response` (the default records nothing), and again, idempotently, with each checkpoint, final output and terminal stored background response. The coordinator record refuses a result whose run or session differs from the lease's with `InvalidInput`, and a response recorded after its session was finalized is due for deletion at once. A turn whose stream fails before a result is returned is not recorded; [session retention](docs/session-retention.md#stored-provider-responses) lists every case. Session retention releases a deleting session's rows once its purge cutoff passes and finalizes the shell only afterwards. `OrmAiSessionRetentionService::delete_stored_provider_responses` deletes released responses through the new `AiStoredProviderResponseDeletionService` boundary, installed with `with_stored_response_deletion_service` and bounded by `AiStoredResponseCleanupLimits`; it reports an `AiStoredResponseCleanupReport`. Intent and attempt count commit before each request, only an acknowledged delete followed by a not-found retrieval removes a row, and after the bounded attempts (24 by default) a row ends `cleanup_unconfirmed` with its identifier kept. `OpenAiStoredResponseDeletionService::with_provider_profile_id` binds the OpenAI adapter to one profile and implements the boundary. A boundary that does not own a row's profile returns `InvalidConfiguration`; the row spends no attempt and is counted in `AiStoredResponseCleanupReport::unrouted`. Fixes #468.
+- **Persistence:** apply AI schema module `0.82.0`. It adds the table `graphql_orm_ai_stored_provider_responses`. No data backfill: responses stored before the upgrade are not in the ledger.
+
+No GraphQL SDL change. See the [migration guide](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
 
 ## Unreleased - 0.146.0
 

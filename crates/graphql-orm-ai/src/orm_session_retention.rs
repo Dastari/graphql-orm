@@ -29,6 +29,9 @@ use crate::{AiError, AiRunState, AiScope, AiSessionRetentionReport, AiSessionRet
 pub(crate) const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
 const RUN_CHECKPOINT_RETENTION_POLICY: &str = "graphql_orm_ai.run_checkpoint.retention_purge";
 mod native_checkpoints;
+mod stored_responses;
+
+pub(crate) use stored_responses::record_retained_provider_response;
 
 const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 7] = [
     "provider_turn_persisted",
@@ -505,6 +508,8 @@ pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiSessionRetentionLimits,
+    stored_response_deletion: Option<Arc<dyn crate::AiStoredProviderResponseDeletionService>>,
+    stored_response_cleanup_limits: crate::AiStoredResponseCleanupLimits,
 }
 
 impl OrmAiSessionRetentionService {
@@ -521,6 +526,8 @@ impl OrmAiSessionRetentionService {
             database,
             clock,
             limits,
+            stored_response_deletion: None,
+            stored_response_cleanup_limits: crate::AiStoredResponseCleanupLimits::default(),
         }
     }
 
@@ -2285,6 +2292,11 @@ impl OrmAiSessionRetentionService {
                     if !remaining_provider_sessions.is_empty() {
                         return Ok(false);
                     }
+                    // Every retained provider response must have been handed
+                    // to the stored-response ledger's deletion first.
+                    if stored_responses::session_has_retained_responses(tx, session_id).await? {
+                        return Ok(false);
+                    }
 
                     let remaining_events = tx
                         .query::<AiSessionEventRecord>()
@@ -3792,6 +3804,10 @@ impl OrmAiSessionRetentionService {
                         .ok_or(AiError::PersistenceFailed)?;
                 }
             }
+            // Hand the session's provider-retained responses to the
+            // stored-response ledger once the purge cutoff has passed.
+            self.release_stored_provider_responses(session_id, now)
+                .await?;
         }
         let checkpoint_purge_ready;
         let mut session_changed = false;
@@ -9702,5 +9718,307 @@ mod tests {
                 assert!(service.prune_session_content(None).await.is_ok());
             }
         }
+    }
+
+    /// Scripted stored-response deletion boundary that records each request.
+    struct ScriptedResponseDeletion {
+        confirm: Mutex<Vec<bool>>,
+        requests: Mutex<Vec<crate::AiStoredProviderResponseDeletionRequest>>,
+    }
+
+    impl ScriptedResponseDeletion {
+        fn new(confirm: Vec<bool>) -> Arc<Self> {
+            Arc::new(Self {
+                confirm: Mutex::new(confirm),
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::AiStoredProviderResponseDeletionService for ScriptedResponseDeletion {
+        async fn delete_and_confirm_absent(
+            &self,
+            request: &crate::AiStoredProviderResponseDeletionRequest,
+        ) -> Result<(), AiError> {
+            self.requests.lock().unwrap().push(request.clone());
+            let mut confirm = self.confirm.lock().unwrap();
+            if !confirm.is_empty() && confirm.remove(0) {
+                Ok(())
+            } else {
+                Err(AiError::ProviderFailed)
+            }
+        }
+    }
+
+    /// A boundary that owns no profile.
+    struct UnboundResponseDeletion;
+
+    #[async_trait]
+    impl crate::AiStoredProviderResponseDeletionService for UnboundResponseDeletion {
+        async fn delete_and_confirm_absent(
+            &self,
+            _: &crate::AiStoredProviderResponseDeletionRequest,
+        ) -> Result<(), AiError> {
+            Err(AiError::InvalidConfiguration("not bound".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unbound_profile_is_reported_without_spending_attempts() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        record_response(&database, session_id, "openai", "resp_unbound").await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let clock = Arc::new(FixedClock::new(now()));
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        )
+        .with_stored_response_deletion_service(Arc::new(UnboundResponseDeletion))
+        .with_stored_response_cleanup_limits(
+            crate::AiStoredResponseCleanupLimits::default()
+                .with_maximum_delete_attempts(1)
+                .unwrap(),
+        );
+        service.prune_session_content(None).await.unwrap();
+        for _ in 0..3 {
+            let report = service.delete_stored_provider_responses().await.unwrap();
+            assert_eq!(
+                (report.unrouted, report.unconfirmed, report.retried),
+                (1, 0, 0)
+            );
+            let rows = ledger(&database).await;
+            assert_eq!(rows[0].cleanup_state, "cleanup_backoff");
+            assert_eq!(rows[0].provider_delete_attempts, 0);
+            clock.advance_seconds(3_600);
+        }
+    }
+
+    async fn record_response(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        provider_kind: &'static str,
+        response_id: &'static str,
+    ) {
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    record_retained_provider_response(
+                        tx,
+                        session_id,
+                        provider_kind,
+                        "profile-openai",
+                        response_id,
+                        now().unix_timestamp(),
+                    )
+                    .await
+                })
+            })
+            .await
+            .expect("retained response should record");
+    }
+
+    async fn ledger(database: &Database<SqliteBackend>) -> Vec<AiStoredProviderResponseRecord> {
+        database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiStoredProviderResponseRecord>()
+                        .limit(16)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("ledger should load")
+    }
+
+    #[tokio::test]
+    async fn retained_responses_are_deleted_after_session_deletion_and_only_confirmed_absence_counts()
+     {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        record_response(&database, session_id, "openai", "resp_one").await;
+        // Recording the same response again keeps one row; other providers
+        // have no deletion boundary here and are not recorded.
+        record_response(&database, session_id, "openai", "resp_one").await;
+        record_response(&database, session_id, "anthropic", "msg_other").await;
+        let rows = ledger(&database).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cleanup_state, "retained");
+
+        let clock = Arc::new(FixedClock::new(now()));
+        let deletion = ScriptedResponseDeletion::new(vec![false, true]);
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        )
+        .with_stored_response_deletion_service(deletion.clone());
+
+        // An active session keeps its responses.
+        service.prune_session_content(None).await.unwrap();
+        assert_eq!(
+            service.delete_stored_provider_responses().await.unwrap(),
+            crate::AiStoredResponseCleanupReport::default()
+        );
+        assert_eq!(ledger(&database).await[0].cleanup_state, "retained");
+        assert!(deletion.requests.lock().unwrap().is_empty());
+
+        // Inside the deleted-content cutoff they stay retained, and the
+        // session shell is not finalized.
+        mark_session_deleting(&database, session_id, 30).await;
+        service.prune_session_content(None).await.unwrap();
+        assert_eq!(ledger(&database).await[0].cleanup_state, "retained");
+
+        // Past the cutoff retention releases them, then finalizes the shell.
+        clock.advance_seconds(60);
+        let mut finalized = 0;
+        for _ in 0..4 {
+            finalized += service
+                .prune_session_content(None)
+                .await
+                .unwrap()
+                .deleting_sessions_finalized;
+        }
+        assert_eq!(finalized, 1);
+        let rows = ledger(&database).await;
+        assert_eq!(rows[0].cleanup_state, "delete_required");
+
+        // A first unconfirmed answer is retried, never counted as deleted.
+        let first = service.delete_stored_provider_responses().await.unwrap();
+        assert_eq!((first.deleted, first.retried, first.unconfirmed), (0, 1, 0));
+        let rows = ledger(&database).await;
+        assert_eq!(rows[0].cleanup_state, "cleanup_backoff");
+        assert_eq!(rows[0].provider_delete_attempts, 1);
+        assert!(rows[0].provider_delete_requested_at.is_some());
+        // Not due again until the backoff passes.
+        let waiting = service.delete_stored_provider_responses().await.unwrap();
+        assert_eq!(waiting, crate::AiStoredResponseCleanupReport::default());
+
+        clock.advance_seconds(3_600);
+        let second = service.delete_stored_provider_responses().await.unwrap();
+        assert_eq!((second.deleted, second.retried), (1, 0));
+        assert!(ledger(&database).await.is_empty());
+        let requests = deletion.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].provider_kind(), &crate::ProviderKind::OpenAi);
+        assert_eq!(requests[0].provider_profile_id(), "profile-openai");
+        assert_eq!(requests[0].provider_response_id(), "resp_one");
+        assert!(!requests[0].delete_previously_requested());
+        assert!(requests[1].delete_previously_requested());
+        let debug = format!("{:?}", requests[0]);
+        assert!(!debug.contains("resp_one") && !debug.contains("profile-openai"));
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_response_deletion_ends_terminal_and_keeps_the_identifier() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        record_response(&database, session_id, "openai", "resp_kept").await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let clock = Arc::new(FixedClock::new(now()));
+        let unconfigured = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        );
+        unconfigured.prune_session_content(None).await.unwrap();
+        // Without a deletion boundary the released row waits.
+        assert_eq!(
+            unconfigured
+                .delete_stored_provider_responses()
+                .await
+                .unwrap(),
+            crate::AiStoredResponseCleanupReport::default()
+        );
+        assert_eq!(ledger(&database).await[0].cleanup_state, "delete_required");
+
+        let deletion = ScriptedResponseDeletion::new(Vec::new());
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        )
+        .with_stored_response_deletion_service(deletion.clone())
+        .with_stored_response_cleanup_limits(
+            crate::AiStoredResponseCleanupLimits::default()
+                .with_maximum_delete_attempts(2)
+                .unwrap(),
+        );
+        assert_eq!(
+            service
+                .delete_stored_provider_responses()
+                .await
+                .unwrap()
+                .retried,
+            1
+        );
+        clock.advance_seconds(3_600);
+        assert_eq!(
+            service
+                .delete_stored_provider_responses()
+                .await
+                .unwrap()
+                .unconfirmed,
+            1
+        );
+        let rows = ledger(&database).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cleanup_state, "cleanup_unconfirmed");
+        assert_eq!(rows[0].provider_response_id, "resp_kept");
+        assert_eq!(rows[0].provider_delete_attempts, 2);
+        clock.advance_seconds(3_600);
+        assert_eq!(
+            service.delete_stored_provider_responses().await.unwrap(),
+            crate::AiStoredResponseCleanupReport::default()
+        );
+        assert_eq!(deletion.requests.lock().unwrap().len(), 2);
+
+        // A claim interrupted after its intent is reclaimed once its lease
+        // expires, and an exhausted bound settles it without another request.
+        let other = seed_empty_session(&database, &scope).await;
+        record_response(&database, other, "openai", "resp_interrupted").await;
+        mark_session_deleting(&database, other, 120).await;
+        service.prune_session_content(None).await.unwrap();
+        let row = ledger(&database)
+            .await
+            .into_iter()
+            .find(|row| row.provider_response_id == "resp_interrupted")
+            .unwrap();
+        AiStoredProviderResponseRecord::update_by_id(
+            &database,
+            &row.id,
+            UpdateAiStoredProviderResponseRecordInput {
+                cleanup_state: Some("cleanup_in_progress".to_owned()),
+                cleanup_lease_expires_at: Some(Some(clock.now().unix_timestamp() + 60)),
+                provider_delete_attempts: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            service.delete_stored_provider_responses().await.unwrap(),
+            crate::AiStoredResponseCleanupReport::default()
+        );
+        clock.advance_seconds(61);
+        assert_eq!(
+            service
+                .delete_stored_provider_responses()
+                .await
+                .unwrap()
+                .unconfirmed,
+            1
+        );
+        assert_eq!(deletion.requests.lock().unwrap().len(), 2);
     }
 }

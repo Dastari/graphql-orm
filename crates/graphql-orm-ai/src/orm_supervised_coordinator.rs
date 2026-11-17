@@ -1430,7 +1430,14 @@ impl AiSupervisedAgentCoordinator {
                 Box::pin(self.execute_provider_with_heartbeats(&mut lease, provider_plan)).await
             };
         let result = match provider_result {
-            Ok(result) => result,
+            Ok(result) => {
+                // Before any later check can fail the turn: the provider
+                // already holds the response.
+                self.run_control
+                    .record_retained_provider_response(&lease, &result)
+                    .await?;
+                result
+            }
             Err(SupervisedProviderTurnFailure::Provider) => {
                 if let Some((service, claim)) = &reclaimed {
                     let _ = service

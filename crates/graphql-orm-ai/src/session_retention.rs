@@ -138,3 +138,207 @@ pub trait AiSessionRetentionService: Send + Sync {
         after_session_cursor: Option<String>,
     ) -> Result<AiSessionRetentionReport, AiError>;
 }
+
+/// Exact provider-retained response selected for deletion by the
+/// stored-response ledger.
+///
+/// Only the stored-response cleanup pass constructs this request, after a
+/// generation-fenced claim of a ledger row that session retention released
+/// once its session was deleted past the purge cutoff. It is not general
+/// provider authority. The identifiers are redacted from `Debug` but remain
+/// sensitive deployment metadata: never log them, persist them elsewhere, or
+/// expose them to a model or client.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiStoredProviderResponseDeletionRequest {
+    provider_kind: crate::ProviderKind,
+    provider_profile_id: String,
+    provider_response_id: String,
+    delete_previously_requested: bool,
+}
+
+impl AiStoredProviderResponseDeletionRequest {
+    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
+    pub(crate) fn new(
+        provider_kind: crate::ProviderKind,
+        provider_profile_id: String,
+        provider_response_id: String,
+        delete_previously_requested: bool,
+    ) -> Self {
+        Self {
+            provider_kind,
+            provider_profile_id,
+            provider_response_id,
+            delete_previously_requested,
+        }
+    }
+
+    /// Exact provider family that retains the response.
+    pub const fn provider_kind(&self) -> &crate::ProviderKind {
+        &self.provider_kind
+    }
+
+    /// Exact logical provider profile whose credential stored the response.
+    pub fn provider_profile_id(&self) -> &str {
+        &self.provider_profile_id
+    }
+
+    /// Exact provider response identifier.
+    pub fn provider_response_id(&self) -> &str {
+        &self.provider_response_id
+    }
+
+    /// Whether an earlier deletion intent for this response was recorded.
+    ///
+    /// This is audit history, never proof of absence: the earlier request may
+    /// not have reached the provider, the credential may since address another
+    /// project, and intent survives backup and restore.
+    pub const fn delete_previously_requested(&self) -> bool {
+        self.delete_previously_requested
+    }
+}
+
+impl std::fmt::Debug for AiStoredProviderResponseDeletionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiStoredProviderResponseDeletionRequest")
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_profile_id", &"[REDACTED]")
+            .field("provider_response_id", &"[REDACTED]")
+            .field(
+                "delete_previously_requested",
+                &self.delete_previously_requested,
+            )
+            .finish()
+    }
+}
+
+/// Provider-specific deletion boundary for responses the provider retains.
+///
+/// Implementations receive one exact response for one logical profile and
+/// must never list, search or select other objects.
+/// `OpenAiStoredResponseDeletionService` implements it for OpenAI.
+#[async_trait]
+pub trait AiStoredProviderResponseDeletionService: Send + Sync {
+    /// Deletes the exact response and confirms that it is absent.
+    ///
+    /// Return `Ok(())` only when the provider acknowledged deleting this exact
+    /// response and a following retrieval returned not-found.
+    ///
+    /// # Errors
+    ///
+    /// Return [`AiError::InvalidConfiguration`] only when this boundary does
+    /// not own the request's provider kind or profile and sent nothing; the
+    /// ledger then keeps the row without spending an attempt and counts it in
+    /// [`AiStoredResponseCleanupReport::unrouted`]. Return any other error
+    /// whenever absence is not confirmed, including a not-found answer to the
+    /// delete itself, an acknowledged delete whose follow-up retrieval fails,
+    /// and any transport failure. The ledger retries those with backoff and
+    /// finally records the response as unconfirmed; it never treats an error
+    /// as deletion.
+    async fn delete_and_confirm_absent(
+        &self,
+        request: &AiStoredProviderResponseDeletionRequest,
+    ) -> Result<(), AiError>;
+}
+
+/// Bounds for one stored-response cleanup pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiStoredResponseCleanupLimits {
+    maximum_batch_size: u32,
+    cleanup_lease_ttl: time::Duration,
+    maximum_delete_attempts: u32,
+}
+
+impl AiStoredResponseCleanupLimits {
+    /// Creates validated limits with the default bound of 24 deletion
+    /// attempts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the batch is in
+    /// `1..=200` and the claim lifetime is positive and no more than one hour.
+    pub fn new(
+        maximum_batch_size: u32,
+        cleanup_lease_ttl: time::Duration,
+    ) -> Result<Self, AiError> {
+        if !(1..=200).contains(&maximum_batch_size)
+            || !cleanup_lease_ttl.is_positive()
+            || cleanup_lease_ttl > time::Duration::hours(1)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid stored-response cleanup limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_batch_size,
+            cleanup_lease_ttl,
+            maximum_delete_attempts: 24,
+        })
+    }
+
+    /// Sets the number of deletion intents, interrupted calls included,
+    /// before a response is recorded as `cleanup_unconfirmed`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the bound is in
+    /// `1..=1024`.
+    pub fn with_maximum_delete_attempts(mut self, maximum: u32) -> Result<Self, AiError> {
+        if !(1..=1024).contains(&maximum) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid stored-response deletion attempt bound".to_owned(),
+            ));
+        }
+        self.maximum_delete_attempts = maximum;
+        Ok(self)
+    }
+
+    /// Maximum ledger rows claimed in one pass.
+    pub const fn maximum_batch_size(self) -> u32 {
+        self.maximum_batch_size
+    }
+
+    /// Reclaimable cleanup claim lifetime.
+    pub const fn cleanup_lease_ttl(self) -> time::Duration {
+        self.cleanup_lease_ttl
+    }
+
+    /// Deletion intents before a response is recorded as unconfirmed.
+    pub const fn maximum_delete_attempts(self) -> u32 {
+        self.maximum_delete_attempts
+    }
+}
+
+impl Default for AiStoredResponseCleanupLimits {
+    fn default() -> Self {
+        Self {
+            maximum_batch_size: 50,
+            cleanup_lease_ttl: time::Duration::minutes(5),
+            maximum_delete_attempts: 24,
+        }
+    }
+}
+
+/// Result of one stored-response cleanup pass.
+///
+/// `deleted` counts only responses whose absence the deletion boundary
+/// confirmed. Nothing else proves that a response is gone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AiStoredResponseCleanupReport {
+    /// Responses confirmed absent; their ledger rows were removed.
+    pub deleted: u32,
+    /// Responses whose deletion was not confirmed and will be retried.
+    pub retried: u32,
+    /// Responses that reached the attempt bound and are now terminal
+    /// `cleanup_unconfirmed` rows kept for operator follow-up.
+    pub unconfirmed: u32,
+    /// Candidates another worker claimed or changed first.
+    pub deferred: u32,
+    /// Responses the installed deletion boundary does not own (another
+    /// provider kind, or a profile it is not bound to). Nothing was sent, no
+    /// attempt was spent, and the row is offered again an hour later. A
+    /// nonzero count is a configuration problem: bind or install a boundary
+    /// for that profile.
+    pub unrouted: u32,
+}

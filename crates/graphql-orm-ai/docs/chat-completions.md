@@ -50,11 +50,20 @@ continuation are refused.
 
 Content deltas become `TextDelta`. Tool-call fragments are assembled by their
 `index` into `ToolCallStarted`, `ToolArgumentsDelta` and `ToolCallCompleted`,
-within the adapter's call-count and argument-size bounds. A second call without
-declared parallel tool calls, a rename, malformed arguments, or a
-`finish_reason` other than `stop` or `tool_calls` (for example `length`) is a
-protocol violation. Call IDs from the server are used when valid; a missing ID
-is replaced by a generated opaque one.
+within the adapter's call-count and argument-size bounds; the tool events are
+held until the `finish_reason` arrives. A second call without declared parallel
+tool calls, a rename, malformed arguments, or a `finish_reason` other than
+`stop`, `tool_calls` or `length` (for example `content_filter`) is a protocol
+violation. Call IDs from the server are used when valid; a missing ID is
+replaced by a generated opaque one.
+
+A `length` stop spent the tokens and ended the turn early. It completes with
+its usage settled and a visible notice that the response stopped at the output
+limit and may be incomplete. A tool request in that turn is dropped and never
+dispatched, and the notice says that no tool was run.
+
+Every chunk must name the requested model, or a dated snapshot of it
+(`-YYYYMMDD` or `-YYYY-MM-DD`); any other model is refused.
 
 ## Usage
 
