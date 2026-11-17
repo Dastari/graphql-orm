@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.175.0 narrows the locking read of generated GraphQL `updateMany`
+and `deleteMany` by the SQL predicate of the row policy's `read_visibility`
+when no `write_target_prefilter` is declared, so rows outside the caller's
+read visibility are neither locked nor passed to row callbacks (#752). The
+root delete of a `dependent_deletes` entity now reports its `errorCode` under
+`mutation_error_codes` (#763). See the
+[migration guide](../../MIGRATION.md#01740-to-01750-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+
 Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 

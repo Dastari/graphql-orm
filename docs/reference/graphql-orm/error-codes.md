@@ -68,11 +68,12 @@ mapping between the two:
 | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT_VIOLATION`, `CURSOR_INVALID`, `PAGE_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `AUTHORIZATION_MISCONFIGURED`, `STEP_UP_REQUIRED` | ORM | See [codes](#codes) |
 | `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
 | `SUBSCRIPTION_SELECTION_UNSUPPORTED` | ORM, opt-in | The `Changed` selection can never be streamed (a relation, a computed field or an unavailable key). Subscribe with a smaller selection, for example keys only |
+| `SUBSCRIPTIONS_NOT_SUPPORTED` | router | A subscription was sent over HTTP, or the router has no subscription gateway. Subscribe over the router's `graphql-transport-ws` endpoint |
+| `MUTATION_NOT_ALLOWED_OVER_HTTP_GET` | router | A mutation was sent with HTTP `GET`. Send it with `POST` |
 | `GRAPHQL_VALIDATION_FAILED`, `REQUEST_TOO_LARGE`, `OPERATION_LIMIT_EXCEEDED`, `INTROSPECTION_DISABLED`, `SUBGRAPH_FAILURE`, `SUBGRAPH_UNAVAILABLE`, `SUBSCRIPTION_LIMIT_EXCEEDED`, `SUBSCRIPTION_AUTHORIZATION_CHANGED`, `SUBSCRIPTION_SCHEMA_RELOAD`, `PERSISTED_DOCUMENT_*`, `BYTE_ROUTE_*` | router | See the [router configuration reference](../../../crates/graphql-orm-router/docs/configuration.md) |
 
-The router's wire tests show a subgraph error's `extensions.code` reaching the
-client unchanged. No router test covers other extension keys yet, such as
-`outcome` below.
+The router's wire tests show a subgraph error's `extensions.code` and
+`extensions.outcome` reaching the client unchanged over HTTP.
 
 ## Unsupported subscription selection
 
@@ -141,8 +142,18 @@ reports every failure as a top-level error, so its result has no `errorCode`.
 Without the attribute the single-row result types, the SDL and the bulk codes
 are unchanged. Rust code that builds a single-row result with a struct literal
 must add `error_code: None` once the attribute is set; the constructors `ok`
-and `err` are unaffected. A root delete refused by an entity's dependent
-delete plan returns its message without a code.
+and `err` are unaffected. On an entity with `dependent_deletes`, the root
+delete reports the same `error` and `errorCode` as a direct delete, including
+for a root row the plan refuses once its transaction holds the row.
+
+`errorCode` holds the code of the error that failed the write, and that error
+can come from the host. When a host callback, such as a mutation hook,
+refuses a write with its own `extensions.code`, a bulk
+`updateMany` or `deleteMany` payload reports that code as `errorCode`, with
+or without the attribute, so `errorCode` is not always an
+[`OrmErrorCode`](#codes) value. A single-row root reports such a refusal as a
+top-level error carrying the same code. Clients should treat a code they do
+not recognise as opaque.
 
 ## GraphQL Extensions
 

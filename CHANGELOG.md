@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.175.0
+
+- **Bulk writes no longer lock rows outside read visibility ([#752](https://github.com/Dastari/graphql-orm/issues/752)).** Generated GraphQL `updateMany` and `deleteMany` add the SQL predicate of `RowPolicy::read_visibility` (`Prefilter` or `Complete`, `GraphqlMutation` surface) to their locking read when the policy declares no `write_target_prefilter`. Rows outside it are not selected, locked, passed to `can_write_row`/`can_read_row` or counted against the bulk bound or scan budget, so another transaction's lock on a hidden row no longer delays the write on PostgreSQL or SQL Server. Every selected row is still classified by the row callbacks, and visible rows give the same payload and writes. A row outside read visibility that `can_write_row` allows is now left out; a declared `write_target_prefilter` takes precedence and keeps such rows targets. Without either predicate the residual lock and timing behaviour is documented in [strict authorization](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes). Single-row writes are unchanged.
+- **Coded dependent-delete root refusals ([#763](https://github.com/Dastari/graphql-orm/issues/763)).** On an entity with `dependent_deletes` and `mutation_error_codes`, a root delete the plan refuses (for example `Entity not found` for a row hidden once the transaction holds it) reports the direct delete's `errorCode` (`NOT_FOUND`) instead of null.
+- **Error-code reference ([#763](https://github.com/Dastari/graphql-orm/issues/763)).** Lists the router codes `SUBSCRIPTIONS_NOT_SUPPORTED` and `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`, states that a bulk payload's `errorCode` can be a host refusal's own code, and that a subgraph's `extensions.outcome` passes through the router (now covered by a router wire test). The client metadata reference states that `carried_fields` grants no access and points to `classification` for secret fields. A new test checks that a key-field or default-sort change changes the interpretation fingerprint.
+
 ## Unreleased - ORM/macros 0.173.0
 
 - The operation catalogue 0.9.0 and companion package releases declare the same

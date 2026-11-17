@@ -10,6 +10,29 @@ supersedes: []
 
 # Migration Guide
 
+## 0.174.0 to 0.175.0: bulk-write target visibility and coded dependent-delete refusals
+
+Upgrade ORM and macros together and recompile entities. No data migration is
+needed.
+
+- **Bulk writes narrowed by read visibility (#752). Action needed** only if
+  your `RowPolicy::read_visibility` returns `Prefilter` or `Complete` on the
+  `GraphqlMutation` surface, you declare no `write_target_prefilter`, and
+  GraphQL callers may `updateMany`/`deleteMany` rows outside their read
+  visibility that `can_write_row` allows. Those rows are now left out of the
+  bulk write, as missing rows are. To keep them targets, return a
+  `write_target_prefilter` that selects every row the caller can read or
+  write; it takes precedence over read visibility. Otherwise **no action**:
+  visible rows give the same payload and writes, and rows outside read
+  visibility are no longer locked or passed to row callbacks. Single-row
+  writes and repository writes are unchanged. See
+  [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+- **Dependent-delete root `errorCode` (#763). No action.** An entity with
+  `dependent_deletes` and `mutation_error_codes` reports `NOT_FOUND` (or the
+  refusing step's code) where its root delete refusal had a null `errorCode`.
+  Clients that treated null as "unknown" now see the code a direct delete
+  reports.
+
 ## 0.172.0 to 0.173.0: process and toolchain
 
 **Action needed:** use Rust 1.97.1 or newer (development/CI pin 1.97.1).

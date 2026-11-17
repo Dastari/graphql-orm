@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.175.0 gives the root delete of a `dependent_deletes` entity the
+same `errorCode` as a direct delete under `mutation_error_codes` (#763), and
+generates `updateMany` and `deleteMany` against the runtime's bulk-target
+selection that applies read visibility (#752). Upgrade ORM and macros
+together; see the
+[migration guide](../../MIGRATION.md#01740-to-01750-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+
 Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
