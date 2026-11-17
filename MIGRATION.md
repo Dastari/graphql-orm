@@ -62,11 +62,32 @@ one value per group instead:
    the build. Set them in CI and in any tool that builds the crate outside
    the workspace (an IDE, a container build) too, or those builds use
    camelCase.
-3. Code that tested the features with `cfg(feature = "field-case-pascal")`
-   can only see its own crate's features; use the generated GraphQL names or
-   the SDL instead. Inside graphql-orm's own tests the build script sets
-   `cfg(graphql_orm_field_case = "pascal")` (and `resolver`/`argument`), with
-   values `camel`, `pascal`, `snake`, `screaming_snake`, `lower` and `upper`.
+3. If your crate forwarded the case features through its own features (for
+   example `pascal = ["graphql-orm/field-case-pascal"]`), remove those
+   features: Cargo cannot set an environment variable for the build.
+4. If your own code was gated on such a feature (`#[cfg(feature =
+   "pascal")]`), read the variable instead. A build script gives you a
+   `cfg` and reruns when the value changes:
+
+   ```rust
+   // build.rs
+   fn main() {
+       println!("cargo::rerun-if-env-changed=GRAPHQL_ORM_FIELD_CASE");
+       println!("cargo::rustc-check-cfg=cfg(app_pascal_fields)");
+       if std::env::var("GRAPHQL_ORM_FIELD_CASE").as_deref() == Ok("PascalCase") {
+           println!("cargo::rustc-cfg=app_pascal_fields");
+       }
+   }
+   ```
+
+   Then write `#[cfg(app_pascal_fields)]`. For a value only,
+   `option_env!("GRAPHQL_ORM_FIELD_CASE")` works without a build script, but
+   Cargo does not rebuild your crate when the variable changes, so prefer
+   the build script. Code that only needs the served names can read the
+   generated SDL instead. Inside graphql-orm's own tests the build script
+   sets `cfg(graphql_orm_field_case = "pascal")` (and `resolver`/`argument`),
+   with values `camel`, `pascal`, `snake`, `screaming_snake`, `lower` and
+   `upper`; these cfgs are not visible to other crates.
 
 `graphql-orm-ai` keeps its camelCase types unless `GRAPHQL_ORM_AI_CASE` is
 `PascalCase`, exactly as before when its feature was off, so an ORM-only
@@ -116,24 +137,27 @@ Generated `schema_builder`, `schema_builder_with_limits` and
 example `related(keys, p).not()?`. ORM/macros 0.172.0 (placeholder). No SDL,
 persistent schema or data migration.
 
-`related(keys, target)` now renders as `(CASE WHEN <a source key IS NULL>
-THEN NULL WHEN EXISTS (<related rows where target>) THEN 1 WHEN EXISTS
-(<related rows where target is not FALSE>) THEN NULL ELSE 0 END) = 1` on
-SQLite, PostgreSQL and SQL Server, instead of a plain `EXISTS`. For each
-source row it is UNKNOWN when a key column is NULL, TRUE when a related row
-has `target` TRUE, UNKNOWN when none does but one has `target` UNKNOWN, and
-FALSE otherwise.
+`related(keys, target)` is now three-valued. For each source row it is
+UNKNOWN when a key column is NULL, TRUE when a related row has `target` TRUE,
+UNKNOWN when none does but one has `target` UNKNOWN, and FALSE otherwise.
 
-- Positive uses admit exactly the same rows as before, because only TRUE
+- Positive uses admit exactly the same rows as before, and render the same
+  single correlated `EXISTS (<related rows where target>)`, because only TRUE
   admits a row.
-- A negation no longer admits a row whose relation key is NULL, or whose
+- A negation, including one that reaches the relation through `and` or `or`
+  under `not()`, renders the rows where the relation is FALSE:
+  `<every source key IS NOT NULL> AND NOT EXISTS (<related rows where target
+  is TRUE or UNKNOWN>)`. It used to render as `NOT EXISTS (<related rows
+  where target>)` and admitted rows whose relation key is NULL, or whose
   related rows only leave `target` UNKNOWN (for example `secret = 1` on a
-  NULL `secret`). It used to render as `NOT EXISTS` and admit both, so such a
-  policy can now return fewer rows. A policy that means to admit NULL keys
-  must say so with an explicit `or` over a NULL test of the key, for example
-  a generated `isNull: true` filter on it through `ReadPredicate::from_filter`.
-- Each `related` predicate binds the target's values twice, in order, so a
-  rendered clause has twice the target's bind parameters.
+  NULL `secret`). Such a policy can now return fewer rows. PostgreSQL plans
+  the new negation as an anti-join, like the old one.
+- A policy that means to admit NULL keys must say so with an explicit `or`
+  over a NULL test of the key. `ReadPredicate::is_null` (#769, on main) is
+  the intended form for that once main is integrated into this release; it
+  also works for keys that are private or not filterable. Until then, a
+  generated `isNull: true` filter through `ReadPredicate::from_filter` works
+  only when the key column is exposed as a filter field (`#[filterable]`).
 
 Review each negated relation policy, and add the explicit NULL alternative
 where rows without a relation key should stay visible.

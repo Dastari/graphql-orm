@@ -477,36 +477,23 @@ fn exists_sql_is_quoted_and_parameterized_for_the_selected_backend() {
     let query = EntityQuery::<FilterLink, Backend>::new()
         .with_read_visibility(&ReadVisibility::Complete(predicate))
         .unwrap();
-    // The three-valued relation (#770) binds the target's values once per
-    // EXISTS: the matching test, then the not-FALSE test.
-    assert_eq!(
-        query.values,
-        vec![
-            SqlValue::String(value.into()),
-            SqlValue::String(value.into())
-        ]
-    );
+    assert_eq!(query.values, vec![SqlValue::String(value.into())]);
     let sql = query.where_clauses.join(" AND ");
     assert!(sql.contains("EXISTS (SELECT 1 FROM"), "{sql}");
-    assert!(
-        sql.contains("\"target_id\" IS NULL") || sql.contains("[target_id] IS NULL"),
-        "{sql}"
-    );
+    // The positive relation is one plain EXISTS (#770 review: the three-valued
+    // form is rendered only where a negation reaches it).
+    assert!(!sql.contains("CASE") && !sql.contains("IS NULL"), "{sql}");
     assert!(!sql.contains(value), "{sql}");
-    // Fragment placeholders are rebased by occurrence when the statement is
-    // rendered, so the two copies of the target bind two values.
     #[cfg(feature = "mssql")]
     assert!(
-        sql.contains("[filter_targets]") && sql.matches("@P").count() == 2,
+        sql.contains("[filter_targets]") && sql.contains("@P1"),
         "{sql}"
     );
     #[cfg(feature = "postgres")]
     assert!(
-        sql.contains("\"filter_targets\"") && sql.matches('$').count() == 2,
+        sql.contains("\"filter_targets\"") && sql.contains("$1"),
         "{sql}"
     );
-    #[cfg(feature = "sqlite")]
-    assert_eq!(sql.matches('?').count(), 2, "{sql}");
     #[cfg(feature = "sqlite")]
     assert!(
         sql.contains("\"filter_targets\"") && sql.contains('?'),

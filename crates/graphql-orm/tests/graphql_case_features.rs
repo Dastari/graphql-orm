@@ -322,11 +322,26 @@ fn column_api_names_follow_the_active_naming_configuration() {
 }
 
 /// graphql-orm and graphql-orm-macros read the naming variables with the same
-/// build script, so the runtime types and the generated code agree (#508).
+/// `build_naming.rs`, so the runtime types and the generated code agree
+/// (#508). Each build script keeps its own other logic (graphql-orm's
+/// qualifies owned-planning replay).
 #[test]
 fn naming_build_scripts_are_identical() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let orm = std::fs::read_to_string(root.join("build.rs")).unwrap();
-    let macros = std::fs::read_to_string(root.join("../graphql-orm-macros/build.rs")).unwrap();
+    let orm = std::fs::read_to_string(root.join("build_naming.rs")).unwrap();
+    let macros =
+        std::fs::read_to_string(root.join("../graphql-orm-macros/build_naming.rs")).unwrap();
     assert_eq!(orm, macros);
+    for build in [
+        root.join("build.rs"),
+        root.join("../graphql-orm-macros/build.rs"),
+    ] {
+        let script = std::fs::read_to_string(&build).unwrap();
+        assert!(
+            script.contains("include!(\"build_naming.rs\");")
+                && script.contains("emit_naming_cfgs();"),
+            "{}",
+            build.display()
+        );
+    }
 }

@@ -157,11 +157,16 @@ persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
 `predicate.not()?` uses SQL `NOT`: TRUE becomes FALSE, FALSE becomes TRUE,
 and NULL/UNKNOWN remains UNKNOWN (denied in WHERE). It never treats UNKNOWN as
 FALSE before negating. Empty SQL fragments and empty conjunctions fail closed; an empty disjunction
-is the supported constant FALSE. Relation
-EXISTS is two-valued: `exists_any.not()?.or(exists_matching)?` means absent or
-matching. For a present related row whose comparison is UNKNOWN, matching does
-not grant access. Avoid `not(exists(not(matches)))` when NULL must be denied:
-NULL comparisons inside EXISTS do not match rows.
+is the supported constant FALSE. A relation is three-valued (#770): UNKNOWN
+when a source key column is NULL, or when no related row matches but one has
+the target UNKNOWN. Its positive form renders as one correlated `EXISTS`; a
+negation, also one reaching it through `and`/`or`, renders
+`<keys IS NOT NULL> AND NOT EXISTS (<related rows where the target is not
+FALSE>)` (an anti-join on PostgreSQL). So `related(..).not()` never admits a
+NULL key or an UNKNOWN-only relation, and double negation is the identity.
+`exists_any.not()?.or(exists_matching)?` means "the key is set and no related
+row exists, or a related row matches"; to also admit rows without a key, add
+an explicit NULL test of the key with `or`.
 `ReadPredicate::related::<Backend, Source, Target>(&[("source_column",
 "target_column")], target_predicate)` provides a validated, parameterized
 EXISTS equality relation, including composite key mappings. Column names are

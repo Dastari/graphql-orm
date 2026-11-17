@@ -182,6 +182,12 @@ jobs:
           GRAPHQL_ORM_FIELD_CASE: PascalCase
         run: cargo test -p graphql-orm --features router-protocol --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics --test composite_subscription_scopes --test node_id_version_relations --test link_relation_patterns --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
+      # The opt-in replay feature reads cfgs that graphql-orm's build script
+      # sets; only the release replay profile built it before (#774 review).
+      - name: Lint and run owned-planning replay on the qualified toolchain
+        run: |
+          cargo clippy -p graphql-orm --locked --no-default-features --features sqlite,owned-planning-replay --lib -- -D warnings
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,owned-planning-replay --lib replay_positive
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
   schema-export:

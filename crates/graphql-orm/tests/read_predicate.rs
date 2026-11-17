@@ -292,7 +292,8 @@ async fn negation_preserves_null_and_relation_truth_tables() {
 
 /// `related(P)` is three-valued (#770): UNKNOWN when a source key is NULL or
 /// when no related row has `P` TRUE but one has it UNKNOWN. Positive results
-/// are unchanged, and the negation never admits a row on either UNKNOWN.
+/// are unchanged, and a negation, also one reaching the relation through
+/// `and`/`or`, never admits a row on either UNKNOWN.
 #[tokio::test]
 #[cfg_attr(
     any(feature = "postgres", feature = "mssql"),
@@ -307,14 +308,17 @@ async fn related_negation_fails_closed_on_null_keys_and_unknown_targets() {
         other => panic!("unsupported test backend: {other:?}"),
     };
     execute(&db, &format!("CREATE TABLE predicate_records (id {id_type} PRIMARY KEY, rank BIGINT NOT NULL, secret BIGINT NULL, label VARCHAR(40) NOT NULL)")).await.unwrap();
-    // secret -> rank. Rank 1 has a NULL key. Rank 2 points at rank 1, whose
-    // own secret is NULL. Rank 3 points at rank 2 (secret 1). Rank 4 points
-    // at a rank with no row.
-    execute(&db, "INSERT INTO predicate_records VALUES ('00000000-0000-0000-0000-000000000001', 1, NULL, 'null'), ('00000000-0000-0000-0000-000000000002', 2, 1, 'unknown'), ('00000000-0000-0000-0000-000000000003', 3, 2, 'match'), ('00000000-0000-0000-0000-000000000004', 4, 9, 'absent')").await.unwrap();
-    let related = || {
+    // secret -> rank. Row 1 (rank 1) has a NULL key. Row 2 points at rank 1,
+    // whose secret is NULL. Row 3 points at rank 2 (secret 1). Row 4 points at
+    // a rank with no row. Rows 5 and 6 share rank 5: one NULL key, one
+    // pointing at nothing. Row 7 (rank 6) points at rank 5, whose two rows
+    // have secrets NULL and 7: one UNKNOWN and one FALSE for `secret = 1`.
+    // Row 8 (rank 8) points at itself.
+    execute(&db, "INSERT INTO predicate_records VALUES ('00000000-0000-0000-0000-000000000001', 1, NULL, 'null'), ('00000000-0000-0000-0000-000000000002', 2, 1, 'unknown'), ('00000000-0000-0000-0000-000000000003', 3, 2, 'match'), ('00000000-0000-0000-0000-000000000004', 4, 9, 'absent'), ('00000000-0000-0000-0000-000000000005', 5, NULL, 'dup'), ('00000000-0000-0000-0000-000000000006', 5, 7, 'dup'), ('00000000-0000-0000-0000-000000000007', 6, 5, 'mixed'), ('00000000-0000-0000-0000-000000000008', 8, 8, 'self')").await.unwrap();
+    let related = |value| {
         ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
             &[("secret", "rank")],
-            column("secret", 1).unwrap(),
+            column("secret", value).unwrap(),
         )
         .unwrap()
     };
@@ -337,28 +341,93 @@ async fn related_negation_fails_closed_on_null_keys_and_unknown_targets() {
         }
     };
     // Positive: only the row whose related row has secret = 1 TRUE.
-    assert_eq!(ranks(related()).await, vec![3]);
-    // Negation: the NULL key (1) and the UNKNOWN related value (2) stay
-    // UNKNOWN and are not admitted; the absent relation (4) is FALSE, so its
-    // negation admits it.
-    assert_eq!(ranks(related().not().unwrap()).await, vec![4]);
+    assert_eq!(ranks(related(1)).await, vec![3]);
+    // Negation: NULL keys (rows 1, 5), the UNKNOWN-only relation (row 2) and
+    // the UNKNOWN+FALSE relation (row 7) are not admitted; FALSE relations
+    // (rows 4, 6, 8) are.
+    assert_eq!(ranks(related(1).not().unwrap()).await, vec![4, 5, 8]);
     // Double negation is the identity.
     assert_eq!(
-        ranks(related().not().unwrap().not().unwrap()).await,
+        ranks(related(1).not().unwrap().not().unwrap()).await,
         vec![3]
     );
-    // Rank 3's related row (rank 2, secret 1) has `secret = 2` FALSE, so the
-    // negation admits it. Rank 2's related row (rank 1, secret NULL) has it
-    // UNKNOWN, so the negation does not.
-    let other = ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+    // Row 3's related row has `secret = 2` FALSE, row 2's has it UNKNOWN.
+    assert_eq!(ranks(related(2)).await, Vec::<i64>::new());
+    assert_eq!(ranks(related(2).not().unwrap()).await, vec![3, 4, 5, 8]);
+    // A negation reaching the relation through `or` / `and` is pushed down:
+    // `not(r OR rank = 4)` is FALSE-of-r AND rank <> 4.
+    assert_eq!(
+        ranks(
+            related(1)
+                .or(column("rank", 4).unwrap())
+                .unwrap()
+                .not()
+                .unwrap()
+        )
+        .await,
+        vec![5, 8]
+    );
+    // `not(r AND rank = 3)` is FALSE-of-r OR rank <> 3: the UNKNOWN relation
+    // rows are admitted only through the second term.
+    assert_eq!(
+        ranks(
+            related(1)
+                .and(column("rank", 3).unwrap())
+                .unwrap()
+                .not()
+                .unwrap()
+        )
+        .await,
+        vec![1, 2, 4, 5, 5, 6, 8]
+    );
+    // ... and back again.
+    assert_eq!(
+        ranks(
+            related(1)
+                .and(column("rank", 3).unwrap())
+                .unwrap()
+                .not()
+                .unwrap()
+                .not()
+                .unwrap()
+        )
+        .await,
+        vec![3]
+    );
+    // A relation under a relation: rows with a related row whose own
+    // `related(1).not()` is TRUE. Row 7 relates to rows 5 (UNKNOWN) and 6
+    // (TRUE); row 8 to itself (TRUE). Rows 2 and 3 relate only to UNKNOWN
+    // rows (1 and 2), so they stay UNKNOWN.
+    let nested = ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
         &[("secret", "rank")],
-        column("secret", 2).unwrap(),
+        related(1).not().unwrap(),
     )
     .unwrap();
-    assert_eq!(ranks(other.clone()).await, Vec::<i64>::new());
-    assert_eq!(ranks(other.not().unwrap()).await, vec![3, 4]);
-    // A generated-filter target renders backend placeholders; both copies
-    // bind in order beside other bound terms.
+    assert_eq!(ranks(nested.clone()).await, vec![6, 8]);
+    // Its negation admits only FALSE: rows 4 and 6, which relate to nothing.
+    assert_eq!(ranks(nested.not().unwrap()).await, vec![4, 5]);
+    // A composite key with a partial NULL is UNKNOWN: rows 1 and 5 never
+    // pass the negation. Row 8 is its own related row.
+    let composite = || {
+        ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+            &[("secret", "rank"), ("label", "label")],
+            ReadPredicate::column::<DefaultBackend, PredicateRecord>(
+                "rank",
+                ReadPredicateOp::Gte,
+                SqlValue::Int(0),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(ranks(composite()).await, vec![8]);
+    assert_eq!(ranks(composite().not().unwrap()).await, vec![2, 3, 4, 5, 6]);
+    assert_eq!(
+        ranks(composite().not().unwrap().not().unwrap()).await,
+        vec![8]
+    );
+    // A generated-filter target renders backend placeholders and binds in
+    // order beside other bound terms.
     let filtered = || {
         ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
             &[("secret", "rank")],
@@ -387,7 +456,43 @@ async fn related_negation_fails_closed_on_null_keys_and_unknown_targets() {
                 .unwrap()
         )
         .await,
-        vec![2]
+        vec![2, 5, 6, 8]
     );
     owner.cleanup().unwrap();
+}
+
+/// The plan shape of the relation renderings (#770 review): the positive form
+/// is one correlated `EXISTS` and the negation one key test plus one
+/// `NOT EXISTS` (an anti-join on PostgreSQL), each binding the target's values
+/// once. Neither renders a CASE over two `EXISTS` probes.
+#[test]
+fn relation_renderings_are_single_correlated_subqueries() {
+    let related = || {
+        ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+            &[("secret", "rank")],
+            column("secret", 1).unwrap(),
+        )
+        .unwrap()
+    };
+    let rendered = |predicate: ReadPredicate| {
+        let query = EntityQuery::<PredicateRecord>::new()
+            .with_read_visibility(&ReadVisibility::Complete(predicate))
+            .unwrap();
+        (query.where_clauses.join(" AND "), query.values.len())
+    };
+    let (positive, binds) = rendered(related());
+    assert_eq!(positive.matches("EXISTS (").count(), 1, "{positive}");
+    assert!(
+        !positive.contains("CASE") && !positive.contains("NOT "),
+        "{positive}"
+    );
+    assert_eq!(binds, 1);
+    let (negative, binds) = rendered(related().not().unwrap());
+    assert_eq!(negative.matches("EXISTS (").count(), 1, "{negative}");
+    assert!(
+        negative.contains("IS NOT NULL AND NOT EXISTS ("),
+        "{negative}"
+    );
+    assert!(!negative.contains("THEN NULL"), "{negative}");
+    assert_eq!(binds, 1);
 }
