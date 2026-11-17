@@ -18,6 +18,11 @@ root delete of a `dependent_deletes` entity now reports its `errorCode` under
 `mutation_error_codes` (#763). See the
 [migration guide](../../MIGRATION.md#01740-to-01750-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
 
+Version 0.174.0 adds fail-closed read-policy negation: `ReadPredicate::not_related`,
+`ReadPredicate::is_null` and `is_not_null`, and refuses `not()` over a predicate that renders
+the deny fallback `1 = 0` (an empty, over-limit or invalid filter list or value).
+See [read-predicate negation and NULLs](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls).
+
 Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 

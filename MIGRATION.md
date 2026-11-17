@@ -33,6 +33,36 @@ needed.
   Clients that treated null as "unknown" now see the code a direct delete
   reports.
 
+## 0.173.0 to 0.174.0: read-policy negation
+
+Upgrade ORM and macros together. Generated code is unchanged. See
+[read-predicate negation and NULLs](docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls).
+
+- **`ReadPredicate::not_related`, `is_null` and `is_not_null` (#766). No
+  action.** `not_related::<Backend, Source, Target>(keys, target)` is the
+  fail-closed "no related row matching `target`": a row with a NULL key, or
+  with a related row whose target predicate is UNKNOWN, is not admitted; add
+  `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?` to admit NULL keys.
+  `is_null` and `is_not_null` validate the column like `column`.
+- **Negating the deny fallback is refused (#766). Action needed** only if a
+  policy calls `.not()` on a predicate that can render the generated deny
+  fallback `1 = 0`: an empty `in_list` or `or` list, a filter that fails
+  validation (such as a list over `MAX_FILTER_LIST_OPERANDS`, 1,000,
+  operands), an invalid filter value, or a relation over any of these. A deny
+  list computed per request is the usual case. Previously, negating such a
+  predicate admitted all rows; it is now refused, and the request fails with
+  `AUTHORIZATION_MISCONFIGURED`. When the list is empty, omit the negated
+  term, use `ReadPredicate::is_not_null` to admit every row with a value, or
+  return `ReadVisibility::Unrestricted` deliberately; keep a deny list within
+  the operand limit. Policies that never negate such a predicate are
+  unaffected, and generated client filters (`not: { field: { inList: [] } }`)
+  are unchanged.
+- **NULL rule (#766). No action.** `not()` keeps SQL three-valued logic: a
+  NULL compared column stays UNKNOWN and is never admitted by negation.
+  `related(..).not()` is unchanged (two-valued `NOT EXISTS`, which admits rows
+  with a NULL key or only UNKNOWN related rows); switch absence policies to
+  `not_related` if those rows must be denied.
+
 ## 0.172.0 to 0.173.0: process and toolchain
 
 **Action needed:** use Rust 1.97.1 or newer (development/CI pin 1.97.1).

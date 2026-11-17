@@ -53,6 +53,117 @@ pub struct ReadPredicate {
     backend: DatabaseBackend,
     expression: FilterExpression,
 }
+fn validate_column<T: Entity>(column: &str) -> async_graphql::Result<()> {
+    if T::columns()
+        .iter()
+        .any(|definition| definition.name == column)
+    {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+/// Every fragment is non-empty and every conjunction has a child. An empty
+/// disjunction is accepted here and refused as a match-nothing term.
+fn negatable(expression: &FilterExpression) -> bool {
+    match expression {
+        FilterExpression::Raw { clause, .. } | FilterExpression::TrustedFragment { clause, .. } => {
+            !clause.trim().is_empty()
+        }
+        FilterExpression::And(children) => !children.is_empty() && children.iter().all(negatable),
+        FilterExpression::Or(children) => children.iter().all(negatable),
+    }
+}
+
+/// Whether rendered policy SQL contains the ORM's never-true term `1 = 0`
+/// (an empty `in_list` or `or` list, or another generated match-nothing
+/// fallback) as a standalone comparison. Bound values are placeholders, so a
+/// clause never contains caller text.
+fn contains_match_nothing(clause: &str) -> bool {
+    fn word(c: char) -> bool {
+        c.is_alphanumeric()
+            || matches!(
+                c,
+                '_' | '"' | '\'' | '`' | '[' | ']' | '.' | '$' | '@' | '?'
+            )
+    }
+    let chars = clause.chars().collect::<Vec<_>>();
+    let skip = |mut index: usize| {
+        while chars.get(index).is_some_and(|c| c.is_whitespace()) {
+            index += 1;
+        }
+        index
+    };
+    (0..chars.len()).any(|start| {
+        if chars[start] != '1' || (start > 0 && word(chars[start - 1])) {
+            return false;
+        }
+        let equals = skip(start + 1);
+        if chars.get(equals) != Some(&'=') {
+            return false;
+        }
+        let zero = skip(equals + 1);
+        chars.get(zero) == Some(&'0') && !chars.get(zero + 1).is_some_and(|c| word(*c))
+    })
+}
+
+/// A validated key relation from `S` to `T` with its rendered target predicate
+/// (anonymous placeholders) and bind values.
+struct Relation {
+    table: String,
+    joins: String,
+    predicate: String,
+    values: Vec<SqlValue>,
+}
+impl Relation {
+    fn new<B, S, T>(keys: &[(&str, &str)], target: &ReadPredicate) -> async_graphql::Result<Self>
+    where
+        B: OrmBackend,
+        S: Entity + 'static,
+        T: Entity + 'static,
+    {
+        if keys.is_empty() || target.entity != TypeId::of::<T>() || target.backend != B::DIALECT {
+            return Err(invalid());
+        }
+        let mut joins = Vec::new();
+        for (source, destination) in keys {
+            if !S::columns().iter().any(|c| c.name == *source)
+                || !T::columns().iter().any(|c| c.name == *destination)
+            {
+                return Err(invalid());
+            }
+            joins.push(format!(
+                "__gom_visibility.{} = {}.{}",
+                B::DIALECT.quote_identifier(destination),
+                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
+                B::DIALECT.quote_identifier(source)
+            ));
+        }
+        let mut values = Vec::new();
+        let predicate = render_filter_expression(
+            DatabaseBackend::Sqlite,
+            &target.expression,
+            &mut 1,
+            &mut values,
+        );
+        Ok(Self {
+            table: B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
+            joins: joins.join(" AND "),
+            predicate,
+            values,
+        })
+    }
+
+    /// Correlated EXISTS over the related rows where `predicate` is TRUE.
+    fn exists(&self, predicate: &str) -> String {
+        format!(
+            "EXISTS (SELECT 1 FROM (SELECT * FROM {} WHERE {predicate}) AS __gom_visibility WHERE {})",
+            self.table, self.joins
+        )
+    }
+}
+
 impl ReadPredicate {
     /// Compare a validated persisted physical column with a bound value.
     /// Private and non-filterable columns are accepted; this does not expose
@@ -62,12 +173,7 @@ impl ReadPredicate {
         op: ReadPredicateOp,
         value: SqlValue,
     ) -> async_graphql::Result<Self> {
-        if !T::columns()
-            .iter()
-            .any(|definition| definition.name == column)
-        {
-            return Err(invalid());
-        }
+        validate_column::<T>(column)?;
         let operator = match op {
             ReadPredicateOp::Eq => "=",
             ReadPredicateOp::Ne => "<>",
@@ -86,23 +192,75 @@ impl ReadPredicate {
         })
     }
 
-    /// SQL negation: UNKNOWN (NULL) remains UNKNOWN and cannot authorize a row.
-    /// EXISTS relations negate to NOT EXISTS. To allow absent or matching rows,
-    /// compose `exists_any.not()?.or(exists_matching)?`. Empty inner fragments
-    /// are refused rather than interpreted as an authorization grant.
+    /// `column IS NULL` on a validated persisted physical column.
+    ///
+    /// This is the explicit way to admit (or, with [`Self::not`], to exclude)
+    /// rows whose column is NULL. It is two-valued: never UNKNOWN. Private and
+    /// non-filterable columns are accepted; unknown names fail closed.
+    pub fn is_null<B: OrmBackend, T: Entity + 'static>(
+        column: &str,
+    ) -> async_graphql::Result<Self> {
+        Self::null_test::<B, T>(column, "IS NULL")
+    }
+
+    /// `column IS NOT NULL` on a validated persisted physical column.
+    ///
+    /// Two-valued, like [`Self::is_null`]. Use it where a negated deny list
+    /// would be empty: [`Self::not`] refuses to negate an empty `in_list`, and
+    /// `is_not_null` states "every row with a value" explicitly.
+    pub fn is_not_null<B: OrmBackend, T: Entity + 'static>(
+        column: &str,
+    ) -> async_graphql::Result<Self> {
+        Self::null_test::<B, T>(column, "IS NOT NULL")
+    }
+
+    fn null_test<B: OrmBackend, T: Entity + 'static>(
+        column: &str,
+        test: &str,
+    ) -> async_graphql::Result<Self> {
+        validate_column::<T>(column)?;
+        Ok(Self {
+            entity: TypeId::of::<T>(),
+            backend: B::DIALECT,
+            expression: FilterExpression::trusted_fragment(
+                format!("{} {test}", B::DIALECT.quote_identifier(column)),
+                Vec::new(),
+            ),
+        })
+    }
+
+    /// SQL negation, rendered as `NOT (...)` with the inner bind values in
+    /// their original order.
+    ///
+    /// Predicates use SQL three-valued logic and only TRUE admits a row.
+    /// `not(p)` is TRUE exactly when `p` is FALSE; when `p` is UNKNOWN (for
+    /// example `column = ?` on a NULL column) the negation stays UNKNOWN and
+    /// does not admit the row. A comparison is FALSE only when it would be
+    /// FALSE whatever value a NULL column held, so negation never admits a row
+    /// on the strength of a NULL. Double negation is the identity and the rule
+    /// holds inside any `and`/`or` tree. Only SQL evaluates policies: reads,
+    /// counts, keyset and connection pages, authorized scans, search and
+    /// subscription delivery re-reads all render the same clause. To admit
+    /// NULL rows, say so explicitly:
+    /// `p.not()?.or(ReadPredicate::is_null::<B, T>("column")?)?`.
+    ///
+    /// Refused with `AUTHORIZATION_MISCONFIGURED`:
+    /// - empty inner fragments or conjunctions;
+    /// - a predicate that renders the deny fallback `1 = 0` anywhere,
+    ///   including inside a relation: an empty `in_list` or `or` list, a
+    ///   generated filter that fails validation (for example a list over
+    ///   [`crate::graphql::filters::MAX_FILTER_LIST_OPERANDS`] operands), or
+    ///   an invalid filter value. Its negation would be a blanket grant. Omit
+    ///   the term, or use [`Self::is_not_null`] or
+    ///   [`ReadVisibility::Unrestricted`] deliberately.
+    ///
+    /// Relation EXISTS is two-valued, so `related(..).not()` is plain
+    /// `NOT EXISTS`: a source row with a NULL key, or whose related rows all
+    /// have an UNKNOWN target predicate, is admitted. For the fail-closed
+    /// absence test use [`Self::not_related`].
     #[allow(clippy::should_implement_trait)] // Fallible policy construction.
     pub fn not(self) -> async_graphql::Result<Self> {
-        fn supported(expression: &FilterExpression) -> bool {
-            match expression {
-                FilterExpression::Raw { clause, .. }
-                | FilterExpression::TrustedFragment { clause, .. } => !clause.trim().is_empty(),
-                FilterExpression::And(children) => {
-                    !children.is_empty() && children.iter().all(supported)
-                }
-                FilterExpression::Or(children) => children.iter().all(supported),
-            }
-        }
-        if !supported(&self.expression) {
+        if !negatable(&self.expression) {
             return Err(invalid());
         }
         let mut values = Vec::new();
@@ -112,6 +270,9 @@ impl ReadPredicate {
             &mut 1,
             &mut values,
         );
+        if contains_match_nothing(&clause) {
+            return Err(invalid());
+        }
         Ok(Self {
             expression: FilterExpression::trusted_fragment(format!("NOT ({clause})"), values),
             ..self
@@ -146,40 +307,78 @@ impl ReadPredicate {
         S: Entity + 'static,
         T: Entity + 'static,
     {
-        if keys.is_empty() || target.entity != TypeId::of::<T>() || target.backend != B::DIALECT {
-            return Err(invalid());
-        }
-        let mut joins = Vec::new();
-        for (source, destination) in keys {
-            if !S::columns().iter().any(|c| c.name == *source)
-                || !T::columns().iter().any(|c| c.name == *destination)
-            {
-                return Err(invalid());
-            }
-            joins.push(format!(
-                "__gom_visibility.{} = {}.{}",
-                B::DIALECT.quote_identifier(destination),
-                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
-                B::DIALECT.quote_identifier(source)
-            ));
-        }
-        let mut values = Vec::new();
-        let predicate = render_filter_expression(
-            DatabaseBackend::Sqlite,
-            &target.expression,
-            &mut 1,
-            &mut values,
-        );
-        let clause = format!(
-            "EXISTS (SELECT 1 FROM (SELECT * FROM {} WHERE {}) AS __gom_visibility WHERE {})",
-            B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
-            predicate,
-            joins.join(" AND ")
-        );
+        let relation = Relation::new::<B, S, T>(keys, &target)?;
+        let clause = relation.exists(&relation.predicate);
         Ok(Self {
             entity: TypeId::of::<S>(),
             backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(clause, values),
+            expression: FilterExpression::trusted_fragment(clause, relation.values),
+        })
+    }
+
+    /// Fail-closed absence: "no related row can match `target`".
+    ///
+    /// `keys` and `target` are validated exactly as for [`Self::related`], and
+    /// as there the policy owns the join: target row policies are not
+    /// imported, and a hidden target row counts like any other. The outcome
+    /// reveals what `related(keys, target)` reveals plus whether some related
+    /// row has `target` UNKNOWN (a hidden one included), and that case fails
+    /// closed: it can deny a row, never admit one. The result is
+    /// three-valued, so it composes with [`Self::not`], `and` and `or` under
+    /// the same rule as every other predicate. For each source row it is:
+    ///
+    /// - UNKNOWN when any source key column is NULL: the relation cannot be
+    ///   evaluated, so the row is not admitted;
+    /// - FALSE when a related row has `target` TRUE;
+    /// - UNKNOWN when no related row has `target` TRUE but one has it UNKNOWN
+    ///   (it might match), so the row is not admitted;
+    /// - TRUE otherwise, including when there is no related row at all.
+    ///
+    /// `not_related(keys, p).not()?` therefore admits the same rows as
+    /// `related(keys, p)`. To admit rows with a NULL key, add
+    /// `.or(ReadPredicate::is_null::<B, S>("key")?)?` explicitly.
+    ///
+    /// It renders as `(CASE WHEN <key IS NULL> THEN NULL WHEN EXISTS (<related
+    /// rows where target>) THEN 0 WHEN EXISTS (<related rows where target is
+    /// not FALSE>) THEN NULL ELSE 1 END) = 1` on SQLite, PostgreSQL and SQL
+    /// Server. The target's bind values appear twice, in that order. A target
+    /// that renders the deny fallback `1 = 0` (such as an empty `in_list`) is
+    /// refused with `AUTHORIZATION_MISCONFIGURED`, as for [`Self::not`].
+    pub fn not_related<B, S, T>(keys: &[(&str, &str)], target: Self) -> async_graphql::Result<Self>
+    where
+        B: OrmBackend,
+        S: Entity + 'static,
+        T: Entity + 'static,
+    {
+        if !negatable(&target.expression) {
+            return Err(invalid());
+        }
+        let relation = Relation::new::<B, S, T>(keys, &target)?;
+        if relation.predicate.trim().is_empty() || contains_match_nothing(&relation.predicate) {
+            return Err(invalid());
+        }
+        let source = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
+        let null_key = keys
+            .iter()
+            .map(|(column, _)| format!("{source}.{} IS NULL", B::DIALECT.quote_identifier(column)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let matching = relation.exists(&relation.predicate);
+        let possible = relation.exists(&format!(
+            "CASE WHEN NOT ({}) THEN 0 ELSE 1 END = 1",
+            relation.predicate
+        ));
+        let mut values = relation.values.clone();
+        values.extend(relation.values);
+        Ok(Self {
+            entity: TypeId::of::<S>(),
+            backend: B::DIALECT,
+            expression: FilterExpression::trusted_fragment(
+                format!(
+                    "(CASE WHEN {null_key} THEN NULL WHEN {matching} THEN 0 WHEN {possible} THEN NULL ELSE 1 END) = 1"
+                ),
+                values,
+            ),
         })
     }
 
@@ -1517,6 +1716,51 @@ mod predicate_tests {
                 expression,
             };
             assert!(predicate.not().is_err());
+        }
+    }
+
+    fn sqlite_fragment(clause: &str, values: Vec<SqlValue>) -> ReadPredicate {
+        ReadPredicate {
+            entity: TypeId::of::<()>(),
+            backend: DatabaseBackend::Sqlite,
+            expression: FilterExpression::trusted_fragment(clause, values),
+        }
+    }
+
+    #[test]
+    fn negation_refuses_match_nothing_terms() {
+        // An empty `in_list`, an empty disjunction or another match-nothing
+        // term would negate to a blanket grant.
+        for expression in [
+            FilterExpression::Or(vec![]),
+            FilterExpression::trusted_fragment("1 = 0", vec![]),
+            FilterExpression::trusted_fragment(
+                "(\"rank\" = ?) AND (1 = 0)",
+                vec![SqlValue::Int(1)],
+            ),
+            FilterExpression::trusted_fragment(
+                "(1 = 0) /* spatial unsupported on mssql */",
+                vec![],
+            ),
+            FilterExpression::trusted_fragment(
+                "EXISTS (SELECT 1 FROM (SELECT * FROM \"t\" WHERE 1=0) AS v WHERE v.\"k\" = \"s\".\"k\")",
+                vec![],
+            ),
+            FilterExpression::And(vec![
+                FilterExpression::trusted_fragment("\"rank\" = ?", vec![SqlValue::Int(1)]),
+                FilterExpression::Or(vec![]),
+            ]),
+        ] {
+            let predicate = ReadPredicate {
+                entity: TypeId::of::<()>(),
+                backend: DatabaseBackend::Sqlite,
+                expression,
+            };
+            assert!(predicate.clone().not().is_err(), "{predicate:?}");
+            assert!(predicate.not().is_err());
+        }
+        for clause in ["\"rank\" = ?", "\"col1\" = 10", "\"x1\" = 0", "\"a\" <> ?"] {
+            assert!(sqlite_fragment(clause, vec![]).not().is_ok(), "{clause}");
         }
     }
 }

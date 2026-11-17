@@ -17,6 +17,8 @@ selection that applies read visibility (#752). Upgrade ORM and macros
 together; see the
 [migration guide](../../MIGRATION.md#01740-to-01750-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
 
+Version 0.174.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
+
 Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 

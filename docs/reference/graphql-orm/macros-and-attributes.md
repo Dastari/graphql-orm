@@ -1256,6 +1256,13 @@ bound parameter and each pattern a `LIKE` pattern, so the limits keep a filter i
 `INVALID_INPUT` before any SQL runs; the same check applies to filters built in Rust, through each
 filter's `validate()` and the generated `WhereInput`'s `DatabaseFilter::validate`.
 
+An empty `inList` matches no rows, and so does an `or: []`. A client filter may
+still negate one: `not: { field: { inList: [] } }` matches every row the
+request can already see. Row policy still applies, so this is not a way past
+authorization; it is the plain negation of "matches nothing". Read policies are
+stricter: `ReadPredicate::not()` refuses a predicate that renders this deny
+fallback (see [read-predicate negation and NULLs](pagination-migration.md#read-predicate-negation-and-nulls)).
+
 ## Managed versions
 
 `#[graphql_orm(version = "managed")]` declares a record version that every generated write advances
