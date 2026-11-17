@@ -246,10 +246,12 @@ impl ReadPredicate {
     ///
     /// Refused with `AUTHORIZATION_MISCONFIGURED`:
     /// - empty inner fragments or conjunctions;
-    /// - a predicate that contains a match-nothing term anywhere, including
-    ///   inside a relation: an empty `in_list` or `or` list (rendered
-    ///   `1 = 0`), or another generated never-true term. Its negation would be
-    ///   a blanket grant. Omit the term, or use [`Self::is_not_null`] or
+    /// - a predicate that renders the deny fallback `1 = 0` anywhere,
+    ///   including inside a relation: an empty `in_list` or `or` list, a
+    ///   generated filter that fails validation (for example a list over
+    ///   [`crate::graphql::filters::MAX_FILTER_LIST_OPERANDS`] operands), or
+    ///   an invalid filter value. Its negation would be a blanket grant. Omit
+    ///   the term, or use [`Self::is_not_null`] or
     ///   [`ReadVisibility::Unrestricted`] deliberately.
     ///
     /// Relation EXISTS is two-valued, so `related(..).not()` is plain
@@ -318,7 +320,10 @@ impl ReadPredicate {
     ///
     /// `keys` and `target` are validated exactly as for [`Self::related`], and
     /// as there the policy owns the join: target row policies are not
-    /// imported, and a hidden target row counts like any other. The result is
+    /// imported, and a hidden target row counts like any other. The outcome
+    /// reveals what `related(keys, target)` reveals plus whether some related
+    /// row has `target` UNKNOWN (a hidden one included), and that case fails
+    /// closed: it can deny a row, never admit one. The result is
     /// three-valued, so it composes with [`Self::not`], `and` and `or` under
     /// the same rule as every other predicate. For each source row it is:
     ///
@@ -337,8 +342,8 @@ impl ReadPredicate {
     /// rows where target>) THEN 0 WHEN EXISTS (<related rows where target is
     /// not FALSE>) THEN NULL ELSE 1 END) = 1` on SQLite, PostgreSQL and SQL
     /// Server. The target's bind values appear twice, in that order. A target
-    /// containing a match-nothing term (such as an empty `in_list`) is refused
-    /// with `AUTHORIZATION_MISCONFIGURED`, as for [`Self::not`].
+    /// that renders the deny fallback `1 = 0` (such as an empty `in_list`) is
+    /// refused with `AUTHORIZATION_MISCONFIGURED`, as for [`Self::not`].
     pub fn not_related<B, S, T>(keys: &[(&str, &str)], target: Self) -> async_graphql::Result<Self>
     where
         B: OrmBackend,

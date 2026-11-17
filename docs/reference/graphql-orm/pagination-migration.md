@@ -184,15 +184,19 @@ policy in Rust.
   `p.not()?.or(ReadPredicate::is_null::<Backend, Entity>("column")?)?`.
   `ReadPredicate::is_null` and `is_not_null` validate the column like
   `column` and are two-valued.
-- **Empty lists.** A generated `in_list: []` renders `1 = 0` and admits
-  nothing. `not()` refuses with `AUTHORIZATION_MISCONFIGURED` any predicate
-  that contains such a match-nothing term anywhere (an empty `in_list` or `or`
-  list, or a relation over one), because the negation would grant every row.
-  The refusal happens when the policy is built, so the request fails rather
-  than leaking rows. When a computed deny list is empty, omit the term, use
-  `is_not_null` to admit every row with a value, or return
-  `ReadVisibility::Unrestricted` deliberately. Empty fragments and empty
-  conjunctions are refused as before.
+- **Empty lists and other deny fallbacks.** A generated filter renders the
+  deny fallback `1 = 0`, which admits nothing, for an empty `in_list` or `or`
+  list, for a filter that fails validation (such as a list over
+  `MAX_FILTER_LIST_OPERANDS`, 1,000, operands) and for an invalid filter
+  value. `not()` refuses with `AUTHORIZATION_MISCONFIGURED` any predicate that
+  renders `1 = 0` anywhere, a relation over one included, because the
+  negation would grant every row. Before 0.174.0, negating such a predicate
+  admitted all rows; it is now refused when the policy is built, so the
+  request fails instead. When a computed deny list is empty, omit the term,
+  use `is_not_null` to admit every row with a value, or return
+  `ReadVisibility::Unrestricted` deliberately. Split or bound a deny list that
+  can exceed the operand limit. Empty fragments and empty conjunctions are
+  refused as before.
 - **Absence of a related row.** `ReadPredicate::not_related::<Backend, Source,
   Target>(&[("source_column", "target_column")], target_predicate)` is the
   fail-closed "no related row matching P". For each source row it is UNKNOWN
@@ -203,18 +207,18 @@ policy in Rust.
   `P`, and related rows where `P` is not FALSE), so the target's bind values
   appear twice. `not_related(k, p).not()?` admits the same rows as
   `related(k, p)`. Add `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?`
-  to admit rows with a NULL key. A target predicate containing a match-nothing
-  term is refused, as for `not()`.
+  to admit rows with a NULL key. A target predicate rendering the deny
+  fallback is refused, as for `not()`.
 - `related(k, p).not()?` is plain `NOT EXISTS`, which is two-valued: it admits
   a row with a NULL key, or whose related rows all have `P` UNKNOWN. This form
   is unchanged since 0.92; prefer `not_related` for absence policies.
 - **Visibility of related rows.** As with `related`, the policy owns the join:
   the target's row policy is not applied inside `related` or `not_related`, so
-  a target row the caller cannot read counts like any other. Whether a source
-  row is admitted under `not_related` is a function of the same facts that
-  decide `related` (does a related row match, might one match), so the
-  negated form discloses nothing about hidden target rows that the positive
-  form does not already disclose. Neither form returns target columns.
+  a target row the caller cannot read counts like any other. `not_related(P)`
+  reveals what `related(P)` reveals (does some related row match) plus one more
+  fact: whether some related row, hidden or not, has `P` UNKNOWN. That fact
+  fails closed: it can only deny a source row, never admit one. Neither form
+  returns target columns.
   Generated client relation filters keep their own rule: they always AND the
   target's complete SQL visibility into the subquery, so hidden rows never
   count there.
