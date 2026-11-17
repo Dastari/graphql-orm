@@ -2053,6 +2053,17 @@ where
     }
 
     pub async fn commit_and_emit(self) -> crate::Result<()> {
+        self.commit_and_emit_tracked(None).await
+    }
+
+    /// [`Self::commit_and_emit`], recording on `outcome` when the commit is
+    /// sent and when it succeeded. A refusal that rolls back first leaves it
+    /// where it was, since nothing was committed.
+    #[doc(hidden)]
+    pub async fn commit_and_emit_tracked(
+        self,
+        outcome: Option<&crate::graphql::errors::MutationOutcomeTracker>,
+    ) -> crate::Result<()> {
         if self.runtime_state.write_refused() {
             self.rollback().await?;
             return Err(crate::graphql::errors::sqlx_error_from_public(
@@ -2083,7 +2094,13 @@ where
         // Transaction extensions end before the commit: nothing that runs
         // afterwards, including a deferred action, can observe one.
         drop(extensions);
+        if let Some(outcome) = outcome {
+            outcome.commit_started();
+        }
         B::commit_write_transaction(tx).await?;
+        if let Some(outcome) = outcome {
+            outcome.committed();
+        }
         for event in deferred_events {
             event.emit(db);
         }

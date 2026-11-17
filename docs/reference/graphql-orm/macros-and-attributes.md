@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -58,6 +58,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
 | `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
+| `mutation_error_codes` | flag | absent; generated single-row results gain a nullable `errorCode` and the bulk filter refusals a code; see [mutation result error codes](error-codes.md#mutation-result-error-codes) |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |

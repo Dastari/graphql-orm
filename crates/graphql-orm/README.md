@@ -3,12 +3,24 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.171.0 adds an opt-in client error contract with one code vocabulary
+shared with the router: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an
+unstreamable `Changed` selection
+(`DatabaseBuilder::subscription_selection_unsupported_code`),
+`extensions.outcome` on generated mutation errors
+(`DatabaseBuilder::mutation_error_outcome`, see `MutationOutcome`), and
+`errorCode` on the single-row results of entities declared with
+`mutation_error_codes`. Nothing changes without them. See the
+[error-code reference](../../docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router)
+and the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
 
 Version 0.170.0 refuses, on generated static schemas, a value that is not an
 object where an input object is expected, and on static and runtime schemas a

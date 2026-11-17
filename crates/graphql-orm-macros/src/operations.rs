@@ -1695,6 +1695,37 @@ fn generate_graphql_operations_unfiltered(
     let notify_on_deleted =
         notify_single(quote! { ::graphql_orm::graphql::orm::ChangeAction::Deleted });
     let has_notify_handler = notify_handler_path.is_some();
+    // `mutation_error_codes`: a single-row result's `ErrorCode` beside `Error`,
+    // and a code for the bulk filter refusals. Without it the result types
+    // keep their shape and the bulk codes stay null.
+    let result_error_code_field = if entity_meta.mutation_error_codes {
+        quote! {
+            /// Stable code of `error`, from the ORM's public error codes. Null on success.
+            pub error_code: Option<String>,
+        }
+    } else {
+        quote! {}
+    };
+    let result_error_code_none = if entity_meta.mutation_error_codes {
+        quote! { error_code: None, }
+    } else {
+        quote! {}
+    };
+    let result_error_code_from_graphql = if entity_meta.mutation_error_codes {
+        quote! {
+            result.error_code = error.extensions.as_ref().and_then(|ext| ext.get("code")).and_then(|value| match value {
+                ::graphql_orm::async_graphql::Value::String(code) => Some(code.clone()),
+                _ => None,
+            });
+        }
+    } else {
+        quote! { let _ = &error.extensions; }
+    };
+    let refusal_error_code = if entity_meta.mutation_error_codes {
+        quote! { result.error_code = Some(code.as_str().to_owned()); }
+    } else {
+        quote! { let _ = code; }
+    };
     let notify_bulk = |action: proc_macro2::TokenStream| {
         if let Some(ref handler) = notify_handler_path {
             quote! {
@@ -4691,6 +4722,9 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
+                // The root's error reports what its write did (opt-in).
+                let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
+                let __gom_result: ::graphql_orm::async_graphql::Result<#upsert_result_type> = async {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #upsert_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -4801,6 +4835,7 @@ fn generate_graphql_operations_unfiltered(
                     #struct_name::__gom_require_managed_version_headroom(current_entity)
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 }
+                __gom_outcome.write_attempted();
                 hook_ctx.execute(&sql, &bind_values)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -4835,7 +4870,7 @@ fn generate_graphql_operations_unfiltered(
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx
-                    .commit_and_emit()
+                    .commit_and_emit_tracked(Some(&__gom_outcome))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
@@ -4852,6 +4887,8 @@ fn generate_graphql_operations_unfiltered(
                 let mut result = #upsert_result_type::ok(action, entity);
                 #mutation_output_release
                 Ok(result)
+            }.await;
+                __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
         }
     } else {
@@ -6302,6 +6339,9 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
+                // The root's error reports what its write did (opt-in).
+                let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
+                let __gom_result: ::graphql_orm::async_graphql::Result<#result_type> = async {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -6364,6 +6404,7 @@ fn generate_graphql_operations_unfiltered(
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
+                __gom_outcome.write_attempted();
                 hook_ctx.execute(&sql, &bind_values)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -6398,14 +6439,16 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::ChangeAction::Created,
                     #create_graphql_event_entity,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                hook_ctx.commit_and_emit_tracked(Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let result = {
                     #create_output_binding
                     #create_output_authorization
-                    #result_type { success: true, error: None, entity }
+                    #result_type { success: true, error: None, #result_error_code_none entity }
                 };
                 #notify_on_created
                 Ok(result)
+            }.await;
+                __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
 
     };
@@ -6450,6 +6493,7 @@ fn generate_graphql_operations_unfiltered(
             pub struct #result_type {
                 pub success: bool,
                 pub error: Option<String>,
+                #result_error_code_field
                 #[graphql(name = #entity_result_field_name)]
                 pub entity: Option<#struct_name>,
             }
@@ -8980,6 +9024,9 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
                 #expected_version_param
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
+                // The root's error reports what its write did (opt-in).
+                let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
+                let __gom_result: ::graphql_orm::async_graphql::Result<#result_type> = async {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
@@ -9031,7 +9078,7 @@ fn generate_graphql_operations_unfiltered(
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 if current_entity.is_none() {
-                    return Ok(#result_type::err("Entity not found"));
+                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
                 }
                 let current_entity = current_entity.expect("checked above");
                 if !db.authorize_write_target(
@@ -9043,7 +9090,7 @@ fn generate_graphql_operations_unfiltered(
                     &current_entity as &(dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
                     // Neither readable nor writable: indistinguishable from a missing row.
-                    return Ok(#result_type::err("Entity not found"));
+                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
                 }
                 if __gom_expected_version.is_some()
                     && #struct_name::__gom_managed_version_of(&current_entity) != __gom_expected_version
@@ -9082,7 +9129,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 if set_clauses.is_empty() {
-                    return Ok(#result_type::err("No fields to update"));
+                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "No fields to update"));
                 }
                 #struct_name::__gom_require_managed_version_headroom(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -9119,6 +9166,7 @@ fn generate_graphql_operations_unfiltered(
                 // Add the ID to the values for the WHERE clause
                 values.push(#pk_bind_value);
 
+                __gom_outcome.write_attempted();
                 let result = hook_ctx.execute(&sql, &values).await;
 
                 match result {
@@ -9154,7 +9202,7 @@ fn generate_graphql_operations_unfiltered(
                                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                                     Some(&entity),
                                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                                hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                                hook_ctx.commit_and_emit_tracked(Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                                 // Invoke optional post-mutation hook.
                                 #notify_on_updated
@@ -9163,12 +9211,14 @@ fn generate_graphql_operations_unfiltered(
                                 #mutation_output_release
                                 Ok(result)
                             },
-                            None => Ok(#result_type::err("Entity not found after update")),
+                            None => Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found after update")),
                         }
                     }
                     Ok(_) => Err(::graphql_orm::async_graphql::Error::new("authorized update did not affect the exact locked row")),
-                    Err(e) => Ok(#result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
+                    Err(e) => Ok(#result_type::__gom_from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e))),
                 }
+            }.await;
+                __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
         }
     } else {
@@ -9184,6 +9234,9 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#update_many_result_type> {
+                // The root's error reports what its write did (opt-in).
+                let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
+                let __gom_result: ::graphql_orm::async_graphql::Result<#update_many_result_type> = async {
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -9212,7 +9265,7 @@ fn generate_graphql_operations_unfiltered(
 
                 let filter = match where_input {
                     Some(ref f) if !f.is_empty() => f,
-                    _ => return Ok(#update_many_result_type::err("Where filter is required for bulk update and must not be empty")),
+                    _ => return Ok(#update_many_result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "Where filter is required for bulk update and must not be empty")),
                 };
 
                 if let Err(error) = filter.__gom_require_scalar_write_filter() {
@@ -9226,7 +9279,7 @@ fn generate_graphql_operations_unfiltered(
                     return Ok(#update_many_result_type::from_graphql_error(error));
                 }
                 let mut notification_rows = Vec::new();
-                match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), Some(ctx), Some(&mut notification_rows)).await {
+                match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), Some(ctx), Some(&mut notification_rows), Some(&__gom_outcome)).await {
                     Ok(affected_count) => {
                         #[allow(unused_mut)]
                         let mut result = #update_many_result_type::ok(affected_count);
@@ -9235,9 +9288,18 @@ fn generate_graphql_operations_unfiltered(
                     },
                     Err(e) => {
                         let error = ::graphql_orm::graphql::errors::graphql_error_from_sqlx(e);
+                        // `success: false` must mean nothing was written: a failed
+                        // commit is reported as a top-level `unknown` error instead.
+                        if __gom_outcome.outcome() == ::graphql_orm::graphql::errors::MutationOutcome::Unknown
+                            && ::graphql_orm::graphql::errors::MutationOutcomeTracker::enabled::<#backend_marker>(ctx)
+                        {
+                            return Err(error);
+                        }
                         Ok(#update_many_result_type::from_graphql_error(error))
                     },
                 }
+            }.await;
+                __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
         }
     } else {
@@ -9274,6 +9336,7 @@ fn generate_graphql_operations_unfiltered(
         pub struct #result_type {
             pub success: bool,
             pub error: Option<String>,
+            #result_error_code_field
             #[graphql(name = #entity_result_field_name)]
             pub entity: Option<#struct_name>,
         }
@@ -9389,11 +9452,32 @@ fn generate_graphql_operations_unfiltered(
         impl #result_type {
             /// Create a successful result with the entity
             pub fn ok(entity: #struct_name) -> Self {
-                Self { success: true, error: None, entity: Some(entity) }
+                Self { success: true, error: None, #result_error_code_none entity: Some(entity) }
             }
             /// Create an error result
             pub fn err(msg: impl Into<String>) -> Self {
-                Self { success: false, error: Some(msg.into()), entity: None }
+                Self { success: false, error: Some(msg.into()), #result_error_code_none entity: None }
+            }
+            /// A refusal that wrote nothing, with its code under `mutation_error_codes`.
+            #[doc(hidden)]
+            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl Into<String>) -> Self {
+                #[allow(unused_mut)]
+                let mut result = Self::err(msg);
+                #refusal_error_code
+                result
+            }
+            /// A rolled-back write's safe message, with its code under `mutation_error_codes`.
+            #[doc(hidden)]
+            pub fn __gom_from_graphql_error(error: ::graphql_orm::async_graphql::Error) -> Self {
+                #[allow(unused_mut)]
+                let mut result = Self::err(error.message.clone());
+                #result_error_code_from_graphql
+                result
+            }
+            /// A committed delete, which returns no entity.
+            #[doc(hidden)]
+            pub fn __gom_deleted() -> Self {
+                Self { success: true, error: None, #result_error_code_none entity: None }
             }
         }
 
@@ -9418,6 +9502,14 @@ fn generate_graphql_operations_unfiltered(
                 });
                 Self { error_code, ..Self::err(error.message) }
             }
+            /// A refusal that wrote nothing; its code is kept under `mutation_error_codes`.
+            #[doc(hidden)]
+            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl Into<String>) -> Self {
+                #[allow(unused_mut)]
+                let mut result = Self::err(msg);
+                #refusal_error_code
+                result
+            }
 
         }
 
@@ -9437,6 +9529,14 @@ fn generate_graphql_operations_unfiltered(
                     _ => None,
                 });
                 Self { error_code, ..Self::err(error.message) }
+            }
+            /// A refusal that wrote nothing; its code is kept under `mutation_error_codes`.
+            #[doc(hidden)]
+            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl Into<String>) -> Self {
+                #[allow(unused_mut)]
+                let mut result = Self::err(msg);
+                #refusal_error_code
+                result
             }
 
         }
@@ -9630,6 +9730,9 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #id_arg_name, desc = #id_arg_description)] id: #pk_type,
                 #expected_version_param
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
+                // The root's error reports what its write did (opt-in).
+                let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
+                let __gom_result: ::graphql_orm::async_graphql::Result<#result_type> = async {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
@@ -9677,7 +9780,7 @@ fn generate_graphql_operations_unfiltered(
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 if entity.is_none() {
-                    return Ok(#result_type::err("Entity not found"));
+                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
                 }
                 let entity = entity.unwrap();
                 if !db.authorize_write_target(
@@ -9689,7 +9792,7 @@ fn generate_graphql_operations_unfiltered(
                     &entity as &(dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
                     // Neither readable nor writable: indistinguishable from a missing row.
-                    return Ok(#result_type::err("Entity not found"));
+                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
                 }
                 if __gom_expected_version.is_some()
                     && #struct_name::__gom_managed_version_of(&entity) != __gom_expected_version
@@ -9725,6 +9828,7 @@ fn generate_graphql_operations_unfiltered(
                     1
                 );
                 let values = [#pk_bind_value];
+                __gom_outcome.write_attempted();
                 let result = hook_ctx.execute(&sql, &values).await;
 
                 match result {
@@ -9748,20 +9852,18 @@ fn generate_graphql_operations_unfiltered(
                             ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                             Some(&entity),
                         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                        hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                        hook_ctx.commit_and_emit_tracked(Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         // Invoke optional post-mutation hook.
                         #notify_on_deleted
 
-                        Ok(#result_type {
-                            success: true,
-                            error: None,
-                            entity: None
-                        })
+                        Ok(#result_type::__gom_deleted())
                     },
                     Ok(_) => Err(::graphql_orm::async_graphql::Error::new("authorized delete did not affect the exact locked row")),
-                    Err(e) => Ok(#result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
+                    Err(e) => Ok(#result_type::__gom_from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e))),
                 }
+            }.await;
+                __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
 
             #update_many_graphql_method
@@ -9773,6 +9875,9 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
+                // The root's error reports what its write did (opt-in).
+                let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
+                let __gom_result: ::graphql_orm::async_graphql::Result<#delete_many_result_type> = async {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery};
 
                 #reject_unplanned_delete_effects
@@ -9801,7 +9906,7 @@ fn generate_graphql_operations_unfiltered(
 
                 let filter = match where_input {
                     Some(ref f) if !f.is_empty() => f,
-                    _ => return Ok(#delete_many_result_type::err("Where filter is required for bulk delete and must not be empty")),
+                    _ => return Ok(#delete_many_result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "Where filter is required for bulk delete and must not be empty")),
                 };
 
                 if let Err(error) = filter.__gom_require_scalar_write_filter() {
@@ -9815,15 +9920,26 @@ fn generate_graphql_operations_unfiltered(
                     return Ok(#delete_many_result_type::from_graphql_error(error));
                 }
                 let mut notification_rows = Vec::new();
-                match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), Some(ctx), Some(&mut notification_rows)).await {
+                match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), Some(ctx), Some(&mut notification_rows), Some(&__gom_outcome)).await {
                     Ok(deleted_count) => {
                         #[allow(unused_mut)]
                         let mut result = #delete_many_result_type::ok(deleted_count);
                         #notify_bulk_deleted
                         Ok(result)
                     },
-                    Err(e) => Ok(#delete_many_result_type::from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e))),
+                    Err(e) => {
+                        let error = ::graphql_orm::graphql::errors::graphql_error_from_sqlx(e);
+                        // As for updateMany: a failed commit is a top-level `unknown` error.
+                        if __gom_outcome.outcome() == ::graphql_orm::graphql::errors::MutationOutcome::Unknown
+                            && ::graphql_orm::graphql::errors::MutationOutcomeTracker::enabled::<#backend_marker>(ctx)
+                        {
+                            return Err(error);
+                        }
+                        Ok(#delete_many_result_type::from_graphql_error(error))
+                    },
                 }
+            }.await;
+                __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
         }
 
@@ -10768,7 +10884,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input: #where_input,
                 input: #update_input,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_update_where_with_auth(db, where_input, input, None, None, None).await
+                Self::__gom_update_where_with_auth(db, where_input, input, None, None, None, None).await
             }
 
             #[doc(hidden)]
@@ -10779,6 +10895,7 @@ fn generate_graphql_operations_unfiltered(
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
                 graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
                 notification_rows: Option<&mut Vec<Self>>,
+                __gom_outcome: Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
             ) -> ::graphql_orm::Result<i64> {
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
@@ -10935,6 +11052,9 @@ fn generate_graphql_operations_unfiltered(
                     .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
 
+                if let Some(outcome) = __gom_outcome {
+                    outcome.write_attempted();
+                }
                 let mut affected = 0_i64;
                 for (entity, (sql, values, _)) in matched_entities.iter().zip(&row_plans) {
                     let mut row_values = values.clone();
@@ -10981,7 +11101,7 @@ fn generate_graphql_operations_unfiltered(
                         ).await?;
                         if notification_rows.is_some() { committed_rows.push(entity); }
                 }
-                hook_ctx.commit_and_emit().await?;
+                hook_ctx.commit_and_emit_tracked(__gom_outcome).await?;
 
                 if let Some(rows) = notification_rows { rows.extend(committed_rows); }
                 Ok(affected)
@@ -11084,7 +11204,7 @@ fn generate_graphql_operations_unfiltered(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_delete_where_with_auth(db, where_input, None, None, None).await
+                Self::__gom_delete_where_with_auth(db, where_input, None, None, None, None).await
             }
 
             /// Delete every row for this entity.
@@ -11095,7 +11215,7 @@ fn generate_graphql_operations_unfiltered(
             pub async fn delete_all(
                 db: &::graphql_orm::db::Database<#backend_marker>,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_delete_matching_with_auth(db, #where_input::default(), None, None, true, None).await
+                Self::__gom_delete_matching_with_auth(db, #where_input::default(), None, None, true, None, None).await
             }
 
             /// Replace every row for this entity in one transaction.
@@ -11214,8 +11334,9 @@ fn generate_graphql_operations_unfiltered(
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
                 graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
                 notification_rows: Option<&mut Vec<Self>>,
+                __gom_outcome: Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_delete_matching_with_auth(db, where_input, auth_context, graphql_ctx, false, notification_rows).await
+                Self::__gom_delete_matching_with_auth(db, where_input, auth_context, graphql_ctx, false, notification_rows, __gom_outcome).await
             }
 
             #[doc(hidden)]
@@ -11226,6 +11347,7 @@ fn generate_graphql_operations_unfiltered(
                 graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
                 allow_empty_filter: bool,
                 notification_rows: Option<&mut Vec<Self>>,
+                __gom_outcome: Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
             ) -> ::graphql_orm::Result<i64> {
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
@@ -11302,6 +11424,9 @@ fn generate_graphql_operations_unfiltered(
                     &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
+                if let Some(outcome) = __gom_outcome {
+                    outcome.write_attempted();
+                }
                 let mut deleted = 0_i64;
                 for entity in &matched_entities {
                     let values = [#pk_bind_value_for_entity];
@@ -11336,7 +11461,7 @@ fn generate_graphql_operations_unfiltered(
                         Some(entity),
                     ).await?;
                 }
-                hook_ctx.commit_and_emit().await?;
+                hook_ctx.commit_and_emit_tracked(__gom_outcome).await?;
 
                 if let Some(rows) = notification_rows { rows.extend(matched_entities); }
                 Ok(deleted)
