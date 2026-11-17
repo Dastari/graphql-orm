@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.170.0 installs `GeneratedInputValidation` in the generated schema
+builders, so a value that is not an object where an input object is expected
+is refused with `invalid_graphql_input` before any resolver runs, as is a
+variable at a position the GraphQL rule does not allow. Recompile entities with
+aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01690-to-01700-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
+
 Version 0.169.0 maps a SQL Server `String` field that is a key, unique, an
 index member or a foreign-key source to `NVARCHAR(450)`, which SQL Server can
 index, and an unmapped Rust type to `NVARCHAR(MAX)` instead of `TEXT`.
