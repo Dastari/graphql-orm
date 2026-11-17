@@ -137,17 +137,90 @@ fn sql_server_column_changes_are_valid_t_sql() {
         ["ALTER TABLE dbo.records ADD COLUMN note NVARCHAR(200)"]
     );
 
+    // A type without characters has no collation: the statement is plain.
+    let retype = |nullable| MigrationStep::AlterColumn {
+        table_name: "dbo.records".into(),
+        before: column("total", "INT", nullable),
+        after: column("total", "BIGINT", nullable),
+    };
+    assert_eq!(
+        render_migration_step(DatabaseBackend::Mssql, &retype(false)),
+        ["ALTER TABLE dbo.records ALTER COLUMN total BIGINT NOT NULL"]
+    );
+    assert_eq!(
+        render_migration_step(DatabaseBackend::Mssql, &retype(true)),
+        ["ALTER TABLE dbo.records ALTER COLUMN total BIGINT NULL"]
+    );
+
+    // A character column keeps its live collation (#742): the statement reads
+    // it when it runs and names it unless it is the database default.
     let alter = |nullable| MigrationStep::AlterColumn {
         table_name: "dbo.records".into(),
         before: column("note", "NVARCHAR(100)", nullable),
         after: column("note", "NVARCHAR(200)", nullable),
     };
-    assert_eq!(
-        render_migration_step(DatabaseBackend::Mssql, &alter(false)),
-        ["ALTER TABLE dbo.records ALTER COLUMN note NVARCHAR(200) NOT NULL"]
+    for (nullable, nullability) in [(false, "NOT NULL"), (true, "NULL")] {
+        let rendered = render_migration_step(DatabaseBackend::Mssql, &alter(nullable));
+        let [statement] = rendered.as_slice() else {
+            panic!("one statement: {rendered:?}");
+        };
+        assert!(
+            statement.starts_with("EXEC sys.sp_executesql N'"),
+            "{statement}"
+        );
+        for part in [
+            "ALTER TABLE dbo.records ALTER COLUMN note NVARCHAR(200)",
+            "c.collation_name",
+            "OBJECT_ID(N''dbo.records'')",
+            "c.name = N''note''",
+            "DATABASEPROPERTYEX(DB_NAME(), ''Collation'')",
+            " COLLATE ",
+        ] {
+            assert!(statement.contains(part), "{part}: {statement}");
+        }
+        assert!(
+            statement.contains(&format!("N'' {nullability}''")),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn sql_server_search_metadata_is_t_sql() {
+    use graphql_orm::graphql::orm::{SearchIndexModel, SearchIndexStrategy};
+    let step = MigrationStep::CreateSearchIndex {
+        table_name: "dbo.records".into(),
+        index: SearchIndexModel {
+            name: "search_records".into(),
+            table_name: "dbo.records".into(),
+            entity_name: "Record's".into(),
+            primary_key: "id".into(),
+            strategy: SearchIndexStrategy::MssqlFullText,
+            language: "english".into(),
+            tokenizer: "unicode61".into(),
+            min_token_len: 2,
+            fallback_enabled: false,
+            fields: Vec::new(),
+            json_paths: Vec::new(),
+            relations: Vec::new(),
+            readiness_tracked: false,
+        },
+    };
+    let statements = render_migration_step(DatabaseBackend::Mssql, &step);
+    let sql = statements.join("\n");
+    assert!(!sql.contains("IF NOT EXISTS"), "{sql}");
+    assert!(!sql.contains("OR REPLACE"), "{sql}");
+    assert!(
+        sql.contains("IF OBJECT_ID(N'__graphql_orm_search_metadata', N'U') IS NULL CREATE TABLE"),
+        "{sql}"
     );
-    assert_eq!(
-        render_migration_step(DatabaseBackend::Mssql, &alter(true)),
-        ["ALTER TABLE dbo.records ALTER COLUMN note NVARCHAR(200) NULL"]
+    assert!(
+        sql.contains("entity_name NVARCHAR(450) NOT NULL PRIMARY KEY"),
+        "{sql}"
     );
+    assert!(sql.contains("WHERE entity_name = N'Record''s'"), "{sql}");
+    assert!(sql.contains("IF @@ROWCOUNT = 0 INSERT INTO"), "{sql}");
+    // The other backends keep their own statements.
+    let sqlite = render_migration_step(DatabaseBackend::Sqlite, &step).join("\n");
+    assert!(sqlite.contains("INSERT OR REPLACE INTO"), "{sqlite}");
 }

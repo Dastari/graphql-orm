@@ -112,6 +112,8 @@ struct LimitBoard {
         keyset = "id asc"
     )
 )]
+// A native search index on SQLite and PostgreSQL; SQL Server searches by scan.
+#[graphql_orm(search(index = true))]
 struct LimitCard {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -119,6 +121,7 @@ struct LimitCard {
     #[sortable]
     id: String,
     #[filterable(type = "string")]
+    #[graphql_orm(searchable(weight = "A"))]
     board_id: String,
 }
 
@@ -231,6 +234,14 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         #[cfg(feature = "mssql")]
         owned_mssql::execute_batch(&owner.connection_string, &insert).await?;
     }
+    // Rows inserted with SQL reach the native search index on a rebuild.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    LimitCard::rebuild_search_index(&db).await?;
+    // SQL Server has no native index: a search scans candidates in batches.
+    #[cfg(feature = "mssql")]
+    let db = db.with_authorized_scan_config(graphql_orm::graphql::orm::AuthorizedScanConfig::new(
+        [7; 32], 10, 100,
+    ));
     Ok(Fixture {
         db,
         #[cfg(feature = "mssql")]
@@ -246,7 +257,7 @@ async fn execute(db: &Database, query: &str) -> async_graphql::Response {
 }
 
 /// The pages a client can ask for, with the path of each page's edges.
-const PAGES: [(&str, &str, &[&str]); 3] = [
+const PAGES: [(&str, &str, &[&str]); 4] = [
     (
         "list root",
         "{ limitCards(page: { limit: LIMIT }) { edges { node { id } } } }",
@@ -261,6 +272,11 @@ const PAGES: [(&str, &str, &[&str]); 3] = [
         "to-many relation",
         "{ limitBoard(id: \"board\") { cards(page: { limit: LIMIT }) { edges { node { id } } } } }",
         &["limitBoard", "cards"],
+    ),
+    (
+        "search connection",
+        "{ limitCardsSearch(search: { query: \"board\" }, page: { limit: LIMIT }) { edges { node { id } } } }",
+        &["limitCardsSearch"],
     ),
 ];
 
@@ -308,6 +324,91 @@ async fn oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(
             assert_eq!(edges(served.data.into_json()?, path), 2, "{name}");
         }
     }
+    Ok(())
+}
+
+/// The offset pages a client can ask for, with the path of each page's edges.
+const OFFSET_PAGES: [(&str, &str, &[&str]); 3] = [
+    (
+        "list root",
+        "{ limitCards(page: { limit: 2, offset: OFFSET }) { edges { node { id } } } }",
+        &["limitCards"],
+    ),
+    (
+        "to-many relation",
+        "{ limitBoard(id: \"board\") { cards(page: { limit: 2, offset: OFFSET }) { edges { node { id } } } } }",
+        &["limitBoard", "cards"],
+    ),
+    // The native index path on SQLite and PostgreSQL, the scan on SQL Server.
+    (
+        "search connection",
+        "{ limitCardsSearch(search: { query: \"board\" }, page: { limit: 2, offset: OFFSET }) { edges { node { id } } } }",
+        &["limitCardsSearch"],
+    ),
+];
+
+/// #456: a client page offset above a configured maximum is refused with
+/// `PAGE_LIMIT_EXCEEDED`, the code an oversized limit is refused with, and
+/// never reaches the database. An offset at the maximum is served. Without a
+/// maximum, which is the default, offsets stay unbounded.
+async fn client_offsets_above_a_configured_maximum_are_refused(db: &Database) -> TestResult {
+    let capped = db.clone().with_max_page_offset(Some(3));
+    assert_eq!(db.client_pagination_config().max_offset(), None);
+    assert_eq!(capped.client_pagination_config().max_offset(), Some(3));
+    for (name, query, path) in OFFSET_PAGES {
+        let over = query.replace("OFFSET", "4");
+        let at_maximum = query.replace("OFFSET", "3");
+        let deep = query.replace("OFFSET", "1000000000");
+
+        // Default: any offset is served; past the last row the page is empty.
+        let served = execute(db, &over).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 1, "{name}");
+        let served = execute(db, &deep).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 0, "{name}");
+
+        // With a maximum: refused with the stable code, naming both numbers.
+        for query in [&over, &deep] {
+            let refused = execute(&capped, query).await;
+            assert_eq!(refused.errors.len(), 1, "{name}: {:?}", refused.errors);
+            let error = &refused.errors[0];
+            assert_eq!(
+                error.extensions.as_ref().and_then(|ext| ext.get("code")),
+                Some(&async_graphql::Value::from("PAGE_LIMIT_EXCEEDED")),
+                "{name}: {error:?}"
+            );
+            assert!(
+                error.message.starts_with("requested offset ")
+                    && error
+                        .message
+                        .ends_with(" exceeds the maximum page offset 3"),
+                "{name}: {}",
+                error.message
+            );
+        }
+        let served = execute(&capped, &at_maximum).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 2, "{name}");
+    }
+    // The page builder that custom resolvers use applies the same bound.
+    let page = graphql_orm::graphql::orm::PageInput {
+        limit: Some(1),
+        offset: Some(4),
+    };
+    assert_eq!(
+        capped
+            .client_pagination_config()
+            .resolve_client_page(Some(&page), true)
+            .map_err(|error| error.code)
+            .err(),
+        Some(graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded)
+    );
+    assert!(
+        db.client_pagination_config()
+            .resolve_client_page(Some(&page), true)
+            .is_ok()
+    );
     Ok(())
 }
 
@@ -490,6 +591,7 @@ async fn run() -> TestResult {
     schema_complexity_bounds_are_isolated(&fixture.db).await?;
     declared_maximum_is_published_and_a_mismatched_database_is_refused(&fixture.db);
     oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(&fixture.db).await?;
+    client_offsets_above_a_configured_maximum_are_refused(&fixture.db).await?;
     host_keyset_reads_take_a_per_read_maximum(&fixture.db).await?;
     fixture.finish()
 }
