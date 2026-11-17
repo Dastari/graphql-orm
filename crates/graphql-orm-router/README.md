@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.1 changes only the wire tests, which now check that a subgraph
+error's `extensions.outcome` reaches the client unchanged. Router behavior,
+configuration and public APIs are unchanged.
+
 Version 0.16.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 

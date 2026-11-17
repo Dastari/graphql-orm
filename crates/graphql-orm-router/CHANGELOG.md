@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.16.1
+
+- Tests: a wire test checks that a subgraph error's `extensions.outcome`
+  (`refused`, `failed`, `committed`, `unknown`, or none) reaches the client
+  unchanged beside its `code` over HTTP. No router behavior changes.
+  ([#763](https://github.com/Dastari/graphql-orm/issues/763))
+
 ## Unreleased - 0.16.0
 
 Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
