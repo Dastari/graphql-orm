@@ -3,12 +3,19 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.172.0 accepts the entity options `lifetime(...)`,
+`changed_started` and `aggregate_source`, and the `schema_roots!` option
+`client_metadata`, and emits `graphql_orm_interpretation_fingerprint` from
+every `schema_roots!`. Without them generated output is unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
 
 Version 0.170.0 installs `GeneratedInputValidation` in the generated schema
 builders, so a value that is not an object where an input object is expected

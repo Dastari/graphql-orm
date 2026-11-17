@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,19 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - ORM/macros 0.172.0, operation catalogue 0.8.1
+
+Client-facing metadata, all opt-in. Without the new options, generated SDL, operation catalogues, semantic catalogues and fingerprints are unchanged. See [client-facing schema metadata](docs/reference/graphql-orm/client-metadata.md) and the [migration guide](MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
+- **Client metadata export ([#340](https://github.com/Dastari/graphql-orm/issues/340), [#670](https://github.com/Dastari/graphql-orm/issues/670), [#672](https://github.com/Dastari/graphql-orm/issues/672)).** `schema_roots!(client_metadata: true)` emits `graphql_orm_client_metadata()`, a `GraphqlClientMetadata` document bound to `graphql_orm_semantic_catalog()` by its fingerprint and exported at build time with `export_json` (canonical JSON). Per entity it lists the fields the generated `Changed` stream can carry (computed by the same rules as the subscribe-time selection check), the declared lifetime field and its encoding, and each public relationship's key mapping: `batchable` with ordered source and target public field names and whether the target filter accepts `Equal` and `In`, `not_batchable` for relationships with a source or target condition or a field policy, or `no_exposed_key` when a key field is not public or is policy-guarded. Conditions and column names are never published. Router-served delivery is later.
+- **Lifetime fields ([#670](https://github.com/Dastari/graphql-orm/issues/670)).** `#[graphql_entity(lifetime(field = "...", format = "rfc3339_utc" | "unix_seconds" | "unix_milliseconds" | "sqlite_utc_text"))]` names the field holding a record's UTC expiry time; `DateTime<Utc>` defaults to `rfc3339_utc`, and integer and `String` fields must state their format. The derive refuses private, policy-guarded, secret, list and non-time fields. `Entity::graphql_lifetime()` returns it. Expiry is not enforced.
+- **Started signal on `Changed` streams ([#341](https://github.com/Dastari/graphql-orm/issues/341)).** `#[graphql_entity(changed_started = true)]` adds `Started: Boolean` to the entity's `Changed` root. With `Started: true` the subscriber first receives one frame with `Started: true` and every other field null, sent once the stream is admitted, authorized and listening: every change committed after it is delivered. The event type keeps its name, gains `Started: Boolean!` and makes `Action`, `ChangeKind`, `Id` and `Key` nullable. No new error code.
+- **Aggregate source entity ([#372](https://github.com/Dastari/graphql-orm/issues/372)).** `#[graphql_entity(aggregate = true, aggregate_source = true)]` makes the aggregate root return `[<Entity>AggregateResultRow!]!`, whose always-null `SourceEntity: <Entity>` field names the source entity in the served schema, through introspection and composition.
+- **Interpretation fingerprint ([#671](https://github.com/Dastari/graphql-orm/issues/671)).** Every `schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`: SHA-256 over the cursor-format version, the backend dialect, each entity's `NodeId` type identity, keyset order, default sort and primary-key fields, and the digest of an optional host salt. It is stable across restarts and replicas and changes when any input changes. `GRAPHQL_ORM_INTERPRETATION_HEADER` and `GRAPHQL_ORM_INTERPRETATION_ACK_FIELD` name where a host serves it; router composition is later.
+- **Multi-page reads ([#673](https://github.com/Dastari/graphql-orm/issues/673)), docs only.** The pagination reference states that every page is an independent read and why the ORM offers no snapshot token.
+- **Design plan for `Changed` replay ([#668](https://github.com/Dastari/graphql-orm/issues/668)).** [docs/plans/active/changed-stream-replay](docs/plans/active/changed-stream-replay/README.md); no implementation.
+- Operation catalogue 0.8.1 adds the `GraphqlClientMetadata` types, `relationship_key_field_exposed` and `relationship_target_filterable`. Additive; no existing type, wire format or fingerprint changes.
 
 ## Unreleased - ORM/macros 0.170.0
 

@@ -156,6 +156,14 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
         None
     }
 
+    /// The field holding a record's expiry time and its encoding, declared
+    /// with `#[graphql_entity(lifetime(field = "...", ...))]`. Descriptive
+    /// only: the ORM never hides or removes a row because it has expired.
+    /// Handwritten implementations return none.
+    fn graphql_lifetime() -> Option<super::GraphqlEntityLifetimeMetadata> {
+        None
+    }
+
     /// Persisted field policy metadata used by non-GraphQL repository paths.
     fn repository_field_policies() -> &'static [RepositoryFieldPolicyDef] {
         &[]

@@ -3,12 +3,20 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.172.0 adds opt-in client-facing metadata: a build-time client
+metadata export (`schema_roots!(client_metadata: true)`) with `Changed` stream
+carried fields, lifetime fields and relationship key mappings, an opt-in
+`Changed` started signal, an opt-in aggregate source entity, and
+`graphql_orm_interpretation_fingerprint`. Defaults are unchanged. See
+[client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md)
+and the [migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
 
 Version 0.170.0 refuses, on generated static schemas, a value that is not an
 object where an input object is expected, and on static and runtime schemas a

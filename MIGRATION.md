@@ -3,12 +3,59 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## ORM/macros 0.172.0 and operation catalogue 0.8.1: client-facing metadata
+
+Upgrade ORM and macros together and recompile entities. Without the new
+options, generated SDL, operation catalogues, semantic catalogues and their
+fingerprints are unchanged. See
+[client-facing schema metadata](docs/reference/graphql-orm/client-metadata.md).
+
+- **Client metadata export (#340, #670, #672). No action.**
+  `schema_roots!(client_metadata: true)` emits
+  `graphql_orm_client_metadata()`, a separate document bound to the semantic
+  catalogue by its fingerprint. It lists the fields each generated `Changed`
+  stream can carry, each declared lifetime field and each public relationship's
+  key mapping (`batchable`, `not_batchable` for conditional or policy-guarded
+  relationships, or `no_exposed_key`). Export it at build time with
+  `GraphqlClientMetadata::export_json`. The semantic catalogue is unchanged.
+- **Lifetime fields (#670). No action.**
+  `#[graphql_entity(lifetime(field = "...", format = "..."))]` names the field
+  holding a record's expiry time. Integer and `String` fields must state their
+  `format`. The ORM never enforces expiry.
+- **Started signal (#341). Action needed** only for clients of an entity you
+  opt in with `changed_started = true`. That entity's `Changed` root gains
+  `Started: Boolean`, its `<Entity>ChangedEvent` gains `Started: Boolean!`,
+  and its `Action`, `ChangeKind`, `Id` and `Key` fields become nullable so a
+  started frame can leave them null. Events still fill them, and a subscriber
+  that does not pass `Started: true` receives no started frame, but typed
+  client code generated from the old schema sees the nullability change.
+  Regenerate it.
+- **Aggregate source entity (#372). Action needed** only for clients of an
+  entity you opt in with `aggregate_source = true`. Its aggregate root returns
+  `[<Entity>AggregateResultRow!]!`, with the shared row's fields plus an
+  always-null `SourceEntity: <Entity>`, in place of
+  `[GraphqlAggregateResultRow!]!`. Documents keep validating; typed client
+  code and AI capability approvals that name the result type must be
+  regenerated.
+- **Interpretation fingerprint (#671). No action.** Every `schema_roots!`
+  emits `graphql_orm_interpretation_fingerprint(salt)`. It changes when a
+  release may read existing cursors, keys or `NodeId` values differently. The
+  ORM does not serve it; a host may serve it as the `graphql-orm-interpretation`
+  response header and in `connection_ack`. A host whose own items are named
+  `graphql_orm_interpretation_fingerprint` or `graphql_orm_client_metadata` in
+  the `schema_roots!` module must rename them.
+- **Operation catalogue 0.8.1. No action.** The client metadata types are
+  additive (`GraphqlClientMetadata` and its members, all non-exhaustive with
+  constructors). No existing type, wire format or fingerprint changes.
+- **Multi-page reads (#673). No action.** The pagination reference now states
+  that each page is an independent read and why there is no snapshot token.
 
 ## 0.169.0 to 0.170.0: input-object values on static schemas and bulk-write filter authority
 

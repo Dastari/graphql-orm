@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-17
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,8 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.170.0, `graphql-orm-macros` 0.170.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.146.0; `graphql-orm-router-protocol` 0.2.1; **`graphql-orm-router` 0.15.5**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.172.0, `graphql-orm-macros` 0.172.0**; **`graphql-orm-operation-catalog` 0.8.1**; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.146.0; `graphql-orm-router-protocol` 0.2.1; **`graphql-orm-router` 0.15.5**.
 
+- **No action** — ORM/macros 0.172.0, operation catalogue 0.8.1: opt-in client-facing metadata. `schema_roots!(client_metadata: true)` emits a build-time client metadata export (`Changed` carried fields, `lifetime(...)` expiry fields, relationship key mappings); every `schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`; the pagination reference states that pages are independent reads (no snapshot token). Without the options, SDL, catalogues and fingerprints are unchanged. [Migration](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata)
+- **Action needed** — ORM/macros 0.172.0: only for clients of an entity you opt in with `changed_started = true` (its `Changed` event's `Action`, `ChangeKind`, `Id` and `Key` become nullable and it gains `Started`) or `aggregate_source = true` (its aggregate root returns `[<Entity>AggregateResultRow!]!`): regenerate typed client code and any approvals that name those types. [Migration](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata)
 - **No action** — ORM/macros 0.170.0: generated `schema_builder` helpers refuse a scalar, list or enum sent for an input object, and a variable whose declared type does not fit its position, with `invalid_graphql_input` before any resolver runs. Field arguments are checked; directive arguments are left to async-graphql. Bulk-write filter authority is unchanged and now tested on SQLite and PostgreSQL. [Migration](../../MIGRATION.md#01690-to-01700-input-object-values-on-static-schemas-and-bulk-write-filter-authority)
 - **Action needed** — ORM/macros 0.170.0: only for hosts that build a schema from generated roots by hand: add `.extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`; without it the schema does not get the check. [Migration](../../MIGRATION.md#01690-to-01700-input-object-values-on-static-schemas-and-bulk-write-filter-authority)
 - **Action needed** — ORM/macros 0.170.0: only for client documents that place a variable where the GraphQL rule "All Variable Usages Are Allowed" does not admit its declared type (for example a nullable variable without a default at a required argument, or a nullable or null variable in a oneof field). Generated static and runtime GraphQL schemas now refuse such a request with `invalid_graphql_input` instead of running it when its value happened to coerce; declare the variable with the position's type. [Migration](../../MIGRATION.md#01690-to-01700-input-object-values-on-static-schemas-and-bulk-write-filter-authority)

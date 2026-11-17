@@ -58,6 +58,26 @@ pub(crate) struct EntityMetadata {
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
     /// `node_id`: generate the global `NodeId` field and its resolvable `@key`.
     pub(crate) node_id: Option<proc_macro2::Span>,
+    /// `lifetime(field = "...", format = "...")`: the field holding the
+    /// record's expiry time, published in client metadata (#670).
+    pub(crate) lifetime: Option<LifetimeMetadata>,
+    /// `changed_started = true`: the `Changed` root accepts `Started: true`
+    /// and then sends one started frame before any event (#341).
+    pub(crate) changed_started: bool,
+    /// `aggregate_source = true`: the aggregate root returns
+    /// `<Entity>AggregateResultRow`, whose `SourceEntity` field's type names
+    /// the entity (#372).
+    pub(crate) aggregate_source: bool,
+}
+
+/// A declared lifetime (expiry) field.
+#[derive(Clone)]
+pub(crate) struct LifetimeMetadata {
+    /// Rust field name.
+    pub(crate) field: String,
+    /// Declared encoding, when given.
+    pub(crate) format: Option<String>,
+    pub(crate) span: proc_macro2::Span,
 }
 
 /// One declared `@key` for a resolvable Federation entity.
@@ -254,6 +274,46 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.aggregate = lit.value;
+                } else if meta.path.is_ident("aggregate_source") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.aggregate_source = lit.value;
+                } else if meta.path.is_ident("changed_started") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.changed_started = lit.value;
+                } else if meta.path.is_ident("lifetime") {
+                    if metadata.lifetime.is_some() {
+                        return Err(meta.error("lifetime may only be declared once per entity"));
+                    }
+                    let span = meta.path.span();
+                    let mut field = None;
+                    let mut format = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("field") {
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            field = Some(lit.value());
+                        } else if option.path.is_ident("format") {
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            if !matches!(
+                                lit.value().as_str(),
+                                "rfc3339_utc" | "unix_seconds" | "unix_milliseconds" | "sqlite_utc_text"
+                            ) {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "lifetime format accepts rfc3339_utc, unix_seconds, unix_milliseconds or sqlite_utc_text",
+                                ));
+                            }
+                            format = Some(lit.value());
+                        } else {
+                            return Err(option.error("unsupported lifetime option; expected field or format"));
+                        }
+                        Ok(())
+                    })?;
+                    let field = field.ok_or_else(|| {
+                        syn::Error::new(span, "lifetime requires field = \"<rust field name>\"")
+                    })?;
+                    metadata.lifetime = Some(LifetimeMetadata { field, format, span });
                 } else if meta.path.is_ident("ai_mutations") {
                     meta.parse_nested_meta(|operation| {
                         let Some(category) = operation.path.get_ident().map(ToString::to_string)
@@ -4195,6 +4255,7 @@ fn generate_entity_tokens(
         serde_rename_all,
     )?;
     let mut semantic_record_version = quote! { None };
+    let mut semantic_lifetime: Option<proc_macro2::TokenStream> = None;
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
@@ -4948,6 +5009,20 @@ fn generate_entity_tokens(
             };
             let has_field_policy = field_meta.read_policy.is_some();
             let sortable = field_meta.sortable && field_meta.order;
+            if let Some(lifetime) = entity_meta
+                .lifetime
+                .as_ref()
+                .filter(|lifetime| lifetime.field == rust_name)
+            {
+                semantic_lifetime = Some(lifetime_tokens(
+                    lifetime,
+                    field,
+                    &field_meta,
+                    &graphql_name,
+                    &type_name,
+                    classification,
+                )?);
+            }
             if field_meta.is_version {
                 let mode = if field_meta.managed_version {
                     quote! { ::graphql_orm::graphql::orm::GraphqlRecordVersionMode::Managed }
@@ -6154,6 +6229,19 @@ fn generate_entity_tokens(
         return Ok(quote! { #(#identity_field_methods)* });
     }
 
+    let semantic_lifetime_value = match (&entity_meta.lifetime, semantic_lifetime) {
+        (_, Some(tokens)) => tokens,
+        (Some(lifetime), None) => {
+            return Err(syn::Error::new(
+                lifetime.span,
+                format!(
+                    "lifetime field `{}` is not a readable persisted scalar field of this entity",
+                    lifetime.field
+                ),
+            ));
+        }
+        (None, None) => quote! { None },
+    };
     let managed_version_field_tokens = match &managed_version_api_name {
         Some(name) if !schema_only => quote! { Some(#name) },
         _ => quote! { None },
@@ -7068,6 +7156,10 @@ fn generate_entity_tokens(
                         #retention_policy,
                     )
                 })
+            }
+
+            fn graphql_lifetime() -> Option<::graphql_orm::graphql::orm::GraphqlEntityLifetimeMetadata> {
+                #semantic_lifetime_value
             }
 
             fn graphql_semantic_metadata() -> Option<&'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata> {
@@ -9609,4 +9701,57 @@ mod attribute_composition_tests {
             assert!(parse_field_metadata(&field).is_err(), "{tokens}");
         }
     }
+}
+
+/// Validates a declared lifetime field and returns its client-metadata value.
+fn lifetime_tokens(
+    lifetime: &LifetimeMetadata,
+    field: &syn::Field,
+    field_meta: &FieldMetadata,
+    graphql_name: &str,
+    type_name: &str,
+    classification: &str,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let refuse = |message: &str| Err(syn::Error::new(lifetime.span, message));
+    if field_meta.graphql_skip || field_meta.read_policy.is_some() || classification == "secret" {
+        return refuse(
+            "lifetime field must be a public field without a read_policy and not classified secret",
+        );
+    }
+    let inner = option_inner_type(&field.ty).unwrap_or(&field.ty);
+    let utc = quote!(#inner).to_string().contains("Utc");
+    let encoding = match (type_name, lifetime.format.as_deref()) {
+        ("DateTime", None | Some("rfc3339_utc")) if utc => "Rfc3339Utc",
+        ("DateTime", _) => {
+            return refuse(
+                "a DateTime lifetime field must be DateTime<Utc> with format rfc3339_utc",
+            );
+        }
+        ("i32" | "i64" | "u32", Some("unix_seconds")) => "UnixSeconds",
+        ("i64", Some("unix_milliseconds")) => "UnixMilliseconds",
+        ("i32" | "i64" | "u32", _) => {
+            return refuse(
+                "an integer lifetime field requires format = \"unix_seconds\" (or \"unix_milliseconds\" for i64)",
+            );
+        }
+        ("String", Some("rfc3339_utc")) => "Rfc3339Utc",
+        ("String", Some("sqlite_utc_text")) => "SqliteUtcText",
+        ("String", _) => {
+            return refuse(
+                "a String lifetime field requires format = \"rfc3339_utc\" or \"sqlite_utc_text\"",
+            );
+        }
+        _ => {
+            return refuse(
+                "lifetime field must be DateTime<Utc>, an integer of Unix time, or a String timestamp",
+            );
+        }
+    };
+    let encoding = syn::Ident::new(encoding, lifetime.span);
+    Ok(quote! {
+        Some(::graphql_orm::graphql::orm::GraphqlEntityLifetimeMetadata::new(
+            #graphql_name,
+            ::graphql_orm::graphql::orm::GraphqlLifetimeEncoding::#encoding,
+        ))
+    })
 }
