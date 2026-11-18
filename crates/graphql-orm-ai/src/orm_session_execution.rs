@@ -1,6 +1,7 @@
 //! Durable session-selection reads and exact legacy evidence checks.
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{map_transaction, principal_identity, record_scope};
 use agql_auth::{Clock, CurrentPrincipalResolver};
 use async_trait::async_trait;
 use graphql_orm::db::Database;
@@ -10,7 +11,7 @@ use graphql_orm::graphql::orm::{DefaultWriteBackend, MutationContext, Transactio
 use std::sync::Arc;
 
 use crate::orm_runs::load_and_validate_active_lease;
-use crate::orm_sessions::{map_transaction, principal_identity, record_scope};
+
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiError, AiRunExecutionSelectionReader, AiRunLease, AiSessionAction,

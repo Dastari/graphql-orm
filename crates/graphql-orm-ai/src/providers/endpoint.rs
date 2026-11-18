@@ -17,7 +17,8 @@ use crate::{AiProviderEndpointPolicy, AiProviderKindInput, ProviderError};
     feature = "provider-anthropic-core"
 ))]
 pub(super) fn normalized_provider_endpoint(value: &str) -> Result<Url, ProviderError> {
-    let url = crate::configuration::parse_provider_endpoint(value).ok_or_else(unsafe_endpoint)?;
+    let url =
+        crate::configuration::parse_provider_endpoint(value).map_err(|_| unsafe_endpoint())?;
     if url.path().is_empty() || url.path() == "/" || url.path().len() > 2_048 {
         return Err(unsafe_endpoint());
     }
@@ -29,7 +30,7 @@ pub(super) fn normalized_provider_endpoint(value: &str) -> Result<Url, ProviderE
 #[cfg(feature = "provider-ollama-core")]
 pub(super) fn normalized_provider_origin(value: &str) -> Result<Url, ProviderError> {
     let mut url =
-        crate::configuration::parse_provider_endpoint(value).ok_or_else(unsafe_endpoint)?;
+        crate::configuration::parse_provider_endpoint(value).map_err(|_| unsafe_endpoint())?;
     if !matches!(url.path(), "" | "/") {
         return Err(unsafe_endpoint());
     }

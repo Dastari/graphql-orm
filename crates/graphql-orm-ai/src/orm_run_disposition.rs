@@ -4,6 +4,9 @@
 
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, principal_identity, record_scope,
+};
 use std::sync::Arc;
 
 use agql_auth::{
@@ -23,9 +26,7 @@ use crate::orm_runs::{
     run_consequential_tool_dispatch_possible, run_produced_assistant_output,
     run_provider_dispatch_possible,
 };
-use crate::orm_sessions::{
-    content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
-};
+use crate::orm_sessions::map_protection;
 use crate::persistence::*;
 use crate::{
     AcknowledgeAiRunFailureInput, AiAccessPolicy, AiContentProtectionPolicy,

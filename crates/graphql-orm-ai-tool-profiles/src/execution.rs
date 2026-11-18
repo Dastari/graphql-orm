@@ -1,5 +1,6 @@
 //! Backend-neutral GraphQL execution target and operation contracts.
 
+use crate::sha256::valid_sha256;
 use async_graphql::parser::{
     parse_query,
     types::{OperationType, Selection},
@@ -149,8 +150,8 @@ impl GraphqlSemanticOperationBinding {
 
     fn has_valid_shape(&self) -> bool {
         self.fingerprint_algorithm == GRAPHQL_SEMANTIC_FINGERPRINT_ALGORITHM
-            && valid_sha256_fingerprint(&self.catalog_fingerprint)
-            && valid_sha256_fingerprint(&self.operation_fingerprint)
+            && valid_sha256(&self.catalog_fingerprint)
+            && valid_sha256(&self.operation_fingerprint)
             && valid_graphql_name(&self.field_name)
     }
 
@@ -232,8 +233,8 @@ impl GraphqlGeneratedOperationBinding {
 
     fn has_valid_shape(&self) -> bool {
         self.fingerprint_algorithm == GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM
-            && valid_sha256_fingerprint(&self.catalog_fingerprint)
-            && valid_sha256_fingerprint(&self.operation_fingerprint)
+            && valid_sha256(&self.catalog_fingerprint)
+            && valid_sha256(&self.operation_fingerprint)
             && !self.field_name.is_empty()
             && self.field_name.len() <= 256
             && !self.field_name.chars().any(char::is_control)
@@ -481,13 +482,6 @@ impl GraphqlOperationContract {
 #[doc(hidden)]
 pub fn stable_graphql_document_hash(document: &str) -> String {
     graphql_orm_operation_catalog::exact_document_hash(document)
-}
-
-fn valid_sha256_fingerprint(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn valid_graphql_name(value: &str) -> bool {

@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.26.0
+
+- Reuse compiled validators for query, mutation and subscription plans and
+  their GraphQL arguments. Plan schemas, validation and fingerprints are
+  unchanged.
+- Classify compact query plan corrections at the validation site so editing
+  diagnostics cannot change the model-facing correction code.
+
 ## Unreleased - 0.25.0
 
 Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.

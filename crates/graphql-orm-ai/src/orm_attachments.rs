@@ -3,6 +3,12 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{map_orm, map_transaction, page_input, principal_identity};
+use crate::persisted_state::{
+    AttachmentArtifactCleanupState, AttachmentProcessingState, AttachmentQuarantineState,
+    AttachmentScanState,
+};
+use crate::sha256::valid_sha256;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,12 +19,8 @@ use futures::StreamExt;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
-};
-use graphql_orm::graphql::pagination::{
-    KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::pagination::{KeysetConnectionInput, ValidatedKeysetConnection};
 use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, StorageError};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -44,7 +46,7 @@ use crate::{
     AiProviderAttachmentResolver, AiProviderFileDeletionRequest, AiProviderFileDeletionService,
     AiResolvedProviderAttachment, AiScope, AiSessionAction, AiSessionId, AiSessionWakeup,
     ContentProtectionContext, CreateAiAttachmentUploadInput, ProviderKind, valid_mime,
-    valid_safe_reference, valid_sha256,
+    valid_safe_reference,
 };
 
 /// Deployment hard limits for attachment intake.
@@ -434,7 +436,8 @@ impl OrmAiAttachmentService {
                     if current.owner_principal_kind != kind
                         || current.owner_subject != subject
                         || current.session_id != session.id
-                        || current.quarantine_state != "pending_upload"
+                        || current.quarantine_state
+                            != AttachmentQuarantineState::PendingUpload.as_str()
                         || current.deleted_at.is_some()
                         || current
                             .upload_expires_at
@@ -450,8 +453,12 @@ impl OrmAiAttachmentService {
                             AiAttachmentRecordWhereInput::default(),
                             UpdateAiAttachmentRecordInput {
                                 upload_token_hash: Some(None),
-                                quarantine_state: Some("uploading".to_owned()),
-                                processing_state: Some("scanning".to_owned()),
+                                quarantine_state: Some(
+                                    AttachmentQuarantineState::Uploading.as_str().to_owned(),
+                                ),
+                                processing_state: Some(
+                                    AttachmentProcessingState::Scanning.as_str().to_owned(),
+                                ),
                                 processing_expires_at: Some(Some(processing_expires_at)),
                                 ..Default::default()
                             },
@@ -521,14 +528,15 @@ impl OrmAiAttachmentService {
                 detected_mime: Some(facts.detected_mime),
                 byte_count: Some(facts.byte_count),
                 sha256: Some(facts.sha256),
-                quarantine_state: Some("rejected".to_owned()),
-                scan_state: Some("rejected".to_owned()),
+                quarantine_state: Some(AttachmentQuarantineState::Rejected.as_str().to_owned()),
+                scan_state: Some(AttachmentScanState::Rejected.as_str().to_owned()),
                 processing_state: Some(
                     if deleted {
-                        "complete"
+                        AttachmentProcessingState::Complete
                     } else {
-                        "cleanup_required"
+                        AttachmentProcessingState::CleanupRequired
                     }
+                    .as_str()
                     .to_owned(),
                 ),
                 processing_expires_at: Some(None),
@@ -560,14 +568,15 @@ impl OrmAiAttachmentService {
             claimed,
             UpdateAiAttachmentRecordInput {
                 quarantine_blob_reference: quarantine_deleted.then_some(None),
-                quarantine_state: Some("failed".to_owned()),
-                scan_state: Some("failed".to_owned()),
+                quarantine_state: Some(AttachmentQuarantineState::Failed.as_str().to_owned()),
+                scan_state: Some(AttachmentScanState::Failed.as_str().to_owned()),
                 processing_state: Some(
                     if quarantine_deleted {
-                        "complete"
+                        AttachmentProcessingState::Complete
                     } else {
-                        "cleanup_required"
+                        AttachmentProcessingState::CleanupRequired
                     }
+                    .as_str()
                     .to_owned(),
                 ),
                 processing_expires_at: Some(None),
@@ -587,21 +596,33 @@ impl OrmAiAttachmentService {
         let queries = [
             AiAttachmentArtifactRecordWhereInput {
                 cleanup_state: Some(StringFilter {
-                    eq: Some("cleanup_required".to_owned()),
+                    eq: Some(
+                        AttachmentArtifactCleanupState::CleanupRequired
+                            .as_str()
+                            .to_owned(),
+                    ),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
             AiAttachmentArtifactRecordWhereInput {
                 cleanup_state: Some(StringFilter {
-                    eq: Some("cleanup_backoff".to_owned()),
+                    eq: Some(
+                        AttachmentArtifactCleanupState::CleanupBackoff
+                            .as_str()
+                            .to_owned(),
+                    ),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
             AiAttachmentArtifactRecordWhereInput {
                 cleanup_state: Some(StringFilter {
-                    eq: Some("cleanup_in_progress".to_owned()),
+                    eq: Some(
+                        AttachmentArtifactCleanupState::CleanupInProgress
+                            .as_str()
+                            .to_owned(),
+                    ),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -734,7 +755,11 @@ impl OrmAiAttachmentService {
                                 ..Default::default()
                             },
                             UpdateAiAttachmentArtifactRecordInput {
-                                cleanup_state: Some(Some("cleanup_in_progress".to_owned())),
+                                cleanup_state: Some(Some(
+                                    AttachmentArtifactCleanupState::CleanupInProgress
+                                        .as_str()
+                                        .to_owned(),
+                                )),
                                 cleanup_generation: Some(Some(generation)),
                                 cleanup_lease_expires_at: Some(Some(cleanup_expires_at)),
                                 cleanup_next_attempt_at: Some(None),
@@ -788,7 +813,9 @@ impl OrmAiAttachmentService {
                                 provider_profile_id: Some(None),
                                 provider_reference: Some(None),
                                 provider_expires_at: Some(None),
-                                cleanup_state: Some(Some("complete".to_owned())),
+                                cleanup_state: Some(Some(
+                                    AttachmentArtifactCleanupState::Complete.as_str().to_owned(),
+                                )),
                                 cleanup_lease_expires_at: Some(None),
                                 cleanup_next_attempt_at: Some(None),
                                 deleted_at: Some(Some(now)),
@@ -806,7 +833,11 @@ impl OrmAiAttachmentService {
                                 byte_count: Some(0),
                                 protected_content: Some(None),
                                 provider_expires_at: Some(None),
-                                cleanup_state: Some(Some("cleanup_unconfirmed".to_owned())),
+                                cleanup_state: Some(Some(
+                                    AttachmentArtifactCleanupState::CleanupUnconfirmed
+                                        .as_str()
+                                        .to_owned(),
+                                )),
                                 cleanup_lease_expires_at: Some(None),
                                 cleanup_next_attempt_at: Some(None),
                                 deleted_at: Some(Some(now)),
@@ -822,7 +853,11 @@ impl OrmAiAttachmentService {
                             retry.expect("failed artifact deletion has retry facts");
                         (
                             UpdateAiAttachmentArtifactRecordInput {
-                                cleanup_state: Some(Some("cleanup_backoff".to_owned())),
+                                cleanup_state: Some(Some(
+                                    AttachmentArtifactCleanupState::CleanupBackoff
+                                        .as_str()
+                                        .to_owned(),
+                                )),
                                 cleanup_lease_expires_at: Some(None),
                                 cleanup_retry_count: Some(Some(next_retry_count)),
                                 cleanup_next_attempt_at: Some(Some(next_attempt_at)),
@@ -918,7 +953,11 @@ impl OrmAiAttachmentService {
                         version,
                         AiAttachmentArtifactRecordWhereInput {
                             cleanup_state: Some(StringFilter {
-                                eq: Some("cleanup_in_progress".to_owned()),
+                                eq: Some(
+                                    AttachmentArtifactCleanupState::CleanupInProgress
+                                        .as_str()
+                                        .to_owned(),
+                                ),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -966,21 +1005,21 @@ impl OrmAiAttachmentService {
         let queries = [
             AiAttachmentRecordWhereInput {
                 quarantine_state: Some(StringFilter {
-                    eq: Some("pending_upload".to_owned()),
+                    eq: Some(AttachmentQuarantineState::PendingUpload.as_str().to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
             AiAttachmentRecordWhereInput {
                 quarantine_state: Some(StringFilter {
-                    eq: Some("uploading".to_owned()),
+                    eq: Some(AttachmentQuarantineState::Uploading.as_str().to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
             AiAttachmentRecordWhereInput {
                 quarantine_state: Some(StringFilter {
-                    eq: Some("deleting".to_owned()),
+                    eq: Some(AttachmentQuarantineState::Deleting.as_str().to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -988,9 +1027,15 @@ impl OrmAiAttachmentService {
             AiAttachmentRecordWhereInput {
                 processing_state: Some(StringFilter {
                     in_list: Some(vec![
-                        "cleanup_required".to_owned(),
-                        "cleanup_backoff".to_owned(),
-                        "cleanup_in_progress".to_owned(),
+                        AttachmentProcessingState::CleanupRequired
+                            .as_str()
+                            .to_owned(),
+                        AttachmentProcessingState::CleanupBackoff
+                            .as_str()
+                            .to_owned(),
+                        AttachmentProcessingState::CleanupInProgress
+                            .as_str()
+                            .to_owned(),
                     ]),
                     ..Default::default()
                 }),
@@ -1108,7 +1153,11 @@ impl OrmAiAttachmentService {
                             AiAttachmentRecordWhereInput::default(),
                             UpdateAiAttachmentRecordInput {
                                 upload_token_hash: Some(None),
-                                processing_state: Some("cleanup_in_progress".to_owned()),
+                                processing_state: Some(
+                                    AttachmentProcessingState::CleanupInProgress
+                                        .as_str()
+                                        .to_owned(),
+                                ),
                                 processing_expires_at: Some(None),
                                 cleanup_generation: Some(Some(generation)),
                                 cleanup_lease_expires_at: Some(Some(cleanup_expires_at)),
@@ -1185,42 +1234,56 @@ impl OrmAiAttachmentService {
                             blob_reference: Some(None),
                             quarantine_blob_reference: Some(None),
                             upload_token_hash: Some(None),
-                            processing_state: Some("complete".to_owned()),
+                            processing_state: Some(
+                                AttachmentProcessingState::Complete.as_str().to_owned(),
+                            ),
                             processing_expires_at: Some(None),
                             cleanup_lease_expires_at: Some(None),
                             cleanup_next_attempt_at: Some(None),
                             ..Default::default()
                         };
-                        let reason_code = match original_state.as_str() {
-                            "pending_upload" => {
-                                update.quarantine_state = Some("expired".to_owned());
-                                update.scan_state = Some("failed".to_owned());
-                                update.rejection_code =
-                                    Some(Some("upload_ticket_expired".to_owned()));
-                                update.deleted_at = Some(Some(now));
-                                "upload_ticket_expired"
-                            }
-                            "uploading" => {
-                                update.quarantine_state = Some("failed".to_owned());
-                                update.scan_state = Some("failed".to_owned());
-                                update.rejection_code =
-                                    Some(Some("upload_processing_expired".to_owned()));
-                                "upload_processing_expired"
-                            }
-                            "deleting" => {
-                                update.quarantine_state = Some("deleted".to_owned());
-                                update.deleted_at = Some(Some(now));
-                                "attachment_deleted"
-                            }
-                            _ => "orphan_objects_deleted",
-                        };
+                        let reason_code =
+                            match AttachmentQuarantineState::from_persisted(&original_state) {
+                                Some(AttachmentQuarantineState::PendingUpload) => {
+                                    update.quarantine_state = Some(
+                                        AttachmentQuarantineState::Expired.as_str().to_owned(),
+                                    );
+                                    update.scan_state =
+                                        Some(AttachmentScanState::Failed.as_str().to_owned());
+                                    update.rejection_code =
+                                        Some(Some("upload_ticket_expired".to_owned()));
+                                    update.deleted_at = Some(Some(now));
+                                    "upload_ticket_expired"
+                                }
+                                Some(AttachmentQuarantineState::Uploading) => {
+                                    update.quarantine_state =
+                                        Some(AttachmentQuarantineState::Failed.as_str().to_owned());
+                                    update.scan_state =
+                                        Some(AttachmentScanState::Failed.as_str().to_owned());
+                                    update.rejection_code =
+                                        Some(Some("upload_processing_expired".to_owned()));
+                                    "upload_processing_expired"
+                                }
+                                Some(AttachmentQuarantineState::Deleting) => {
+                                    update.quarantine_state = Some(
+                                        AttachmentQuarantineState::Deleted.as_str().to_owned(),
+                                    );
+                                    update.deleted_at = Some(Some(now));
+                                    "attachment_deleted"
+                                }
+                                _ => "orphan_objects_deleted",
+                            };
                         (update, "succeeded", reason_code.to_owned())
                     } else {
                         let (next_retry_count, next_attempt_at) =
                             retry.expect("failed deletion has retry facts");
                         (
                             UpdateAiAttachmentRecordInput {
-                                processing_state: Some("cleanup_backoff".to_owned()),
+                                processing_state: Some(
+                                    AttachmentProcessingState::CleanupBackoff
+                                        .as_str()
+                                        .to_owned(),
+                                ),
                                 cleanup_lease_expires_at: Some(None),
                                 cleanup_retry_count: Some(Some(next_retry_count)),
                                 cleanup_next_attempt_at: Some(Some(next_attempt_at)),
@@ -1314,7 +1377,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
                 }),
                 ..Default::default()
             },
-            page_input(&page),
+            page_input(&page, false),
         )
         .await
         .map_err(map_orm)?;
@@ -1460,9 +1523,13 @@ impl AiAttachmentService for OrmAiAttachmentService {
                             sha256: None,
                             upload_token_hash: Some(token_hash),
                             upload_expires_at: Some(expires_at),
-                            quarantine_state: "pending_upload".to_owned(),
-                            scan_state: "pending".to_owned(),
-                            processing_state: "pending".to_owned(),
+                            quarantine_state: AttachmentQuarantineState::PendingUpload
+                                .as_str()
+                                .to_owned(),
+                            scan_state: AttachmentScanState::Pending.as_str().to_owned(),
+                            processing_state: AttachmentProcessingState::Pending
+                                .as_str()
+                                .to_owned(),
                             processing_expires_at: None,
                             cleanup_generation: None,
                             cleanup_lease_expires_at: None,
@@ -1524,8 +1591,8 @@ impl AiAttachmentService for OrmAiAttachmentService {
         if session.state != "active" || !is_attachment_owner(principal, &attachment) {
             return Err(AiError::NotFound);
         }
-        if attachment.quarantine_state != "ready"
-            || attachment.scan_state != "clean"
+        if attachment.quarantine_state != AttachmentQuarantineState::Ready.as_str()
+            || attachment.scan_state != AttachmentScanState::Clean.as_str()
             || attachment.blob_reference.is_none()
             || attachment.quarantine_blob_reference.is_some()
             || attachment.detected_mime.is_none()
@@ -1583,8 +1650,12 @@ impl AiAttachmentService for OrmAiAttachmentService {
                             expected_attachment_version,
                             AiAttachmentRecordWhereInput::default(),
                             UpdateAiAttachmentRecordInput {
-                                quarantine_state: Some("released".to_owned()),
-                                processing_state: Some("complete".to_owned()),
+                                quarantine_state: Some(
+                                    AttachmentQuarantineState::Released.as_str().to_owned(),
+                                ),
+                                processing_state: Some(
+                                    AttachmentProcessingState::Complete.as_str().to_owned(),
+                                ),
                                 processing_expires_at: Some(None),
                                 finalized_at: Some(Some(now)),
                                 ..Default::default()
@@ -1656,7 +1727,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
             return Err(AiError::NotFound);
         }
         if attachment.message_id.is_some()
-            || attachment.quarantine_state == "uploading"
+            || attachment.quarantine_state == AttachmentQuarantineState::Uploading.as_str()
             || attachment.deleted_at.is_some()
         {
             return Err(AiError::Conflict);
@@ -1689,8 +1760,12 @@ impl AiAttachmentService for OrmAiAttachmentService {
                             AiAttachmentRecordWhereInput::default(),
                             UpdateAiAttachmentRecordInput {
                                 upload_token_hash: Some(None),
-                                quarantine_state: Some("deleting".to_owned()),
-                                processing_state: Some("deleting".to_owned()),
+                                quarantine_state: Some(
+                                    AttachmentQuarantineState::Deleting.as_str().to_owned(),
+                                ),
+                                processing_state: Some(
+                                    AttachmentProcessingState::Deleting.as_str().to_owned(),
+                                ),
                                 processing_expires_at: Some(Some(deletion_expires_at)),
                                 ..Default::default()
                             },
@@ -1757,8 +1832,12 @@ impl AiAttachmentService for OrmAiAttachmentService {
                             UpdateAiAttachmentRecordInput {
                                 blob_reference: Some(None),
                                 quarantine_blob_reference: Some(None),
-                                quarantine_state: Some("deleted".to_owned()),
-                                processing_state: Some("complete".to_owned()),
+                                quarantine_state: Some(
+                                    AttachmentQuarantineState::Deleted.as_str().to_owned(),
+                                ),
+                                processing_state: Some(
+                                    AttachmentProcessingState::Complete.as_str().to_owned(),
+                                ),
                                 processing_expires_at: Some(None),
                                 deleted_at: Some(Some(now)),
                                 ..Default::default()
@@ -1914,9 +1993,9 @@ impl AiProviderAttachmentResolver for OrmAiAttachmentService {
         if !is_attachment_owner(principal.principal(), &attachment)
             || attachment.session_id != session_id.0
             || attachment.message_id.is_none()
-            || attachment.quarantine_state != "released"
-            || attachment.scan_state != "clean"
-            || attachment.processing_state != "complete"
+            || attachment.quarantine_state != AttachmentQuarantineState::Released.as_str()
+            || attachment.scan_state != AttachmentScanState::Clean.as_str()
+            || attachment.processing_state != AttachmentProcessingState::Complete.as_str()
             || attachment.deleted_at.is_some()
             || attachment.detected_mime.as_deref() != Some(request.mime())
             || attachment
@@ -1966,9 +2045,9 @@ impl AiProviderAttachmentResolver for OrmAiAttachmentService {
             || current.detected_mime != attachment.detected_mime
             || current.byte_count != attachment.byte_count
             || current.sha256 != attachment.sha256
-            || current.quarantine_state != "released"
-            || current.scan_state != "clean"
-            || current.processing_state != "complete"
+            || current.quarantine_state != AttachmentQuarantineState::Released.as_str()
+            || current.scan_state != AttachmentScanState::Clean.as_str()
+            || current.processing_state != AttachmentProcessingState::Complete.as_str()
             || current.quarantine_blob_reference.is_some()
             || current.deleted_at.is_some()
         {
@@ -2205,9 +2284,13 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
                 UpdateAiAttachmentRecordInput {
                     blob_reference: (!final_deleted).then_some(Some(final_key)),
                     quarantine_blob_reference: Some(Some(quarantine_key.to_owned())),
-                    quarantine_state: Some("failed".to_owned()),
-                    scan_state: Some("failed".to_owned()),
-                    processing_state: Some("cleanup_required".to_owned()),
+                    quarantine_state: Some(AttachmentQuarantineState::Failed.as_str().to_owned()),
+                    scan_state: Some(AttachmentScanState::Failed.as_str().to_owned()),
+                    processing_state: Some(
+                        AttachmentProcessingState::CleanupRequired
+                            .as_str()
+                            .to_owned(),
+                    ),
                     processing_expires_at: Some(None),
                     rejection_code: Some(Some("quarantine_cleanup_failed".to_owned())),
                     ..Default::default()
@@ -2225,9 +2308,9 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
                     detected_mime: Some(Some(report.detected_mime().to_owned())),
                     byte_count: Some(Some(byte_count)),
                     sha256: Some(Some(outcome.sha256_hex)),
-                    quarantine_state: Some("ready".to_owned()),
-                    scan_state: Some("clean".to_owned()),
-                    processing_state: Some("ready".to_owned()),
+                    quarantine_state: Some(AttachmentQuarantineState::Ready.as_str().to_owned()),
+                    scan_state: Some(AttachmentScanState::Clean.as_str().to_owned()),
+                    processing_state: Some(AttachmentProcessingState::Ready.as_str().to_owned()),
                     processing_expires_at: Some(None),
                     scanner_version: Some(Some(report.scanner_version().to_owned())),
                     acceptance_policy_version: Some(Some(decision.policy_version)),
@@ -2245,14 +2328,6 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
         };
         Ok(attachment_view(&updated))
     }
-}
-
-fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
-    let kind = match principal {
-        AuthPrincipal::User(_) => "user".to_owned(),
-        AuthPrincipal::ApiToken(token) => format!("api_token:{}", token.principal_kind.as_str()),
-    };
-    (kind, principal.subject())
 }
 
 fn is_session_owner(principal: &AuthPrincipal, session: &AiSessionRecord) -> bool {
@@ -2296,23 +2371,26 @@ fn is_cleanup_eligible(record: &AiAttachmentRecord, now: i64) -> bool {
     if (record.message_id.is_some() || record.deleted_at.is_some()) && !retention_cleanup {
         return false;
     }
-    match record.processing_state.as_str() {
-        "cleanup_required" | "retention_cleanup_required" => true,
-        "cleanup_backoff" => record
+    match AttachmentProcessingState::from_persisted(&record.processing_state) {
+        Some(
+            AttachmentProcessingState::CleanupRequired
+            | AttachmentProcessingState::RetentionCleanupRequired,
+        ) => true,
+        Some(AttachmentProcessingState::CleanupBackoff) => record
             .cleanup_next_attempt_at
             .is_some_and(|next_attempt_at| next_attempt_at <= now),
-        "cleanup_in_progress" => record
+        Some(AttachmentProcessingState::CleanupInProgress) => record
             .cleanup_lease_expires_at
             .is_some_and(|expires_at| expires_at <= now),
-        _ => match record.quarantine_state.as_str() {
-            "pending_upload" => record
+        _ => match AttachmentQuarantineState::from_persisted(&record.quarantine_state) {
+            Some(AttachmentQuarantineState::PendingUpload) => record
                 .upload_expires_at
                 .is_some_and(|expires_at| expires_at <= now),
-            "uploading" => record
+            Some(AttachmentQuarantineState::Uploading) => record
                 .processing_expires_at
                 .or(record.upload_expires_at)
                 .is_some_and(|expires_at| expires_at <= now),
-            "deleting" => record
+            Some(AttachmentQuarantineState::Deleting) => record
                 .processing_expires_at
                 .is_none_or(|expires_at| expires_at <= now),
             _ => false,
@@ -2321,12 +2399,16 @@ fn is_cleanup_eligible(record: &AiAttachmentRecord, now: i64) -> bool {
 }
 
 fn is_artifact_cleanup_eligible(record: &AiAttachmentArtifactRecord, now: i64) -> bool {
-    match record.cleanup_state.as_deref() {
-        Some("cleanup_required") => true,
-        Some("cleanup_backoff") => record
+    match record
+        .cleanup_state
+        .as_deref()
+        .and_then(AttachmentArtifactCleanupState::from_persisted)
+    {
+        Some(AttachmentArtifactCleanupState::CleanupRequired) => true,
+        Some(AttachmentArtifactCleanupState::CleanupBackoff) => record
             .cleanup_next_attempt_at
             .is_some_and(|next_attempt_at| next_attempt_at <= now),
-        Some("cleanup_in_progress") => record
+        Some(AttachmentArtifactCleanupState::CleanupInProgress) => record
             .cleanup_lease_expires_at
             .is_some_and(|expires_at| expires_at <= now),
         _ => false,
@@ -2485,45 +2567,9 @@ fn safe_reason(value: &str) -> String {
     }
 }
 
-fn page_input(page: &ValidatedKeysetConnection) -> KeysetConnectionInput {
-    match page.direction {
-        KeysetWindowDirection::Forward => KeysetConnectionInput {
-            after: page.cursor.clone(),
-            first: Some(page.limit),
-            ..Default::default()
-        },
-        KeysetWindowDirection::Backward => KeysetConnectionInput {
-            before: page.cursor.clone(),
-            last: Some(page.limit),
-            ..Default::default()
-        },
-    }
-}
-
 fn map_protection(error: crate::ContentProtectionError) -> AiError {
     match error {
         crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
         _ => AiError::PersistenceFailed,
-    }
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }

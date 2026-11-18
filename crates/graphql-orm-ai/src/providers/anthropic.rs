@@ -10,6 +10,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
+use super::sse::SseDecoder;
 use crate::{
     AiProvider, AiProviderEndpointPolicy, AiProviderKindInput, AiSecretStore, ModelContinuation,
     ModelContinuationMode, ModelConversationMessage, ModelInputBlock, ModelRequest,
@@ -585,53 +586,9 @@ fn classify_status(status: reqwest::StatusCode) -> ProviderError {
     }
 }
 
-#[derive(Default)]
-struct SseDecoder {
-    buffer: Vec<u8>,
-}
-
-impl SseDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseFrame>, ProviderError> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > MAXIMUM_SSE_EVENT_BYTES {
-            return Err(ProviderError::Rejected);
-        }
-        let mut frames = Vec::new();
-        while let Some((position, delimiter_length)) = find_sse_delimiter(&self.buffer) {
-            let frame = self.buffer.drain(..position).collect::<Vec<_>>();
-            self.buffer.drain(..delimiter_length);
-            if let Some(frame) = decode_sse_frame(&frame)? {
-                frames.push(frame);
-            }
-        }
-        Ok(frames)
-    }
-
-    fn finish(&self) -> Result<(), ProviderError> {
-        if self.buffer.iter().all(u8::is_ascii_whitespace) {
-            Ok(())
-        } else {
-            Err(ProviderError::Unavailable)
-        }
-    }
-}
-
 struct SseFrame {
     event: String,
     data: String,
-}
-
-fn find_sse_delimiter(bytes: &[u8]) -> Option<(usize, usize)> {
-    bytes
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|position| (position, 2))
-        .or_else(|| {
-            bytes
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|position| (position, 4))
-        })
 }
 
 fn decode_sse_frame(frame: &[u8]) -> Result<Option<SseFrame>, ProviderError> {
@@ -1091,7 +1048,7 @@ fn normalized_stream(
 ) -> ProviderEventStream {
     Box::pin(async_stream::try_stream! {
         let mut bytes = response.bytes_stream();
-        let mut decoder = SseDecoder::default();
+        let mut decoder = SseDecoder::new(MAXIMUM_SSE_EVENT_BYTES);
         let mut normalizer = AnthropicEventNormalizer::new(
             expected_model,
             offered_tools,
@@ -1100,7 +1057,7 @@ fn normalized_stream(
         .with_pinned_snapshot(pinned_snapshot);
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
-            for frame in decoder.push(&chunk)? {
+            for frame in decoder.push_frames(&chunk, decode_sse_frame)? {
                 for event in normalizer.normalize(frame)? {
                     yield event;
                 }

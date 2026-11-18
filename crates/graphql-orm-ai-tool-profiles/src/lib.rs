@@ -17,6 +17,7 @@ mod execution_rejection;
 mod plan_schema_types;
 mod profiles;
 mod query_plans;
+mod sha256;
 mod tool_media;
 mod tools;
 

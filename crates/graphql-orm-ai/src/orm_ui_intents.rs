@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_support::{content_context, map_orm};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -485,20 +486,6 @@ fn derived_uuid(domain: &[u8], source_hash: &[u8; 32]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-fn content_context(
-    entity: &str,
-    row_id: Uuid,
-    field: &str,
-    scope: &AiScope,
-) -> ContentProtectionContext {
-    ContentProtectionContext {
-        entity: entity.to_owned(),
-        row_id: row_id.to_string(),
-        field: field.to_owned(),
-        scope: scope.clone(),
-    }
-}
-
 fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(values) => {
@@ -513,24 +500,6 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
                 .collect(),
         ),
         value => value.clone(),
-    }
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    use graphql_orm::graphql::errors::OrmErrorCode;
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 
