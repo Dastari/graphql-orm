@@ -168,17 +168,18 @@ impl MssqlPoolOptions {
         self
     }
 
-    /// Bind temporal values as native SQL Server parameters for this pool.
+    /// Bind temporal text values as native SQL Server parameters for this pool.
     ///
-    /// The default uses text for compatibility. Native date, datetime2 and
-    /// datetimeoffset parameters avoid session-dependent text conversion.
-    /// Legacy datetime columns can round and compare differently.
+    /// Chrono values always bind natively. The default sends temporal text as
+    /// written. Native date, datetime2 and datetimeoffset parameters avoid
+    /// session-dependent text conversion. Legacy datetime columns can round
+    /// and compare differently.
     pub fn typed_temporal_parameters(mut self, enabled: bool) -> Self {
         self.typed_temporal_parameters = enabled;
         self
     }
 
-    /// Whether temporal values use native SQL Server parameters.
+    /// Whether temporal text values use native SQL Server parameters.
     pub fn get_typed_temporal_parameters(&self) -> bool {
         self.typed_temporal_parameters
     }
@@ -1924,7 +1925,7 @@ impl MssqlParamValue {
     fn from_value(value: &SqlValue, typed_temporal_parameters: bool) -> crate::Result<Self> {
         Ok(match value {
             SqlValue::String(value) => Self::String(value.clone()),
-            SqlValue::Temporal(value) if typed_temporal_parameters => {
+            SqlValue::Temporal(value) if typed_temporal_parameters || value.is_chrono() => {
                 Self::Temporal(encode_temporal(value)?)
             }
             SqlValue::Temporal(value) => Self::String(value.as_text().to_owned()),

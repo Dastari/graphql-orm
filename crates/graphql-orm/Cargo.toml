@@ -79,6 +79,7 @@ tracing = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+sqlx = { workspace = true, features = ["chrono"] }
 async-graphql = { workspace = true, features = ["chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }

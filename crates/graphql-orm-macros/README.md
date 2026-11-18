@@ -12,7 +12,8 @@ supersedes: []
 
 Generated writes carry temporal types for chrono dates and timestamps and
 for text fields marked `#[date_field]` or `#[filterable(type = "date")]`.
-SQL Server can opt in to native binding per pool. See the
+SQL Server binds chrono values natively and can opt in to native binding
+for temporal text per pool. See the
 [migration guide](../../MIGRATION.md#sql-server-native-temporal-parameters-521).
 
 The unreleased breaking release fixes each schema's

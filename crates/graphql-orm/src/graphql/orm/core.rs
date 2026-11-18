@@ -66,7 +66,13 @@ pub enum SqlValue {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TemporalValue {
     kind: TemporalKind,
-    text: String,
+    text: TemporalText,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TemporalText {
+    Input(String),
+    Chrono(String),
 }
 
 /// Parsed type of a temporal parameter.
@@ -89,9 +95,16 @@ impl TemporalValue {
         &self.kind
     }
 
-    /// Return the original spelling used by text-compatible binders.
+    /// Return the spelling used by text-compatible binders.
     pub fn as_text(&self) -> &str {
-        &self.text
+        match &self.text {
+            TemporalText::Input(text) | TemporalText::Chrono(text) => text,
+        }
+    }
+
+    #[cfg(feature = "mssql")]
+    pub(crate) fn is_chrono(&self) -> bool {
+        matches!(self.text, TemporalText::Chrono(_))
     }
 }
 
@@ -99,7 +112,7 @@ impl SqlValue {
     /// Construct a parameter from an explicitly temporal text field or filter.
     ///
     /// The original text is retained. SQL Server native binding requires an
-    /// ISO date, a naive ISO timestamp, or an ISO timestamp with an offset.
+    /// ISO date or an ISO timestamp with seconds and an optional offset.
     pub fn temporal_text(text: String) -> Self {
         let value = text.trim();
         let naive = value.strip_suffix(" UTC").unwrap_or(value);
@@ -115,7 +128,10 @@ impl SqlValue {
         } else {
             TemporalKind::Unparsed
         };
-        Self::Temporal(TemporalValue { kind, text })
+        Self::Temporal(TemporalValue {
+            kind,
+            text: TemporalText::Input(text),
+        })
     }
 }
 
@@ -123,7 +139,7 @@ impl From<chrono::NaiveDate> for SqlValue {
     fn from(date: chrono::NaiveDate) -> Self {
         Self::Temporal(TemporalValue {
             kind: TemporalKind::Date(date),
-            text: date.to_string(),
+            text: TemporalText::Chrono(date.to_string()),
         })
     }
 }
@@ -132,7 +148,7 @@ impl From<chrono::NaiveDateTime> for SqlValue {
     fn from(date_time: chrono::NaiveDateTime) -> Self {
         Self::Temporal(TemporalValue {
             kind: TemporalKind::DateTime(date_time),
-            text: date_time.to_string(),
+            text: TemporalText::Chrono(date_time.to_string()),
         })
     }
 }
@@ -141,7 +157,7 @@ impl From<chrono::DateTime<chrono::Utc>> for SqlValue {
     fn from(date_time: chrono::DateTime<chrono::Utc>) -> Self {
         Self::Temporal(TemporalValue {
             kind: TemporalKind::DateTime(date_time.naive_utc()),
-            text: date_time.to_string(),
+            text: TemporalText::Chrono(date_time.to_string()),
         })
     }
 }
@@ -150,7 +166,7 @@ impl From<chrono::DateTime<chrono::FixedOffset>> for SqlValue {
     fn from(date_time: chrono::DateTime<chrono::FixedOffset>) -> Self {
         Self::Temporal(TemporalValue {
             kind: TemporalKind::DateTimeOffset(date_time),
-            text: date_time.to_string(),
+            text: TemporalText::Chrono(date_time.to_string()),
         })
     }
 }

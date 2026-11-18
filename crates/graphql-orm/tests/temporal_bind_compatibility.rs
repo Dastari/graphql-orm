@@ -125,3 +125,80 @@ async fn temporal_parameters_keep_the_previous_text_storage_and_comparison()
     }
     Ok(())
 }
+
+#[derive(
+    graphql_orm::prelude::RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize,
+)]
+#[repository_entity(table = "temporal_rows")]
+struct TemporalRow {
+    #[primary_key]
+    id: String,
+    calendar_date: NaiveDate,
+    stamp: Option<NaiveDateTime>,
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "starts disposable PostgreSQL")]
+async fn generated_rows_use_the_native_chrono_decoder() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::FromSqlRow;
+
+    #[cfg(feature = "sqlite")]
+    let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    #[cfg(feature = "postgres")]
+    let pool = owned_postgres::OwnedPostgres::pool("temporal-row-decoding", 1).await?;
+
+    #[cfg(feature = "postgres")]
+    {
+        Backend::execute_with_binds(
+            &pool,
+            "CREATE TEMP TABLE temporal_rows (id TEXT, calendar_date DATE, stamp TIMESTAMP)",
+            &[],
+        )
+        .await?;
+        Backend::execute_with_binds(
+            &pool,
+            "INSERT INTO temporal_rows VALUES
+                ('first', DATE '2026-04-09', TIMESTAMP '2026-04-09 12:34:56.125'),
+                ('second', DATE '2026-04-09', NULL)",
+            &[],
+        )
+        .await?;
+        let rows = Backend::fetch_rows(
+            &pool,
+            "SELECT id, calendar_date, stamp FROM temporal_rows ORDER BY id",
+            &[],
+        )
+        .await?;
+        let present = TemporalRow::from_row(&rows[0])?;
+        let absent = TemporalRow::from_row(&rows[1])?;
+        assert_eq!(present.calendar_date, "2026-04-09".parse::<NaiveDate>()?);
+        assert_eq!(present.stamp, Some("2026-04-09T12:34:56.125".parse()?));
+        assert_eq!(absent.calendar_date, present.calendar_date);
+        assert_eq!(absent.stamp, None);
+    }
+
+    #[cfg(feature = "sqlite")]
+    for (timestamp_sql, expected) in [
+        ("'2026-04-09T12:34:56Z'", Some("2026-04-09T12:34:56")),
+        ("'2026-04-09T12:34:56+05:30'", Some("2026-04-09T12:34:56")),
+        ("'2026-04-09 12:34'", Some("2026-04-09T12:34:00")),
+        ("0", Some("1970-01-01T00:00:00")),
+        ("2440587.5", Some("1970-01-01T00:00:00")),
+        ("NULL", None),
+    ] {
+        let rows = Backend::fetch_rows(
+            &pool,
+            &format!("SELECT 'row' AS id, '2026-04-09' AS calendar_date, {timestamp_sql} AS stamp"),
+            &[],
+        )
+        .await?;
+        let row = TemporalRow::from_row(&rows[0])?;
+        assert_eq!(row.calendar_date, "2026-04-09".parse::<NaiveDate>()?);
+        assert_eq!(
+            row.stamp,
+            expected.map(str::parse).transpose()?,
+            "{timestamp_sql}"
+        );
+    }
+    Ok(())
+}

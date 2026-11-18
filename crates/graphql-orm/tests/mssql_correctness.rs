@@ -1767,6 +1767,7 @@ struct TemporalRecord {
     legacy_stamp: String,
     #[filterable(type = "date")]
     precise_stamp: chrono::NaiveDateTime,
+    utc_stamp: chrono::DateTime<chrono::Utc>,
     #[filterable(type = "date")]
     calendar_date: chrono::NaiveDate,
     #[filterable(type = "date")]
@@ -1789,6 +1790,7 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
              id nvarchar(64) NOT NULL PRIMARY KEY,
              legacy_stamp datetime NOT NULL,
              precise_stamp datetime2(7) NOT NULL,
+             utc_stamp datetime2(7) NOT NULL,
              calendar_date date NOT NULL,
              offset_stamp datetimeoffset(7) NULL
          );",
@@ -1803,10 +1805,17 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
     let date = "2026-04-09".parse::<chrono::NaiveDate>()?;
     let sql = "SET LANGUAGE British; SET DATEFORMAT dmy;
         SELECT CONVERT(char(10), CONVERT(datetime, @P1), 23) AS value";
+    let text_date = SqlValue::temporal_text("2026-04-09".into());
     for (pool, expected) in [(&compatibility, "2026-09-04"), (&typed, "2026-04-09")] {
-        let rows = pool.fetch_rows(sql, &[SqlValue::from(date)]).await?;
+        let rows = pool
+            .fetch_rows(sql, std::slice::from_ref(&text_date))
+            .await?;
         assert_eq!(rows[0].try_get::<String, _>("value")?, expected);
     }
+    let rows = compatibility
+        .fetch_rows(sql, &[SqlValue::from(date)])
+        .await?;
+    assert_eq!(rows[0].try_get::<String, _>("value")?, "2026-04-09");
     let rows = typed
         .fetch_rows(sql, &[SqlValue::String("2026-04-09".into())])
         .await?;
@@ -1823,6 +1832,7 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
         CreateTemporalRecordInput {
             legacy_stamp: "2026-04-09".into(),
             precise_stamp: stamp,
+            utc_stamp: stamp.and_utc(),
             calendar_date: date,
             offset_stamp: Some(offset),
         },
@@ -1882,6 +1892,29 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
     .expect("the row exists");
     assert_eq!(row.legacy_stamp, "2026-05-10T00:00:00Z");
     assert!(row.offset_stamp.is_none());
+
+    let compatibility = MssqlPool::connect_ado_external_writable(&server.connection_string).await?;
+    let database = Database::<MssqlBackend>::builder(compatibility)
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    let nanos = "2026-04-09T12:34:56.123456789".parse::<chrono::NaiveDateTime>()?;
+    let nanos_offset = chrono::DateTime::parse_from_rfc3339("2026-04-09T12:34:56.123456789+05:30")?;
+    let row = TemporalRecord::insert(
+        &database,
+        CreateTemporalRecordInput {
+            legacy_stamp: "2026-04-09T00:00:00".into(),
+            precise_stamp: nanos,
+            utc_stamp: nanos.and_utc(),
+            calendar_date: date,
+            offset_stamp: Some(nanos_offset),
+        },
+    )
+    .await?;
+    assert_eq!(row.precise_stamp, stamp);
+    assert_eq!(row.utc_stamp, stamp.and_utc());
+    assert_eq!(row.calendar_date, date);
+    assert_eq!(row.offset_stamp, Some(offset));
+    assert_eq!(row.offset_stamp.unwrap().offset(), offset.offset());
 
     server.cleanup()?;
     Ok(())

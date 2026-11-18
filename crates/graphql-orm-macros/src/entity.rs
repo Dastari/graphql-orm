@@ -8217,44 +8217,10 @@ fn generate_row_field_assignment(
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let inner = option_inner_type(field_type).unwrap_or(field_type);
-    if let Some(temporal_type) = chrono_temporal_type(inner) {
-        let is_offset_aware = type_path_last_ident(inner).is_some_and(|name| name == "DateTime");
-        let value = if backend == BackendKind::Mssql
-            || (backend == BackendKind::Postgres && is_offset_aware)
-        {
-            quote! { row.try_get(#db_col)? }
-        } else {
-            let parser = match (temporal_type, is_offset_aware) {
-                ("DATETIME2", false) => quote! {
-                    |text: &str| text.parse::<#inner>().or_else(|_| {
-                        <#inner>::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
-                    })
-                },
-                ("DATETIME2", true) => quote! {
-                    |text: &str| text.parse::<#inner>().or_else(|error| {
-                        let naive = text.strip_suffix(" UTC").ok_or(error)?;
-                        ::graphql_orm::chrono::NaiveDateTime::parse_from_str(
-                            naive, "%Y-%m-%d %H:%M:%S%.f"
-                        ).map(|value| value.and_utc())
-                    })
-                },
-                _ => quote! { |text: &str| text.parse::<#inner>() },
-            };
-            if is_option_type(field_type) {
-                quote! {{
-                    let value: Option<String> = row.try_get(#db_col)?;
-                    value.as_deref().map(#parser).transpose()
-                        .map_err(|error| ::graphql_orm::sqlx::Error::Decode(Box::new(error)))?
-                }}
-            } else {
-                quote! {{
-                    let value: String = row.try_get(#db_col)?;
-                    (#parser)(&value)
-                        .map_err(|error| ::graphql_orm::sqlx::Error::Decode(Box::new(error)))?
-                }}
-            }
-        };
-        return Ok(quote! { #field_name: #value, });
+    if backend == BackendKind::Mssql
+        && (chrono_temporal_type(inner).is_some() || (meta.is_date_field && is_string_type(inner)))
+    {
+        return Ok(quote! { #field_name: row.try_get(#db_col)?, });
     }
 
     let bool_expr = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
@@ -8282,8 +8248,13 @@ fn generate_row_field_assignment(
         }}
     };
     // Handle special field types
-    if meta.is_date_field && is_string_type(inner) {
-        return Ok(quote! { #field_name: row.try_get(#db_col)?, });
+    if meta.is_date_field {
+        return Ok(quote! {
+            #field_name: {
+                let s: Option<String> = row.try_get(#db_col)?;
+                s.and_then(|s| str_to_datetime(&s).ok())
+            },
+        });
     }
     if meta.is_boolean_field {
         return Ok(quote! {
