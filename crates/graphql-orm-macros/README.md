@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.179.1 changes no macro output; it keeps the version line aligned with the ORM, whose test-owned PostgreSQL containers are now memory-capped.
+
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
 the runtime renderer; every other name is generated as before.
 
