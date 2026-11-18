@@ -3,7 +3,7 @@ title: "Portable Persistence Primitives"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -47,6 +47,10 @@ uses `UPDLOCK, HOLDLOCK`; SQLite's generated top-level helpers use `BEGIN IMMEDI
 writes materialize the authorized primary-key set and mutate only those exact keys. A row that starts
 matching concurrently is therefore ordered after the operation rather than being included by a
 later broad predicate.
+With the opt-in `narrow_bulk_writes_to_read_visibility` and a SQL predicate, a SQL Server bulk
+write reads its candidate keys read committed without a write lock, then locks only those keys
+with `UPDLOCK, FORCESEEK`, so the lock never reaches a row outside the predicate; see
+[row policy on generated writes](../reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
 Upsert also has to fence the case where no row exists yet. Generated top-level upsert helpers select
 `StateMachine` automatically. An upsert invoked inside a caller-owned `Default` transaction fails

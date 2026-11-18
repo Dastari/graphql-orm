@@ -3345,10 +3345,11 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// `deleteMany` also ask, on the `GraphqlMutation` surface, when
     /// [`Self::write_target_prefilter`] returns `None`. A `Prefilter` or
     /// `Complete` predicate then narrows their locking read: rows outside it
-    /// are never passed to a row callback, and on PostgreSQL never locked. On
-    /// SQL Server, a scan may still lock rows outside it; an index seek on the
-    /// predicate avoids that. Every selected row is still classified by the
-    /// row callbacks. A row outside the predicate is left out even if
+    /// are never passed to a row callback, and are never locked on PostgreSQL
+    /// or SQL Server (where the targets are read by key and then locked by a
+    /// forced key seek; with `READ_COMMITTED_SNAPSHOT` off, the unlocked
+    /// candidate read can still wait for an uncommitted change to a hidden
+    /// row). Every selected row is still classified by the row callbacks. A row outside the predicate is left out even if
     /// [`Self::can_write_row`] would allow it; return a write-target
     /// prefilter that selects such rows if callers may bulk-write rows they
     /// cannot read. An error then refuses the bulk write.

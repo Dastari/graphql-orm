@@ -377,12 +377,50 @@ before. With it on:
 
 **Locks on hidden rows.** On PostgreSQL a row a SQL predicate leaves out (a
 `write_target_prefilter`, or read visibility with the setting on) is never
-locked: the row lock is taken only on rows that pass the `WHERE` clause. On
-SQL Server it depends on the access path. The locking read uses
-`WITH (UPDLOCK, HOLDLOCK)`, which locks each row it reads before testing the
-predicate, so a scan still locks, and waits on, rows outside the predicate; an
-index seek on the predicate's columns avoids reading them. SQLite locks the
-whole database for a write, so there are no row locks to observe.
+locked: the row lock is taken only on rows that pass the `WHERE` clause. SQLite
+locks the whole database for a write, so there are no row locks to observe.
+
+On SQL Server the single locking read uses `WITH (UPDLOCK, HOLDLOCK)`, which
+locks each row it reads before testing the predicate, so a scan locks, and
+waits on, rows outside the predicate. With the setting on, a bulk write with a
+SQL predicate (read visibility or a `write_target_prefilter`) therefore reads
+its targets in two steps, a page of up to 500 at a time:
+
+1. It reads the keys of the rows that match the filter and the predicate, in
+   key order, read committed (`WITH (READCOMMITTED)`) and without a write
+   lock. It holds no lock on a row it reads.
+2. It locks the rows with those keys with `UPDLOCK` and `FORCESEEK`, with a
+   `WHERE` on the key alone, so the only access path is a seek on those keys.
+   The lock runs read committed, so it takes no key-range lock that would
+   reach a neighbouring row. It then checks the filter and the predicate again
+   on each locked row, one key seek at a time, at the transaction's own
+   isolation, and leaves out a row that no longer matches. Every row that is
+   written stays locked until the write commits, and is classified by the row
+   callbacks as before.
+
+The write then never locks a hidden row, and never waits on a lock another
+transaction holds on one, whatever plan the optimizer picks. If SQL Server
+cannot seek on the key, it refuses the statement and the write fails instead
+of scanning. What remains:
+
+- With `READ_COMMITTED_SNAPSHOT` off, the default for a new SQL Server
+  database, step 1 is a locking read committed read. It takes a momentary
+  shared lock on each row it reads, so it still waits for a hidden row that
+  another transaction has changed and not yet committed. It does not wait on
+  other transactions' shared or update locks, such as another bulk write's
+  locking read. With `READ_COMMITTED_SNAPSHOT` on, step 1 reads the last
+  committed version of each row and does not wait at all; turn it on to
+  close this.
+- A row that matched in step 1 but leaves the filter or the predicate before
+  step 2 stays locked until the write ends, although it is not written or
+  passed to a callback.
+- Step 1 holds no key-range locks, so a row that starts to match the filter
+  after it is not written, as on PostgreSQL. The written rows are still
+  locked and checked again before they are written.
+
+Without the setting, a `write_target_prefilter` narrows SQL Server's single
+locking read as before, and whether a scan locks rows outside it depends on
+the access path.
 
 Without any SQL predicate (`CallbackOnly` or `Unrestricted` visibility, no
 prefilter, or the setting off) the bulk write still selects and locks every
@@ -392,7 +430,8 @@ rows match a readable filter can still be observed. It shows in latency and,
 on PostgreSQL and SQL Server, in waits on locks that other transactions hold on
 hidden rows. The caller also briefly locks rows it cannot see. A SQL predicate
 removes the callback and counting difference on every backend, and the lock
-difference on PostgreSQL.
+difference on PostgreSQL and, with the setting on, on SQL Server, apart from
+the limits above.
 
 A generated GraphQL bulk write may write at most
 `PaginationConfig::max_bulk_write_rows` rows (default `10_000`) per mutation

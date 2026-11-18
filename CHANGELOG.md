@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.184.0
+
+Opt-in SQL Server bulk writes no longer lock or wait on hidden rows ([#752](https://github.com/Dastari/graphql-orm/issues/752)). See the [migration guide](MIGRATION.md#01790-to-01840-sql-server-bulk-writes-lock-only-their-targets).
+
+- **SQL Server: a narrowed bulk write locks only its targets.** With `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` and a SQL predicate (read visibility or a `write_target_prefilter`), generated GraphQL `updateMany` and `deleteMany` on SQL Server no longer use one `UPDLOCK, HOLDLOCK` read, which locked every row a scan read before testing the predicate. They read each page of candidate keys read committed without a write lock, then lock only those keys with `UPDLOCK, FORCESEEK` (read committed, so no key-range lock reaches a neighbouring row) and check the filter and the predicate again on each locked row at the transaction's isolation. Rows outside the predicate are not locked, and the write does not wait on another transaction's lock on them, whatever plan SQL Server picks. Locked rows are still classified by the row callbacks, the write is still atomic, and the written rows stay locked until it commits.
+- **What remains on SQL Server.** With `READ_COMMITTED_SNAPSHOT` off (the default for a new database), the unlocked candidate read still waits for a hidden row with another transaction's uncommitted change; with it on, it reads the committed version and does not wait. A row that leaves the filter or predicate between the two reads stays locked until the write ends without being written. A row that starts to match after the candidate read is not written, as on PostgreSQL. If SQL Server cannot seek on the key, the write fails instead of scanning. See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+- The default is unchanged: without the setting, bulk writes on every backend select and lock as before. PostgreSQL and SQLite are unchanged in both modes.
+- Generated `updateMany` and `deleteMany` pass the runtime a key accessor for the second read, so ORM and macros must be upgraded together.
+- New tests: on an owned SQL Server, a narrowed bulk write neither waits on another transaction's update lock on a hidden row (the next key after a target, the case a multi-key seek's range lock reaches) nor holds a lock on another hidden row while it runs, while the unnarrowed controls do both; the documented wait with `READ_COMMITTED_SNAPSHOT` off, and no wait with it on. On every backend: a narrowed bulk write over three pages of visible rows interleaved with hidden ones writes each visible row once, and the scan budget counts only the narrowed candidates.
+
 ## Unreleased - ORM/macros 0.179.0
 
 Security property suites for identifier quoting and canonical JSON ([#725](https://github.com/Dastari/graphql-orm/issues/725)). See the [migration guide](MIGRATION.md#01770-to-01790-identifier-quoting-and-canonical-json-properties).

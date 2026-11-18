@@ -2417,11 +2417,17 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// [`RowPolicy::read_visibility`](crate::graphql::orm::RowPolicy::read_visibility)
     /// on the `GraphqlMutation` surface is added to the bulk write's locking
     /// read. Rows outside it are not passed to a row callback or counted
-    /// against the bulk bound or scan budget, and on PostgreSQL they are not
-    /// locked. On SQL Server, whether a scanned row outside the predicate is
-    /// locked depends on the access path: an index seek on the predicate
-    /// avoids it, a scan does not. Every selected row is still classified by
-    /// the row callbacks, so visible rows give the same payload and writes.
+    /// against the bulk bound or scan budget, and are not locked. On SQL
+    /// Server, a bulk write with a SQL predicate (read visibility or a
+    /// `write_target_prefilter`) reads its candidates' keys read committed
+    /// without a write lock, then locks only those keys by a forced key seek
+    /// and checks the filter and predicate again on the locked rows, so it
+    /// neither locks nor waits on a row outside the predicate, whatever the
+    /// plan. With `READ_COMMITTED_SNAPSHOT` off, that unlocked read can still
+    /// wait for another transaction's uncommitted change to a hidden row (the
+    /// strict-authorization reference lists what remains).
+    /// Every selected row is still classified by the row callbacks, so visible
+    /// rows give the same payload and writes.
     ///
     /// A row the caller may write but not read is then left out, as a missing
     /// row is; a declared `write_target_prefilter` takes precedence in both

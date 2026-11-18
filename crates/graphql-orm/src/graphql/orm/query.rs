@@ -3049,11 +3049,44 @@ pub fn render_filter_expression(
     }
 }
 
+/// How a rendered `SELECT` locks the rows of its table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectLock {
+    /// The read takes the transaction's ordinary locks.
+    None,
+    /// The backend's write-decision lock: `FOR UPDATE` on PostgreSQL,
+    /// `WITH (UPDLOCK, HOLDLOCK)` on SQL Server.
+    WriteDecision,
+    /// SQL Server: a read committed read of the table inside a stricter
+    /// transaction, `WITH (READCOMMITTED)`. It holds no lock on the rows it
+    /// reads, and reads the committed version of a row without locking it when
+    /// the database has `READ_COMMITTED_SNAPSHOT` on. Other backends render no
+    /// hint.
+    MssqlReadCommitted,
+}
+
 fn render_select_query_inner(
     dialect: DatabaseBackend,
     query: &SelectQuery,
     write_decision: bool,
 ) -> RenderedQuery {
+    render_select_query_locked(
+        dialect,
+        query,
+        if write_decision {
+            SelectLock::WriteDecision
+        } else {
+            SelectLock::None
+        },
+    )
+}
+
+fn render_select_query_locked(
+    dialect: DatabaseBackend,
+    query: &SelectQuery,
+    lock: SelectLock,
+) -> RenderedQuery {
+    let write_decision = lock == SelectLock::WriteDecision;
     // SQL Server rejects `FETCH NEXT 0 ROWS`; `TOP (0)` is its empty page.
     let mssql_empty_page = dialect == DatabaseBackend::Mssql
         && !query.count_only
@@ -3069,10 +3102,14 @@ fn render_select_query_inner(
         query.columns.join(", ")
     };
     let table = dialect.render_identifier_path(query.table);
-    let table = if write_decision && dialect == DatabaseBackend::Mssql {
-        format!("{table} WITH (UPDLOCK, HOLDLOCK)")
-    } else {
-        table.into_owned()
+    let table = match (lock, dialect) {
+        (SelectLock::WriteDecision, DatabaseBackend::Mssql) => {
+            format!("{table} WITH (UPDLOCK, HOLDLOCK)")
+        }
+        (SelectLock::MssqlReadCommitted, DatabaseBackend::Mssql) => {
+            format!("{table} WITH (READCOMMITTED)")
+        }
+        _ => table.into_owned(),
     };
     let mut sql = format!("SELECT {} FROM {}", projection, table);
     let mut values = Vec::new();
@@ -4964,6 +5001,18 @@ where
     }
 }
 
+/// One page of bulk-write candidate keys; see
+/// `EntityQuery::fetch_write_candidate_keys_in_transaction`.
+#[derive(Debug)]
+pub(crate) struct WriteCandidateKeys {
+    /// The keys of the rows that satisfy the residual in-memory predicates.
+    pub(crate) keys: Vec<SqlValue>,
+    /// The number of rows read.
+    pub(crate) read: i64,
+    /// The key of the last row read, where the next page starts.
+    pub(crate) last: Option<SqlValue>,
+}
+
 pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub where_clauses: Vec<String>,
     pub values: Vec<SqlValue>,
@@ -5551,6 +5600,153 @@ where
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         context.database().observe_read(&rendered.sql, rows.len());
         query.decode_candidates(&rows)
+    }
+
+    /// Read one page of bulk-write candidate keys without a write lock: at
+    /// most `limit` rows after the key `after`, in key order, read committed
+    /// (see [`SelectLock::MssqlReadCommitted`]).
+    ///
+    /// Returns the keys of the rows that also satisfy the residual in-memory
+    /// predicates, the number of rows read and the key of the last row read.
+    /// Only for an entity with a single-column key.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_write_candidate_keys_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        after: Option<&SqlValue>,
+        limit: i64,
+        key_value: fn(&T) -> SqlValue,
+    ) -> crate::Result<WriteCandidateKeys>
+    where
+        B: WriteBackend,
+    {
+        let key_column = B::DIALECT.quote_identifier_path(T::PRIMARY_KEY);
+        let mut query = self.clone();
+        if let Some(after) = after {
+            query = query.where_clause(&format!("{key_column} > ?"), after.clone());
+        }
+        query.order_clauses = vec![key_column];
+        query.order_values = Vec::new();
+        let rendered = render_select_query_locked(
+            B::DIALECT,
+            &query.candidate_select(0, Some(limit.max(0)))?,
+            SelectLock::MssqlReadCommitted,
+        );
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        context.database().observe_read(&rendered.sql, rows.len());
+        let candidates = query.decode_candidates(&rows)?;
+        Ok(WriteCandidateKeys {
+            read: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+            last: candidates.last().map(|(row, _)| key_value(row)),
+            keys: candidates
+                .iter()
+                .filter(|(_, matches)| *matches)
+                .map(|(row, _)| key_value(row))
+                .collect(),
+        })
+    }
+
+    /// SQL Server: lock the rows with the given single-column keys for a write
+    /// decision, in key order, each with whether it still satisfies the
+    /// query's SQL filter and residual in-memory predicates.
+    ///
+    /// Each chunk of keys takes two statements, and neither reads, locks or
+    /// waits on a row of the table outside those keys, whatever the filter:
+    ///
+    /// 1. The lock: `WITH (UPDLOCK, FORCESEEK)` with a `WHERE` that names only
+    ///    the key, so the only access path is a seek on those keys. It runs
+    ///    read committed (set inside its own batch, which restores the
+    ///    transaction's level when it ends): at `SERIALIZABLE`, a multi-key
+    ///    seek takes key-range locks that reach the next key, which may be a
+    ///    hidden row, even under a `READCOMMITTED` table hint. A key that no
+    ///    longer exists returns nothing and locks nothing. The update locks
+    ///    are held until the transaction ends.
+    /// 2. The check: at the transaction's own isolation, one singleton seek
+    ///    per locked key (`CROSS APPLY`), which evaluates the filter on the
+    ///    locked row. Every key exists and is held, so the seeks take key
+    ///    locks only, and anything else the filter reads (a related table, a
+    ///    policy table) is read and locked as the transaction's isolation
+    ///    requires, as in the single locking read.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn lock_write_candidates_by_key_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        keys: &[SqlValue],
+        key_value: fn(&T) -> SqlValue,
+    ) -> crate::Result<Vec<(T, bool)>>
+    where
+        B: WriteBackend,
+    {
+        /// Bind parameters a statement may use, below SQL Server's 2,100.
+        const MAX_BINDS: usize = 2_000;
+        const KEY: &str = "__gom_key";
+        const STILL_MATCHES: &str = "__gom_still_matches";
+        let dialect = B::DIALECT;
+        if dialect != DatabaseBackend::Mssql {
+            return Err(sqlx::Error::Protocol(
+                "key-locked write candidates are read on SQL Server only".to_owned(),
+            ));
+        }
+        self.ensure_filter_valid()?;
+        let key_column = dialect.quote_identifier_path(T::PRIMARY_KEY);
+        let table = dialect.render_identifier_path(T::TABLE_NAME);
+        let columns = T::column_names().join(", ");
+        let filter = filter_expression_from_raw_parts(dialect, &self.where_clauses, &self.values);
+        let filter_binds = self.values.len();
+        let chunk = MAX_BINDS.saturating_sub(filter_binds).clamp(1, 500);
+        let placeholders = |first: usize, count: usize| {
+            (first..first + count)
+                .map(|index| dialect.placeholder(index))
+                .collect::<Vec<_>>()
+        };
+        let mut locked = Vec::with_capacity(keys.len());
+        for keys in keys.chunks(chunk) {
+            let lock = format!(
+                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED; \
+                 SELECT {columns} FROM {table} WITH (UPDLOCK, FORCESEEK) \
+                 WHERE {key_column} IN ({})",
+                placeholders(1, keys.len()).join(", ")
+            );
+            let rows = context.fetch_rows(&lock, keys).await?;
+            context.database().observe_read(&lock, rows.len());
+            let held = rows
+                .iter()
+                .map(|row| T::from_row(row).map(|row| key_value(&row)))
+                .collect::<crate::Result<Vec<_>>>()?;
+            if held.is_empty() {
+                continue;
+            }
+
+            let mut values = Vec::with_capacity(filter_binds + held.len());
+            let mut next_index = 1usize;
+            let recheck = filter
+                .as_ref()
+                .map(|filter| {
+                    render_filter_expression(dialect, filter, &mut next_index, &mut values)
+                })
+                .filter(|sql| !sql.is_empty())
+                .unwrap_or_else(|| "1 = 1".to_owned());
+            let key_rows = placeholders(next_index, held.len())
+                .into_iter()
+                .map(|placeholder| format!("({placeholder})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            values.extend(held);
+            let check = format!(
+                "SELECT __gom_locked.* FROM (VALUES {key_rows}) AS __gom_keys({KEY}) \
+                 CROSS APPLY (SELECT {columns}, \
+                 CASE WHEN {recheck} THEN CAST(1 AS BIGINT) ELSE CAST(0 AS BIGINT) END AS {STILL_MATCHES} \
+                 FROM {table} WITH (UPDLOCK, FORCESEEK) WHERE {key_column} = __gom_keys.{KEY}) AS __gom_locked \
+                 ORDER BY __gom_locked.{key_column}"
+            );
+            let rows = context.fetch_rows(&check, &values).await?;
+            context.database().observe_read(&check, rows.len());
+            for (row, (entity, residual)) in rows.iter().zip(self.decode_candidates(&rows)?) {
+                let still_matches = B::try_get_i64(row, STILL_MATCHES)? == 1;
+                locked.push((entity, residual && still_matches));
+            }
+        }
+        Ok(locked)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

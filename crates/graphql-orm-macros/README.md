@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.184.0 passes the runtime a key accessor from generated `updateMany` and `deleteMany`,
+which the opt-in SQL Server bulk-write narrowing uses to lock its targets by key (#752).
+Upgrade ORM and macros together; see the
+[migration guide](../../MIGRATION.md#01790-to-01840-sql-server-bulk-writes-lock-only-their-targets).
+
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
 the runtime renderer; every other name is generated as before.
 

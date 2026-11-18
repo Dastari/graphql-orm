@@ -151,6 +151,10 @@ struct OwnerRows {
     visibility: Visibility,
     writes_theirs: bool,
     asked: Arc<Mutex<Vec<String>>>,
+    /// SQL Server: on each write callback, whether another session could
+    /// update the hidden row `key4` at once (see [`hidden_row_is_free`]).
+    #[cfg(feature = "mssql")]
+    probe: Option<(String, Arc<Mutex<Vec<bool>>>)>,
 }
 impl OwnerRows {
     fn new(prefilter: bool, asked: Arc<Mutex<Vec<String>>>) -> Self {
@@ -159,6 +163,8 @@ impl OwnerRows {
             visibility: Visibility::CallbackOnly,
             writes_theirs: false,
             asked,
+            #[cfg(feature = "mssql")]
+            probe: None,
         }
     }
     fn with_visibility(mut self, visibility: Visibility) -> Self {
@@ -221,7 +227,15 @@ impl RowPolicy for OwnerRows {
         _: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async move { Ok(self.decide(row, true)) })
+        Box::pin(async move {
+            // The bulk write's transaction is open, and its targets locked.
+            #[cfg(feature = "mssql")]
+            if let Some((connection, free)) = &self.probe {
+                let result = hidden_row_is_free(connection).await;
+                free.lock().unwrap().push(result);
+            }
+            Ok(self.decide(row, true))
+        })
     }
     fn write_target_prefilter<'a>(
         &'a self,
@@ -692,6 +706,249 @@ async fn a_lock_on_a_hidden_row_does_not_block_an_opted_in_narrowed_bulk_write()
     owner.cleanup().unwrap();
 }
 
+/// A new session on `connection` updates the hidden row `key4`, giving up on
+/// a lock after one second: `true` when nothing held it.
+#[cfg(feature = "mssql")]
+async fn hidden_row_is_free(connection: &str) -> bool {
+    owned_mssql::execute_batch(
+        connection,
+        "SET LOCK_TIMEOUT 1000; UPDATE target_records SET other = other WHERE record_key = 'key4'",
+    )
+    .await
+    .is_ok()
+}
+
+/// A SQL Server session held open across statements.
+#[cfg(feature = "mssql")]
+async fn sql_server_session(
+    connection: &str,
+) -> graphql_orm::tiberius::Client<graphql_orm::tokio_util::compat::Compat<tokio::net::TcpStream>> {
+    use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
+    let config = graphql_orm::tiberius::Config::from_ado_string(connection).unwrap();
+    let tcp = tokio::net::TcpStream::connect(config.get_addr())
+        .await
+        .unwrap();
+    tcp.set_nodelay(true).unwrap();
+    graphql_orm::tiberius::Client::connect(config, tcp.compat_write())
+        .await
+        .unwrap()
+}
+
+#[cfg(feature = "mssql")]
+async fn run_batch(
+    session: &mut graphql_orm::tiberius::Client<
+        graphql_orm::tokio_util::compat::Compat<tokio::net::TcpStream>,
+    >,
+    sql: &str,
+) {
+    session
+        .simple_query(sql)
+        .await
+        .unwrap()
+        .into_results()
+        .await
+        .unwrap();
+}
+
+/// Whether a write that gave up on a wait refused. Its session, abandoned by
+/// the pool, may still be waiting on the server: end it.
+#[cfg(feature = "mssql")]
+async fn waited(
+    connection: &str,
+    response: async_graphql::Response,
+    payload: serde_json::Value,
+) -> bool {
+    let refused = !response.errors.is_empty() || payload["success"] == false;
+    owned_mssql::execute_batch(
+        connection,
+        "DECLARE @kill NVARCHAR(MAX) = N''; \
+         SELECT @kill += N'KILL ' + CAST(session_id AS NVARCHAR(10)) + N'; ' \
+         FROM sys.dm_exec_requests WHERE blocking_session_id <> 0 AND session_id <> @@SPID; \
+         EXEC (@kill);",
+    )
+    .await
+    .unwrap();
+    refused
+}
+
+/// #752 on SQL Server: with the setting on, a bulk write narrowed by read
+/// visibility neither waits on another transaction's lock on a hidden row nor
+/// holds a lock on one, whatever access path the optimizer picks. A statement
+/// of the write gives up after five seconds, so a wait fails fast. (A
+/// `SET LOCK_TIMEOUT` sent through the pool runs inside `sp_executesql` and
+/// does not outlast it; the probe's own session uses one.)
+///
+/// The controls (no predicate, or the setting off) read every matching row
+/// under `UPDLOCK, HOLDLOCK`: they wait on the locked hidden row, and hold
+/// the other one until they commit.
+///
+/// The one remaining wait is documented: with `READ_COMMITTED_SNAPSHOT` off,
+/// the unlocked candidate read is a locking read committed read, which waits
+/// for a hidden row another transaction has changed and not yet committed.
+/// With `READ_COMMITTED_SNAPSHOT` on it reads the committed version instead.
+#[cfg(feature = "mssql")]
+#[tokio::test]
+async fn a_lock_on_a_hidden_row_does_not_block_an_opted_in_narrowed_sql_server_bulk_write() {
+    use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
+    let (db, mut owner) = setup().await;
+    drop(db);
+    let connection = owner.connection_string.clone();
+    let probes = Arc::new(Mutex::new(Vec::new()));
+    let open = || async {
+        let pool = MssqlPool::connect_ado_external_writable_with(
+            &connection,
+            MssqlPoolOptions::new()
+                .max_connections(1)
+                .query_timeout(Some(std::time::Duration::from_secs(5))),
+        )
+        .await
+        .unwrap();
+        Database::builder(pool)
+            .schema_policy(SchemaPolicy::ExternalWritable)
+            .build()
+    };
+    let with_policy = |db: &Database, visibility, narrow: bool| {
+        let mut db = db
+            .clone()
+            .with_narrow_bulk_writes_to_read_visibility(narrow);
+        db.set_entity_policy(AllowEntityPolicy);
+        let mut policy = OwnerRows::new(false, Default::default()).with_visibility(visibility);
+        policy.probe = Some((connection.clone(), probes.clone()));
+        db.set_row_policy(policy);
+        db
+    };
+    let run = |db: Database, mutation: &'static str| async move {
+        let schema = schema_builder(db).data(AuthSubject::new("test")).finish();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            schema.execute(format!("mutation {{ {mutation} }}")),
+        )
+        .await
+        .expect("the query timeout bounds every wait");
+        let json = response.data.clone().into_json().unwrap();
+        let payload = json
+            .as_object()
+            .and_then(|fields| fields.values().next().cloned())
+            .unwrap_or_default();
+        (response, payload)
+    };
+    let take_probes = || std::mem::take(&mut *probes.lock().unwrap());
+
+    let db = open().await;
+
+    // No other transaction: the narrowed write leaves the hidden rows free
+    // while it runs. Without narrowing the write holds them.
+    for visibility in [Visibility::Prefilter, Visibility::Complete] {
+        let (response, payload) = run(with_policy(&db, visibility, true), UPDATE_ALL).await;
+        assert!(response.errors.is_empty(), "{response:?}");
+        assert_eq!(payload["success"], true, "{visibility:?} {payload}");
+        assert_eq!(payload["affectedCount"], 2, "{visibility:?}");
+        let free = take_probes();
+        assert!(
+            !free.is_empty() && free.iter().all(|free| *free),
+            "{visibility:?}: the narrowed write holds no lock on a hidden row: {free:?}"
+        );
+    }
+    let (_, payload) = run(with_policy(&db, Visibility::Prefilter, false), UPDATE_ALL).await;
+    assert_eq!(payload["success"], true, "{payload}");
+    assert!(
+        take_probes().contains(&false),
+        "control: the unnarrowed write holds the hidden rows it read"
+    );
+
+    // Another transaction holds update locks on the hidden row `key3`, in the
+    // table and in its `record_key` index, as a concurrent write's locking
+    // read does.
+    let mut locker = sql_server_session(&connection).await;
+    run_batch(
+        &mut locker,
+        "BEGIN TRANSACTION; SELECT * FROM target_records WITH (UPDLOCK, HOLDLOCK) WHERE record_key = 'key3'",
+    )
+    .await;
+    for (visibility, narrow) in [
+        (Visibility::CallbackOnly, true),
+        (Visibility::Prefilter, false),
+    ] {
+        let (response, payload) = run(with_policy(&db, visibility, narrow), UPDATE_ALL).await;
+        assert!(
+            waited(&connection, response, payload).await,
+            "{visibility:?} narrow={narrow}: the write waits on the lock"
+        );
+    }
+    take_probes();
+    for visibility in [Visibility::Prefilter, Visibility::Complete] {
+        let (response, payload) = run(with_policy(&db, visibility, true), UPDATE_ALL).await;
+        assert!(response.errors.is_empty(), "{response:?}");
+        assert_eq!(payload["success"], true, "{visibility:?} {payload}");
+        assert_eq!(payload["affectedCount"], 2, "{visibility:?}");
+        assert!(take_probes().iter().all(|free| *free), "{visibility:?}");
+    }
+    run_batch(&mut locker, "ROLLBACK TRANSACTION").await;
+
+    // Another transaction changed the hidden row `key3` and has not committed.
+    // With `READ_COMMITTED_SNAPSHOT` off, the candidate read waits for it.
+    run_batch(
+        &mut locker,
+        "BEGIN TRANSACTION; UPDATE target_records SET other = 'pending' WHERE record_key = 'key3'",
+    )
+    .await;
+    let (response, payload) = run(with_policy(&db, Visibility::Prefilter, true), UPDATE_ALL).await;
+    assert!(
+        waited(&connection, response, payload).await,
+        "documented: a locking read committed read waits for an uncommitted change"
+    );
+    run_batch(&mut locker, "ROLLBACK TRANSACTION").await;
+    drop(locker);
+    drop(db);
+    take_probes();
+
+    // With `READ_COMMITTED_SNAPSHOT` on, the candidate read does not wait.
+    owned_mssql::execute_batch(
+        &connection,
+        "ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE",
+    )
+    .await
+    .unwrap();
+    let db = open().await;
+    let mut locker = sql_server_session(&connection).await;
+    run_batch(
+        &mut locker,
+        "BEGIN TRANSACTION; UPDATE target_records SET other = 'pending' WHERE record_key = 'key3'",
+    )
+    .await;
+    let (response, payload) = run(with_policy(&db, Visibility::Prefilter, false), UPDATE_ALL).await;
+    assert!(
+        waited(&connection, response, payload).await,
+        "control: the unnarrowed write waits on the change"
+    );
+    take_probes();
+    for (visibility, mutation) in [
+        (Visibility::Prefilter, UPDATE_ALL),
+        (Visibility::Complete, UPDATE_ALL),
+        (Visibility::Prefilter, DELETE_ALL),
+    ] {
+        let (response, payload) = run(with_policy(&db, visibility, true), mutation).await;
+        assert!(response.errors.is_empty(), "{response:?}");
+        assert_eq!(
+            payload["success"], true,
+            "{visibility:?} {mutation} {payload}"
+        );
+        assert!(
+            take_probes().iter().all(|free| *free),
+            "{visibility:?} {mutation}"
+        );
+    }
+    run_batch(&mut locker, "ROLLBACK TRANSACTION").await;
+    drop(locker);
+    assert_eq!(
+        stored(&db).await,
+        [("key3", "before"), ("key4", "before")]
+            .map(|(key, other)| (key.to_owned(), other.to_owned()))
+    );
+    drop(db);
+    owner.cleanup().unwrap();
+}
+
 /// The bulk bound counts the rows the caller may write. For a fixed set of
 /// such rows the payload is the same whether or not other, hidden rows match
 /// the filter, with a callback-only row policy and with a SQL prefilter.
@@ -743,15 +1000,26 @@ async fn hidden_matching_rows_never_change_a_bulk_write_outcome() {
 /// same host-configured refusal a read gets; a SQL prefilter avoids the scan.
 #[tokio::test]
 async fn a_bulk_write_candidate_scan_is_capped_by_the_read_scan_budget() {
-    for prefilter in [false, true] {
+    // A prefilter, or (opted in) the read visibility predicate, narrows in SQL.
+    for (prefilter, narrow) in [(false, false), (true, false), (false, true)] {
         let (mut db, mut owner) = setup().await;
-        db.set_row_policy(OwnerRows::new(prefilter, Default::default()));
+        db.set_row_policy(
+            OwnerRows::new(prefilter, Default::default()).with_visibility(Visibility::Prefilter),
+        );
+        let db = db.with_narrow_bulk_writes_to_read_visibility(narrow);
+        // A budget too small for even the visible rows refuses either way.
+        let tiny = db
+            .clone()
+            .with_pagination_config(PaginationConfig::default().with_max_scanned_rows(Some(1)));
+        let payload = mutate(&tiny, UPDATE_ALL).await;
+        assert_eq!(payload["errorCode"], "PAGE_LIMIT_EXCEEDED", "{payload}");
+        assert!(all_before(&stored(&db).await), "nothing was written");
         // Four candidates match; the budget allows three.
         let tight = db
             .clone()
             .with_pagination_config(PaginationConfig::default().with_max_scanned_rows(Some(3)));
         let payload = mutate(&tight, UPDATE_ALL).await;
-        if prefilter {
+        if prefilter || narrow {
             // SQL removes the hidden rows: two candidates, within the budget.
             assert_eq!(payload["success"], true, "{payload}");
             assert_eq!(payload["affectedCount"], 2);
@@ -771,6 +1039,58 @@ async fn a_bulk_write_candidate_scan_is_capped_by_the_read_scan_budget() {
         let payload = mutate(&roomy, DELETE_ALL).await;
         assert_eq!(payload["success"], true, "{payload}");
         assert_eq!(payload["deletedCount"], 2);
+        owner.cleanup().unwrap();
+    }
+}
+
+/// A narrowed bulk write reads its candidates in pages. On SQL Server each
+/// page is read by key and the next starts after its last key: with hidden
+/// rows between the visible ones and three pages of visible rows, every
+/// visible row is written exactly once, as without narrowing.
+#[tokio::test]
+async fn a_narrowed_bulk_write_reads_every_page_of_candidates_once() {
+    // 2,400 more matching rows; the even ones are the caller's.
+    #[cfg(feature = "sqlite")]
+    let rows = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2400) \
+        INSERT INTO target_records SELECT printf('10000000-0000-0000-0000-%012d', i), 'keyp' || i, \
+        CASE WHEN i % 2 = 0 THEN 'mine' ELSE 'theirs' END, 'before' FROM n";
+    #[cfg(feature = "postgres")]
+    let rows = "INSERT INTO target_records SELECT ('10000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid, \
+        'keyp' || i, CASE WHEN i % 2 = 0 THEN 'mine' ELSE 'theirs' END, 'before' FROM generate_series(1, 2400) AS i";
+    #[cfg(feature = "mssql")]
+    let rows = "WITH n AS (SELECT TOP (2400) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) AS i \
+        FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b) \
+        INSERT INTO target_records SELECT CAST(CONCAT('10000000-0000-0000-0000-', RIGHT(CONCAT('000000000000', i), 12)) AS UNIQUEIDENTIFIER), \
+        CONCAT('keyp', i), CASE WHEN i % 2 = 0 THEN 'mine' ELSE 'theirs' END, 'before' FROM n";
+    let unbounded = PaginationConfig::default()
+        .with_max_scanned_rows(None)
+        .with_max_bulk_write_rows(None);
+    for narrow in [false, true] {
+        let (mut db, mut owner) = setup().await;
+        execute(&db, rows).await.unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        db.set_row_policy(
+            OwnerRows::new(false, asked.clone()).with_visibility(Visibility::Prefilter),
+        );
+        let db = db
+            .with_narrow_bulk_writes_to_read_visibility(narrow)
+            .with_pagination_config(unbounded);
+        let payload = mutate(&db, UPDATE_ALL).await;
+        assert_eq!(payload["success"], true, "narrow={narrow} {payload}");
+        assert_eq!(payload["affectedCount"], 1202, "narrow={narrow}");
+        let asked = take_asked(&asked);
+        assert_eq!(
+            asked.len(),
+            if narrow { 1202 } else { 2404 },
+            "narrow={narrow}"
+        );
+        let rows = stored(&db).await;
+        let written = rows.iter().filter(|(_, other)| other == "after").count();
+        assert_eq!(written, 1202, "narrow={narrow}");
+        let payload = mutate(&db, DELETE_ALL).await;
+        assert_eq!(payload["deletedCount"], 1202, "narrow={narrow} {payload}");
+        assert!(all_before(&stored(&db).await));
+        assert_eq!(stored(&db).await.len(), 1202);
         owner.cleanup().unwrap();
     }
 }
