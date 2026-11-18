@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-router"
-version = "0.16.2"
+version = "0.16.4"
 edition = "2024"
 description = "Federated GraphQL router for graphql-orm and project-neutral subgraphs"
 license = "MIT"

@@ -41,6 +41,7 @@ fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
     }
     hex.as_bytes()
         .chunks(2)
+        // Invalid checksum encodings are represented as missing.
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect()
 }
@@ -70,6 +71,7 @@ fn multipart_etag(parts: &[PartReceipt]) -> Option<String> {
 fn sha256_hex_from_base64(encoded: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
+        // Invalid checksum encodings are represented as missing.
         .ok()?;
     (bytes.len() == 32).then(|| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -158,6 +160,7 @@ impl S3StorageBackend {
         };
         Ok(output
             .content_length()
+            // A negative provider length cannot match the expected object size.
             .and_then(|length| u64::try_from(length).ok())
             == Some(size_bytes)
             && output.e_tag() == Some(expected.as_str()))
@@ -468,6 +471,7 @@ impl MultipartBlobStore for S3StorageBackend {
                     if_not_exists: false,
                 },
                 started_at: upload.initiated().and_then(|initiated| {
+                    // An unrepresentable initiation time is reported as unknown.
                     OffsetDateTime::from_unix_timestamp(initiated.secs()).ok()
                 }),
             });
@@ -488,6 +492,7 @@ fn pair_token(key: &str, upload: &str) -> String {
 
 fn split_pair_token(token: &str) -> Option<(String, String)> {
     let (length, rest) = token.split_once('\n')?;
+    // Invalid lengths reject the continuation token.
     let length = length.parse::<usize>().ok()?;
     (rest.len() >= length && rest.is_char_boundary(length))
         .then(|| (rest[..length].to_string(), rest[length..].to_string()))

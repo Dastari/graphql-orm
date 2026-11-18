@@ -255,9 +255,19 @@ impl LocalStorageBackend {
     /// it resolves to the existing directory and [`Self::check_root_name`]
     /// refuses it. Best effort; a write that cannot create it fails on its own.
     pub(crate) fn ensure_internal_dir(&self) {
-        let _ = std::fs::create_dir_all(&self.root);
-        if let Ok(Some(root)) = Dir::open_root(&self.root) {
-            let _ = root.create_dir(INTERNAL_STORAGE_DIR);
+        if let Err(error) = std::fs::create_dir_all(&self.root) {
+            tracing::warn!(kind = ?error.kind(), "local storage root setup failed");
+        }
+        match Dir::open_root(&self.root) {
+            Ok(Some(root)) => {
+                if let Err(error) = root.create_dir(INTERNAL_STORAGE_DIR) {
+                    tracing::warn!(kind = ?error.kind(), "local storage internal directory setup failed");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(kind = ?error.kind(), "local storage root could not be opened during setup");
+            }
         }
     }
 
@@ -792,6 +802,7 @@ fn blob_metadata(key: &str, metadata: &std::fs::Metadata) -> BlobMetadata {
         size_bytes: Some(metadata.len()),
         sha256_hex: None,
         etag: None,
+        // Modification time is optional on filesystems that cannot supply it.
         last_modified: metadata.modified().ok().map(OffsetDateTime::from),
     }
 }
@@ -845,11 +856,13 @@ impl StreamingObjectStore for LocalStorageBackend {
             match chunk {
                 Ok(bytes) => {
                     if let Err(err) = writer.write_chunk(bytes).await {
+                        // Abort is best effort so the caller receives the original error.
                         let _ = writer.abort().await;
                         return Err(err);
                     }
                 }
                 Err(err) => {
+                    // Abort is best effort so the caller receives the original error.
                     let _ = writer.abort().await;
                     return Err(err);
                 }
@@ -1225,8 +1238,11 @@ impl LocalStorageBackend {
                     return Ok((BlobListPage::default(), ListingWork::default()));
                 };
                 let internal = match backend.open_root()? {
-                    Some(root) => match root.info(INTERNAL_STORAGE_DIR) {
-                        Ok(Some(info)) if info.kind == Kind::Dir => Some(info.identity),
+                    Some(root) => match root
+                        .info(INTERNAL_STORAGE_DIR)
+                        .map_err(|source| StorageError::io(root.path(), source))?
+                    {
+                        Some(info) if info.kind == Kind::Dir => Some(info.identity),
                         _ => None,
                     },
                     None => None,
@@ -1577,8 +1593,7 @@ impl ListingWalk<'_> {
                 && frame
                     .dir
                     .info(name)
-                    .ok()
-                    .flatten()
+                    .map_err(|source| StorageError::io(frame.dir.path(), source))?
                     .is_some_and(|info| info.identity == internal)
             {
                 return Ok(None);
@@ -1784,6 +1799,7 @@ impl TempFile {
             // Pairs with the store in `Drop`: either the guard sees this
             // file and removes it, or this task sees the guard gone.
             if abandoned.load(Ordering::SeqCst) {
+                // A cancelled writer can only attempt a best-effort unlink.
                 let _ = dir.remove_file(&name);
             }
             result
@@ -1816,6 +1832,7 @@ impl TempFile {
     pub(crate) async fn remove(mut self) {
         let dir = Arc::clone(&self.dir);
         let name = self.name.clone();
+        // Best-effort unlink of a unique temporary name.
         let _ = tokio::task::spawn_blocking(move || dir.remove_file(&name)).await;
         self.released = true;
     }
@@ -1831,6 +1848,7 @@ impl Drop for TempFile {
         // may never run if the runtime is shutting down. It is one unlink of a
         // unique name; a write still in flight keeps its descriptor and
         // finishes harmlessly.
+        // Best-effort unlink of a unique temporary name.
         let _ = self.dir.remove_file(&self.name);
     }
 }
@@ -1894,6 +1912,7 @@ fn is_uploading_temp_file(path: &Path) -> bool {
 
 fn is_older_than(modified: Option<SystemTime>, now: SystemTime, older_than: Duration) -> bool {
     modified
+        // A future timestamp is ineligible for stale-file cleanup.
         .and_then(|modified| now.duration_since(modified).ok())
         .is_some_and(|age| age >= older_than)
 }
@@ -2797,6 +2816,32 @@ mod resume_tests {
         assert!(!Resume::parse(None).passed_key("a"));
         assert!(!Resume::parse(None).passed_directory("a/"));
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn listing_propagates_directory_identity_errors() {
+    let root = tempfile::tempdir().expect("storage root");
+    let dir = Dir::open_root(root.path())
+        .expect("open root")
+        .expect("root");
+    let frame = ListingFrame::new(dir, String::new());
+    let walk = ListingWalk {
+        internal: Some((0, 0)),
+        prefix: "",
+        resume: Resume::parse(None),
+        limit: 1,
+        work: ListingWork::default(),
+    };
+    // Supply a synthetic entry whose name the filesystem cannot stat.
+    let entry = local_fs::Entry {
+        name: "x".repeat(4096).into(),
+        kind: Kind::Dir,
+    };
+    assert!(matches!(
+        walk.child(&frame, &entry),
+        Err(StorageError::Io { .. })
+    ));
 }
 
 // These build backends with `LocalStorageBackend::new`, absent on Windows.

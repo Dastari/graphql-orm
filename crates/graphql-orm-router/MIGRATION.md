@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.2 to 0.16.4
+
+**No action.** The authenticated metrics response adds
+`router_authentication_refresh_failure_total`. Public readiness still checks
+for an active graph. No configuration changes are required.
+
 ## 0.16.1 to 0.16.2
 
 **No action.** No consumer migration is required. Only the wire tests change;
