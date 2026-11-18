@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -234,8 +234,9 @@ same SQL visibility contract; residual callbacks still require implementation.
 
 A closure predicate admits a row based on every row reachable from it through
 a self-referencing key: merge chains, parent hierarchies, alias chains. It is
-evaluated in SQL by a recursive CTE, so the cost follows the rows a walk
-reaches, not the size of the table, and no closure is collected in Rust.
+evaluated in SQL, per row, by a recursive CTE on SQLite and PostgreSQL and by
+an unrolled breadth-first search on SQL Server. The cost follows the rows a
+walk reaches, not the size of the table, and no closure is collected in Rust.
 
 ```rust
 // Some row in the chain (the row itself included) matches `p`.
@@ -273,15 +274,17 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   step), or a non-NULL pointer at depth `max_depth` leading outside the rows
   already reached (the depth bound cut the walk short). A pointer whose
   columns are all NULL ends the walk: that is how a root is represented.
-- **Cycles** terminate. The walk is bounded, and the CTE uses `UNION`, which
-  discards duplicate rows. A cycle, a self-loop included, is complete once
+- **Cycles** terminate. The walk is bounded, and it discards duplicate rows
+  (the CTE's `UNION`, or SQL Server's per-level `GROUP BY`). A cycle, a
+  self-loop included, is complete once
   `max_depth` is at least its length, because every pointer on it then leads
   back to a reached row.
 - **Depth bound.** The default is `READ_PREDICATE_CLOSURE_DEFAULT_DEPTH` (64)
-  hops. `related_closure_within` accepts 1 to
-  `READ_PREDICATE_CLOSURE_MAX_DEPTH` (1,024) and refuses anything else with
-  `AUTHORIZATION_MISCONFIGURED`. Each evaluated row costs at most `max_depth`
-  times the rows its walk can reach. Hitting the bound makes the walk
+  hops on every backend. `related_closure_within` accepts 1 to
+  `READ_PREDICATE_CLOSURE_MAX_DEPTH` (1,024), or 1 to
+  `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) on SQL Server, and refuses
+  anything else with `AUTHORIZATION_MISCONFIGURED`. Each evaluated row costs
+  at most `max_depth` times the rows its walk can reach. Hitting the bound makes the walk
   incomplete. `All` then fails closed. `Any` is TRUE only if it found a
   matching row within the bound, and otherwise UNKNOWN, so neither the
   existential form nor its negation admits the row.
@@ -296,15 +299,49 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   row fails `p`". A closure whose target renders the deny fallback `1 = 0` is
   accepted, since the positive forms only deny with it, but `not()` refuses to
   negate it.
-- **Rendering and backends.** A correlated scalar subquery with
-  `WITH RECURSIVE`, on SQLite and PostgreSQL, applied wherever the policy
+- **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
   search and subscription delivery re-reads. `P`'s bind values appear four
-  times, in order. Nested closures get distinct CTE names. **SQL Server is
-  refused** with `AUTHORIZATION_MISCONFIGURED` when the policy is built: SQL
-  Server does not allow a common table expression inside a subquery, so the
-  closure cannot be correlated with the row being authorized. It is never
-  evaluated in memory instead. Other backends are refused too.
+  times, in order. Nested closures get distinct names. It is never evaluated
+  in memory, and never for the whole table. MySQL and other backends are
+  refused with `AUTHORIZATION_MISCONFIGURED`.
+- **SQLite and PostgreSQL** render `WITH RECURSIVE`.
+- **SQL Server** does not allow a common table expression inside a subquery,
+  so the walk is unrolled into a breadth-first search, with no schema objects
+  and no DDL:
+  - **Structure.** There is one nested derived table per hop. Level `k`
+    holds each distinct pointer reached within `k` hops with the hop it was
+    first reached at. It is built from level `k - 1` plus one correlated
+    `OUTER APPLY` that looks up the rows named by the pointers first reached
+    at hop `k - 1`, grouped by pointer.
+  - **Evaluating `P`.** Each pointer below the bound is followed once more,
+    to evaluate `P` over the rows it names. The row's own `P` is evaluated
+    last.
+  - **Same semantics.** Both forms reach the same pointers, depths and rows,
+    so they admit the same rows. A parity test checks this case for case on
+    all three backends, and the owned SQL Server lane runs the full closure
+    suite.
+  - **Bound.** SQL Server stops compiling a statement nested about 100
+    levels deep (error 191, "nested too deeply"). The SQL Server bound is
+    therefore `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64), the same as the
+    default. That leaves room for the host query and for nested closures,
+    whose walk sits beside the outer one, not inside it. The shorthand
+    constructors behave identically on every backend.
+  - **Cost.** Each level is deduplicated, so the work per row is bounded by
+    `max_depth` times the distinct pointers reached, whatever the fan-out of
+    a non-unique key. Each hop is a correlated lookup on the key columns. Each
+    hop's `OUTER APPLY` carries `TOP (2147483647)`, which limits nothing.
+    Without it, plan compilation time grew superlinearly with the bound when
+    the key has no index (about 80 s at 64 hops in the owned lane). With it,
+    a first compile at the default bound takes about 0.1 to 0.3 s, and the
+    plan is then cached.
+  - **Indexes.** Index the key columns, normally the primary key.
+  - **Plan shape at the default bound, over 3,000 rows with a primary key.**
+    The table is scanned once for the rows being authorized. Every hop, and
+    the lookup that evaluates `P`, is a nested-loops clustered index seek,
+    executed only for frontier pointers. There are no hash or merge joins
+    and no table scan per hop. The owned-lane performance test asserts this
+    shape.
 
 ### Exact offsets remain compatible
 

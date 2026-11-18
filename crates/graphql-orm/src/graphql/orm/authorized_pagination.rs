@@ -144,6 +144,159 @@ fn closure_level(predicate: &str) -> usize {
         + 1
 }
 
+/// The largest hop bound [`ReadPredicate::related_closure_within`] accepts on
+/// SQL Server, where the walk is unrolled into one nested derived table per
+/// hop. SQL Server refuses statements nested much deeper ("nested too
+/// deeply", error 191), so a larger bound is refused with
+/// `AUTHORIZATION_MISCONFIGURED`. It equals
+/// [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`], so `related_closure` and
+/// `related_closure_all` behave the same on every backend.
+pub const READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH: u32 = 64;
+
+/// The SQL Server closure. SQL Server does not allow a common table
+/// expression inside a subquery, so the bounded walk is unrolled into a
+/// breadth-first search of nested derived tables, one per hop:
+///
+/// 1. Level 0 holds the authorized row's pointer at depth 0. Level `k` holds
+///    every pointer reached within `k` hops with the hop it was first reached
+///    at: level `k - 1`, plus the distinct pointers of the rows named by its
+///    frontier (the pointers first reached at hop `k - 1`), grouped by pointer
+///    keeping the minimum depth. Each level is deduplicated, so its size is
+///    the number of distinct pointers reached, whatever the fan-out. Only
+///    pointer columns are carried; the target is not evaluated in the walk.
+/// 2. Each pointer below the bound is followed once more to evaluate the
+///    target over the rows it names, which are the rows the recursive CTE's
+///    step reaches, giving their MAX/MIN truth and whether any exist.
+/// 3. A pointer makes the walk incomplete when it is partially NULL, when it
+///    is not NULL and names no row, or when it is first reached at the bound
+///    (the CTE's "at the bound and not seen before"). An all-NULL pointer
+///    names no row and is complete: a root.
+/// 4. The authorized row's own truth is evaluated last, in the outer scope.
+///
+/// The CTE form expands a pointer each time it is reached, but a later
+/// expansion only reaches pointers already reached earlier, so both forms see
+/// the same pointers, first depths and reached rows, and the verdict below is
+/// the CTE's. Each hop's `OUTER APPLY` carries `TOP (2147483647)`, which is
+/// no limit but keeps the hop a correlated lookup so the plan does not grow
+/// with join reordering. The target appears four times (twice per truth), as
+/// in the CTE form.
+fn render_mssql_closure(
+    dialect: DatabaseBackend,
+    table: &str,
+    prefix: &str,
+    keys: &[(&str, &str)],
+    quantifier: ReadPredicateQuantifier,
+    predicate: &str,
+    max_depth: u32,
+) -> String {
+    let columns = |render: &dyn Fn(usize, &str, &str) -> String, separator: &str| {
+        keys.iter()
+            .enumerate()
+            .map(|(index, &(pointer, key))| render(index, pointer, key))
+            .collect::<Vec<_>>()
+            .join(separator)
+    };
+    let of = |alias: &str| columns(&|index, _, _| format!("{alias}.__gom_p{index}"), ", ");
+    let names = columns(&|index, _, _| format!("__gom_p{index}"), ", ");
+    let pointers = columns(
+        &|index, pointer, _| {
+            format!(
+                "{table}.{} AS __gom_p{index}",
+                dialect.quote_identifier(pointer)
+            )
+        },
+        ", ",
+    );
+    // The rows of `table` whose key equals the pointer carried by `alias`.
+    let named_by = |alias: &str| {
+        columns(
+            &|index, _, key| {
+                format!(
+                    "{table}.{} = {alias}.__gom_p{index}",
+                    dialect.quote_identifier(key)
+                )
+            },
+            " AND ",
+        )
+    };
+    let group = format!("{prefix}_g");
+    let level = |depth: u32| {
+        if depth == max_depth {
+            group.clone()
+        } else {
+            format!("{prefix}_l{depth}")
+        }
+    };
+    let mut walk = format!("(SELECT {pointers}, 0 AS __gom_depth) AS {}", level(0));
+    for depth in 1..=max_depth {
+        let previous = level(depth - 1);
+        let child = format!("{prefix}_c{depth}");
+        let merged = format!("{prefix}_v{depth}");
+        walk = format!(
+            "(SELECT {merged_names}, MIN({merged}.__gom_depth) AS __gom_depth FROM {walk} \
+             OUTER APPLY (SELECT DISTINCT TOP (2147483647) 1 AS __gom_r, {pointers} FROM {table} \
+             WHERE {previous}.__gom_depth = {frontier} AND {step}) AS {child} \
+             CROSS APPLY (VALUES ({previous_names}, {previous}.__gom_depth), \
+             ({child_names}, CASE WHEN {child}.__gom_r IS NOT NULL THEN {depth} END)) \
+             AS {merged} ({names}, __gom_depth) WHERE {merged}.__gom_depth IS NOT NULL \
+             GROUP BY {merged_names}) AS {current}",
+            merged_names = of(&merged),
+            frontier = depth - 1,
+            step = named_by(&previous),
+            previous_names = of(&previous),
+            child_names = of(&child),
+            current = level(depth),
+        );
+    }
+    let followed = columns(
+        &|index, _, _| format!("{group}.__gom_p{index} IS NOT NULL"),
+        " AND ",
+    );
+    let ambiguous = if keys.len() > 1 {
+        format!(
+            "(NOT ({followed}) AND ({})) OR ",
+            columns(
+                &|index, _, _| format!("{group}.__gom_p{index} IS NOT NULL"),
+                " OR "
+            )
+        )
+    } else {
+        String::new()
+    };
+    // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
+    let truth = format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END");
+    let reached = format!("{prefix}_r");
+    let truths = format!("{prefix}_x");
+    let summary = format!("{prefix}_s");
+    let own = format!("{prefix}_a");
+    let verdict = match quantifier {
+        ReadPredicateQuantifier::Any => format!(
+            "CASE WHEN {own}.__gom_truth = 2 OR {summary}.__gom_max = 2 THEN 1 \
+             WHEN {own}.__gom_truth = 1 OR {summary}.__gom_max = 1 OR {summary}.__gom_incomplete = 1 \
+             THEN NULL ELSE 0 END"
+        ),
+        ReadPredicateQuantifier::All => format!(
+            "CASE WHEN {own}.__gom_truth = 0 OR {summary}.__gom_min = 0 THEN 0 \
+             WHEN {own}.__gom_truth = 1 OR {summary}.__gom_min = 1 OR {summary}.__gom_incomplete = 1 \
+             THEN NULL ELSE 1 END"
+        ),
+    };
+    // `table` is unaliased where the target is evaluated: in `truths` it is
+    // the reached row, and in `own` (no FROM) the authorized row.
+    format!(
+        "(SELECT {verdict} FROM (\
+         SELECT MAX({reached}.__gom_max) AS __gom_max, MIN({reached}.__gom_min) AS __gom_min, \
+         MAX(CASE WHEN {ambiguous}({followed} AND ({group}.__gom_depth = {max_depth} \
+         OR {reached}.__gom_rows = 0)) THEN 1 ELSE 0 END) AS __gom_incomplete FROM {walk} \
+         OUTER APPLY (SELECT MAX({truths}.__gom_truth) AS __gom_max, \
+         MIN({truths}.__gom_truth) AS __gom_min, COUNT(*) AS __gom_rows \
+         FROM (SELECT {truth} AS __gom_truth FROM {table} \
+         WHERE {step} AND {group}.__gom_depth < {max_depth}) AS {truths}) AS {reached}) AS {summary} \
+         CROSS APPLY (SELECT {truth} AS __gom_truth) AS {own}) = 1",
+        step = named_by(&group),
+    )
+}
+
 /// A validated key relation from `S` to `T` with its rendered target predicate
 /// (anonymous placeholders) and bind values.
 struct Relation {
@@ -507,14 +660,17 @@ impl ReadPredicate {
     /// A pointer whose columns are all NULL ends the walk at that row: this
     /// is how a root is represented, and it is complete.
     ///
-    /// **Cycles** terminate: the walk is bounded by `max_depth`, and the
-    /// recursive CTE discards duplicate rows. A cycle, a self-loop included,
-    /// is complete, because every pointer on it leads back to a reached row.
+    /// **Cycles** terminate: the walk is bounded by `max_depth`, and it
+    /// discards duplicate rows. A cycle, a self-loop included, is complete
+    /// once `max_depth` is at least its length, because every pointer on it
+    /// then leads back to a reached row.
     ///
     /// **Depth bound.** `max_depth` must be between 1 and
-    /// [`READ_PREDICATE_CLOSURE_MAX_DEPTH`]; the shorthand constructors use
-    /// [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`]. The work per evaluated row
-    /// is at most `max_depth` times the rows the walk can reach. Hitting the
+    /// [`READ_PREDICATE_CLOSURE_MAX_DEPTH`], or
+    /// [`READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH`] on SQL Server; the shorthand
+    /// constructors use [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`] on every
+    /// backend. The work per evaluated row is at most `max_depth` times the
+    /// rows the walk can reach. Hitting the
     /// bound makes the walk incomplete: `All` is then never TRUE (it fails
     /// closed), and `Any` is TRUE only if a matching row was found within
     /// the bound, otherwise UNKNOWN, so the row is not admitted and a
@@ -529,17 +685,21 @@ impl ReadPredicate {
     /// result UNKNOWN, so they can deny a row, never admit one. Neither form
     /// returns columns of reached rows.
     ///
-    /// **Rendering.** A correlated scalar subquery with `WITH RECURSIVE` on
-    /// SQLite and PostgreSQL, used wherever the policy clause is applied:
-    /// reads, counts, aggregates, keyset and connection pages, search and
-    /// subscription delivery re-reads. `target`'s bind values appear four
-    /// times, in order. SQL Server does not allow a common table expression
-    /// inside a subquery, so there the closure cannot be correlated with the
-    /// row; it is refused when the policy is built rather than evaluated in
-    /// memory. Other backends are refused too.
+    /// **Rendering.** A correlated scalar subquery, used wherever the policy
+    /// clause is applied: reads, counts, aggregates, keyset and connection
+    /// pages, search and subscription delivery re-reads. `target`'s bind
+    /// values appear four times, in order. SQLite and PostgreSQL render a
+    /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
+    /// common table expression inside a subquery, so there the walk is
+    /// unrolled into a breadth-first search with one nested derived table and
+    /// one correlated `OUTER APPLY` lookup per hop. Each level keeps only the
+    /// distinct pointers reached so far, so the work per row stays bounded by
+    /// `max_depth` times the distinct pointers reached, whatever the fan-out.
+    /// Both forms admit the same rows. No backend evaluates the closure in
+    /// memory or for the whole table. Other backends are refused.
     ///
-    /// Refused with `AUTHORIZATION_MISCONFIGURED`: SQL Server and other
-    /// unsupported backends, `max_depth` outside the range above, empty or
+    /// Refused with `AUTHORIZATION_MISCONFIGURED`: unsupported backends,
+    /// `max_depth` outside the range above, empty or
     /// unknown key columns, a target for another entity or backend, and an
     /// empty target. A target that renders the deny fallback `1 = 0` is
     /// accepted, as for `related`, because the positive forms only deny with
@@ -554,12 +714,12 @@ impl ReadPredicate {
         B: OrmBackend,
         T: Entity + 'static,
     {
-        if !matches!(
-            B::DIALECT,
-            DatabaseBackend::Sqlite | DatabaseBackend::Postgres
-        ) || !(1..=READ_PREDICATE_CLOSURE_MAX_DEPTH).contains(&max_depth)
-            || !negatable(&target.expression)
-        {
+        let limit = match B::DIALECT {
+            DatabaseBackend::Sqlite | DatabaseBackend::Postgres => READ_PREDICATE_CLOSURE_MAX_DEPTH,
+            DatabaseBackend::Mssql => READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH,
+            _ => 0,
+        };
+        if !(1..=limit).contains(&max_depth) || !negatable(&target.expression) {
             return Err(invalid());
         }
         let relation = Relation::new::<B, T, T>(keys, &target)?;
@@ -569,6 +729,28 @@ impl ReadPredicate {
         let dialect = B::DIALECT;
         let table = dialect.render_table_identifier_path(T::TABLE_NAME);
         let cte = format!("__gom_closure_{}", closure_level(&relation.predicate));
+        let mut values = Vec::with_capacity(relation.values.len() * 4);
+        for _ in 0..4 {
+            values.extend(relation.values.iter().cloned());
+        }
+        if dialect == DatabaseBackend::Mssql {
+            return Ok(Self {
+                entity: TypeId::of::<T>(),
+                backend: B::DIALECT,
+                expression: FilterExpression::trusted_fragment(
+                    render_mssql_closure(
+                        dialect,
+                        &table,
+                        &cte,
+                        keys,
+                        quantifier,
+                        &relation.predicate,
+                        max_depth,
+                    ),
+                    values,
+                ),
+            });
+        }
         let join = |items: Vec<String>, separator: &str| items.join(separator);
         let indexed = |render: &dyn Fn(usize, &str, &str) -> String| {
             keys.iter()
@@ -648,10 +830,6 @@ impl ReadPredicate {
              WHERE {cte}.__gom_depth < {max_depth}) \
              SELECT {verdict} FROM {cte}) = 1"
         );
-        let mut values = Vec::with_capacity(relation.values.len() * 4);
-        for _ in 0..4 {
-            values.extend(relation.values.iter().cloned());
-        }
         Ok(Self {
             entity: TypeId::of::<T>(),
             backend: B::DIALECT,

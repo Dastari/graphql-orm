@@ -3,12 +3,17 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.178.0 supports the transitive-closure read predicates on SQL Server, as an unrolled
+breadth-first search with the same semantics as the recursive CTE on SQLite and PostgreSQL;
+SQL Server accepts bounds up to `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64).
+See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
 
 Version 0.176.0 adds transitive-closure read predicates: `ReadPredicate::related_closure`,
 `related_closure_all` and `related_closure_within`, rendered as a recursive CTE on SQLite and

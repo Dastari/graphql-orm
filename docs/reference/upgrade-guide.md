@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.176.0, `graphql-orm-macros` 0.176.0**; `graphql-orm-operation-catalog` 0.9.0; `graphql-orm-storage` 0.17.0; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; `graphql-orm-ai` 0.148.0; `graphql-orm-router-protocol` 0.3.0; `graphql-orm-router` 0.16.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.178.0, `graphql-orm-macros` 0.178.0**; `graphql-orm-operation-catalog` 0.9.0; `graphql-orm-storage` 0.17.0; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; `graphql-orm-ai` 0.148.0; `graphql-orm-router-protocol` 0.3.0; `graphql-orm-router` 0.16.0.
 
+- **No action** — ORM/macros 0.178.0: the transitive-closure read predicates now work on SQL Server, as a correlated breadth-first search with the same semantics as the CTE form (no DDL). `related_closure_within` accepts at most 64 hops on SQL Server (`READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH`); the default bound is 64 everywhere. [Migration](../../MIGRATION.md#01770-to-01780-closure-read-predicates-on-sql-server)
 - **No action** — ORM/macros 0.176.0: transitive read-policy closures. `ReadPredicate::related_closure` ("some reachable row matches P"), `related_closure_all` ("no reachable row fails P") and `related_closure_within` (an explicit hop bound, at most 1,024; the default is 64) render a recursive CTE on SQLite and PostgreSQL and fail closed on UNKNOWN values, unreachable or ambiguous steps and the depth bound. SQL Server refuses them with `AUTHORIZATION_MISCONFIGURED`. [Migration](../../MIGRATION.md#01750-to-01760-transitive-read-policy-closures)
 
 ### workspace-2026.11.17.4

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,16 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - ORM/macros 0.178.0
+
+Transitive-closure read predicates on SQL Server ([#779](https://github.com/Dastari/graphql-orm/issues/779)). See [read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures) and the [migration guide](MIGRATION.md#01770-to-01780-closure-read-predicates-on-sql-server).
+
+- **`ReadPredicate::related_closure`, `related_closure_all` and `related_closure_within` work on SQL Server.** They were refused there with `AUTHORIZATION_MISCONFIGURED`, because SQL Server does not allow a common table expression inside a subquery. SQL Server now renders the bounded walk as a correlated breadth-first search: one nested derived table and one correlated `OUTER APPLY` key lookup per hop, deduplicated per level by pointer with the hop it was first reached at, then one lookup per reached pointer to evaluate the target. It adds no schema objects or DDL, is evaluated per row in SQL (never in memory or for the whole table), and applies on every read path: reads, counts, aggregates, keyset and connection pages, and subscription delivery. SQL Server has no search execution, so search does not apply there.
+- **Identical semantics.** Three-valued TRUE/FALSE/UNKNOWN, fail-closed incomplete walks (a partially NULL composite pointer, a non-NULL pointer naming no row, or the depth bound), all-NULL pointers as roots, cycles that are complete once the bound covers them, both quantifiers, `not()` and the deny-fallback refusal all match the CTE form.
+- **SQL Server bound.** `related_closure_within` accepts 1 to the new `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) hops on SQL Server and refuses larger bounds with `AUTHORIZATION_MISCONFIGURED`. SQL Server refuses statements nested about 100 levels deep. The default bound (64) is unchanged on every backend, so `related_closure` and `related_closure_all` behave identically everywhere. SQLite and PostgreSQL keep the 1,024-hop maximum.
+- **Cost.** Each level holds only distinct pointers, so the work per row is bounded by the bound times the distinct pointers reached, whatever the fan-out. Each hop's `OUTER APPLY` carries a no-op `TOP (2147483647)` fence, which keeps plan compilation fast (about 0.1 to 0.3 s for a first compile at the default bound) and keeps every hop a nested-loops seek on the key.
+- New tests run the closure suite on owned SQL Server: truth tables, the depth bound, keyset and connection pages, refusals, rendering and bind order, and a 3,000-row performance check that asserts the plan shape. Subscription delivery also runs on owned SQL Server. A new parity test runs 248 generated cases on SQLite, owned PostgreSQL and owned SQL Server and checks each admitted set against a reference evaluator of the documented rules. The cases cover cycles, self-loops, chains past the bound, unreachable and partially NULL pointers, composite and fan-out keys, nested closures and `not()`.
 
 ## Unreleased - ORM/macros 0.176.0
 

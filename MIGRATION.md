@@ -3,12 +3,26 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.177.0 to 0.178.0: closure read predicates on SQL Server
+
+Upgrade ORM and macros together. Generated code is unchanged. See
+[read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+- **`related_closure`, `related_closure_all` and `related_closure_within` on
+  SQL Server (#779). No action.** They were refused on SQL Server with
+  `AUTHORIZATION_MISCONFIGURED` and are now supported there, with the same
+  semantics as on SQLite and PostgreSQL. A SQL Server policy that collects a
+  closure in memory can switch to them. `related_closure_within` accepts at
+  most `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) hops on SQL Server; the
+  default bound (64) is the same on every backend. Index the key columns,
+  normally the primary key. SQLite and PostgreSQL are unchanged.
 
 ## 0.175.0 to 0.176.0: transitive read-policy closures
 
