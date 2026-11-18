@@ -21,8 +21,14 @@ except for the per-backend path splitting below.
   as `"app"."users"`, to the single-identifier `quote_identifier` or
   `render_identifier`. Those calls now treat it as one name, because it is not
   one delimited identifier; pass the path to `quote_identifier_path` or
-  `render_identifier_path`, which keep each well-formed part unchanged. No
-  in-tree caller does this. Input that is exactly one well-formed delimited
+  `render_identifier_path`, which keep each well-formed part unchanged, or a
+  table-qualified column to the new `DatabaseBackend::quote_column_identifier`,
+  which keeps its column part. Inside the workspace, read predicates
+  (`ReadPredicate::column`, `is_null`, `is_not_null` and the relation,
+  `not_related` and closure joins), the `exclude_blank` group-page filter and
+  generated dependent-delete selection did this with a table-qualified
+  `db_column` such as `"t"."c"`; they now render its column part (the group
+  filter, its path). Input that is exactly one well-formed delimited
   identifier, such as `"Mixed Case"` or `[order]`, is still returned
   unchanged.
 - **Declared names that only look delimited are refused (#782). Action
@@ -57,12 +63,25 @@ except for the per-backend path splitting below.
   bracketed and work. Every name SQL Server accepted bare keeps its exact
   text, so existing migration plans, their hashes and stored statement
   fingerprints are unchanged.
-- **Introspection reads catalogue names literally (#782). No action.** SQL
-  Server introspection quotes the raw names it reads back from the catalogue
-  unconditionally, and SQLite and PostgreSQL introspection never pass such a
-  name through as SQL text, so a table literally named
-  `[ledger]` is reported, and its indexes and foreign keys read, as that
-  table rather than as `ledger`. Ordinary names are reported as before.
+- **Introspection reports catalogue names that re-render as themselves
+  (#782). Action needed** only if code stores or compares introspected model
+  names (`TableModel::table_name`, `ForeignKeyModel::target_table` and
+  `constraint_name`, index names and columns) by text for objects whose
+  catalogue name needs delimiting. Ordinary names are reported exactly as
+  before, so plans for them are unchanged. These change:
+  - SQL Server quotes every raw schema, table and column name, and reports an
+    index, index column or foreign-key constraint name that is itself
+    bracketed or contains a dot delimited (`[[ix]]]`, `[a.b]`), so a table
+    literally named `[ledger]` is no longer read as `ledger`, and dropping or
+    recreating an introspected index or constraint names the same object.
+  - PostgreSQL reports a table name with a dot (`"local.parent"`) delimited,
+    as it already did for names bare SQL would fold (`"Local"`), and reports
+    foreign-key targets the same way: in the current schema, and for both
+    parts of a target in another schema (`"Archive"."Parent"`). Such a target previously came back as
+    `Local`, `local.parent` or `Archive.Parent`, which resolved to a different
+    table or none, so a plan could see a spurious foreign-key change.
+  - SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read
+    delimit the raw names they address.
 
 ## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
 

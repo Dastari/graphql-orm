@@ -2281,6 +2281,8 @@ mod drift_tests {
                 "\"\"\"a\"\" OR true OR \"\"b\"\"\"",
             ),
             ("\"\"", "\"\"\"\"\"\""),
+            // A quoted name containing NUL is not one delimited identifier.
+            ("\"a\0b\"", "\"\"\"a\0b\"\"\""),
         ] {
             assert_eq!(quote_policy_column(column), rendered, "{column}");
         }

@@ -4619,11 +4619,9 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         let table_name: String = row.try_get("table_name")?;
         // A catalog name is already physical: do not render a case-sensitive
         // catalog spelling as a bare name that would reach another table.
-        let reported = if super::dialect::postgres_resolved_identifier(&table_name) != table_name {
-            format!("\"{}\"", table_name.replace('"', "\"\""))
-        } else {
-            table_name.clone()
-        };
+        // A name that bare SQL would fold, split at a dot or read as a
+        // delimited identifier is reported delimited (#782).
+        let reported = super::dialect::postgres_reported_relation_name(&table_name);
         relations.push((reported, schema_name.clone(), table_name));
     }
     let mut reported_relations = std::collections::BTreeSet::new();
@@ -4950,11 +4948,13 @@ pub(super) async fn introspect_owned_postgres_connection_including(
                         // of the current schema with the same name.
                         match reported_names.get(&(target_schema.clone(), target_table.clone())) {
                             Some(reported) => reported.clone(),
-                            None if target_schema == schema_name => target_table,
+                            None if target_schema == schema_name => {
+                                super::dialect::postgres_reported_relation_name(&target_table)
+                            }
                             None => format!(
                                 "{}.{}",
-                                DatabaseBackend::Postgres.render_raw_identifier(&target_schema),
-                                DatabaseBackend::Postgres.render_raw_identifier(&target_table)
+                                super::dialect::postgres_reported_relation_name(&target_schema),
+                                super::dialect::postgres_reported_relation_name(&target_table)
                             ),
                         }
                     },
@@ -6119,7 +6119,11 @@ pub async fn introspect_mssql_schema(
         .await?;
         let mut foreign_keys: Vec<super::core::ForeignKeyModel> = Vec::new();
         for row in foreign_key_rows {
-            let constraint_name = super::MssqlBackend::try_get_string(&row, "constraint_name")?;
+            // Names are kept in the declared-name convention the renderers
+            // read, so a constraint literally named `[fk]` drops as itself.
+            let constraint_name = DatabaseBackend::Mssql.raw_name_in_declared_form(
+                &super::MssqlBackend::try_get_string(&row, "constraint_name")?,
+            );
             let pair = super::core::ForeignKeyColumnPairModel {
                 source_column: DatabaseBackend::Mssql.delimit_raw_identifier(
                     &super::MssqlBackend::try_get_string(&row, "source_column")?,
@@ -6230,8 +6234,12 @@ async fn introspect_mssql_indexes(
     .await?;
     let mut indexes: Vec<(super::owned_schema::IndexModel, bool)> = Vec::new();
     for row in rows {
-        let name = super::MssqlBackend::try_get_string(&row, "index_name")?;
-        let column = super::MssqlBackend::try_get_string(&row, "column_name")?;
+        // Declared-name convention, as for constraint names: an index or
+        // column literally named `[x]` (or `a.b`) re-renders as itself.
+        let name = DatabaseBackend::Mssql
+            .raw_name_in_declared_form(&super::MssqlBackend::try_get_string(&row, "index_name")?);
+        let column = DatabaseBackend::Mssql
+            .raw_name_in_declared_form(&super::MssqlBackend::try_get_string(&row, "column_name")?);
         let descending = row.try_get::<i64, _>("is_descending")? != 0;
         if indexes.last().is_none_or(|(index, _)| index.name != name) {
             let mut index = super::owned_schema::IndexModel::new(name, Vec::new());
@@ -6273,10 +6281,15 @@ async fn introspect_mssql_indexes(
 /// as unfiltered.
 #[cfg(feature = "mssql")]
 fn mssql_index_predicate(filter: &str) -> super::owned_schema::IndexPredicateModel {
-    parse_mssql_in_filter(filter).unwrap_or_else(|| super::owned_schema::IndexPredicateModel {
-        column: String::new(),
-        values: vec![filter.to_string()],
-    })
+    parse_mssql_in_filter(filter)
+        .map(|mut predicate| {
+            predicate.column = DatabaseBackend::Mssql.raw_name_in_declared_form(&predicate.column);
+            predicate
+        })
+        .unwrap_or_else(|| super::owned_schema::IndexPredicateModel {
+            column: String::new(),
+            values: vec![filter.to_string()],
+        })
 }
 
 #[cfg(feature = "mssql")]

@@ -1084,7 +1084,7 @@ pub(crate) fn postgres_resolved_identifier(identifier: &str) -> String {
 
 /// The name inside `identifier` when it is exactly one well-formed quoted
 /// PostgreSQL identifier: it starts and ends with `"`, is not empty inside,
-/// and every inner `"` is doubled.
+/// contains no NUL, and every inner `"` is doubled.
 pub(crate) fn postgres_delimited_identifier(identifier: &str) -> Option<String> {
     let inner = identifier.strip_prefix('"')?.strip_suffix('"')?;
     let mut name = String::with_capacity(inner.len());
@@ -1095,7 +1095,7 @@ pub(crate) fn postgres_delimited_identifier(identifier: &str) -> Option<String> 
         }
         name.push(character);
     }
-    (!name.is_empty()).then_some(name)
+    (!name.is_empty() && !name.contains('\0')).then_some(name)
 }
 
 /// Whether `character` is a Basic Multilingual Plane character in one of the
@@ -1114,6 +1114,25 @@ fn mssql_identifier_character(character: char, table: &[(u16, u16)]) -> bool {
             })
             .is_ok()
     })
+}
+
+/// A raw PostgreSQL catalogue relation name in the declared-name form
+/// introspection reports: unchanged when the ORM's renderers resolve that
+/// text back to the same relation, and otherwise delimited literally. A name
+/// that bare SQL folds (`Archive`), that reads as a delimited identifier, or
+/// that the path splitter would split at a dot (`local.parent`) is delimited;
+/// an ordinary or reserved name keeps its text.
+#[cfg(feature = "postgres")]
+pub(crate) fn postgres_reported_relation_name(name: &str) -> String {
+    if postgres_resolved_identifier(name) != name
+        || identifier_path_parts(DatabaseBackend::Postgres, name)
+            .nth(1)
+            .is_some()
+    {
+        DatabaseBackend::Postgres.delimit_raw_identifier(name)
+    } else {
+        name.to_owned()
+    }
 }
 
 /// Whether a declared table path has a single part, with no schema, as
@@ -1204,17 +1223,51 @@ impl DatabaseBackend {
         }
     }
 
-    /// A raw catalogue name as generated SQL would render it: bare when
-    /// [`Self::render_identifier`] would write it bare, and otherwise
-    /// delimited literally with [`Self::delimit_raw_identifier`], even when it
-    /// already looks delimited, so it is never read as a different name.
-    #[cfg(feature = "postgres")]
-    pub(crate) fn render_raw_identifier(self, name: &str) -> String {
-        if self.is_one_delimited_identifier(name) {
+    /// A raw catalogue name in the declared-name convention that the
+    /// migration renderers read: unchanged when quoting it would name it,
+    /// and otherwise delimited literally. A name that is itself one
+    /// well-formed delimited identifier (such as an index literally named
+    /// `[ix]`) or that the backend's path splitter would split (such as
+    /// `a.b`) is delimited, so re-rendering it names the catalogue object
+    /// rather than `ix` or `b`. Every ordinary name keeps its text, so
+    /// introspected models and migration plans are unchanged for them.
+    #[cfg(feature = "mssql")]
+    pub(crate) fn raw_name_in_declared_form(self, name: &str) -> String {
+        if self.is_one_delimited_identifier(name)
+            || identifier_path_parts(self, name).nth(1).is_some()
+        {
             self.delimit_raw_identifier(name)
         } else {
-            self.render_identifier(name).into_owned()
+            name.to_owned()
         }
+    }
+
+    /// The column a declared column path names, as one delimited identifier
+    /// to follow a table or alias prefix (`alias.<column>`) or to stand
+    /// unqualified in a predicate.
+    ///
+    /// A declared physical column may be table-qualified, such as
+    /// `"t"."c"`. Its last path part, split with the dialect's own delimited
+    /// forms, is the column; it is delimited with
+    /// [`SqlDialect::quote_identifier`]. A plain column is quoted as before.
+    /// Use this wherever the column is referenced through an alias or inside
+    /// a subquery: the whole path would read as `schema.table.column` after a
+    /// prefix, and a literal-quoted path can read as a string constant on
+    /// SQLite.
+    ///
+    /// ```
+    /// use graphql_orm::graphql::orm::DatabaseBackend;
+    ///
+    /// assert_eq!(DatabaseBackend::Sqlite.quote_column_identifier("owner"), "\"owner\"");
+    /// assert_eq!(DatabaseBackend::Sqlite.quote_column_identifier("\"t\".\"c\""), "\"c\"");
+    /// assert_eq!(DatabaseBackend::Mssql.quote_column_identifier("[t].[a.b]"), "[a.b]");
+    /// ```
+    pub fn quote_column_identifier(self, column: &str) -> String {
+        let part = identifier_path_parts(self, column)
+            .filter(|part| !part.is_empty())
+            .last()
+            .unwrap_or(column);
+        self.quote_identifier(part)
     }
 
     fn identifier_needs_quoting(self, identifier: &str) -> bool {

@@ -1444,3 +1444,275 @@ async fn sql_server_introspection_reads_each_raw_table_name_literally()
     server.cleanup()?;
     result
 }
+
+/// Round 3 of #782: migration DDL names one declared column the same way in
+/// `CREATE TABLE`, the index column list and a conditional index's
+/// predicate, so a table-qualified declared name never leaves SQLite an
+/// index on a string constant.
+#[cfg(feature = "sqlite")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_migration_ddl_names_one_declared_column_consistently()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{
+        IndexDef, IndexPredicateDef, MigrationStep, render_migration_step,
+    };
+    use graphql_orm::sqlx::{self, sqlite::SqlitePoolOptions};
+
+    const STATUS: &str = "\"t\".\"status\"";
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    // Column definitions are written with `render_identifier`, as migrations do.
+    let column = BACKEND.render_identifier(STATUS).into_owned();
+    sqlx::query(&format!(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, {column} TEXT);"
+    ))
+    .execute(&pool)
+    .await?;
+    let mut index = IndexDef::new("ix_open", &[STATUS]);
+    index.predicate = Some(IndexPredicateDef {
+        column: STATUS,
+        values: &["open"],
+    });
+    for statement in render_migration_step(
+        BACKEND,
+        &MigrationStep::CreateIndex {
+            table_name: "t".to_owned(),
+            index,
+        },
+    ) {
+        sqlx::query(&statement).execute(&pool).await?;
+    }
+    // The index is on the table's column, not on an expression.
+    let indexed: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT name FROM pragma_index_info('ix_open');")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(indexed, [Some(STATUS.to_owned())]);
+    sqlx::query(&format!(
+        "INSERT INTO t (id, {column}) VALUES (1, 'open'), (2, 'closed'), (3, 'open');"
+    ))
+    .execute(&pool)
+    .await?;
+    // SQLite refuses `INDEXED BY` a partial index unless the WHERE clause
+    // implies its predicate, so this also proves the predicate names that
+    // column.
+    let open: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM t INDEXED BY ix_open WHERE {column} IN ('open');"
+    ))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(open, 2);
+    pool.close().await;
+    Ok(())
+}
+
+/// Round 3 of #782: PostgreSQL foreign-key targets are reported in a form
+/// that resolves to the referenced table: a case-sensitive schema and table
+/// and a table name with a dot are delimited.
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_foreign_key_targets_resolve_to_the_referenced_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::introspect_postgres_schema;
+    use graphql_orm::sqlx;
+
+    let mut postgres = owned_postgres::OwnedPostgres::start("identifier-quoting-fk")?;
+    let result = async {
+        let pool = sqlx::PgPool::connect(&postgres.url).await?;
+        sqlx::raw_sql(
+            r#"
+            CREATE SCHEMA "Archive";
+            CREATE TABLE "Archive"."Parent" (id integer PRIMARY KEY);
+            CREATE TABLE "local.parent" (id integer PRIMARY KEY);
+            CREATE TABLE "Local" (id integer PRIMARY KEY);
+            CREATE TABLE local_child (
+                id integer PRIMARY KEY,
+                parent integer CONSTRAINT fk_dotted REFERENCES "local.parent"(id),
+                upper integer CONSTRAINT fk_upper REFERENCES "Local"(id),
+                external_parent integer CONSTRAINT fk_archive REFERENCES "Archive"."Parent"(id)
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+        let model = introspect_postgres_schema(&pool).await?;
+        let child = model
+            .tables
+            .iter()
+            .find(|table| table.table_name == "local_child")
+            .ok_or("local_child")?;
+        let mut targets = Vec::new();
+        for foreign_key in &child.foreign_keys {
+            let path = BACKEND
+                .render_identifier_path(&foreign_key.target_table)
+                .into_owned();
+            let expected = match foreign_key.constraint_name.as_deref() {
+                Some("fk_dotted") => "public.\"local.parent\"",
+                Some("fk_upper") => "public.\"Local\"",
+                Some("fk_archive") => "\"Archive\".\"Parent\"",
+                other => return Err(format!("unexpected constraint {other:?}").into()),
+            };
+            let same: Option<bool> = sqlx::query_scalar(
+                "SELECT pg_catalog.to_regclass($1)::oid = pg_catalog.to_regclass($2)::oid",
+            )
+            .bind(&path)
+            .bind(expected)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(same, Some(true), "{path} should resolve to {expected}");
+            targets.push(foreign_key.target_table.clone());
+        }
+        targets.sort();
+        assert_eq!(
+            targets,
+            ["\"Archive\".\"Parent\"", "\"Local\"", "\"local.parent\""]
+        );
+        // The referenced tables of the current schema are reported under the
+        // same names, so a foreign key and its target table still match.
+        for name in ["\"local.parent\"", "\"Local\""] {
+            assert!(
+                model.tables.iter().any(|table| table.table_name == name),
+                "{name}: {:?}",
+                model
+                    .tables
+                    .iter()
+                    .map(|t| &t.table_name)
+                    .collect::<Vec<_>>()
+            );
+        }
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    postgres.cleanup()?;
+    result
+}
+
+/// Round 3 of #782: SQL Server catalogue names round-trip. Schemas, tables
+/// and columns that contain `]`, `.` and non-ASCII characters, and index,
+/// index-column and constraint names that are themselves bracketed, are
+/// introspected in a form the migration renderers turn back into the same
+/// objects; the rendered statements run against the owned server.
+#[cfg(feature = "mssql")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::db::mssql::MssqlPool;
+    use graphql_orm::graphql::orm::{
+        MigrationStep, introspect_mssql_schema, render_migration_step,
+    };
+
+    let mut server = owned_mssql::OwnedSqlServer::start().await?;
+    let result = async {
+        let connection = server.connection_string.clone();
+        owned_mssql::execute_batch(&connection, "CREATE SCHEMA [雪]].schema]").await?;
+        owned_mssql::execute_batch(
+            &connection,
+            "CREATE TABLE [雪]].schema].[台]].parent] ([列]].id] int NOT NULL PRIMARY KEY); \
+             CREATE TABLE [雪]].schema].[台]].child] ( \
+                 id int NOT NULL PRIMARY KEY, \
+                 [列]].parent] int CONSTRAINT [[制約]]] REFERENCES [雪]].schema].[台]].parent] ([列]].id]), \
+                 [[値]]] int, \
+                 [値.b] int \
+             ); \
+             CREATE INDEX [[索引]]] ON [雪]].schema].[台]].child] ([[値]]]); \
+             CREATE INDEX [ix.dot] ON [雪]].schema].[台]].child] ([値.b]);",
+        )
+        .await?;
+        let pool = MssqlPool::connect_ado(&connection).await?;
+        let model = introspect_mssql_schema(&pool).await?;
+        let table = |name: &str| {
+            model
+                .tables
+                .iter()
+                .find(|table| table.table_name == name)
+                .ok_or_else(|| format!("{name}: {:?}", model.tables))
+        };
+        let parent = table("[雪]].schema].[台]].parent]")?;
+        let child = table("[雪]].schema].[台]].child]")?;
+        assert_eq!(parent.primary_key, "[列]].id]");
+        let foreign_key = &child.foreign_keys[0];
+        assert_eq!(foreign_key.target_table, parent.table_name);
+        assert_eq!(foreign_key.constraint_name.as_deref(), Some("[[制約]]]"));
+        assert_eq!(foreign_key.column_pairs[0].source_column, "[列]].parent]");
+        assert_eq!(foreign_key.column_pairs[0].target_column, parent.primary_key);
+        let index = |name: &str| {
+            child
+                .indexes
+                .iter()
+                .find(|index| index.name == name)
+                .cloned()
+                .ok_or_else(|| format!("{name}: {:?}", child.indexes))
+        };
+        let bracketed = index("[[索引]]]")?;
+        assert_eq!(bracketed.columns, ["[[値]]]"]);
+        let dotted = index("[ix.dot]")?;
+        assert_eq!(dotted.columns, ["[値.b]"]);
+
+        let mut statements = Vec::new();
+        for index in [bracketed, dotted] {
+            statements.extend(render_migration_step(
+                BACKEND,
+                &MigrationStep::DropIndex {
+                    table_name: child.table_name.clone(),
+                    index_name: index.name.to_string(),
+                },
+            ));
+            statements.extend(render_migration_step(
+                BACKEND,
+                &MigrationStep::CreateIndex {
+                    table_name: child.table_name.clone(),
+                    index,
+                },
+            ));
+        }
+        statements.extend(render_migration_step(
+            BACKEND,
+            &MigrationStep::DropForeignKey {
+                table_name: child.table_name.clone(),
+                foreign_key: foreign_key.clone(),
+            },
+        ));
+        assert_eq!(
+            statements,
+            [
+                "DROP INDEX [[索引]]] ON [雪]].schema].[台]].child]",
+                "CREATE INDEX [[索引]]] ON [雪]].schema].[台]].child] ([[値]]])",
+                "DROP INDEX [ix.dot] ON [雪]].schema].[台]].child]",
+                "CREATE INDEX [ix.dot] ON [雪]].schema].[台]].child] ([値.b])",
+                "ALTER TABLE [雪]].schema].[台]].child] DROP CONSTRAINT [[制約]]]",
+            ]
+        );
+        for statement in &statements {
+            owned_mssql::execute_batch(&connection, statement).await?;
+        }
+        // The same objects were addressed: both indexes exist again on their
+        // own columns, and the constraint is gone.
+        let after = introspect_mssql_schema(&pool).await?;
+        let child = after
+            .tables
+            .iter()
+            .find(|table| table.table_name == "[雪]].schema].[台]].child]")
+            .ok_or("child after")?;
+        let mut indexes = child
+            .indexes
+            .iter()
+            .map(|index| (index.name.to_string(), index.columns.to_vec()))
+            .collect::<Vec<_>>();
+        indexes.sort();
+        assert_eq!(
+            indexes,
+            [
+                ("[[索引]]]".to_owned(), vec!["[[値]]]"]),
+                ("[ix.dot]".to_owned(), vec!["[値.b]"]),
+            ]
+        );
+        assert!(child.foreign_keys.is_empty(), "{:?}", child.foreign_keys);
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    server.cleanup()?;
+    result
+}

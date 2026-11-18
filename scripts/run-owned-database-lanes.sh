@@ -40,7 +40,7 @@ run_dependent_deletes() {
 
 run_identifier_quoting() {
   cargo test -p graphql-orm --locked --no-default-features --features "$1" \
-    --test identifier_quoting_properties -- --test-threads=1
+    --test identifier_quoting_properties --test qualified_read_predicates -- --test-threads=1
 }
 
 run_sqlite() {

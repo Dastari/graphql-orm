@@ -171,9 +171,9 @@ impl Relation {
             }
             joins.push(format!(
                 "__gom_visibility.{} = {}.{}",
-                B::DIALECT.quote_identifier(destination),
+                B::DIALECT.quote_column_identifier(destination),
                 B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
-                B::DIALECT.quote_identifier(source)
+                B::DIALECT.quote_column_identifier(source)
             ));
         }
         let mut values = Vec::new();
@@ -222,7 +222,10 @@ impl ReadPredicate {
             entity: TypeId::of::<T>(),
             backend: B::DIALECT,
             expression: FilterExpression::trusted_fragment(
-                format!("{} {operator} ?", B::DIALECT.quote_identifier_path(column)),
+                format!(
+                    "{} {operator} ?",
+                    B::DIALECT.quote_column_identifier(column)
+                ),
                 vec![value],
             ),
         })
@@ -259,7 +262,7 @@ impl ReadPredicate {
             entity: TypeId::of::<T>(),
             backend: B::DIALECT,
             expression: FilterExpression::trusted_fragment(
-                format!("{} {test}", B::DIALECT.quote_identifier_path(column)),
+                format!("{} {test}", B::DIALECT.quote_column_identifier(column)),
                 Vec::new(),
             ),
         })
@@ -396,7 +399,12 @@ impl ReadPredicate {
         let source = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
         let null_key = keys
             .iter()
-            .map(|(column, _)| format!("{source}.{} IS NULL", B::DIALECT.quote_identifier(column)))
+            .map(|(column, _)| {
+                format!(
+                    "{source}.{} IS NULL",
+                    B::DIALECT.quote_column_identifier(column)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" OR ");
         let matching = relation.exists(&relation.predicate);
@@ -577,7 +585,9 @@ impl ReadPredicate {
                 .collect::<Vec<_>>()
         };
         let pointers = join(
-            indexed(&|_, pointer, _| format!("{table}.{}", dialect.quote_identifier(pointer))),
+            indexed(&|_, pointer, _| {
+                format!("{table}.{}", dialect.quote_column_identifier(pointer))
+            }),
             ", ",
         );
         let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
@@ -592,7 +602,7 @@ impl ReadPredicate {
             indexed(&|index, _, key| {
                 format!(
                     "{table}.{} = {cte}.__gom_p{index}",
-                    dialect.quote_identifier(key)
+                    dialect.quote_column_identifier(key)
                 )
             }),
             " AND ",
@@ -616,7 +626,7 @@ impl ReadPredicate {
             indexed(&|index, _, key| {
                 format!(
                     "__gom_target.{} = __gom_node.__gom_p{index}",
-                    dialect.quote_identifier(key)
+                    dialect.quote_column_identifier(key)
                 )
             }),
             " AND ",
