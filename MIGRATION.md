@@ -24,6 +24,46 @@ assigns the final version numbers. A version named in an entry below is the
 integration placeholder its change was written against, not a published
 release.
 
+### Exhaustive SqlValue matches (#521)
+
+**Action needed** for downstream Rust code that inspects SQL values. Add a
+wildcard arm to exhaustive matches on `graphql_orm::graphql::orm::SqlValue`
+and handle unsupported values explicitly. The enum is now `#[non_exhaustive]`
+and gains `Temporal` for dates and timestamps.
+
+Generated writes include `SqlValue::Temporal` for chrono fields and annotated
+temporal text fields in `MutationEvent.changes`. Host hooks that extract dates
+with `if let SqlValue::String(_)` must handle `SqlValue::Temporal` too, even with
+native SQL Server temporal text parameters disabled. Use
+`TemporalValue::kind()` to inspect the parsed value or
+`TemporalValue::as_text()` to recover its previous text spelling.
+
+### SQL Server native temporal parameters (#521)
+
+**No action** to retain the previous behavior for existing temporal text
+writes and date filters. SQL Server binds chrono values natively. To enable
+native binding for temporal text as well, pass
+`MssqlPoolOptions::new().typed_temporal_parameters(true)` when connecting
+your SQL Server pool and use that pool to build the `Database`.
+
+- On an `NVARCHAR(MAX)` field declared with `#[filterable(type = "date")]`,
+  writes may store SQL Server's text spelling. Filter comparisons convert
+  stored text to temporal values, changing lexical comparisons to temporal
+  comparisons. One row with non-ISO text that SQL Server cannot convert can
+  fail the whole query.
+- An offset-bearing filter compared with `datetime2` or `datetime` compares
+  instants with the stored column treated as UTC. Previously SQL Server
+  dropped the filter offset and compared wall-clock times. This can change
+  which rows filters and read policies admit.
+- At database compatibility level 130 or later, conversion of a legacy
+  `datetime` column to a higher-precision type can expose its 1/300-second
+  ticks. An `eq` or `BETWEEN` operand at the displayed millisecond can stop
+  matching. Native parameters can also change rounding on writes.
+
+The [SQL Server reference](docs/reference/graphql-orm/mssql.md#native-temporal-parameters)
+lists supported formats. A future breaking release can enable native
+temporal text parameters by default.
+
 ### GraphQL naming is selected by environment variables, not features (#508)
 
 **Action needed** only for builds that enable a `resolver-case-*`,

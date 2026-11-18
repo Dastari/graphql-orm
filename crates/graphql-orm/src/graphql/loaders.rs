@@ -52,7 +52,7 @@ impl RelationKey {
         let types = values
             .iter()
             .map(|value| match value {
-                SqlValue::String(_) => (Type::String, false),
+                SqlValue::String(_) | SqlValue::Temporal(_) => (Type::String, false),
                 SqlValue::Uuid(_) => (Type::Uuid, false),
                 SqlValue::Int(_) => (Type::Int, false),
                 SqlValue::Float(_) => (Type::Float, false),
@@ -714,6 +714,7 @@ struct RelationGroupKey {
 fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
     match value {
         crate::graphql::orm::SqlValue::String(value) => value.clone(),
+        crate::graphql::orm::SqlValue::Temporal(value) => value.as_text().to_owned(),
         crate::graphql::orm::SqlValue::Uuid(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Int(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Float(value) => value.to_string(),

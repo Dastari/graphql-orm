@@ -56,7 +56,7 @@ run_sqlite() {
     --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test page_limit_contract --test repository_explicit_limits \
     --test bulk_write_filter_authority --test static_input_object_shape --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked
+    --test temporal_bind_compatibility --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features sqlite --locked
@@ -64,7 +64,7 @@ run_sqlite() {
 
 run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
+    --test temporal_bind_compatibility --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --test runtime_many_to_many -- --test-threads=1

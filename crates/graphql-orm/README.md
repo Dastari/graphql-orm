@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+SQL Server binds chrono values natively. Pools can opt in to native binds
+for annotated temporal text and date filters with
+`MssqlPoolOptions::typed_temporal_parameters(true)`. See the [migration guide](../../MIGRATION.md#sql-server-native-temporal-parameters-521)
+for legacy `datetime` conversion and the `SqlValue` match update.
+
 The unreleased breaking release fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side

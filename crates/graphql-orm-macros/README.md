@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Generated writes carry temporal types for chrono dates and timestamps and
+for text fields marked `#[date_field]` or `#[filterable(type = "date")]`.
+SQL Server binds chrono values natively and can opt in to native binding
+for temporal text per pool. See the
+[migration guide](../../MIGRATION.md#sql-server-native-temporal-parameters-521).
+
 The unreleased breaking release fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side

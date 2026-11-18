@@ -7,7 +7,7 @@ use crate::entity::{
     FieldMetadata, decimal_definition_tokens, is_bool_type, is_byte_vec_type, is_option_type,
     is_serde_json_value_or_option, is_string_type, is_uuid_type, is_vec_type, option_inner_type,
     parse_entity_metadata, parse_field_metadata, resolver_auth_mode_tokens,
-    spatial_geometry_type_tokens, type_path_last_ident,
+    scalar_text_bind_tokens, spatial_geometry_type_tokens, type_path_last_ident,
 };
 use crate::naming::{
     apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
@@ -1211,19 +1211,19 @@ fn push_create_input_sql_value_tokens(
             }
         }
     } else if is_option_type(field_type) {
-        let value_expr = quote! { value.to_string() };
+        let value_expr = scalar_text_bind_tokens(field_type, meta, quote! { value });
 
         quote! {
             match &#field_access {
-                Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                Some(value) => bind_values.push(#value_expr),
                 None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
             }
         }
     } else {
-        let value_expr = quote! { (#field_access).to_string() };
+        let value_expr = scalar_text_bind_tokens(field_type, meta, quote! { &(#field_access) });
 
         quote! {
-            bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
+            bind_values.push(#value_expr);
         }
     }
 }
@@ -3432,21 +3432,22 @@ fn generate_graphql_operations_unfiltered(
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
             } else if is_option_type(field_type) {
-                let value_expr = quote! { v.to_string() };
+                let value_expr = scalar_text_bind_tokens(field_type, &meta, quote! { v });
 
                 let bind_tokens = quote! {
                     match &input.#field_name {
-                        Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                        Some(v) => bind_values.push(#value_expr),
                         None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                     }
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
             } else {
-                let value_expr = quote! { input.#field_name.to_string() };
+                let value_expr =
+                    scalar_text_bind_tokens(field_type, &meta, quote! { &input.#field_name });
 
                 let bind_tokens = quote! {
-                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
+                    bind_values.push(#value_expr);
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
@@ -3872,14 +3873,14 @@ fn generate_graphql_operations_unfiltered(
                 update_field_checks_repo.push(update_tokens);
             } else if is_already_optional {
                 // Field type is already Option<T>, update type is Option<Option<T>>
-                let value_expr = quote! { v.to_string() };
+                let value_expr = scalar_text_bind_tokens(field_type, &meta, quote! { v });
 
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(format!("{} = ?", #db_col_sql));
                         match val {
-                            Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                            Some(v) => values.push(#value_expr),
                             None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                         }
                     }
@@ -3925,13 +3926,13 @@ fn generate_graphql_operations_unfiltered(
                 update_field_checks_repo.push(update_tokens);
             } else {
                 // Field type is T, update type is Option<T>
-                let value_expr = quote! { val.to_string() };
+                let value_expr = scalar_text_bind_tokens(field_type, &meta, quote! { val });
 
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(format!("{} = ?", #db_col_sql));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
+                        values.push(#value_expr);
                     }
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
