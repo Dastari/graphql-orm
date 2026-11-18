@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
+
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
 read as whitespace, and adds seeded property suites for identifier quoting on every backend
 and for canonical JSON defaults ([#725](https://github.com/Dastari/graphql-orm/issues/725)).

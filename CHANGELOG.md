@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.179.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- Every PostgreSQL container started by the ORM, backup and AI test harnesses now
+  runs with a hard `--memory 4g --memory-swap 4g` limit, matching the SQL Server
+  harness, so a runaway test backend cannot exhaust the build host. Library code,
+  public API, generated SQL and stored data are unchanged.
+
 ## Unreleased - ORM/macros 0.179.0
 
 Security property suites for identifier quoting and canonical JSON ([#725](https://github.com/Dastari/graphql-orm/issues/725)). See the [migration guide](MIGRATION.md#01770-to-01790-identifier-quoting-and-canonical-json-properties).
