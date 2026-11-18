@@ -3,3 +3,6 @@
 *.cdx.json
 *.pyc
 __pycache__/
+# proptest failure-persistence files. Minimized failures are kept as explicit
+# regression cases in the test source instead.
+/crates/**/*.regressions

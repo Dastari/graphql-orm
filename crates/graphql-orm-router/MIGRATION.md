@@ -3,12 +3,24 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.16.4 to 0.16.5
+
+**Action needed** only if your issuer writes `iss` as an array or adds a
+`crit` header member (including `"crit": null`) to access tokens or the signed
+role-scope catalogue: those tokens are now refused with `UNAUTHENTICATED` by
+both `JwksAuthenticationProvider` and `AgqlAuthenticationProvider`, and such
+a catalogue is refused. A protected header longer than 8 KiB encoded is also
+refused; check this only if your issuer puts large members, such as an `x5c`
+certificate chain, in access-token or catalogue headers. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
+one string and use no critical extensions, and need no change. Configuration
+and public APIs are unchanged.
 
 ## 0.16.2 to 0.16.4
 

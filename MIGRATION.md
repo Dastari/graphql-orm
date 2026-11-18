@@ -3,12 +3,25 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
+
+Upgrade ORM and macros together.
+
+- **SQLite names that start with U+FEFF (#725). Action needed** only if a
+  SQLite entity, column or index name declared in your schema begins with a
+  byte-order mark (U+FEFF). It is now delimited, so it names the declared
+  object; before, SQLite dropped the mark and used the rest of the name. If an
+  existing database holds such an object under the shortened name, rename it
+  to the declared name. Every other name renders as before.
+- **Property suites (#725). No action.** The new tests change no API or
+  stored data.
 
 ## 0.176.0 to 0.177.0: bulk-write target visibility and coded dependent-delete refusals
 

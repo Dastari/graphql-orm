@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,8 +70,11 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.177.0, `graphql-orm-macros` 0.177.0**; `graphql-orm-operation-catalog` 0.9.0; **`graphql-orm-storage` 0.18.1**; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; **`graphql-orm-ai` 0.149.0**; `graphql-orm-router-protocol` 0.3.0; **`graphql-orm-router` 0.16.4**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.179.0, `graphql-orm-macros` 0.179.0**; `graphql-orm-operation-catalog` 0.9.0; **`graphql-orm-storage` 0.18.2**; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; **`graphql-orm-ai` 0.149.0**; `graphql-orm-router-protocol` 0.3.0; **`graphql-orm-router` 0.16.5**.
 
+- **Action needed** — ORM/macros 0.179.0: only for a SQLite name declared with a leading U+FEFF, which is now delimited and keeps the mark. [Migration](../../MIGRATION.md#01770-to-01790-identifier-quoting-and-canonical-json-properties)
+- **Action needed** — router 0.16.5: only if your issuer writes `iss` as an array or adds a `crit` header member (even `null`); such bearer tokens are now refused by both the JWKS and `auth-agql` providers, as is a protected header over 8 KiB encoded. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0164-to-0165)
+- **No action** — storage 0.18.2: key-validation property tests only.
 - **No action** — Router 0.16.4 adds a failed authentication refresh counter to the authenticated metrics response. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0162-to-0164)
 - **Action needed** — Storage 0.18.1 returns an I/O error if a local listing cannot verify the reserved directory identity. Callers that previously expected to proceed after such an error must handle it. [Migration](../../crates/graphql-orm-storage/MIGRATION.md#0170-to-0181)
 - **No action** — ORM/macros 0.177.0: opt-in `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` narrows generated GraphQL `updateMany`/`deleteMany` targets to the row policy's SQL read visibility (rows outside it are not evaluated, counted or, on PostgreSQL, locked); off by default, bulk writes unchanged. Before enabling: write-only rows need a `write_target_prefilter`, and a `read_visibility` error refuses the bulk write. [migration](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals)

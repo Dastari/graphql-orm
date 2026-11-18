@@ -3,7 +3,7 @@ title: Security property and fuzz testing scope
 kind: plan
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -42,5 +42,26 @@ security-sensitive findings through the maintainer's private reporting path.
 
 ## Current checkpoint
 
-Maintainer recommendation accepted on 2026-11-15; issues #725 and #726 define
-implementation scope. This PR records the plan, not completed fuzz coverage.
+Implemented for #725 and #726 (ORM 0.179.0, storage 0.18.2, router 0.16.5).
+Every acceptance-gate surface has a seeded, bounded suite in ordinary CI:
+
+- Scope matching: router scope-template properties under exact and wildcard
+  matchers, and the `auth-agql` adapter's syntax check and expiry conversion
+  (`crates/graphql-orm-router/src/auth.rs`, `src/agql.rs`).
+- SQL quoting: text properties for SQLite, PostgreSQL and SQL Server, and
+  executed round trips on in-memory SQLite and the owned PostgreSQL and SQL
+  Server containers (`crates/graphql-orm/tests/identifier_quoting_properties.rs`).
+- Storage keys: validators against an independent contract model, plus a
+  local-provider containment round trip (`crates/graphql-orm-storage/tests/key_properties.rs`).
+- Canonical JSON: write/read, canonical identity, one spelling, fixed points
+  and limits (`crates/graphql-orm/tests/canonical_json_properties.rs`).
+- JWT and claims: cargo-fuzz targets with an independent oracle, a retained
+  corpus and regressions replayed by `cargo test -p graphql-orm-router`, and
+  a weekly 20-minute run per target (`crates/graphql-orm-router/fuzz/`).
+
+Findings fixed with regressions: a bearer `crit` header was ignored (on
+both providers, including `"crit": null`, found in review), an
+`iss` array containing the issuer was accepted, and a SQLite name starting
+with U+FEFF lost the mark. Open, with ignored regressions: #782 (malformed
+delimited input passes through `quote_identifier`) and #783 (SQL Server
+bare non-ASCII names). Archive this plan when both are resolved.

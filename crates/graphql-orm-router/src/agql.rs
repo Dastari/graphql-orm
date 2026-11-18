@@ -49,6 +49,14 @@ impl AuthenticationProvider for AgqlAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        // The pinned validator does not check `crit` (RFC 7515 4.1.11) or
+        // bound the header, so the adapter refuses an oversized header or any
+        // critical extension before calling it.
+        if crate::jwt::refuse_protected_header(token) {
+            return Err(AuthenticationError::invalid_credential(
+                "invalid bearer credential",
+            ));
+        }
         let user = self
             .validator
             .authenticate_access_token(token)
@@ -403,9 +411,166 @@ mod tests {
         }
     }
 
+    /// Signs `claims` under a hand-written header with `extra` members, so a
+    /// test can send `crit` spellings the JWT library would not write.
+    fn signed_token_with_header(
+        key: &EncodingKey,
+        extra: &str,
+        claims: &serde_json::Value,
+    ) -> String {
+        use base64::Engine as _;
+        let encode = |text: String| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+        let message = format!(
+            "{}.{}",
+            encode(format!(
+                r#"{{"typ":"JWT","alg":"RS256","kid":"agql-key"{extra}}}"#
+            )),
+            encode(claims.to_string())
+        );
+        let signature =
+            jsonwebtoken::crypto::sign(message.as_bytes(), key, Algorithm::RS256).unwrap();
+        format!("{message}.{signature}")
+    }
+
+    /// Review finding on #784: the pinned validator accepted an RS256 token
+    /// with `crit`. The adapter refuses every `crit` member first.
+    #[test]
+    fn adapter_refuses_any_critical_header_before_the_validator() {
+        let signing_key = EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap();
+        let mut jwk = Jwk::from_encoding_key(&signing_key, Algorithm::RS256).unwrap();
+        jwk.common.key_id = Some("agql-key".to_owned());
+        let validator = Arc::new(
+            AccessTokenValidator::builder()
+                .issuer("https://issuer.test")
+                .audience("graphql-router")
+                .jwks_json(serde_json::to_string(&json!({"keys": [jwk]})).unwrap())
+                .build()
+                .unwrap(),
+        );
+        let provider = AgqlAuthenticationProvider::new(validator);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = json!({
+            "sub": "agql-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+            "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
+            "iat": now, "exp": now + 60, "scope": "products.read"
+        });
+        // The hand-written header is otherwise accepted.
+        let control = signed_token_with_header(&signing_key, "", &claims);
+        assert_eq!(
+            provider.authenticate_bearer(&control).unwrap().subject(),
+            "agql-user"
+        );
+        // A small filler member is accepted; one over the protected-header
+        // cap is refused before the validator decodes it.
+        let padded = signed_token_with_header(&signing_key, r#","pad":"ppp""#, &claims);
+        assert!(provider.authenticate_bearer(&padded).is_ok());
+        let oversized = format!(r#","pad":"{}""#, "p".repeat(256 * 1024));
+        for crit in [
+            r#","crit":["exp"]"#,
+            r#","crit":[]"#,
+            r#","crit":null"#,
+            r#","b64":false,"crit":["b64"]"#,
+            oversized.as_str(),
+        ] {
+            let token = signed_token_with_header(&signing_key, crit, &claims);
+            assert_eq!(
+                provider.authenticate_bearer(&token).unwrap_err().kind(),
+                crate::AuthenticationErrorKind::InvalidCredential,
+                "{}",
+                &crit[..crit.len().min(40)]
+            );
+        }
+    }
+
     fn signed_token(key: &EncodingKey, claims: serde_json::Value) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("agql-key".to_owned());
         encode(&header, &claims, key).unwrap()
+    }
+
+    /// Bounded adapter properties (#725, #726). The pinned `agql-auth`
+    /// validator and matcher are external; these cover only the router's
+    /// adapter code around them.
+    mod adapter_properties {
+        use super::*;
+        use agql_auth::HierarchicalScopeOptions;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, FileFailurePersistence, RngSeed};
+
+        fn config(cases: u32, seed: u64) -> Config {
+            let env_u64 = |name: &str| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+            };
+            Config {
+                cases: env_u64("PROPTEST_CASES").map_or(cases, |value| value as u32),
+                rng_seed: RngSeed::Fixed(env_u64("PROPTEST_RNG_SEED").unwrap_or(seed)),
+                source_file: Some(file!()),
+                failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
+                    "regressions",
+                ))),
+                ..Config::default()
+            }
+        }
+
+        fn syntax_char() -> impl Strategy<Value = char> {
+            prop_oneof![
+                3 => proptest::sample::select(vec![
+                    '.', ':', '/', '*', '#', '+', '-', '_', 'a', 'Z', '0', ' ', '\u{ff0e}',
+                ]),
+                1 => any::<char>(),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(config(1024, 0x7260_0101))]
+
+            #[test]
+            fn validated_expiry_times_convert_exactly_or_fail_closed(nanos in any::<i128>()) {
+                if let Ok(time) = checked_system_time(nanos) {
+                    let back = match time.duration_since(UNIX_EPOCH) {
+                        Ok(after) => i128::try_from(after.as_nanos()).unwrap(),
+                        Err(before) => -i128::try_from(before.duration().as_nanos()).unwrap(),
+                    };
+                    prop_assert_eq!(back, nanos);
+                }
+            }
+
+            #[test]
+            fn accepted_hierarchical_syntax_never_occurs_inside_a_template_value(
+                separator in syntax_char(),
+                wildcard in proptest::collection::vec(syntax_char(), 0..3),
+                value in "[A-Za-z0-9_-]{1,16}",
+                granted in "[A-Za-z0-9_-]{1,16}",
+            ) {
+                let wildcard: String = wildcard.into_iter().collect();
+                let accepted = validate_hierarchical_syntax(separator, &wildcard).is_ok();
+                prop_assert_eq!(
+                    accepted,
+                    !is_plain_scope_character(separator)
+                        && !wildcard.chars().all(is_plain_scope_character)
+                );
+                if !accepted {
+                    return Ok(());
+                }
+                // A plain value holds neither the separator nor the wildcard.
+                prop_assert!(!value.contains(separator) && !value.contains(wildcard.as_str()));
+                let options = HierarchicalScopeOptions::default()
+                    .with_separator(separator)
+                    .with_wildcard(wildcard.clone());
+                if let Ok(matcher) = HierarchicalScopeMatch::new(options) {
+                    let matcher = AgqlScopeMatcher::hierarchical(matcher).unwrap();
+                    let scope = |segment: &str| format!("zones{separator}{segment}{separator}read");
+                    // A grant for one plain value never authorizes another.
+                    if matcher.matches(&scope(&granted), &scope(&value)) {
+                        prop_assert_eq!(&granted, &value);
+                    }
+                }
+            }
+        }
     }
 }

@@ -14,3 +14,8 @@ mssql	[app].[a]].b]	[app].[a]].b]
 mssql	[a]].b].[c.d]	[a]].b].[c.d]
 mssql	"a"".b"	"a"".b"
 mssql	[app]."a.b"	[app]."a.b"
+# U+FEFF (byte-order mark) names: SQLite reads a BOM that starts a token as whitespace.
+sqlite	﻿bom	"﻿bom"
+sqlite	app.﻿bom	app."﻿bom"
+sqlite	bom﻿mid	bom﻿mid
+postgres	﻿bom	﻿bom

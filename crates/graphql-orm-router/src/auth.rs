@@ -1278,4 +1278,210 @@ mod tests {
         descriptor.fingerprints.combined = descriptor.combined_fingerprint();
         descriptor
     }
+
+    /// Bounded scope-matching properties (#725): arbitrary argument values,
+    /// including separators, wildcards, placeholders, Unicode lookalikes and
+    /// oversized text, can never broaden what a grant authorizes.
+    mod scope_properties {
+        use super::*;
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, FileFailurePersistence, RngSeed};
+        use serde_json::Value as Json;
+        use std::sync::OnceLock;
+
+        const QUERY: &str = "query Read($id: ID!) { zone(id: $id) { id } }";
+
+        fn config(cases: u32, seed: u64) -> Config {
+            let env_u64 = |name: &str| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+            };
+            Config {
+                cases: env_u64("PROPTEST_CASES").map_or(cases, |value| value as u32),
+                rng_seed: RngSeed::Fixed(env_u64("PROPTEST_RNG_SEED").unwrap_or(seed)),
+                source_file: Some(file!()),
+                failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
+                    "regressions",
+                ))),
+                ..Config::default()
+            }
+        }
+
+        struct Fixture {
+            catalog: AuthorizationCatalog,
+            operation: OperationDefinition,
+        }
+
+        fn fixture() -> &'static Fixture {
+            static FIXTURE: OnceLock<Fixture> = OnceLock::new();
+            FIXTURE.get_or_init(|| Fixture {
+                catalog: entity_catalog(vec![
+                    zone_operation(AuthorizationRequirement::AllScopes {
+                        scopes: vec![ScopeTemplate::parse("zones.{id}.read").unwrap()],
+                    }),
+                    diagnostics_operation(),
+                ]),
+                operation: normalized(&entity_graph(), QUERY),
+            })
+        }
+
+        /// A matcher with a suffix wildcard, as hierarchical policies use.
+        #[derive(Debug)]
+        struct PrefixWildcard;
+
+        impl ScopeMatcher for PrefixWildcard {
+            fn matches(&self, granted: &str, required: &str) -> bool {
+                granted == required
+                    || granted
+                        .strip_suffix('*')
+                        .is_some_and(|prefix| required.starts_with(prefix))
+            }
+        }
+
+        fn allowed(value: &Json, grants: &[String], matcher: &dyn ScopeMatcher) -> bool {
+            let Ok(principal) = AuthenticatedPrincipal::new("subject", grants, None) else {
+                return false;
+            };
+            let value: JsonValue = hive_router::sonic_rs::from_str(&value.to_string()).unwrap();
+            let variables = [("id".to_owned(), value)].into_iter().collect();
+            fixture()
+                .catalog
+                .authorize_operation(
+                    &fixture().operation,
+                    &variables,
+                    Some(&principal),
+                    matcher,
+                    VariableResolution::Complete,
+                )
+                .is_empty()
+        }
+
+        /// The documented substitution: an `ID` value renders as its string,
+        /// or an integer's decimal text, when it is one plain segment.
+        fn rendered(value: &Json) -> Option<String> {
+            let text = match value {
+                Json::String(text) => text.clone(),
+                Json::Number(number) if number.is_i64() || number.is_u64() => number.to_string(),
+                _ => return None,
+            };
+            (!text.is_empty()
+                && text.len() <= 256
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .then(|| format!("zones.{text}.read"))
+        }
+
+        fn value_char() -> impl Strategy<Value = char> {
+            prop_oneof![
+                6 => proptest::char::range('a', 'z'),
+                2 => proptest::char::range('0', '9'),
+                2 => proptest::sample::select(vec!['-', '_', 'Z']),
+                4 => proptest::sample::select(vec![
+                    '.', '*', '{', '}', ':', '/', ' ', '\t', '\0', '"', '#', '?', '%', '+', ',',
+                ]),
+                2 => proptest::sample::select(vec![
+                    '\u{ff0e}', '\u{ff0a}', '\u{2024}', '\u{212a}', '\u{ff11}', 'é',
+                    '\u{301}', '\u{200b}', '\u{feff}', 'ſ',
+                ]),
+                1 => any::<char>(),
+            ]
+        }
+
+        fn argument() -> impl Strategy<Value = Json> {
+            prop_oneof![
+                8 => vec(value_char(), 0..12)
+                    .prop_map(|chars| Json::String(chars.into_iter().collect())),
+                1 => (250usize..262).prop_map(|length| Json::String("z".repeat(length))),
+                1 => any::<i64>().prop_map(Json::from),
+                1 => any::<f64>().prop_map(Json::from),
+                1 => prop_oneof![
+                    Just(Json::Null),
+                    Just(Json::Bool(true)),
+                    Just(serde_json::json!(["a"])),
+                    Just(serde_json::json!({"id": "a"})),
+                ],
+            ]
+        }
+
+        /// Grants near the rendered scope: the exact scope for some value,
+        /// wildcards at every level, and prefixes or extensions of it.
+        fn grants() -> impl Strategy<Value = Vec<String>> {
+            let grant = prop_oneof![
+                3 => vec(value_char(), 0..12).prop_map(|chars| {
+                    format!("zones.{}.read", chars.into_iter().collect::<String>())
+                }),
+                2 => proptest::sample::select(vec![
+                    "*", "zones.*", "zones.*.read", "zones.a*", "zones.a.read*", "zones.a",
+                    "zones.a.read.extra", "zones..read", "Zones.a.read",
+                ])
+                .prop_map(str::to_owned),
+            ];
+            vec(grant, 0..4)
+        }
+
+        /// Adds the scope a string value would render to, plain or not, so
+        /// both outcomes are common.
+        fn with_own_scope(mut grants: Vec<String>, value: &Json, own: bool) -> Vec<String> {
+            if let (true, Json::String(text)) = (own, value) {
+                grants.push(format!("zones.{text}.read"));
+            }
+            grants
+        }
+
+        proptest! {
+            #![proptest_config(config(1024, 0x7250_0401))]
+
+            #[test]
+            fn exact_matching_is_byte_equality(granted in ".{0,8}", required in ".{0,8}") {
+                prop_assert_eq!(ExactScopeMatcher.matches(&granted, &required), granted == required);
+            }
+
+            #[test]
+            fn exact_grants_authorize_exactly_the_rendered_scope(
+                value in argument(),
+                grants in grants(),
+                own in any::<bool>(),
+            ) {
+                let grants = with_own_scope(grants, &value, own);
+                let expected = AuthenticatedPrincipal::new("subject", &grants, None).is_ok()
+                    && rendered(&value).is_some_and(|scope| grants.contains(&scope));
+                prop_assert_eq!(allowed(&value, &grants, &ExactScopeMatcher), expected, "{}", value);
+            }
+
+            #[test]
+            fn malformed_values_fail_closed_even_under_wildcard_grants(
+                value in argument(),
+                grants in grants(),
+                own in any::<bool>(),
+            ) {
+                let grants = with_own_scope(grants, &value, own);
+                let decision = allowed(&value, &grants, &PrefixWildcard);
+                match rendered(&value) {
+                    // No grant, not even `*`, authorizes a value that is not
+                    // one plain segment.
+                    None => prop_assert!(!decision, "{} was authorized by {:?}", value, grants),
+                    Some(scope) => {
+                        let expected = AuthenticatedPrincipal::new("subject", &grants, None)
+                            .is_ok()
+                            && grants.iter().any(|grant| PrefixWildcard.matches(grant, &scope));
+                        prop_assert_eq!(decision, expected, "{} under {:?}", value, grants);
+                    }
+                }
+            }
+
+            #[test]
+            fn a_grant_for_one_value_never_authorizes_another(
+                granted in "[A-Za-z0-9_-]{1,12}",
+                value in argument(),
+            ) {
+                let grants = vec![format!("zones.{granted}.read")];
+                if allowed(&value, &grants, &ExactScopeMatcher) {
+                    prop_assert_eq!(rendered(&value), Some(grants[0].clone()));
+                }
+            }
+        }
+    }
 }
