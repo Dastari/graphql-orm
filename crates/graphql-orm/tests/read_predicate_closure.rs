@@ -124,12 +124,12 @@ fn max_depth() -> u32 {
 #[cfg(feature = "mssql")]
 #[test]
 fn sql_server_bounds_the_unrolled_walk() {
-    // SQL Server unrolls the walk into one OUTER APPLY per hop, so its bound
+    // SQL Server unrolls the walk into one nested level per hop, so its bound
     // is lower; a larger one is refused rather than evaluated in memory.
     let target =
         ReadPredicate::column::<B, ClosureNode>("score", ReadPredicateOp::Gte, SqlValue::Int(5))
             .unwrap();
-    assert!(READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH >= READ_PREDICATE_CLOSURE_DEFAULT_DEPTH);
+    const { assert!(READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH >= READ_PREDICATE_CLOSURE_DEFAULT_DEPTH) };
     ReadPredicate::related_closure::<B, ClosureNode>(PARENT, target.clone()).unwrap();
     ReadPredicate::related_closure_all::<B, ClosureNode>(PARENT, target.clone()).unwrap();
     for quantifier in [ReadPredicateQuantifier::Any, ReadPredicateQuantifier::All] {
@@ -714,7 +714,7 @@ mod portable {
             .await;
         }
         let started = std::time::Instant::now();
-        // The backend's largest bound: 1,024 hops, or 128 on SQL Server. The
+        // The backend's largest bound: 1,024 hops, or 64 on SQL Server. The
         // long chain's rows within the bound of its root are admitted.
         let depth = max_depth();
         let long_chain = 1000.min(depth as usize + 1);
