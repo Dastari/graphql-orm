@@ -14,6 +14,7 @@ mod http;
 
 #[cfg(any(
     feature = "provider-openai-core",
+    feature = "provider-anthropic-core",
     feature = "provider-xai-core",
     feature = "provider-openai-compatible-core",
     feature = "provider-chat-completions-core"

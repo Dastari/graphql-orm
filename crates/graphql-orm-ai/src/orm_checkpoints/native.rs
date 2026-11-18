@@ -730,9 +730,12 @@ impl OrmAiCoordinatorCheckpointService {
                                 || call.id != candidate.id
                                 || (!completed
                                     && !matches!(
-                                        (candidate_state, call.state.as_str()),
-                                        ("prepared", "approval_prepared")
-                                            | ("finalized", "waiting_approval")
+                                        (
+                                            candidate_state,
+                                            ToolCallState::from_persisted(&call.state)
+                                        ),
+                                        ("prepared", Some(ToolCallState::ApprovalPrepared))
+                                            | ("finalized", Some(ToolCallState::WaitingApproval))
                                     ))
                                 || (completed
                                     && !matches!(

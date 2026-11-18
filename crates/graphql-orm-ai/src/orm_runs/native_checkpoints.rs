@@ -218,7 +218,7 @@ pub(crate) async fn cohort(
                     }
                 }
                 PendingPhase::Waiting | PendingPhase::Claimed { .. } => {
-                    if call.state != "waiting_approval"
+                    if call.state != ToolCallState::WaitingApproval.as_str()
                         || step.state != "running"
                         || call.approval_id != candidate.final_approval_id
                         || call.protected_result.is_some()
@@ -452,7 +452,7 @@ pub(crate) async fn outcome(
         .ok_or_else(missing)?;
     if attempt.run_id != run_id
         || attempt.lease_generation != source.lease_generation
-        || attempt.final_state != "waiting_approval"
+        || attempt.final_state != crate::AiRunState::WaitingApproval.as_str()
         || attempt.outcome_code != "approval_wait_parked"
         || attempt.provider_response_id.as_deref() != response_id
     {
@@ -649,7 +649,7 @@ impl OrmAiRunService {
                             .ok_or_else(missing)?;
                         if original.run_id != run.id
                             || original.lease_generation != source.lease_generation
-                            || original.final_state != "waiting_approval"
+                            || original.final_state != crate::AiRunState::WaitingApproval.as_str()
                             || original.outcome_code != "approval_wait_parked"
                             || original.provider_response_id != source.provider_response_id
                         {

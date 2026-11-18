@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.150.0 reuses compiled registered-tool validators and keeps stored lifecycle values and approvals compatible. See the [migration guide](MIGRATION.md#01490-to-01500).
+
 AI 0.149.0 completes OpenAI Responses (also xAI and OpenAI-compatible) `response.incomplete` output-limit stops and Ollama `length` stops with exact usage and a visible notice, never runs a tool request cut off by such a stop, and reads the conversation bootstrap's whole tool-call window so `reset_required` reports only a real reset. No schema change; see [migration guidance](MIGRATION.md#01480-to-01490-output-limit-stops-and-the-bootstrap-tool-call-window).
 
 Version 0.148.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies

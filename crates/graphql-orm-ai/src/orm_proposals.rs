@@ -2,6 +2,9 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, page_input, principal_identity, record_scope,
+};
 use std::sync::Arc;
 
 use agql_auth::{AuthPrincipal, Clock, CurrentPrincipalResolver, PrincipalReference};
@@ -9,12 +12,8 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::UuidFilter;
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
-};
-use graphql_orm::graphql::pagination::{
-    KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::pagination::ValidatedKeysetConnection;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -485,7 +484,7 @@ impl AiProposalService for OrmAiProposalService {
                 }),
                 ..Default::default()
             },
-            page_input(&page),
+            page_input(&page, false),
         )
         .await
         .map_err(map_orm)?;
@@ -916,51 +915,6 @@ fn validate_outcome(outcome: &AiProposalAppliedOutcome) -> Result<(), AiError> {
     Ok(())
 }
 
-fn page_input(page: &ValidatedKeysetConnection) -> KeysetConnectionInput {
-    match page.direction {
-        KeysetWindowDirection::Forward => KeysetConnectionInput {
-            after: page.cursor.clone(),
-            first: Some(page.limit),
-            ..Default::default()
-        },
-        KeysetWindowDirection::Backward => KeysetConnectionInput {
-            before: page.cursor.clone(),
-            last: Some(page.limit),
-            ..Default::default()
-        },
-    }
-}
-
-fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
-    let kind = match principal {
-        AuthPrincipal::User(_) => "user".to_owned(),
-        AuthPrincipal::ApiToken(token) => format!("api_token:{}", token.principal_kind.as_str()),
-    };
-    (kind, principal.subject())
-}
-
-fn record_scope(session: &AiSessionRecord) -> AiScope {
-    AiScope {
-        kind: session.scope_kind.clone(),
-        id: session.scope_id.clone(),
-        tenant_id: session.tenant_id.clone(),
-    }
-}
-
-fn content_context(
-    entity: &str,
-    row_id: Uuid,
-    field: &str,
-    scope: &AiScope,
-) -> ContentProtectionContext {
-    ContentProtectionContext {
-        entity: entity.to_owned(),
-        row_id: row_id.to_string(),
-        field: field.to_owned(),
-        scope: scope.clone(),
-    }
-}
-
 fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(value.unix_timestamp())
         .expect("an existing OffsetDateTime timestamp remains representable")
@@ -970,27 +924,6 @@ fn map_protection(error: crate::ContentProtectionError) -> AiError {
     match error {
         crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
         _ => AiError::PersistenceFailed,
-    }
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 
