@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.149.0 to 0.149.1: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.148.0 to 0.149.0: output-limit stops and the bootstrap tool-call window
 
 No data migration is needed. GraphQL SDL and AI schema module `0.82.0` are

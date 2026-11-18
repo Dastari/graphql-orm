@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.16.3
+
+- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+
 ## Unreleased - 0.16.2
 
 - Tests: a wire test checks that a subgraph error's `extensions.outcome`

@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.177.0 to 0.181.0: remove the unused macros MySQL flag
+
+**Action needed (only if you enable `graphql-orm-macros/mysql`).** Remove
+`mysql` from the macro dependency's feature list and from any feature
+forwarding. Select `sqlite`, `postgres`, or `mssql` for your runtime backend.
+
+**No action** for other hosts. Upgrade ORM and macros together. No data
+migration is needed. The operation catalog's 0.9.0 to 0.9.1 update refreshes
+install documentation and requires no migration.
+
 ## 0.176.0 to 0.177.0: bulk-write target visibility and coded dependent-delete refusals
 
 Upgrade ORM and macros together and recompile entities. No data migration is

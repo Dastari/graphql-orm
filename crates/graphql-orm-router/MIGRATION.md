@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.2 to 0.16.3: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.16.1 to 0.16.2
 
 **No action.** No consumer migration is required. Only the wire tests change;

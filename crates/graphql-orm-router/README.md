@@ -39,12 +39,6 @@ operations refresh role authority. Authorization policy snapshots release their
 context read locks before the refreshed principal is stored. Configuration and
 public APIs are unchanged.
 
-The current workspace selects published Auth `v0.26.0`, peeled to
-`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
-that same tag and refresh their locks to one source; matching the commit alone
-does not unify revision and tag selectors. See the
-[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
-
 Version 0.15.0 lets the Prometheus exporter bind its own `host` (opt-in; the
 default is unchanged) and bounds stale role-scope catalogue use: after
 `maximumStalenessSeconds` (default 15 minutes) of failed refreshes,
@@ -142,9 +136,9 @@ workspace dependency guidance. The Rust implementation is unchanged; consuming
 applications must still review and qualify the coordinated companion revision.
 
 Version 0.6.1 selects published Auth `v0.21.3` for `auth-agql`, retaining the
-same reviewed commit. Direct Auth dependencies must use that tag too; refresh
-the lockfile and verify one Auth source. Existing clock and authorization
-contracts remain unchanged. See [MIGRATION.md](MIGRATION.md).
+same reviewed commit. That release required direct Auth dependencies to use
+the same tag and resolve one Auth source in the lockfile. Existing clock and
+authorization contracts remain unchanged. See [MIGRATION.md](MIGRATION.md).
 
 A project-neutral Federation router for statically configured and explicitly
 registered GraphQL subgraphs. It composes a complete candidate graph before
@@ -168,12 +162,22 @@ requirements.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
 adapter uses its validator's exact injected clock, including subsecond precision,

@@ -639,12 +639,11 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth `v0.22.0` at
-`997707e060bcf5fabf879a5f98146dc2732b1c99`. Use that tag for direct Auth
-dependencies and refresh the lockfile to one source. The
+For that release, the workspace selected published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99` and required direct Auth dependencies
+to use the same tag and resolve one Auth source in the lockfile. The
 [0.53 migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks)
-describes validated current-session proofs; earlier version notes below retain
-their historical selectors.
+describes validated current-session proofs.
 
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
@@ -659,10 +658,10 @@ complete sensitive schema evidence; offline verification returns passive facts.
 See the [replay contract](../../docs/reference/graphql-orm/owned-planning-replay.md).
 
 Version 0.50.2 aligns the paired runtime/macros release with published
-`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag
-selector for direct Auth dependencies as well; refresh the lockfile and verify
-one Auth source. No runtime behavior, generated code or schema migration is
-added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
+`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. That release
+required direct Auth dependencies to use the same tag and resolve one Auth
+source in the lockfile. No runtime behavior, generated code or schema migration
+is added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
 
 Version 0.50.1 adds checked original filter intent and conservative offline
 runtime-record matching in the core runtime. Upgrade ORM/macros together; no
@@ -681,25 +680,6 @@ runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
 
-
-This is the procedural-macro implementation for `graphql-orm`. Applications
-normally depend on the runtime crate and import its prelude; that keeps the
-macro/runtime versions aligned:
-
-```toml
-[dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
-```
-
-Direct use is supported for tooling that needs the macro package:
-
-```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
-```
-
-The direct dependency still requires a compatible `graphql-orm` runtime in the
-consumer crate because generated code refers to `::graphql_orm`. The macros do
-not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 Version 0.39.1 aligns with the runtime string/binding correction; generated
 static fragment rebasing, inputs, GraphQL SDL and timestamp behavior are unchanged.
@@ -722,6 +702,37 @@ metadata. Deleted snapshots additionally require explicit default-deny
 permission alone does not authorize them, including under database RLS.
 See the [subscription migration](../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
 for deleted preimages, raw event observers, propagation limits and action filters.
+
+## Install from Git
+
+This is the procedural-macro implementation for `graphql-orm`. Applications
+normally depend on the runtime crate and import its prelude; that keeps the
+macro/runtime versions aligned.
+
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
+
+```toml
+[dependencies]
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
+```
+
+Direct use is supported for tooling that needs the macro package:
+
+```toml
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
+```
+
+The direct dependency still requires a compatible `graphql-orm` runtime in the
+consumer crate because generated code refers to `::graphql_orm`. The macros do
+not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 ## Public macros
 
@@ -767,8 +778,7 @@ positive `result_maximum_items`; `secret` may only use `never_export`.
 `sqlite` is the default. Select `postgres` or `mssql` by disabling default
 features. The macro compiler rejects a build with no backend and a consumer
 must select an explicit backend when Cargo feature unification enables more
-than one. `mysql` exists as a macro feature but the runtime package does not
-offer a MySQL backend in this release; do not use it as application support.
+than one.
 
 The independent `resolver-case-*`, `argument-case-*`, and `field-case-*`
 groups each permit at most one feature: `pascal`, `snake`,

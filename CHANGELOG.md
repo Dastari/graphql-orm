@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.181.0 and operation catalog 0.9.1
+
+- Removed the unused `graphql-orm-macros/mysql` feature. The supported
+  backends remain SQLite, PostgreSQL and SQL Server (#503).
+- The workspace dependency check compares documented direct edges with
+  Cargo metadata, including optional and dev-only dependencies (#503).
+- Install examples use a reviewed Git revision and point to the package
+  inventory and release manifest. Direct Auth guidance follows the selected
+  revision's workspace manifest (#509).
+
 ## Unreleased - ORM/macros 0.177.0
 
 - **Opt-in: bulk writes narrowed to read visibility ([#752](https://github.com/Dastari/graphql-orm/issues/752), part).** `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or `Database::with_narrow_bulk_writes_to_read_visibility`) makes generated GraphQL `updateMany` and `deleteMany` add the SQL predicate of `RowPolicy::read_visibility` (`Prefilter` or `Complete`, `GraphqlMutation` surface) to their locking read when the policy declares no `write_target_prefilter`. Rows outside it are not passed to `can_write_row`/`can_read_row` or counted against the bulk bound or scan budget. On PostgreSQL they are also not locked, so another transaction's lock on a hidden row no longer delays the write. On SQL Server the `UPDLOCK, HOLDLOCK` read still locks rows a scan reads before testing the predicate; an index seek avoids it. Every selected row is still classified by the row callbacks, and visible rows give the same payload and writes. With the setting on, a row outside read visibility that `can_write_row` allows is left out (a declared `write_target_prefilter` takes precedence and keeps it), and a `read_visibility` error refuses the bulk write. Off by default: bulk writes are unchanged. The residual lock and timing behaviour is documented in [strict authorization](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes). Single-row writes are unchanged.

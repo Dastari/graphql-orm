@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.25.0 to 0.25.1: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.25.0
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
