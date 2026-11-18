@@ -55,7 +55,9 @@ changing either setting.
 
 The adapter supports:
 
-- bounded Responses SSE streaming;
+- bounded Responses SSE streaming, where an output-limit stop completes the
+  turn with a visible notice and drops any tool request in it (see
+  [OpenAI output-limit stops](read-only-tool-loop.md#openai-output-limit-stops));
 - text and JSON input;
 - JSON-schema structured output;
 - strict server-authored custom tools; and

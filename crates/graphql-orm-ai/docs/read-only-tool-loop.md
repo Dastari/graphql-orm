@@ -213,6 +213,46 @@ models requires protected encrypted reasoning/output-item handling and is not
 yet implemented; the runtime does not silently drop required reasoning context
 or turn retention on.
 
+### OpenAI output-limit stops
+
+The Responses adapter (OpenAI, xAI and OpenAI-compatible routes) holds
+`ToolCallStarted`, `ToolArgumentsDelta` and `ToolCallCompleted` until the
+response finishes. `response.completed` releases them in their original order.
+
+`response.incomplete` with `incomplete_details.reason = "max_output_tokens"`
+means the provider spent the tokens and ended the response early:
+
+- The turn completes, so the run can end `Completed`, with usage settled
+  exactly from the incomplete response.
+- The adapter appends one visible notice that the response stopped at the
+  output limit and may be incomplete. The notice counts against the same
+  visible-text bound as the answer; a notice that would exceed it refuses the
+  turn.
+- Every function-call request in the response is dropped and never
+  dispatched, including one whose arguments had finished, and the notice says
+  that no tool was run.
+- Any other incomplete reason, such as `content_filter`, is still refused, as
+  is a provider-run built-in call that started but did not finish.
+
+**Continuation.** The turn returns no tool calls, so no tool result can follow
+it, and `AiAgentContinuation` cannot be built from it (a continuation needs at
+least one result for a call of that turn). A response stored with
+`store_responses = true` can hold the cut-off `function_call` item, but no
+later request names it as `previous_response_id`: a run's first request never
+carries a continuation, and the run ends after this turn. Under stateless
+replay the cut-off call is never persisted as an assistant tool call, so it is
+never replayed as a complete call.
+
+**Stored responses.** The incomplete response is still stored by OpenAI when
+the request sent `store: true`. Because the turn now returns a result, the
+response is recorded in the
+[stored-response ledger](session-retention.md#stored-provider-responses) and
+deleted with its session like any other. Before AI 0.149.0 such a stream
+failed before returning a result, so its stored response was not recorded.
+
+Background responses are separate: a retrieved background response with
+status `incomplete` keeps its existing terminal handling.
+
 ## Deliberate remaining gates
 
 - No mutation, proposal, consequential, approval-required, or non-idempotent
