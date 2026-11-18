@@ -313,3 +313,62 @@ pub fn interpretation_fingerprint(
     let encoded = serde_json::to_vec(&input).expect("interpretation input serializes");
     format!("{:x}", Sha256::digest(&encoded))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{InterpretationEntity, interpretation_fingerprint};
+
+    fn entity(
+        default_sort: &'static str,
+        keys: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> InterpretationEntity {
+        InterpretationEntity {
+            entity: "Record",
+            generated: "node_id=false;keyset=",
+            default_sort,
+            keys: keys
+                .into_iter()
+                .map(|(name, kind, sql_type)| (name, kind.to_owned(), sql_type))
+                .collect(),
+        }
+    }
+
+    fn fingerprint(entity: InterpretationEntity) -> String {
+        interpretation_fingerprint("sqlite", &[entity], None)
+    }
+
+    /// A different key field, key value kind or column type, a different
+    /// key order, and a different default sort each give a different
+    /// fingerprint; the same inputs give the same one.
+    #[test]
+    fn key_fields_and_default_sort_change_the_fingerprint() {
+        let base = || entity("id ASC", vec![("id", "Uuid", "UUID")]);
+        let unchanged = fingerprint(base());
+        assert_eq!(fingerprint(base()), unchanged);
+        let variants = [
+            entity("id ASC", vec![("recordId", "Uuid", "UUID")]),
+            entity("id ASC", vec![("id", "String", "UUID")]),
+            entity("id ASC", vec![("id", "Uuid", "TEXT")]),
+            entity(
+                "id ASC",
+                vec![("id", "Uuid", "UUID"), ("tenantId", "Uuid", "UUID")],
+            ),
+            entity("id DESC", vec![("id", "Uuid", "UUID")]),
+            entity("created_at ASC, id ASC", vec![("id", "Uuid", "UUID")]),
+        ];
+        let mut seen = vec![unchanged];
+        for variant in variants {
+            let value = fingerprint(variant);
+            assert!(
+                !seen.contains(&value),
+                "an input change kept the fingerprint"
+            );
+            seen.push(value);
+        }
+        let ordered = fingerprint(entity(
+            "id ASC",
+            vec![("tenantId", "Uuid", "UUID"), ("id", "Uuid", "UUID")],
+        ));
+        assert!(!seen.contains(&ordered), "key order is an input");
+    }
+}

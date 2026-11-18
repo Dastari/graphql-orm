@@ -305,7 +305,7 @@ pub(crate) fn generate(
                     r.expr = Some(Box::new(syn::parse_quote! {{
                         let result: #result_return = #result;
                         match result {
-                            Ok(result) => Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(result.error.unwrap_or_default())),
+                            Ok(result) => {let code=result.__gom_error_code();Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(::graphql_orm::graphql::orm::StaticRejection::new(result.error.unwrap_or_default(),code)))}
                             Err(error) => Err(error),
                         }
                     }}));
@@ -412,7 +412,7 @@ pub(crate) fn generate(
                         #(#reauthorize_fields)*
                         let result: #result_return = async {#(#suffix)*}.await;
                         let result=result?;
-                        if !result.success {return Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(result.error.unwrap_or_default()));}
+                        if !result.success {let code=result.__gom_error_code();return Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(::graphql_orm::graphql::orm::StaticRejection::new(result.error.unwrap_or_default(),code)));}
                         #completion
                     })
                 }
@@ -473,7 +473,9 @@ pub(crate) fn generate(
                 let stmt = root.stmts.last_mut().unwrap();
                 *stmt = syn::Stmt::Expr(
                     syn::parse_quote! { Ok(match __gom_root_rejection {
-                        Some(message) => #actual::err(message),
+                        // The root refusal keeps its code, as the direct
+                        // delete's coded refusal does.
+                        Some(rejection) => #actual::__gom_rejected(rejection.message, rejection.code),
                         None => #actual::__gom_deleted(),
                     }) },
                     None,
