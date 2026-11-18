@@ -10,12 +10,16 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.178.0 supports the transitive-closure read predicates on SQL Server, as an unrolled
+Version 0.180.0 supports the transitive-closure read predicates on SQL Server, as an unrolled
 breadth-first search with the same semantics as the recursive CTE on SQLite and PostgreSQL;
 SQL Server accepts bounds up to `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64). Read predicates
 are budgeted at build: two nested closures, 1 MiB of rendered SQL and 256 expression levels, plus
 80 subqueries and 900 weighted levels on SQL Server; `and`/`or` folds are flattened.
 See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
+read as whitespace, and adds seeded property suites for identifier quoting on every backend
+and for canonical JSON defaults ([#725](https://github.com/Dastari/graphql-orm/issues/725)).
 
 Version 0.177.0 adds the opt-in
 `DatabaseBuilder::narrow_bulk_writes_to_read_visibility`, which narrows the

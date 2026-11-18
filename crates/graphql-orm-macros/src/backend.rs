@@ -423,10 +423,11 @@ pub(crate) fn backend_render_identifier(backend: BackendKind, identifier: &str) 
     let plain_start = |character: char| {
         character.is_ascii_alphabetic() || character == '_' || !character.is_ascii()
     };
-    let plain = characters.next().is_some_and(plain_start)
-        && characters.all(|character| {
-            plain_start(character) || character.is_ascii_digit() || character == '$'
-        });
+    // SQLite reads a byte-order mark that starts a token as whitespace.
+    let plain = characters.next().is_some_and(|first| {
+        plain_start(first) && !(backend == BackendKind::Sqlite && first == '\u{feff}')
+    }) && characters
+        .all(|character| plain_start(character) || character.is_ascii_digit() || character == '$');
     if plain
         && reserved
             .binary_search(&identifier.to_ascii_lowercase().as_str())

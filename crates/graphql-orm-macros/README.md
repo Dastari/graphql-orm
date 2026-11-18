@@ -10,7 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.178.0 pairs with the runtime's SQL Server closure read predicates; generated code is unchanged.
+Version 0.180.0 pairs with the runtime's SQL Server closure read predicates; generated code is unchanged.
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
+the runtime renderer; every other name is generated as before.
 
 Version 0.177.0 gives the root delete of a `dependent_deletes` entity the
 same `errorCode` as a direct delete under `mutation_error_codes` (#763), and

@@ -235,7 +235,14 @@ impl ByteRouteRuntime {
         // are hop-by-hop for this request and are never forwarded.
         let connection_scoped = headers
             .get_all(ntex_header::CONNECTION)
-            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| {
+                value
+                    .to_str()
+                    .inspect_err(|_| {
+                        tracing::debug!("ignoring non-text byte-route Connection header")
+                    })
+                    .ok()
+            })
             .flat_map(|value| value.split(','))
             .map(|name| name.trim().to_ascii_lowercase())
             .collect::<std::collections::BTreeSet<_>>();
@@ -276,6 +283,7 @@ impl ByteRouteRuntime {
             }
         };
 
+        // Invalid upstream header text or length is handled by the framing check below.
         let raw_length = response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -440,6 +448,7 @@ impl ByteRouteRuntime {
             // credential the router cannot verify.
             return Err(invalid());
         };
+        // Non-text credentials use the normal unauthorized response.
         let Some(token) = value.to_str().ok().and_then(strict_bearer_token) else {
             return Err(invalid());
         };
@@ -500,6 +509,7 @@ impl CompiledRoute {
                     .chain(extra.iter().cloned())
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
+                    // Configured names are validated before the route is constructed.
                     .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
                     .collect::<Vec<_>>()
             };

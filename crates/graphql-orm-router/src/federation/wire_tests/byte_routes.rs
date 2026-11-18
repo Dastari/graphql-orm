@@ -194,6 +194,7 @@ impl Fixture {
                     .trim_end_matches("kB")
                     .trim()
                     .parse::<u64>()
+                    // Unreadable fixture header values are treated as absent.
                     .ok()
             })
             .expect("child memory field")
@@ -268,6 +269,7 @@ fn read_response(stream: &mut TcpStream, head_only: bool) -> Response {
     let status = head
         .split_whitespace()
         .nth(1)
+        // Malformed framing is handled by the fixture parser.
         .and_then(|status| status.parse().ok())
         .expect("status");
     let mut response = Response {
@@ -399,6 +401,7 @@ impl ByteUpstream {
                         let (requests, gate) = (thread_requests.clone(), thread_gate.clone());
                         thread::spawn(move || {
                             if unavailable {
+                                // The peer may already have closed this connection.
                                 let _ = stream.shutdown(std::net::Shutdown::Both);
                             } else {
                                 serve_bytes(stream, &requests, &gate);
@@ -439,6 +442,7 @@ impl Drop for ByteUpstream {
         self.stopping.store(true, Ordering::Release);
         self.gate.release();
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -460,21 +464,25 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
     let size = query
         .split('&')
         .find_map(|pair| pair.strip_prefix("size="))
+        // Malformed framing is handled by the fixture parser.
         .and_then(|size| size.parse::<usize>().ok())
         .unwrap_or(0);
     let head_request = head.starts_with("HEAD ");
     let fixed = |stream: &mut TcpStream, status: &str, headers: &str, body: &[u8]| {
+        // This fixture permits the router to close the connection early.
         let _ = write!(
             stream,
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
             body.len()
         );
         if !head_request {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(body);
         }
     };
     match path {
         "/files/big" => {
+            // This fixture permits the router to close the connection early.
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"big.bin\"\r\nConnection: close\r\n\r\n"
@@ -493,6 +501,7 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
             }
         }
         "/files/chunked" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
             );
@@ -510,14 +519,18 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
                 remaining -= length;
                 thread::sleep(Duration::from_millis(2));
             }
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(b"0\r\n\r\n");
         }
         "/files/gated" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n",
             );
+            // This fixture permits the router to close the connection early.
             let _ = stream.flush();
             gate.hold_until_released();
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(b"6\r\nsecond\r\n0\r\n\r\n");
         }
         "/files/echo" => fixed(
@@ -557,31 +570,37 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
             br#"{"errors":[{"message":"upstream says no","extensions":{"code":"BYTE_ROUTE_UPSTREAM_UNAVAILABLE"}}]}"#,
         ),
         "/files/chunked-lying-length" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\nConnection: close\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n",
             );
         }
         "/files/gzip-coded" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
             );
         }
         "/files/gzip-chunked" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
             );
         }
         "/files/close-delimited" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\npartial",
             );
         }
         "/files/upgrade" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
             );
         }
         "/files/not-modified" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n");
         }
         "/files/slow-headers" => {
@@ -589,13 +608,16 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
             fixed(&mut stream, "200 OK", "", b"late");
         }
         "/files/slow-body" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nhello",
             );
+            // This fixture permits the router to close the connection early.
             let _ = stream.flush();
             thread::sleep(Duration::from_secs(2));
         }
         "/files/drip" => {
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
             );
@@ -605,6 +627,7 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
                 }
                 thread::sleep(Duration::from_millis(100));
             }
+            // This fixture permits the router to close the connection early.
             let _ = stream.write_all(b"0\r\n\r\n");
         }
         _ => fixed(&mut stream, "404 Not Found", "", b"missing"),
@@ -1161,6 +1184,7 @@ fn byte_routes_enforce_limits_and_report_upstream_failures() {
         started.elapsed()
     );
     let mut drained = Vec::new();
+    // The fixture accepts a reset or EOF when draining the stalled stream.
     let _ = stalled.read_to_end(&mut drained);
     assert!(
         drained.len() < 33_554_432,
