@@ -3,12 +3,13 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{content_context, map_context_compaction as map_orm, record_scope};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReferenceKind};
-use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::errors::OrmPublicError;
 use graphql_orm::graphql::filters::{IntFilter, UuidFilter};
 use graphql_orm::graphql::orm::{TransactionError, TransactionMode};
 use serde::{Deserialize, Serialize};
@@ -1276,28 +1277,6 @@ fn validate_session_binding(
     Ok(())
 }
 
-fn record_scope(session: &AiSessionRecord) -> AiScope {
-    AiScope {
-        kind: session.scope_kind.clone(),
-        id: session.scope_id.clone(),
-        tenant_id: session.tenant_id.clone(),
-    }
-}
-
-fn content_context(
-    entity: &str,
-    row_id: Uuid,
-    field: &str,
-    scope: &AiScope,
-) -> ContentProtectionContext {
-    ContentProtectionContext {
-        entity: entity.to_owned(),
-        row_id: row_id.to_string(),
-        field: field.to_owned(),
-        scope: scope.clone(),
-    }
-}
-
 fn context_source_hash(encoded: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(b"graphql-orm-ai/context-compaction/v1\0");
@@ -1324,18 +1303,6 @@ fn map_protection(error: crate::ContentProtectionError) -> AiError {
     }
 }
 
-fn map_orm(error: OrmPublicError) -> AiError {
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict => AiError::Conflict,
-        _ => AiError::PersistenceFailed,
-    }
-}
-
 fn map_transaction(error: TransactionError) -> AiError {
     map_orm(error.public_error().clone())
 }
@@ -1347,6 +1314,7 @@ mod tests {
         AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, ResolvedPrincipal, SessionContext,
     };
     use async_trait::async_trait;
+    use graphql_orm::graphql::errors::OrmErrorCode;
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
     use graphql_orm::prelude::{Database, SqliteBackend};
     use time::OffsetDateTime;

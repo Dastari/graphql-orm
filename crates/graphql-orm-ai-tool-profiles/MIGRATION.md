@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.25.0 to 0.26.0
+
+**No action**. Reusing compiled validators requires no host configuration or
+data migration. Published schemas and fingerprints are unchanged.
+
 ## 0.25.0
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.

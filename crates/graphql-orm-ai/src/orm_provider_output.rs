@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_support::map_orm;
 use std::sync::Arc;
 
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReferenceKind};
@@ -764,24 +765,6 @@ fn bounded_prefix(value: &str, maximum_bytes: usize) -> &str {
         end -= 1;
     }
     &value[..end]
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    use graphql_orm::graphql::errors::OrmErrorCode;
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
 }
 
 #[cfg(test)]

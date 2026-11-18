@@ -3,10 +3,11 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{map_transaction, principal_identity};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use agql_auth::{AuthPrincipal, Clock, PrincipalReference, ResolvedPrincipal};
+use agql_auth::{Clock, PrincipalReference, ResolvedPrincipal};
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -215,7 +216,7 @@ impl OrmAiBudgetService {
                             &principal_subject,
                             &request,
                             canonical_expiry,
-                        ) || existing.state != "reserved"
+                        ) || existing.state != AiBudgetReservationState::Reserved.as_str()
                         {
                             return Ok(Err(AiError::Conflict));
                         }
@@ -392,7 +393,7 @@ impl OrmAiBudgetService {
                             actual_cost_microunits: None,
                             actual_runs: None,
                             idempotency_key: request.idempotency_key,
-                            state: "reserved".to_owned(),
+                            state: AiBudgetReservationState::Reserved.as_str().to_owned(),
                             expires_at: canonical_expiry.unix_timestamp(),
                             reconciled_at: None,
                             settlement_examined_at: 0,
@@ -553,9 +554,15 @@ impl OrmAiBudgetService {
                     }
 
                     let next_state = match reconciliation.outcome {
-                        AiBudgetReconciliationOutcome::Commit => "committed",
-                        AiBudgetReconciliationOutcome::ReleaseUnused => "released",
-                        AiBudgetReconciliationOutcome::MarkUncertain => "uncertain",
+                        AiBudgetReconciliationOutcome::Commit => {
+                            AiBudgetReservationState::Committed.as_str()
+                        }
+                        AiBudgetReconciliationOutcome::ReleaseUnused => {
+                            AiBudgetReservationState::Released.as_str()
+                        }
+                        AiBudgetReconciliationOutcome::MarkUncertain => {
+                            AiBudgetReservationState::Uncertain.as_str()
+                        }
                     };
                     let actual_input = actual
                         .map(|value| amount_to_i64(value.input_tokens))
@@ -834,7 +841,7 @@ pub(crate) async fn commit_uncertain_background_budget(
             record.row_version,
             AiBudgetReservationRecordWhereInput {
                 state: Some(StringFilter {
-                    eq: Some("uncertain".to_owned()),
+                    eq: Some(AiBudgetReservationState::Uncertain.as_str().to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -847,7 +854,7 @@ pub(crate) async fn commit_uncertain_background_budget(
                 actual_image_units: Some(Some(amount_to_i64(actual.image_units)?)),
                 actual_cost_microunits: Some(Some(amount_to_i64(actual.cost_microunits)?)),
                 actual_runs: Some(Some(amount_to_i64(actual.runs)?)),
-                state: Some("committed".to_owned()),
+                state: Some(AiBudgetReservationState::Committed.as_str().to_owned()),
                 reconciled_at: Some(Some(now.unix_timestamp())),
                 ..Default::default()
             },
@@ -989,7 +996,7 @@ pub(crate) async fn commit_stranded_reservation(
                 actual_image_units: Some(Some(amount_to_i64(actual.image_units)?)),
                 actual_cost_microunits: Some(Some(amount_to_i64(actual.cost_microunits)?)),
                 actual_runs: Some(Some(amount_to_i64(actual.runs)?)),
-                state: Some("committed".to_owned()),
+                state: Some(AiBudgetReservationState::Committed.as_str().to_owned()),
                 reconciled_at: Some(Some(now.unix_timestamp())),
                 ..Default::default()
             },
@@ -1714,24 +1721,7 @@ fn parse_provider_kind(value: &str) -> Result<ProviderKind, AiError> {
 }
 
 fn parse_reservation_state(value: &str) -> Result<AiBudgetReservationState, AiError> {
-    match value {
-        "reserved" => Ok(AiBudgetReservationState::Reserved),
-        "committed" => Ok(AiBudgetReservationState::Committed),
-        "released" => Ok(AiBudgetReservationState::Released),
-        "uncertain" => Ok(AiBudgetReservationState::Uncertain),
-        "expired" => Ok(AiBudgetReservationState::Expired),
-        _ => Err(AiError::PersistenceFailed),
-    }
-}
-
-fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
-    let kind = match principal {
-        AuthPrincipal::User(_) => "user".to_owned(),
-        AuthPrincipal::ApiToken(token) => {
-            format!("api_token:{}", token.principal_kind.as_str())
-        }
-    };
-    (kind, principal.subject())
+    AiBudgetReservationState::from_persisted(value).ok_or(AiError::PersistenceFailed)
 }
 
 fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
@@ -1739,28 +1729,10 @@ fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
         .expect("an existing OffsetDateTime unix timestamp remains representable")
 }
 
-fn map_transaction(error: TransactionError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
-        return AiError::RuntimeNotReady;
-    }
-    let public = error.public_error();
-    match public.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(public.message.clone()),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
-}
-
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
-    use agql_auth::{AccessTokenMetadata, AuthUser, FixedClock, SessionContext};
+    use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, SessionContext};
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
     use graphql_orm::prelude::{Database, SqliteBackend};
 

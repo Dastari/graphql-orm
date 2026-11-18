@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{map_orm, map_transaction, principal_kind};
 use std::sync::Arc;
 
 use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
@@ -11,13 +12,11 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionError,
-    TransactionMode,
+    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionMode,
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use url::Url;
 use uuid::Uuid;
 
 use crate::orm_budget::BudgetPeriod;
@@ -2272,9 +2271,16 @@ fn normalize_endpoint(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AiError::InvalidInput("provider endpoint is required".to_owned()))?;
-    Url::parse(raw).map_err(|_| AiError::InvalidInput("invalid provider endpoint".to_owned()))?;
-    let url = crate::configuration::parse_provider_endpoint(raw)
-        .ok_or_else(|| AiError::InvalidInput("unsafe provider endpoint".to_owned()))?;
+    use crate::configuration::ProviderEndpointError;
+    let url = crate::configuration::parse_provider_endpoint(raw).map_err(|error| {
+        AiError::InvalidInput(
+            match error {
+                ProviderEndpointError::InvalidUrl => "invalid provider endpoint",
+                ProviderEndpointError::UnsafeShape => "unsafe provider endpoint",
+            }
+            .to_owned(),
+        )
+    })?;
     if !crate::configuration::provider_endpoint_permitted(endpoint_policy, kind, &url) {
         return Err(AiError::Forbidden);
     }
@@ -2296,15 +2302,6 @@ pub(crate) fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
     Ok(())
 }
 
-fn principal_kind(principal: &AuthPrincipal) -> String {
-    match principal {
-        AuthPrincipal::User(_) => "user".to_owned(),
-        AuthPrincipal::ApiToken(token) => {
-            format!("api_token:{}", token.principal_kind.as_str())
-        }
-    }
-}
-
 fn protection_mode_value(mode: AiContentProtectionMode) -> &'static str {
     match mode {
         AiContentProtectionMode::DatabaseManaged => "database_managed",
@@ -2324,27 +2321,6 @@ fn parse_protection_mode(value: &str) -> Result<AiContentProtectionMode, AiError
 
 fn unix_seconds() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
-}
-
-pub(crate) fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
 }
 
 #[cfg(all(test, feature = "sqlite"))]

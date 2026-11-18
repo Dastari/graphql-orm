@@ -10,6 +10,18 @@ supersedes: []
 
 # Changelog
 
+## 0.16.6 (unreleased)
+
+- Schema polling, dynamic registration, JWKS and role-scope catalogue retrieval
+  share request execution, status handling and bounded response reads. Each
+  path keeps its existing diagnostics, and registration still verifies the
+  connected peer before handling the status.
+- WebSocket subscription forwarding reuses the encoded message when its
+  authorization-variable projection fits. If it must trim the projection, it
+  computes the trim point from exact JSON entry sizes before encoding again.
+- Scope the pending Hive plugin runtime to initialization so it is cleaned up
+  if the startup future is dropped before Hive claims it.
+
 ## 0.16.5 (unreleased)
 
 - Fix (authentication, fail closed): both bearer providers,

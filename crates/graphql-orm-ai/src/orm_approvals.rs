@@ -4,6 +4,10 @@
 
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, page_input, principal_identity, record_scope,
+};
+use crate::persisted_state::ToolCallState;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -14,12 +18,9 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    AiMutationExecutionPolicy, ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError,
-    TransactionMode,
+    AiMutationExecutionPolicy, ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode,
 };
-use graphql_orm::graphql::pagination::{
-    KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
-};
+use graphql_orm::graphql::pagination::{KeysetConnectionInput, ValidatedKeysetConnection};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -823,7 +824,7 @@ impl OrmAiApprovalService {
         }
         let now = canonical_second(self.clock.now());
         let resolved = self.resolve_current(lease.principal_reference()).await?;
-        self.require_registered_binding(lease, binding, "waiting_approval")
+        self.require_registered_binding(lease, binding, ToolCallState::WaitingApproval.as_str())
             .await?;
         if !self
             .access_policy
@@ -934,7 +935,10 @@ impl OrmAiApprovalService {
         let call = AiToolCallRecord::find_by_id(&self.database, &binding.tool_call_id.0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .filter(|call| call.run_id == lease.run_id().0 && call.state == "waiting_approval")
+            .filter(|call| {
+                call.run_id == lease.run_id().0
+                    && call.state == ToolCallState::WaitingApproval.as_str()
+            })
             .ok_or(AiError::Forbidden)?;
         let started_event_id = Uuid::new_v4();
         let started_inbox_event_id = Uuid::new_v4();
@@ -1540,7 +1544,7 @@ impl AiApprovalService for OrmAiApprovalService {
                 }),
                 ..Default::default()
             },
-            page_input(&page),
+            page_input(&page, false),
         )
         .await
         .map_err(map_orm)?;
@@ -1983,7 +1987,7 @@ impl OrmAiApprovalWaitReconciliationService {
             &database,
             AiRunRecordWhereInput {
                 state: Some(StringFilter {
-                    eq: Some("waiting_approval".to_owned()),
+                    eq: Some(crate::AiRunState::WaitingApproval.as_str().to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2033,7 +2037,7 @@ impl OrmAiApprovalWaitReconciliationService {
                         .iter()
                         .filter(|call| {
                             call.lease_generation == run.lease_generation
-                                && call.state == "waiting_approval"
+                                && call.state == ToolCallState::WaitingApproval.as_str()
                         })
                         .collect::<Vec<_>>();
                     let call = (waiting_calls.len() == 1).then(|| waiting_calls[0].clone());
@@ -2457,7 +2461,7 @@ fn approval_wait_linkage_is_valid(
                 && outcome.run_id == snapshot.run.id
                 && outcome.attempt_id == attempt_id
                 && outcome.lease_generation == snapshot.run.lease_generation
-                && outcome.final_state == "waiting_approval"
+                && outcome.final_state == crate::AiRunState::WaitingApproval.as_str()
                 && outcome.outcome_code == "approval_wait_parked"
                 && outcome.provider_response_id.as_deref() == Some(provider_response_id)
         }
@@ -2494,7 +2498,7 @@ fn approval_wait_linkage_is_valid(
         })
         .collect::<Vec<_>>();
     snapshot.calls.len() < 4_097
-        && snapshot.run.state == "waiting_approval"
+        && snapshot.run.state == crate::AiRunState::WaitingApproval.as_str()
         && snapshot.run.lease_generation > 0
         && parked_graph_valid
         && checkpoint.run_id == snapshot.run.id
@@ -2524,7 +2528,7 @@ fn approval_wait_linkage_is_valid(
         && call.provider_response_id.as_deref() == Some(provider_response_id)
         && call.budget_reservation_id == Some(budget_reservation_id)
         && (native_source || call.tool_call_index == 0)
-        && call.state == "waiting_approval"
+        && call.state == ToolCallState::WaitingApproval.as_str()
         && call.completed_at.is_none()
         && call.protected_result.is_none()
         && call.approval_id == Some(approval.id)
@@ -2647,29 +2651,6 @@ fn parse_state(state: &str) -> Result<AiApprovalState, AiError> {
     }
 }
 
-fn page_input(page: &ValidatedKeysetConnection) -> KeysetConnectionInput {
-    match page.direction {
-        KeysetWindowDirection::Forward => KeysetConnectionInput {
-            after: page.cursor.clone(),
-            first: Some(page.limit),
-            ..Default::default()
-        },
-        KeysetWindowDirection::Backward => KeysetConnectionInput {
-            before: page.cursor.clone(),
-            last: Some(page.limit),
-            ..Default::default()
-        },
-    }
-}
-
-fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
-    let kind = match principal {
-        AuthPrincipal::User(_) => "user".to_owned(),
-        AuthPrincipal::ApiToken(token) => format!("api_token:{}", token.principal_kind.as_str()),
-    };
-    (kind, principal.subject())
-}
-
 /// Crate-level tenant predicate for approval and proposal lookups.
 ///
 /// A principal whose token carries a tenant claim may reach only records whose
@@ -2683,28 +2664,6 @@ pub(crate) fn principal_tenant_permits(principal: &AuthPrincipal, scope: &AiScop
         .is_none_or(|tenant_id| scope.tenant_id.as_deref() == Some(tenant_id))
 }
 
-fn record_scope(session: &AiSessionRecord) -> AiScope {
-    AiScope {
-        kind: session.scope_kind.clone(),
-        id: session.scope_id.clone(),
-        tenant_id: session.tenant_id.clone(),
-    }
-}
-
-fn content_context(
-    entity: &str,
-    row_id: Uuid,
-    field: &str,
-    scope: &AiScope,
-) -> ContentProtectionContext {
-    ContentProtectionContext {
-        entity: entity.to_owned(),
-        row_id: row_id.to_string(),
-        field: field.to_owned(),
-        scope: scope.clone(),
-    }
-}
-
 fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(value.unix_timestamp())
         .expect("an existing OffsetDateTime timestamp remains representable")
@@ -2714,27 +2673,6 @@ fn map_protection(error: crate::ContentProtectionError) -> AiError {
     match error {
         crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
         _ => AiError::PersistenceFailed,
-    }
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 

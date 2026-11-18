@@ -2,7 +2,12 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::AiProviderSessionState;
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{map_orm, map_transaction};
+use crate::persisted_state::{
+    AttachmentArtifactCleanupState, AttachmentProcessingState, AttachmentQuarantineState,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -13,8 +18,7 @@ use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
     ConditionalUpdateOutcome, DefaultWriteBackend, EntityAccessKind, EntityAccessSurface,
-    EntityPolicy, MutationLimit, OrderDirection, RetentionPurgeOutcome, TransactionError,
-    TransactionMode,
+    EntityPolicy, MutationLimit, OrderDirection, RetentionPurgeOutcome, TransactionMode,
 };
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use uuid::Uuid;
@@ -1430,7 +1434,7 @@ impl OrmAiSessionRetentionService {
                                                 },
                                                 UpdateAiAttachmentArtifactRecordInput {
                                                     cleanup_state: Some(Some(
-                                                        "cleanup_required".to_owned(),
+                                                        AttachmentArtifactCleanupState::CleanupRequired.as_str().to_owned(),
                                                     )),
                                                     cleanup_lease_expires_at: Some(None),
                                                     cleanup_next_attempt_at: Some(None),
@@ -1482,9 +1486,9 @@ impl OrmAiSessionRetentionService {
                                             UpdateAiAttachmentRecordInput {
                                                 upload_token_hash: Some(None),
                                                 upload_expires_at: Some(None),
-                                                quarantine_state: Some("deleting".to_owned()),
+                                                quarantine_state: Some(AttachmentQuarantineState::Deleting.as_str().to_owned()),
                                                 processing_state: Some(
-                                                    "retention_cleanup_required".to_owned(),
+                                                    AttachmentProcessingState::RetentionCleanupRequired.as_str().to_owned(),
                                                 ),
                                                 processing_expires_at: Some(None),
                                                 cleanup_lease_expires_at: Some(None),
@@ -2126,8 +2130,12 @@ impl OrmAiSessionRetentionService {
                         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                     }
                     let record = &records[0];
-                    match record.state.as_str() {
-                        "active" | "claimed" | "parked_wait" => {
+                    match AiProviderSessionState::from_persisted(&record.state) {
+                        Some(
+                            AiProviderSessionState::Active
+                            | AiProviderSessionState::Claimed
+                            | AiProviderSessionState::ParkedWait,
+                        ) => {
                             let outcome = tx
                                 .compare_and_swap::<AiProviderSessionBindingRecord>(
                                     &record.id,
@@ -2140,7 +2148,11 @@ impl OrmAiSessionRetentionService {
                                         ..Default::default()
                                     },
                                     UpdateAiProviderSessionBindingRecordInput {
-                                        state: Some("cleanup_required".to_owned()),
+                                        state: Some(
+                                            AiProviderSessionState::CleanupRequired
+                                                .as_str()
+                                                .to_owned(),
+                                        ),
                                         // A claimed or parked cursor belongs to
                                         // that run; the same run must not be
                                         // offered a fresh rebind afterwards.
@@ -2182,7 +2194,7 @@ impl OrmAiSessionRetentionService {
                             .map_err(OrmPublicError::from)?;
                             Ok(ProviderSessionCleanupOutcome::Requested)
                         }
-                        "deleted"
+                        Some(AiProviderSessionState::Deleted)
                             if record.protected_cursor.is_none()
                                 && record
                                     .provider_absence_observed_at
@@ -2205,12 +2217,6 @@ impl OrmAiSessionRetentionService {
                             }
                             Ok(ProviderSessionCleanupOutcome::Absent)
                         }
-                        "cleanup_required"
-                        | "cleanup_in_progress"
-                        | "cleanup_backoff"
-                        | "cleanup_exhausted"
-                        | "restore_quarantined"
-                        | "deleted" => Ok(ProviderSessionCleanupOutcome::Blocked),
                         // An unknown state cannot be proved safe to delete;
                         // keep this session blocked without failing the pass.
                         _ => Ok(ProviderSessionCleanupOutcome::Blocked),
@@ -4229,13 +4235,13 @@ async fn retire_purged_provider_session(
             binding.row_version,
             AiProviderSessionBindingRecordWhereInput {
                 state: Some(StringFilter {
-                    eq: Some("active".to_owned()),
+                    eq: Some(AiProviderSessionState::Active.as_str().to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
             UpdateAiProviderSessionBindingRecordInput {
-                state: Some("cleanup_required".to_owned()),
+                state: Some(AiProviderSessionState::CleanupRequired.as_str().to_owned()),
                 cleanup_owner: Some(None),
                 cleanup_lease_expires_at: Some(None),
                 cleanup_next_attempt_at: Some(Some(now)),
@@ -4657,6 +4663,10 @@ pub(crate) fn validate_attachment_artifact(
     artifact: &AiAttachmentArtifactRecord,
     attachment_id: Uuid,
 ) -> Result<(), OrmPublicError> {
+    let cleanup_state = artifact
+        .cleanup_state
+        .as_deref()
+        .and_then(AttachmentArtifactCleanupState::from_persisted);
     if artifact.id.is_nil()
         || artifact.attachment_id != attachment_id
         || artifact.artifact_kind.trim().is_empty()
@@ -4697,29 +4707,20 @@ pub(crate) fn validate_attachment_artifact(
             .is_some_and(|count| count <= 0)
         || artifact.provider_delete_requested_at.is_some()
             != artifact.provider_delete_attempts.is_some()
-        || (artifact.cleanup_state.as_deref() == Some("cleanup_unconfirmed")
+        || (cleanup_state == Some(AttachmentArtifactCleanupState::CleanupUnconfirmed)
             && artifact.provider_delete_attempts.is_none())
         || (artifact.provider_expires_at.is_some() && artifact.provider_reference.is_none())
-        || artifact.cleanup_state.as_deref().is_some_and(|state| {
-            !matches!(
-                state,
-                "cleanup_required"
-                    | "cleanup_in_progress"
-                    | "cleanup_backoff"
-                    | "complete"
-                    | "cleanup_unconfirmed"
-            )
-        })
-        || (artifact.cleanup_state.as_deref() == Some("cleanup_required")
+        || (artifact.cleanup_state.is_some() && cleanup_state.is_none())
+        || (cleanup_state == Some(AttachmentArtifactCleanupState::CleanupRequired)
             && (artifact.deleted_at.is_some()
                 || artifact.cleanup_lease_expires_at.is_some()
                 || artifact.cleanup_next_attempt_at.is_some()))
-        || (artifact.cleanup_state.as_deref() == Some("cleanup_in_progress")
+        || (cleanup_state == Some(AttachmentArtifactCleanupState::CleanupInProgress)
             && (artifact.deleted_at.is_some()
                 || artifact.cleanup_generation.is_none()
                 || artifact.cleanup_lease_expires_at.is_none()
                 || artifact.cleanup_next_attempt_at.is_some()))
-        || (artifact.cleanup_state.as_deref() == Some("cleanup_backoff")
+        || (cleanup_state == Some(AttachmentArtifactCleanupState::CleanupBackoff)
             && (artifact.deleted_at.is_some()
                 || artifact.cleanup_generation.is_none()
                 || artifact.cleanup_lease_expires_at.is_some()
@@ -4727,13 +4728,16 @@ pub(crate) fn validate_attachment_artifact(
                     .cleanup_retry_count
                     .is_none_or(|retry_count| retry_count <= 0)
                 || artifact.cleanup_next_attempt_at.is_none()))
-        || (artifact.cleanup_state.as_deref() == Some("complete")
+        || (cleanup_state == Some(AttachmentArtifactCleanupState::Complete)
             && (artifact.provider_kind.is_some()
                 || artifact.provider_profile_id.is_some()
                 || artifact.provider_reference.is_some()))
         || (matches!(
-            artifact.cleanup_state.as_deref(),
-            Some("complete" | "cleanup_unconfirmed")
+            cleanup_state,
+            Some(
+                AttachmentArtifactCleanupState::Complete
+                    | AttachmentArtifactCleanupState::CleanupUnconfirmed
+            )
         ) && (artifact.blob_reference.is_some()
             || artifact.protected_content.is_some()
             || artifact.provider_expires_at.is_some()
@@ -4749,8 +4753,14 @@ pub(crate) fn validate_attachment_artifact(
 
 fn attachment_artifact_ready_for_metadata_delete(artifact: &AiAttachmentArtifactRecord) -> bool {
     matches!(
-        artifact.cleanup_state.as_deref(),
-        Some("complete" | "cleanup_unconfirmed")
+        artifact
+            .cleanup_state
+            .as_deref()
+            .and_then(AttachmentArtifactCleanupState::from_persisted),
+        Some(
+            AttachmentArtifactCleanupState::Complete
+                | AttachmentArtifactCleanupState::CleanupUnconfirmed
+        )
     ) && artifact
         .cleanup_generation
         .is_some_and(|generation| generation > 0)
@@ -4767,8 +4777,15 @@ fn attachment_artifact_ready_for_metadata_delete(artifact: &AiAttachmentArtifact
 
 fn attachment_artifact_cleanup_pending(artifact: &AiAttachmentArtifactRecord) -> bool {
     matches!(
-        artifact.cleanup_state.as_deref(),
-        Some("cleanup_required" | "cleanup_in_progress" | "cleanup_backoff")
+        artifact
+            .cleanup_state
+            .as_deref()
+            .and_then(AttachmentArtifactCleanupState::from_persisted),
+        Some(
+            AttachmentArtifactCleanupState::CleanupRequired
+                | AttachmentArtifactCleanupState::CleanupInProgress
+                | AttachmentArtifactCleanupState::CleanupBackoff
+        )
     )
 }
 
@@ -4778,30 +4795,43 @@ fn attachment_ready_for_metadata_delete(attachment: &AiAttachmentRecord) -> bool
         && attachment.blob_reference.is_none()
         && attachment.quarantine_blob_reference.is_none()
         && attachment.upload_token_hash.is_none()
-        && attachment.processing_state == "complete"
+        && attachment.processing_state == AttachmentProcessingState::Complete.as_str()
         && attachment.processing_expires_at.is_none()
         && attachment.cleanup_lease_expires_at.is_none()
         && attachment.cleanup_next_attempt_at.is_none()
         && matches!(
-            attachment.quarantine_state.as_str(),
-            "deleted" | "expired" | "failed"
+            AttachmentQuarantineState::from_persisted(&attachment.quarantine_state),
+            Some(
+                AttachmentQuarantineState::Deleted
+                    | AttachmentQuarantineState::Expired
+                    | AttachmentQuarantineState::Failed
+            )
         )
 }
 
 pub(crate) fn attachment_retention_cleanup_pending(attachment: &AiAttachmentRecord) -> bool {
-    attachment.quarantine_state == "deleting"
+    attachment.quarantine_state == AttachmentQuarantineState::Deleting.as_str()
         && matches!(
-            attachment.processing_state.as_str(),
-            "retention_cleanup_required" | "cleanup_in_progress" | "cleanup_backoff"
+            AttachmentProcessingState::from_persisted(&attachment.processing_state),
+            Some(
+                AttachmentProcessingState::RetentionCleanupRequired
+                    | AttachmentProcessingState::CleanupInProgress
+                    | AttachmentProcessingState::CleanupBackoff
+            )
         )
 }
 
 fn attachment_cleanup_pending(attachment: &AiAttachmentRecord) -> bool {
     attachment_retention_cleanup_pending(attachment)
-        || attachment.quarantine_state == "deleting"
+        || attachment.quarantine_state == AttachmentQuarantineState::Deleting.as_str()
         || matches!(
-            attachment.processing_state.as_str(),
-            "cleanup_required" | "cleanup_in_progress" | "cleanup_backoff" | "deleting"
+            AttachmentProcessingState::from_persisted(&attachment.processing_state),
+            Some(
+                AttachmentProcessingState::CleanupRequired
+                    | AttachmentProcessingState::CleanupInProgress
+                    | AttachmentProcessingState::CleanupBackoff
+                    | AttachmentProcessingState::Deleting
+            )
         )
 }
 
@@ -4843,28 +4873,6 @@ fn add_count(current: u32, amount: usize) -> Result<u32, AiError> {
     current
         .checked_add(u32::try_from(amount).map_err(|_| AiError::PersistenceFailed)?)
         .ok_or(AiError::PersistenceFailed)
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: impl Into<OrmPublicError>) -> AiError {
-    let error = error.into();
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
 }
 
 #[cfg(all(test, feature = "sqlite"))]

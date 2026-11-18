@@ -70,8 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.180.0, `graphql-orm-macros` 0.180.0**; `graphql-orm-operation-catalog` 0.9.0; **`graphql-orm-storage` 0.18.2**; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; **`graphql-orm-ai` 0.149.0**; `graphql-orm-router-protocol` 0.3.0; **`graphql-orm-router` 0.16.5**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.180.0, `graphql-orm-macros` 0.180.0**; `graphql-orm-operation-catalog` 0.9.0; **`graphql-orm-storage` 0.18.2**; `graphql-orm-backup` 0.27.0; **`graphql-orm-ai-tool-profiles` 0.26.0**; **`graphql-orm-ai` 0.150.0**; `graphql-orm-router-protocol` 0.3.0; **`graphql-orm-router` 0.16.6**.
 
+- **No action** — AI 0.150.0 and tool profiles 0.26.0 reuse compiled validators. Existing approvals and durable state values remain compatible. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01490-to-01500) · [tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0250-to-0260)
+- **No action** — Router 0.16.6 shares outbound retrieval, reduces redundant WebSocket encoding and scopes the Hive plugin handoff to startup. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0165-to-0166)
 - **Action needed** — ORM/macros 0.179.0: only for a SQLite name declared with a leading U+FEFF, which is now delimited and keeps the mark. [Migration](../../MIGRATION.md#01770-to-01790-identifier-quoting-and-canonical-json-properties)
 - **Action needed** — router 0.16.5: only if your issuer writes `iss` as an array or adds a `crit` header member (even `null`); such bearer tokens are now refused by both the JWKS and `auth-agql` providers, as is a protected header over 8 KiB encoded. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0164-to-0165)
 - **No action** — storage 0.18.2: key-validation property tests only.

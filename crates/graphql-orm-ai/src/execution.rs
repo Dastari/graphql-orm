@@ -2,6 +2,7 @@
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::AiError;
+use crate::sha256::valid_sha256;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -677,13 +678,6 @@ fn validate_descriptor_request_binding(
         return Err(ToolExecutionError::StaleContract);
     }
     Ok(())
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl GraphqlRequestContext {

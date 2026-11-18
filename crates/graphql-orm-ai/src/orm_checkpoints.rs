@@ -2,6 +2,8 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_support::map_orm;
+use crate::persisted_state::ToolCallState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -685,7 +687,7 @@ impl OrmAiCoordinatorCheckpointService {
                 call.risk.as_str(),
                 "low_risk_write" | "non_idempotent_write" | "high_impact"
             )
-            || call.state != "waiting_approval"
+            || call.state != ToolCallState::WaitingApproval.as_str()
             || call.approval_id != Some(approval.id)
             || call.completed_at.is_some()
             || call.protected_result.is_some()
@@ -2629,24 +2631,6 @@ fn valid_reference(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 1_024
         && value.bytes().all(|byte| !byte.is_ascii_control())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    use graphql_orm::graphql::errors::OrmErrorCode;
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
 }
 
 #[cfg(test)]

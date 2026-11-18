@@ -1,5 +1,6 @@
 //! Short-lived delegated authority for private remote GraphQL execution.
 
+use crate::sha256::valid_sha256;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1064,13 +1065,6 @@ fn valid_reference(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 1_024
         && value.bytes().all(|byte| !byte.is_ascii_control())
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]

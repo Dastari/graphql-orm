@@ -4,6 +4,9 @@
 
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, principal_identity, record_scope,
+};
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReference, ResolvedPrincipal};
@@ -23,9 +26,7 @@ use crate::orm_runs::{
     append_terminal_run_event, canonical_second, coordinator_checkpoint_hash, exact_state,
     load_and_validate_active_lease,
 };
-use crate::orm_sessions::{
-    content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
-};
+use crate::orm_sessions::map_protection;
 use crate::orm_tools::{canonical_json_hash, provider_call_key};
 use crate::persistence::*;
 use crate::{

@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.6 consolidates outbound HTTP retrieval, reduces redundant
+WebSocket frame encoding and scopes the Hive plugin handoff to startup.
+
 Version 0.16.5 refuses, on both bearer providers, a token whose header has a
 `crit` member of any value (RFC 7515: the router understands no critical
 extension), and one whose `iss` is an array rather than the configured issuer

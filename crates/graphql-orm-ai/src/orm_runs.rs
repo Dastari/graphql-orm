@@ -3,6 +3,8 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::map_transaction;
+use crate::persisted_state::ToolCallState;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -4001,7 +4003,7 @@ impl OrmAiRunService {
                                 AiToolCallRecordWhereInput::default(),
                                 UpdateAiToolCallRecordInput {
                                     approval_id: Some(Some(approval.id)),
-                                    state: Some("waiting_approval".to_owned()),
+                                    state: Some(ToolCallState::WaitingApproval.as_str().to_owned()),
                                     ..Default::default()
                                 },
                             )
@@ -4188,7 +4190,7 @@ impl OrmAiRunService {
                         if call.run_id != lease.run_id.0
                             || call.lease_generation != lease.lease_generation
                             || call.approval_id != Some(consumption.approval_id)
-                            || call.state != "waiting_approval"
+                            || call.state != ToolCallState::WaitingApproval.as_str()
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
@@ -4844,7 +4846,7 @@ impl OrmAiRunService {
                         }
                         if approval.session_id != run.session_id
                             || call.approval_id != Some(approval.id)
-                            || call.state != "waiting_approval"
+                            || call.state != ToolCallState::WaitingApproval.as_str()
                             || call.completed_at.is_some()
                             || call.protected_result.is_some()
                             || call.risk == "read_only"
@@ -4988,7 +4990,7 @@ impl OrmAiRunService {
                                 return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                             }
                             let binding = &bindings[0];
-                            if binding.state != "parked_wait"
+                            if binding.state != crate::AiProviderSessionState::ParkedWait.as_str()
                                 || binding.parked_wait_kind.as_deref() != Some("approval")
                                 || binding.parked_wait_id != Some(approval.id)
                                 || binding.claimed_run_id != Some(run.id)
@@ -5549,7 +5551,7 @@ impl OrmAiRunService {
                                     != Some(provider_response_id)
                                 || call.budget_reservation_id != Some(budget_reservation_id)
                                 || (!native_source && call.tool_call_index != 0)
-                                || call.state != "waiting_approval"
+                                || call.state != ToolCallState::WaitingApproval.as_str()
                                 || call.completed_at.is_some()
                                 || call.protected_result.is_some()
                                 || call.approval_id != Some(approval.id)
@@ -6799,7 +6801,9 @@ async fn close_parked_provider_session_of_run(
         .await
         .map_err(OrmPublicError::from)?;
     for binding in bindings {
-        if binding.state != "parked_wait" || binding.claimed_run_id != Some(run.id) {
+        if binding.state != crate::AiProviderSessionState::ParkedWait.as_str()
+            || binding.claimed_run_id != Some(run.id)
+        {
             continue;
         }
         let outcome = tx
@@ -6808,13 +6812,21 @@ async fn close_parked_provider_session_of_run(
                 binding.row_version,
                 crate::orm_provider_session::AiProviderSessionBindingRecordWhereInput {
                     state: Some(StringFilter {
-                        eq: Some("parked_wait".to_owned()),
+                        eq: Some(
+                            crate::AiProviderSessionState::ParkedWait
+                                .as_str()
+                                .to_owned(),
+                        ),
                         ..Default::default()
                     }),
                     ..Default::default()
                 },
                 crate::orm_provider_session::UpdateAiProviderSessionBindingRecordInput {
-                    state: Some("cleanup_required".to_owned()),
+                    state: Some(
+                        crate::AiProviderSessionState::CleanupRequired
+                            .as_str()
+                            .to_owned(),
+                    ),
                     last_run_id: Some(Some(run.id)),
                     claimed_run_id: Some(None),
                     claimed_attempt_id: Some(None),
@@ -7847,24 +7859,6 @@ pub(crate) fn timestamp_at_or_before(timestamp: i64) -> Option<IntFilter> {
         lte: Some(timestamp),
         ..Default::default()
     })
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    let public = error.public_error();
-    if crate::orm_runtime_recovery::is_epoch_not_live(public) {
-        return AiError::RuntimeNotReady;
-    }
-    match public.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(public.message.clone()),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -11734,7 +11728,12 @@ pub(crate) async fn run_provider_dispatch_possible(
                 ..Default::default()
             }),
             state: Some(StringFilter {
-                not_in: Some(vec!["released".to_owned(), "expired".to_owned()]),
+                not_in: Some(vec![
+                    crate::AiBudgetReservationState::Released
+                        .as_str()
+                        .to_owned(),
+                    crate::AiBudgetReservationState::Expired.as_str().to_owned(),
+                ]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -11777,9 +11776,13 @@ pub(crate) async fn run_consequential_tool_dispatch_possible(
         return Ok(true);
     }
     for call in calls.iter().filter(|call| call.risk != "read_only") {
-        let never_dispatched = match call.state.as_str() {
-            "control_blocked" | "approval_prepared" | "waiting_approval" => true,
-            "cancelled" => match call.approval_id {
+        let never_dispatched = match ToolCallState::from_persisted(&call.state) {
+            Some(
+                ToolCallState::ControlBlocked
+                | ToolCallState::ApprovalPrepared
+                | ToolCallState::WaitingApproval,
+            ) => true,
+            Some(ToolCallState::Cancelled) => match call.approval_id {
                 Some(approval_id) => tx
                     .find_by_id::<AiApprovalRecord>(&approval_id)
                     .await

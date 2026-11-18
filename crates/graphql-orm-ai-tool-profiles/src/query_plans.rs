@@ -6,7 +6,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::Arc,
+    panic::AssertUnwindSafe,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use async_graphql_parser::{parse_schema, types::TypeSystemDefinition};
@@ -696,14 +697,99 @@ pub struct AiGraphqlQueryPlanCorrection {
     pub maximum_result_bytes: u64,
 }
 
+#[derive(Debug)]
+struct PlanCompileError {
+    error: AiError,
+    code: AiGraphqlQueryPlanFailureCode,
+}
+
+impl PlanCompileError {
+    fn invalid_input(code: AiGraphqlQueryPlanFailureCode, message: &str) -> Self {
+        Self {
+            error: input_error(message),
+            code,
+        }
+    }
+}
+
+impl From<AiError> for PlanCompileError {
+    fn from(error: AiError) -> Self {
+        let code = if matches!(error, AiError::InvalidConfiguration(_)) {
+            AiGraphqlQueryPlanFailureCode::CapabilityStale
+        } else {
+            AiGraphqlQueryPlanFailureCode::InvalidArguments
+        };
+        Self { error, code }
+    }
+}
+
+impl From<PlanCompileError> for AiError {
+    fn from(error: PlanCompileError) -> Self {
+        error.error
+    }
+}
+
+// The schema and its validator always travel together, including when a
+// subscription replaces the base operation's plan schema.
+#[derive(Clone, Debug)]
+struct PlanSchema {
+    value: Value,
+    validator: Arc<OnceLock<Option<AssertUnwindSafe<jsonschema::Validator>>>>,
+}
+
+impl PlanSchema {
+    fn new(value: Value) -> Self {
+        Self {
+            value,
+            validator: Arc::default(),
+        }
+    }
+
+    fn validator(&self, message: &str) -> Result<&jsonschema::Validator, AiError> {
+        self.validator
+            .get_or_init(|| {
+                // Built-in validation has no host callbacks and does not
+                // mutate the plan contract. Preserve the public unwind traits.
+                jsonschema::validator_for(&self.value)
+                    .ok()
+                    .map(AssertUnwindSafe)
+            })
+            .as_ref()
+            .map(|validator| &validator.0)
+            .ok_or_else(|| configuration_error(message))
+    }
+}
+
+struct CompiledVariableSchema {
+    value: Value,
+    validator: jsonschema::Validator,
+}
+
+// The compiler supplies these keys from the finished SDL and admitted
+// semantic metadata. Each cache shares one schema, catalogue and limits.
+type VariableSchemaKey = (String, Option<String>);
+type VariableSchemaCache = BTreeMap<VariableSchemaKey, Arc<CompiledVariableSchema>>;
+
+#[derive(Clone, Default)]
+struct VariableSchemas(Arc<Mutex<VariableSchemaCache>>);
+
+impl std::fmt::Debug for VariableSchemas {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VariableSchemas")
+            .finish_non_exhaustive()
+    }
+}
+
 /// One deterministic provider-facing query capability segment.
 #[derive(Clone, Debug)]
 pub struct AiGraphqlQueryCapability {
     id: AiToolId,
     operation: GraphqlSemanticOperationDescriptor,
     description: String,
-    argument_schema: Value,
-    compact_argument_schema: Value,
+    argument_schema: PlanSchema,
+    compact_argument_schema: PlanSchema,
+    variable_schemas: VariableSchemas,
     fingerprint: String,
     schema_fingerprint: String,
     target_id: GraphqlExecutionTargetId,
@@ -718,6 +804,40 @@ pub struct AiGraphqlQueryCapability {
 }
 
 impl AiGraphqlQueryCapability {
+    fn variable_schema(
+        &self,
+        graphql_type: &str,
+        description: Option<&str>,
+    ) -> Result<Arc<CompiledVariableSchema>, AiError> {
+        const MAXIMUM_CACHED_VARIABLE_SCHEMAS: usize = 128;
+
+        let key = (graphql_type.to_owned(), description.map(str::to_owned));
+        let mut cache = self
+            .variable_schemas
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(compiled) = cache.get(&key) {
+            return Ok(Arc::clone(compiled));
+        }
+        let value = finish_json_schema(input_type_schema(
+            &self.schema,
+            &self.semantic_catalog,
+            graphql_type,
+            description,
+            self.limits,
+            0,
+            &mut Vec::new(),
+        )?)?;
+        let validator = jsonschema::validator_for(&value)
+            .map_err(|_| configuration_error("compiled variable schema is invalid"))?;
+        let compiled = Arc::new(CompiledVariableSchema { value, validator });
+        if cache.len() < MAXIMUM_CACHED_VARIABLE_SCHEMAS {
+            cache.insert(key, Arc::clone(&compiled));
+        }
+        Ok(compiled)
+    }
+
     /// Returns the stable public subgraph/root capability ID.
     pub fn id(&self) -> &AiToolId {
         &self.id
@@ -730,7 +850,7 @@ impl AiGraphqlQueryCapability {
 
     /// Returns the finite JSON Schema 2020-12 query-plan contract.
     pub fn argument_schema(&self) -> &Value {
-        &self.argument_schema
+        &self.argument_schema.value
     }
 
     /// Returns the compact non-recursive provider-facing plan schema.
@@ -740,7 +860,7 @@ impl AiGraphqlQueryCapability {
     /// arguments; it never accepts GraphQL text, aliases, fragments, targets,
     /// introspection, SQL, URLs, or callbacks.
     pub fn compact_argument_schema(&self) -> &Value {
-        &self.compact_argument_schema
+        &self.compact_argument_schema.value
     }
 
     /// Renders [`Self::compact_argument_schema`] with each repeated input
@@ -774,12 +894,13 @@ impl AiGraphqlQueryCapability {
                 },
             )
         });
-        let names = if regenerated.is_ok_and(|schema| schema == self.compact_argument_schema) {
+        let names = if regenerated.is_ok_and(|schema| schema == self.compact_argument_schema.value)
+        {
             names
         } else {
             BTreeMap::new()
         };
-        AiSharedTypePlanSchema::compile(&self.compact_argument_schema, &names)
+        AiSharedTypePlanSchema::compile(self.compact_argument_schema(), &names)
     }
 
     /// Returns the complete capability fingerprint.
@@ -861,13 +982,16 @@ impl AiGraphqlQueryCapability {
     /// Returns a safe input error for unknown, hidden, cyclic, stale,
     /// excessive, malformed, or unbounded plan content.
     pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlQuery, AiError> {
+        self.compile_plan(plan).map_err(AiError::from)
+    }
+
+    fn compile_plan(&self, plan: Value) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
         prevalidate_json_plan(self, &plan)?;
-        let validator = jsonschema::validator_for(&self.argument_schema)
-            .map_err(|_| configuration_error("query capability schema is invalid"))?;
+        let validator = self
+            .argument_schema
+            .validator("query capability schema is invalid")?;
         if !validator.is_valid(&plan) {
-            return Err(input_error(
-                "query plan does not match the capability schema",
-            ));
+            return Err(input_error("query plan does not match the capability schema").into());
         }
         let typed_plan: AiGraphqlQueryPlan = serde_json::from_value(plan.clone())
             .map_err(|_| input_error("query plan has an invalid shape"))?;
@@ -882,20 +1006,28 @@ impl AiGraphqlQueryCapability {
     /// Returns a safe input error for an unknown, hidden, stale, cyclic,
     /// over-depth, over-cardinality, or over-budget public selection.
     pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlQuery, AiError> {
+        self.compile_compact_plan(plan).map_err(AiError::from)
+    }
+
+    fn compile_compact_plan(
+        &self,
+        plan: Value,
+    ) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
         prevalidate_json_plan(self, &plan)?;
-        let validator = jsonschema::validator_for(&self.compact_argument_schema)
-            .map_err(|_| configuration_error("compact query capability schema is invalid"))?;
+        let validator = self
+            .compact_argument_schema
+            .validator("compact query capability schema is invalid")?;
         if !validator.is_valid(&plan) {
             // Keep the pre-v3 closed plan readable for host-owned persisted
             // work and a bounded migration window. It is never advertised by
             // the v3 model definition and remains subject to the same final
             // schema-derived compiler and budgets.
             if plan.get("fields").is_some() && plan.get("selections").is_none() {
-                return self.compile(plan);
+                return self.compile_plan(plan);
             }
-            return Err(input_error(
-                "compact query plan does not match the capability schema",
-            ));
+            return Err(
+                input_error("compact query plan does not match the capability schema").into(),
+            );
         }
         let compact: AiCompactGraphqlQueryPlan = serde_json::from_value(plan.clone())
             .map_err(|_| input_error("compact query plan has an invalid shape"))?;
@@ -910,48 +1042,26 @@ impl AiGraphqlQueryCapability {
         &self,
         plan: Value,
     ) -> Result<AiCompiledGraphqlQuery, AiGraphqlQueryPlanCorrection> {
-        self.compile_compact(plan)
-            .map_err(|error| self.correction_for(&error))
-    }
-
-    fn correction_for(&self, error: &AiError) -> AiGraphqlQueryPlanCorrection {
-        let code = match error {
-            AiError::InvalidInput(message) if message.contains("relationship depth") => {
-                AiGraphqlQueryPlanFailureCode::RelationshipDepthExceeded
-            }
-            AiError::InvalidInput(message)
-                if message.contains("result record")
-                    || message.contains("result-record")
-                    || message.contains("record budget") =>
-            {
-                AiGraphqlQueryPlanFailureCode::ResultBudgetExceeded
-            }
-            AiError::InvalidInput(message)
-                if message.contains("selection is too large")
-                    || message.contains("selection exceeds")
-                    || message.contains("complexity limits") =>
-            {
-                AiGraphqlQueryPlanFailureCode::SelectionTooLarge
-            }
-            AiError::InvalidConfiguration(_) => AiGraphqlQueryPlanFailureCode::CapabilityStale,
-            _ => AiGraphqlQueryPlanFailureCode::InvalidArguments,
-        };
-        AiGraphqlQueryPlanCorrection {
-            version: 1,
-            code,
-            maximum_selected_fields: self.limits.maximum_selected_fields,
-            maximum_relationship_depth: self.limits.maximum_depth,
-            maximum_result_records: self.limits.maximum_result_records,
-            maximum_result_bytes: self.limits.maximum_result_bytes,
-        }
+        self.compile_compact_plan(plan)
+            .map_err(|error| AiGraphqlQueryPlanCorrection {
+                version: 1,
+                code: error.code,
+                maximum_selected_fields: self.limits.maximum_selected_fields,
+                maximum_relationship_depth: self.limits.maximum_depth,
+                maximum_result_records: self.limits.maximum_result_records,
+                maximum_result_bytes: self.limits.maximum_result_bytes,
+            })
     }
 
     fn expand_compact_plan(
         &self,
         compact: AiCompactGraphqlQueryPlan,
-    ) -> Result<AiGraphqlQueryPlan, AiError> {
+    ) -> Result<AiGraphqlQueryPlan, PlanCompileError> {
         if compact.selections.len() > self.limits.maximum_selected_fields as usize {
-            return Err(input_error("compact query selection is too large"));
+            return Err(PlanCompileError::invalid_input(
+                AiGraphqlQueryPlanFailureCode::SelectionTooLarge,
+                "compact query selection is too large",
+            ));
         }
         let mut plan = AiGraphqlQueryPlan {
             arguments: compact.arguments,
@@ -977,7 +1087,8 @@ impl AiGraphqlQueryCapability {
         {
             return Err(input_error(
                 "compact query relationship options do not match a selected path",
-            ));
+            )
+            .into());
         }
         Ok(plan)
     }
@@ -987,14 +1098,15 @@ impl AiGraphqlQueryCapability {
         plan: AiGraphqlQueryPlan,
         fingerprint_plan: &Value,
         expected_kind: GraphqlOperationKind,
-    ) -> Result<AiCompiledGraphqlQuery, AiError> {
+    ) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
         self.semantic_catalog
             .validate()
             .map_err(|_| configuration_error("query semantic catalogue is stale or invalid"))?;
         if self.operation.kind != expected_kind {
             return Err(configuration_error(
                 "semantic operation kind does not match the plan compiler",
-            ));
+            )
+            .into());
         }
         let mut context = CompileContext::new(self);
         let root_field = self
@@ -1043,7 +1155,7 @@ impl AiGraphqlQueryCapability {
                         requested == 0 || maximum_items.is_none_or(|maximum| requested > maximum)
                     })
                 {
-                    return Err(input_error("scalar query plans cannot select fields"));
+                    return Err(input_error("scalar query plans cannot select fields").into());
                 }
                 let scalar =
                     AiDisclosureShape::scalar(AiDisclosureRule::exportable(*classification));
@@ -1065,9 +1177,9 @@ impl AiGraphqlQueryCapability {
                 value_fields,
             } => {
                 if !plan.fields.is_empty() || !plan.relationships.is_empty() {
-                    return Err(input_error(
-                        "aggregate query plans use a fixed result shape",
-                    ));
+                    return Err(
+                        input_error("aggregate query plans use a fixed result shape").into(),
+                    );
                 }
                 (
                     projection.clone(),
@@ -1116,7 +1228,7 @@ impl AiGraphqlQueryCapability {
                 GraphqlOperationKind::Query => "AiQuery",
                 GraphqlOperationKind::Mutation => "AiMutation",
                 GraphqlOperationKind::Subscription => "AiSubscription",
-                _ => return Err(configuration_error("unsupported plan operation kind")),
+                _ => return Err(configuration_error("unsupported plan operation kind").into()),
             },
             &plan_fingerprint[..20]
         );
@@ -1124,7 +1236,7 @@ impl AiGraphqlQueryCapability {
             GraphqlOperationKind::Query => "query",
             GraphqlOperationKind::Mutation => "mutation",
             GraphqlOperationKind::Subscription => "subscription",
-            _ => return Err(configuration_error("unsupported plan operation kind")),
+            _ => return Err(configuration_error("unsupported plan operation kind").into()),
         };
         let document = if projection.is_empty() {
             format!(
@@ -1154,7 +1266,7 @@ impl AiGraphqlQueryCapability {
                 GraphqlOperationKind::Subscription => {
                     format!("bounded-subscription-v{AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION}")
                 }
-                _ => return Err(configuration_error("unsupported plan operation kind")),
+                _ => return Err(configuration_error("unsupported plan operation kind").into()),
             },
             disclosure,
         )?;
@@ -1162,7 +1274,8 @@ impl AiGraphqlQueryCapability {
             .maximum_graphql_record_count()
             .is_none_or(|records| records > u64::from(self.limits.maximum_result_records))
         {
-            return Err(input_error(
+            return Err(PlanCompileError::invalid_input(
+                AiGraphqlQueryPlanFailureCode::ResultBudgetExceeded,
                 "operation selection exceeds the total result record budget",
             ));
         }
@@ -1195,7 +1308,7 @@ impl AiGraphqlQueryCapability {
                 GraphqlOperationKind::Query => AiToolOperationKind::Query,
                 GraphqlOperationKind::Mutation => AiToolOperationKind::Mutation,
                 GraphqlOperationKind::Subscription => AiToolOperationKind::Subscription,
-                _ => return Err(configuration_error("unsupported plan operation kind")),
+                _ => return Err(configuration_error("unsupported plan operation kind").into()),
             },
             &document,
             variable_schema,
@@ -1219,7 +1332,7 @@ impl AiGraphqlQueryCapability {
                     GraphqlOperationKind::Mutation,
                     Some(AiMutationExecutionPolicy::ApprovalRequired),
                 ) => ToolMaturity::SupervisedWrite,
-                _ => return Err(configuration_error("operation capability is prohibited")),
+                _ => return Err(configuration_error("operation capability is prohibited").into()),
             },
         )
         .with_risk(
@@ -1234,7 +1347,7 @@ impl AiGraphqlQueryCapability {
                     GraphqlOperationKind::Mutation,
                     Some(AiMutationExecutionPolicy::ApprovalRequired),
                 ) => AiToolRisk::NonIdempotentWrite,
-                _ => return Err(configuration_error("operation capability is prohibited")),
+                _ => return Err(configuration_error("operation capability is prohibited").into()),
             },
             match (expected_kind, self.operation.ai_mutation_execution) {
                 (GraphqlOperationKind::Query | GraphqlOperationKind::Subscription, None)
@@ -1245,7 +1358,7 @@ impl AiGraphqlQueryCapability {
                     GraphqlOperationKind::Mutation,
                     Some(AiMutationExecutionPolicy::ApprovalRequired),
                 ) => AiApprovalRule::OneShot,
-                _ => return Err(configuration_error("operation capability is prohibited")),
+                _ => return Err(configuration_error("operation capability is prohibited").into()),
             },
         )
         .with_idempotent(matches!(
@@ -1667,7 +1780,7 @@ impl AiGraphqlQueryCapabilityCatalog {
             capabilities
                 .values()
                 .try_fold(0_usize, |total, capability| {
-                    serde_json::to_vec(&capability.argument_schema)
+                    serde_json::to_vec(capability.argument_schema())
                         .ok()
                         .and_then(|encoded| total.checked_add(encoded.len()))
                 });
@@ -1811,8 +1924,10 @@ impl AiGraphqlMutationCapability {
     /// excessive, or unbounded plan content.
     pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlMutation, AiError> {
         prevalidate_json_plan(&self.base, &plan)?;
-        let validator = jsonschema::validator_for(self.argument_schema())
-            .map_err(|_| configuration_error("mutation capability schema is invalid"))?;
+        let validator = self
+            .base
+            .argument_schema
+            .validator("mutation capability schema is invalid")?;
         if !validator.is_valid(&plan) {
             return Err(input_error(
                 "mutation plan does not match the capability schema",
@@ -1843,8 +1958,10 @@ impl AiGraphqlMutationCapability {
     /// unbounded plan content.
     pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlMutation, AiError> {
         prevalidate_json_plan(&self.base, &plan)?;
-        let validator = jsonschema::validator_for(self.compact_argument_schema())
-            .map_err(|_| configuration_error("compact mutation capability schema is invalid"))?;
+        let validator = self
+            .base
+            .compact_argument_schema
+            .validator("compact mutation capability schema is invalid")?;
         if !validator.is_valid(&plan) {
             if plan.get("fields").is_some() && plan.get("selections").is_none() {
                 return self.compile(plan);
@@ -2230,8 +2347,10 @@ impl AiGraphqlSubscriptionCapability {
     /// unbounded, or semantically unsupported plan.
     pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlSubscription, AiError> {
         prevalidate_json_plan(&self.base, &plan)?;
-        let validator = jsonschema::validator_for(self.argument_schema())
-            .map_err(|_| configuration_error("subscription capability schema is invalid"))?;
+        let validator = self
+            .base
+            .argument_schema
+            .validator("subscription capability schema is invalid")?;
         if !validator.is_valid(&plan) {
             return Err(input_error(
                 "subscription plan does not match the capability schema",
@@ -2277,8 +2396,10 @@ impl AiGraphqlSubscriptionCapability {
     /// stale/hidden/excessive selection.
     pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlSubscription, AiError> {
         prevalidate_json_plan(&self.base, &plan)?;
-        let validator = jsonschema::validator_for(self.compact_argument_schema())
-            .map_err(|_| configuration_error("compact subscription schema is invalid"))?;
+        let validator = self
+            .base
+            .compact_argument_schema
+            .validator("compact subscription schema is invalid")?;
         if !validator.is_valid(&plan) {
             if plan.get("fields").is_some() && plan.get("selections").is_none() {
                 return self.compile(plan);
@@ -2755,7 +2876,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 subgraph_id,
                 &operation.field_name,
             ))?;
-            base.argument_schema = subscription_plan_schema(
+            base.argument_schema = PlanSchema::new(subscription_plan_schema(
                 &schema,
                 semantic_catalog,
                 operation,
@@ -2763,8 +2884,8 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 limits.query,
                 maximum_duration_seconds,
                 maximum_events,
-            )?;
-            base.compact_argument_schema = compact_subscription_plan_schema(
+            )?);
+            base.compact_argument_schema = PlanSchema::new(compact_subscription_plan_schema(
                 &schema,
                 semantic_catalog,
                 operation,
@@ -2772,19 +2893,17 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 limits.query,
                 maximum_duration_seconds,
                 maximum_events,
-            )?;
+            )?);
             if let Some(exclusion) =
-                oversized_provider_schema(operation, &base.compact_argument_schema)?
+                oversized_provider_schema(operation, base.compact_argument_schema())?
             {
                 excluded.push(exclusion);
                 continue;
             }
-            if jsonschema::validator_for(&base.argument_schema).is_err()
-                || jsonschema::validator_for(&base.compact_argument_schema).is_err()
-            {
-                return Err(configuration_error(
-                    "generated subscription plan schema is invalid",
-                ));
+            for schema in [&base.argument_schema, &base.compact_argument_schema] {
+                jsonschema::validator_for(&schema.value).map_err(|_| {
+                    configuration_error("generated subscription plan schema is invalid")
+                })?;
             }
             base.fingerprint = sha256_json(&json!({
                 "version": AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
@@ -2793,7 +2912,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 "schema": schema_fingerprint,
                 "semantic_catalog": semantic_catalog.fingerprint,
                 "operation": operation.fingerprint,
-                "argument_schema": base.argument_schema,
+                "argument_schema": base.argument_schema(),
                 "limits": limits,
                 "maximum_duration_seconds": maximum_duration_seconds,
                 "maximum_events": maximum_events,
@@ -3419,6 +3538,8 @@ fn compile_capability(
     if let Some(exclusion) = oversized_provider_schema(operation, &compact_argument_schema)? {
         return Ok(CompiledCapability::Excluded(exclusion));
     }
+    // Check every generated contract at catalogue construction, as before.
+    // Retain validators only for capabilities that actually receive plans.
     jsonschema::validator_for(&argument_schema)
         .map_err(|_| configuration_error("generated query plan schema is invalid"))?;
     let id = AiToolId::parse(match expected_kind {
@@ -3452,8 +3573,9 @@ fn compile_capability(
             id,
             operation: operation.clone(),
             description: operation.description.clone(),
-            argument_schema,
-            compact_argument_schema,
+            argument_schema: PlanSchema::new(argument_schema),
+            compact_argument_schema: PlanSchema::new(compact_argument_schema),
+            variable_schemas: VariableSchemas::default(),
             fingerprint,
             schema_fingerprint: schema_fingerprint.to_owned(),
             target_id,
@@ -6204,18 +6326,8 @@ impl<'a> CompileContext<'a> {
                 .get(name.as_str())
                 .map(|field| field.description.as_str())
                 .or(schema.description.as_deref());
-            let input_schema = finish_json_schema(input_type_schema(
-                &self.capability.schema,
-                &self.capability.semantic_catalog,
-                &schema.ty,
-                description,
-                self.capability.limits,
-                0,
-                &mut Vec::new(),
-            )?)?;
-            let validator = jsonschema::validator_for(&input_schema)
-                .map_err(|_| configuration_error("compiled variable schema is invalid"))?;
-            if !validator.is_valid(&value) {
+            let compiled = self.capability.variable_schema(&schema.ty, description)?;
+            if !compiled.validator.is_valid(&value) {
                 return Err(input_error(
                     "query argument does not match its GraphQL type",
                 ));
@@ -6224,7 +6336,8 @@ impl<'a> CompileContext<'a> {
             self.variables.insert(variable.clone(), value);
             self.variable_definitions
                 .push(format!("${variable}: {}", schema.ty));
-            self.variable_schemas.insert(variable.clone(), input_schema);
+            self.variable_schemas
+                .insert(variable.clone(), compiled.value.clone());
             rendered.push(format!("{name}: ${variable}"));
             self.arguments += 1;
             let _ = path;
@@ -6238,13 +6351,16 @@ impl<'a> CompileContext<'a> {
         plan: EntityPlanRef<'_>,
         ancestry: &mut Vec<String>,
         depth: u8,
-    ) -> Result<(String, AiDisclosureShape), AiError> {
+    ) -> Result<(String, AiDisclosureShape), PlanCompileError> {
         if depth >= self.capability.limits.maximum_depth {
-            return Err(input_error("query relationship depth exceeds its bound"));
+            return Err(PlanCompileError::invalid_input(
+                AiGraphqlQueryPlanFailureCode::RelationshipDepthExceeded,
+                "query relationship depth exceeds its bound",
+            ));
         }
         let entity = semantic_entity(&self.capability.semantic_catalog, entity_name)?;
         if plan.fields.values().any(|selected| !selected) {
-            return Err(input_error("query selection flags must be true"));
+            return Err(input_error("query selection flags must be true").into());
         }
         let supplied_fields = plan.fields.keys().collect::<BTreeSet<_>>();
         let mut rendered = Vec::new();
@@ -6252,7 +6368,7 @@ impl<'a> CompileContext<'a> {
         for field in &entity.fields {
             if supplied_fields.contains(&field.field_name) {
                 if !selectable_exportable_scalar(field) {
-                    return Err(input_error("query selected a hidden or non-scalar field"));
+                    return Err(input_error("query selected a hidden or non-scalar field").into());
                 }
                 self.capability
                     .schema
@@ -6273,7 +6389,7 @@ impl<'a> CompileContext<'a> {
                 .iter()
                 .any(|field| field.field_name == name.as_str())
         }) {
-            return Err(input_error("query selected an unknown field"));
+            return Err(input_error("query selected an unknown field").into());
         }
         for field in &entity.fields {
             let Some(relationship_plan) = plan.relationships.get(&field.field_name) else {
@@ -6287,7 +6403,7 @@ impl<'a> CompileContext<'a> {
                 || field.classification == GraphqlSemanticClassification::Secret
                 || ancestry.iter().any(|name| name == &relationship.target)
             {
-                return Err(input_error("query relationship is hidden or cyclic"));
+                return Err(input_error("query relationship is hidden or cyclic").into());
             }
             let actual = self
                 .capability
@@ -6299,9 +6415,9 @@ impl<'a> CompileContext<'a> {
                 Some(GraphqlSemanticCollectionBound::ServerFixed { .. })
             ) && relationship_plan.maximum_items.is_some()
             {
-                return Err(input_error(
-                    "server-fixed collection bound is not model-selected",
-                ));
+                return Err(
+                    input_error("server-fixed collection bound is not model-selected").into(),
+                );
             }
             let arguments = self.compile_arguments(
                 &actual.arguments,
@@ -6359,10 +6475,10 @@ impl<'a> CompileContext<'a> {
                 .iter()
                 .any(|field| field.field_name == name.as_str())
         }) {
-            return Err(input_error("query selected an unknown relationship"));
+            return Err(input_error("query selected an unknown relationship").into());
         }
         if rendered.is_empty() {
-            return Err(input_error("query selection must not be empty"));
+            return Err(input_error("query selection must not be empty").into());
         }
         let classification = disclosure_fields
             .values()
@@ -6378,11 +6494,12 @@ impl<'a> CompileContext<'a> {
         ))
     }
 
-    fn ensure_totals(&self) -> Result<(), AiError> {
+    fn ensure_totals(&self) -> Result<(), PlanCompileError> {
         if self.selected_fields > self.capability.limits.maximum_selected_fields as usize
             || self.arguments > self.capability.limits.maximum_arguments as usize
         {
-            return Err(input_error(
+            return Err(PlanCompileError::invalid_input(
+                AiGraphqlQueryPlanFailureCode::SelectionTooLarge,
                 "query plan exceeds deployment complexity limits",
             ));
         }
@@ -7067,7 +7184,7 @@ fn prevalidate_input_json(
 fn prevalidate_json_plan(
     capability: &AiGraphqlQueryCapability,
     plan: &Value,
-) -> Result<(), AiError> {
+) -> Result<(), PlanCompileError> {
     fn arguments(
         capability: &AiGraphqlQueryCapability,
         fields: &BTreeMap<String, SchemaInput>,
@@ -7112,12 +7229,15 @@ fn prevalidate_json_plan(
         entity: &str,
         value: &Value,
         depth: u8,
-    ) -> Result<(), AiError> {
+    ) -> Result<(), PlanCompileError> {
         let Some(relations) = value.get("relationships").and_then(Value::as_object) else {
             return Ok(());
         };
         if depth >= capability.limits.maximum_depth && !relations.is_empty() {
-            return Err(input_error("query relationship depth exceeded"));
+            return Err(PlanCompileError::invalid_input(
+                AiGraphqlQueryPlanFailureCode::RelationshipDepthExceeded,
+                "query relationship depth exceeded",
+            ));
         }
         for (name, plan) in relations {
             let (target, field) = relationship(capability, entity, name)?;
@@ -7141,7 +7261,10 @@ fn prevalidate_json_plan(
                 let mut current = entity.as_str();
                 let components = path.split('.').collect::<Vec<_>>();
                 if components.len() > capability.limits.maximum_depth as usize {
-                    return Err(input_error("query relationship depth exceeded"));
+                    return Err(PlanCompileError::invalid_input(
+                        AiGraphqlQueryPlanFailureCode::RelationshipDepthExceeded,
+                        "query relationship depth exceeded",
+                    ));
                 }
                 for (index, name) in components.iter().enumerate() {
                     let (target, field) = relationship(capability, current, name)?;
@@ -9156,6 +9279,7 @@ mod tests {
             let mut staged = public.clone();
             staged.schema = Arc::new(schema.clone());
             staged.semantic_catalog = Arc::new(semantics.clone());
+            staged.variable_schemas = VariableSchemas::default();
             for result in [staged.compile_compact(compact), staged.compile(nested)] {
                 assert!(matches!(
                     result,
@@ -9675,6 +9799,33 @@ mod tests {
     }
 
     #[test]
+    fn capability_clones_share_validators_for_the_same_contract() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<AiGraphqlQueryCapability>();
+
+        let capability = json_codec_capability(AiGraphqlQueryCapabilityLimits::default());
+        let cloned = capability.clone();
+        assert!(std::ptr::eq(
+            capability
+                .compact_argument_schema
+                .validator("invalid")
+                .unwrap(),
+            cloned.compact_argument_schema.validator("invalid").unwrap(),
+        ));
+
+        let integer = capability.variable_schema("Int!", Some("integer")).unwrap();
+        let reused = cloned.variable_schema("Int!", Some("integer")).unwrap();
+        assert!(Arc::ptr_eq(&integer, &reused));
+        assert!(reused.validator.is_valid(&json!(42)));
+        assert!(!reused.validator.is_valid(&json!("42")));
+
+        let text = cloned.variable_schema("String!", Some("integer")).unwrap();
+        assert!(text.validator.is_valid(&json!("42")));
+        let renamed = cloned.variable_schema("Int!", Some("renamed")).unwrap();
+        assert_eq!(renamed.value["description"], "renamed");
+    }
+
+    #[test]
     fn canonical_json_final_variable_contract_resolves_refs_and_retains_closed_bounds() {
         fn assert_local_refs(root: &Value, schema: &Value, at_root: bool) {
             match schema {
@@ -9797,8 +9948,8 @@ mod tests {
         assert_json_codec_admission(&capability, &Value::Object(too_wide), false);
         // Retained/provider schema is not runtime authority, including staged schemas.
         let mut staged = capability.clone();
-        staged.argument_schema = json!({"type": "object"});
-        staged.compact_argument_schema = json!({"type": "object"});
+        staged.argument_schema = PlanSchema::new(json!({"type": "object"}));
+        staged.compact_argument_schema = PlanSchema::new(json!({"type": "object"}));
         assert_json_codec_admission(&staged, &json!([[[null]]]), false);
         for (name, value, accepted) in [
             ("runtimeText", json!("{\"a\":1}"), true),
@@ -9823,7 +9974,7 @@ mod tests {
         assert!(serde_json::from_str::<Value>("1e9999").is_err());
         assert!(serde_json::Number::from_f64(f64::INFINITY).is_none());
         // Local definitions live at the actual plan root and remain small.
-        assert!(capability.argument_schema.get("$defs").is_some());
+        assert!(capability.argument_schema().get("$defs").is_some());
         assert!(
             serde_json::to_vec(capability.argument_schema())
                 .unwrap()
@@ -9873,8 +10024,8 @@ mod tests {
             false,
         );
         let mut staged = capability;
-        staged.argument_schema = json!({"type": "object"});
-        staged.compact_argument_schema = json!({"type": "object"});
+        staged.argument_schema = PlanSchema::new(json!({"type": "object"}));
+        staged.compact_argument_schema = PlanSchema::new(json!({"type": "object"}));
         assert_json_codec_admission(
             &staged,
             &json!("a".repeat(MAXIMUM_JSON_SCALAR_BYTES)),
@@ -10232,6 +10383,7 @@ mod tests {
             let mut staged = capability.clone();
             staged.schema = Arc::new(FinishedSchema::parse(&malicious).unwrap());
             staged.semantic_catalog = Arc::new(changed);
+            staged.variable_schemas = VariableSchemas::default();
             let supplied = json!({"where": {"id": value}}).as_object().unwrap().clone();
             let mut context = CompileContext::new(&staged);
             let root = staged
