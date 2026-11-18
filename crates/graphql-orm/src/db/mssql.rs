@@ -10,7 +10,8 @@ pub use notifications::{
 };
 pub use transport::MssqlTransportPolicy;
 
-use crate::graphql::orm::SqlValue;
+use crate::graphql::orm::{SqlValue, TemporalKind, TemporalValue};
+use chrono::{Datelike, Timelike};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -87,6 +88,7 @@ pub struct MssqlPoolOptions {
     max_lifetime: Option<Duration>,
     health_check_after_idle: Option<Duration>,
     transport: MssqlTransportPolicy,
+    typed_temporal_parameters: bool,
 }
 
 impl Default for MssqlPoolOptions {
@@ -100,6 +102,7 @@ impl Default for MssqlPoolOptions {
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             health_check_after_idle: Some(Duration::from_secs(30)),
             transport: MssqlTransportPolicy::verified(),
+            typed_temporal_parameters: false,
         }
     }
 }
@@ -163,6 +166,21 @@ impl MssqlPoolOptions {
     pub fn transport(mut self, policy: MssqlTransportPolicy) -> Self {
         self.transport = policy;
         self
+    }
+
+    /// Bind temporal values as native SQL Server parameters for this pool.
+    ///
+    /// The default uses text for compatibility. Native date, datetime2 and
+    /// datetimeoffset parameters avoid session-dependent text conversion.
+    /// Legacy datetime columns can round and compare differently.
+    pub fn typed_temporal_parameters(mut self, enabled: bool) -> Self {
+        self.typed_temporal_parameters = enabled;
+        self
+    }
+
+    /// Whether temporal values use native SQL Server parameters.
+    pub fn get_typed_temporal_parameters(&self) -> bool {
+        self.typed_temporal_parameters
     }
 
     /// Configured maximum open connections.
@@ -377,6 +395,7 @@ enum MssqlParamValue {
     Float(f64),
     Bool(bool),
     Decimal(rust_decimal::Decimal),
+    Temporal(ColumnData<'static>),
     NullString,
     NullBytes,
     NullUuid,
@@ -538,7 +557,12 @@ impl MssqlPool {
     ) -> crate::Result<Vec<MssqlRow>> {
         let mut lease = self.acquire().await?;
         let result = self
-            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .bounded(fetch_rows_with_client(
+                &mut lease.client,
+                sql,
+                values,
+                self.options().typed_temporal_parameters,
+            ))
             .await;
         self.finish(lease, result).await
     }
@@ -555,7 +579,12 @@ impl MssqlPool {
         let gated = restore_gated(sql, false);
         let mut lease = self.acquire().await?;
         let result = self
-            .bounded(execute_with_client(&mut lease.client, &gated, values))
+            .bounded(execute_with_client(
+                &mut lease.client,
+                &gated,
+                values,
+                self.options().typed_temporal_parameters,
+            ))
             .await;
         if result.is_ok()
             && let Err(failure) = self
@@ -630,6 +659,7 @@ impl MssqlPool {
                 &mut lease.client,
                 CREATE_RESTORE_MARKER,
                 &[],
+                self.options().typed_temporal_parameters,
             ))
             .await;
         self.finish(lease, result).await.map(|_| ())
@@ -686,9 +716,21 @@ impl MssqlPool {
         let claimed = async {
             let id = [SqlValue::String(restore_id.to_string())];
             if !resume {
-                execute_with_client(&mut lease.client, INSERT_RESTORE_MARKER, &id).await?;
+                execute_with_client(
+                    &mut lease.client,
+                    INSERT_RESTORE_MARKER,
+                    &id,
+                    self.options().typed_temporal_parameters,
+                )
+                .await?;
             }
-            fetch_rows_with_client(&mut lease.client, READ_RESTORE_MARKER, &[]).await
+            fetch_rows_with_client(
+                &mut lease.client,
+                READ_RESTORE_MARKER,
+                &[],
+                self.options().typed_temporal_parameters,
+            )
+            .await
         };
         let rows = self
             .bounded(claimed)
@@ -1189,7 +1231,12 @@ impl MssqlRestore {
         let pool = self.pool.clone();
         let lease = self.connection()?;
         let result = pool
-            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .bounded(execute_with_client(
+                &mut lease.client,
+                sql,
+                values,
+                pool.options().typed_temporal_parameters,
+            ))
             .await;
         self.keep_if_reusable(result)
             .map(MssqlWriteResult::rows_affected)
@@ -1204,7 +1251,12 @@ impl MssqlRestore {
         let pool = self.pool.clone();
         let lease = self.connection()?;
         let result = pool
-            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .bounded(fetch_rows_with_client(
+                &mut lease.client,
+                sql,
+                values,
+                pool.options().typed_temporal_parameters,
+            ))
             .await;
         self.keep_if_reusable(result)
     }
@@ -1226,6 +1278,7 @@ impl MssqlRestore {
                 "IF @@TRANCOUNT > 0 BEGIN RAISERROR(N'the restore connection has an open transaction; commit or roll it back before finishing the restore', 16, 1); RETURN; END; \
                  DELETE FROM [dbo].[__graphql_orm_restore_marker] WHERE restore_id = @P1",
                 &id,
+                pool.options().typed_temporal_parameters,
             ))
             .await;
         self.keep_if_reusable(cleared)?;
@@ -1251,7 +1304,12 @@ impl MssqlTransaction {
         let lease = self.lease.as_mut().ok_or_else(inactive_transaction)?;
         let result = self
             .pool
-            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .bounded(fetch_rows_with_client(
+                &mut lease.client,
+                sql,
+                values,
+                self.pool.options().typed_temporal_parameters,
+            ))
             .await;
         result.map_err(|failure| self.poison(failure))
     }
@@ -1267,7 +1325,12 @@ impl MssqlTransaction {
         let lease = self.lease.as_mut().ok_or_else(inactive_transaction)?;
         let result = self
             .pool
-            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .bounded(execute_with_client(
+                &mut lease.client,
+                sql,
+                values,
+                self.pool.options().typed_temporal_parameters,
+            ))
             .await;
         result.map_err(|failure| self.poison(failure))
     }
@@ -1443,6 +1506,40 @@ impl MssqlScalar for String {
             index: index.display(),
             source: "could not decode SQL Server column as String".into(),
         })
+    }
+}
+
+macro_rules! impl_mssql_temporal_scalar {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl MssqlScalar for $ty {
+            fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+            where
+                I: MssqlColumnIndex,
+            {
+                index.try_get_raw::<Self>(&row.inner).map_err(map_tiberius_error)
+            }
+        }
+    )+};
+}
+
+impl_mssql_temporal_scalar!(
+    chrono::NaiveDate,
+    chrono::NaiveDateTime,
+    chrono::DateTime<chrono::FixedOffset>,
+);
+
+impl MssqlScalar for chrono::DateTime<chrono::Utc> {
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+    where
+        I: MssqlColumnIndex,
+    {
+        if let Ok(value) = index.try_get_raw::<chrono::NaiveDateTime>(&row.inner) {
+            return Ok(value.map(|value| value.and_utc()));
+        }
+        index
+            .try_get_raw::<chrono::DateTime<chrono::FixedOffset>>(&row.inner)
+            .map(|value| value.map(|value| value.to_utc()))
+            .map_err(map_tiberius_error)
     }
 }
 
@@ -1672,6 +1769,7 @@ impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
                 ColumnData::Numeric(value) => ColumnData::Numeric(value),
                 _ => unreachable!("rust_decimal always maps to TDS numeric"),
             },
+            Self::Temporal(value) => value,
             Self::NullString => ColumnData::String(None),
             Self::NullBytes => ColumnData::Binary(None),
             Self::NullUuid => ColumnData::Guid(None),
@@ -1717,17 +1815,34 @@ pub(super) async fn catch_driver_panic<T, E>(
     }
 }
 
+fn bind_query(
+    sql: &str,
+    values: &[SqlValue],
+    typed_temporal_parameters: bool,
+) -> Result<Query<'static>, StatementFailure> {
+    let mut query = Query::new(sql.to_owned());
+    for value in values {
+        query.bind(
+            MssqlParamValue::from_value(value, typed_temporal_parameters).map_err(|error| {
+                StatementFailure {
+                    error,
+                    reusable: true,
+                }
+            })?,
+        );
+    }
+    Ok(query)
+}
+
 async fn fetch_rows_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
+    typed_temporal_parameters: bool,
 ) -> Result<Vec<MssqlRow>, StatementFailure> {
     catch_driver_panic(
         async {
-            let mut query = Query::new(sql.to_string());
-            for value in values.iter().map(MssqlParamValue::from) {
-                query.bind(value);
-            }
+            let query = bind_query(sql, values, typed_temporal_parameters)?;
             let stream = query.query(client).await.map_err(statement_failure)?;
             let rows = stream
                 .into_first_result()
@@ -1744,13 +1859,11 @@ async fn execute_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
+    typed_temporal_parameters: bool,
 ) -> Result<MssqlWriteResult, StatementFailure> {
     catch_driver_panic(
         async {
-            let mut query = Query::new(sql.to_string());
-            for value in values.iter().map(MssqlParamValue::from) {
-                query.bind(value);
-            }
+            let query = bind_query(sql, values, typed_temporal_parameters)?;
             let result = query.execute(client).await.map_err(statement_failure)?;
             Ok(MssqlWriteResult {
                 rows_affected: statement_rows_affected(result.rows_affected()),
@@ -1807,10 +1920,14 @@ fn statement_failure(error: tiberius::error::Error) -> StatementFailure {
     }
 }
 
-impl From<&SqlValue> for MssqlParamValue {
-    fn from(value: &SqlValue) -> Self {
-        match value {
+impl MssqlParamValue {
+    fn from_value(value: &SqlValue, typed_temporal_parameters: bool) -> crate::Result<Self> {
+        Ok(match value {
             SqlValue::String(value) => Self::String(value.clone()),
+            SqlValue::Temporal(value) if typed_temporal_parameters => {
+                Self::Temporal(encode_temporal(value)?)
+            }
+            SqlValue::Temporal(value) => Self::String(value.as_text().to_owned()),
             SqlValue::StringNull => Self::NullString,
             SqlValue::Bytes(value) => Self::Bytes(value.clone()),
             SqlValue::BytesNull => Self::NullBytes,
@@ -1829,7 +1946,43 @@ impl From<&SqlValue> for MssqlParamValue {
             SqlValue::Bool(value) => Self::Bool(*value),
             SqlValue::BoolNull => Self::NullBool,
             SqlValue::Null => Self::NullString,
+        })
+    }
+}
+
+fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> {
+    use tiberius::IntoSql;
+
+    let valid_date = |date: chrono::NaiveDate| (1..=9999).contains(&date.year());
+    let valid_time =
+        |time: chrono::NaiveDateTime| valid_date(time.date()) && time.nanosecond() < 1_000_000_000;
+
+    match *value.kind() {
+        TemporalKind::Date(date) if valid_date(date) => Ok(date.into_sql()),
+        TemporalKind::DateTime(time) if valid_time(time) => Ok(time.into_sql()),
+        TemporalKind::DateTimeOffset(time) => {
+            let offset = time.offset().local_minus_utc();
+            let utc = time.naive_utc();
+            if offset % 60 == 0
+                && offset.abs() <= 14 * 3600
+                && valid_time(utc)
+                && utc
+                    .checked_add_signed(chrono::Duration::seconds(i64::from(offset)))
+                    .is_some_and(valid_time)
+            {
+                Ok(time.into_sql())
+            } else {
+                Err(sqlx::Error::Encode(
+                    "timestamp is outside the SQL Server datetimeoffset range".into(),
+                ))
+            }
         }
+        TemporalKind::Unparsed => Err(sqlx::Error::Encode(
+            "SQL Server native temporal parameters require an ISO date or timestamp".into(),
+        )),
+        _ => Err(sqlx::Error::Encode(
+            "value is outside the SQL Server date or datetime2 range".into(),
+        )),
     }
 }
 

@@ -7475,12 +7475,56 @@ fn generate_projection_definitions(
     Ok(quote! { #(#definitions)* })
 }
 
+/// Chrono temporal types accepted by the generated bind and row paths.
+fn chrono_temporal_type(ty: &syn::Type) -> Option<&'static str> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    match segment.ident.to_string().as_str() {
+        "NaiveDate" => Some("DATE"),
+        "NaiveDateTime" => Some("DATETIME2"),
+        "DateTime" => {
+            let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                return None;
+            };
+            let Some(syn::GenericArgument::Type(zone)) = args.args.first() else {
+                return None;
+            };
+            match type_path_last_ident(zone)?.to_string().as_str() {
+                "Utc" => Some("DATETIME2"),
+                "FixedOffset" => Some("DATETIMEOFFSET"),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Bind the fallback scalar case using the type or explicit temporal field metadata.
+pub(crate) fn scalar_text_bind_tokens(
+    ty: &syn::Type,
+    meta: &FieldMetadata,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let inner = option_inner_type(ty).unwrap_or(ty);
+    if chrono_temporal_type(inner).is_some() {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::from(*#value) }
+    } else if meta.is_date_field || meta.filterable.as_deref() == Some("date") {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::temporal_text((#value).to_string()) }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::String((#value).to_string()) }
+    }
+}
+
 fn projection_lookup_sql_value(
     field: &ParsedField,
     argument: &syn::Ident,
 ) -> proc_macro2::TokenStream {
     let ty = option_inner_type(&field.field.ty).unwrap_or(&field.field.ty);
-    if is_byte_vec_type(ty) {
+    if chrono_temporal_type(ty).is_some() || field.meta.is_date_field {
+        scalar_text_bind_tokens(ty, &field.meta, quote! { #argument })
+    } else if is_byte_vec_type(ty) {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(#argument.clone()) }
     } else if is_uuid_type(ty) {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(*#argument) }
@@ -8172,6 +8216,47 @@ fn generate_row_field_assignment(
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let inner = option_inner_type(field_type).unwrap_or(field_type);
+    if let Some(temporal_type) = chrono_temporal_type(inner) {
+        let is_offset_aware = type_path_last_ident(inner).is_some_and(|name| name == "DateTime");
+        let value = if backend == BackendKind::Mssql
+            || (backend == BackendKind::Postgres && is_offset_aware)
+        {
+            quote! { row.try_get(#db_col)? }
+        } else {
+            let parser = match (temporal_type, is_offset_aware) {
+                ("DATETIME2", false) => quote! {
+                    |text: &str| text.parse::<#inner>().or_else(|_| {
+                        <#inner>::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
+                    })
+                },
+                ("DATETIME2", true) => quote! {
+                    |text: &str| text.parse::<#inner>().or_else(|error| {
+                        let naive = text.strip_suffix(" UTC").ok_or(error)?;
+                        ::graphql_orm::chrono::NaiveDateTime::parse_from_str(
+                            naive, "%Y-%m-%d %H:%M:%S%.f"
+                        ).map(|value| value.and_utc())
+                    })
+                },
+                _ => quote! { |text: &str| text.parse::<#inner>() },
+            };
+            if is_option_type(field_type) {
+                quote! {{
+                    let value: Option<String> = row.try_get(#db_col)?;
+                    value.as_deref().map(#parser).transpose()
+                        .map_err(|error| ::graphql_orm::sqlx::Error::Decode(Box::new(error)))?
+                }}
+            } else {
+                quote! {{
+                    let value: String = row.try_get(#db_col)?;
+                    (#parser)(&value)
+                        .map_err(|error| ::graphql_orm::sqlx::Error::Decode(Box::new(error)))?
+                }}
+            }
+        };
+        return Ok(quote! { #field_name: #value, });
+    }
+
     let bool_expr = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { row.try_get::<bool, _>(#db_col)? }
     } else {
@@ -8197,13 +8282,8 @@ fn generate_row_field_assignment(
         }}
     };
     // Handle special field types
-    if meta.is_date_field {
-        return Ok(quote! {
-            #field_name: {
-                let s: Option<String> = row.try_get(#db_col)?;
-                s.and_then(|s| str_to_datetime(&s).ok())
-            },
-        });
+    if meta.is_date_field && is_string_type(inner) {
+        return Ok(quote! { #field_name: row.try_get(#db_col)?, });
     }
     if meta.is_boolean_field {
         return Ok(quote! {
@@ -8727,6 +8807,11 @@ pub(crate) fn rust_type_to_sql_type(
             BackendKind::Sqlite => "TEXT",
         }
         .to_string();
+    }
+    if backend == BackendKind::Mssql
+        && let Some(sql_type) = chrono_temporal_type(inner_type)
+    {
+        return sql_type.to_owned();
     }
     if meta.is_date_field {
         return match backend {

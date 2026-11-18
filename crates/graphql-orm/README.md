@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+SQL Server pools can opt in to native date and timestamp parameters with
+`MssqlPoolOptions::typed_temporal_parameters(true)`. Text-compatible binds
+remain the default. See the [migration guide](../../MIGRATION.md#sql-server-native-temporal-parameters-521)
+for legacy `datetime` conversion and the `SqlValue` match update.
+
 The unreleased breaking release fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side

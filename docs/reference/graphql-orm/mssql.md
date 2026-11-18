@@ -314,6 +314,7 @@ certificate settings checked.
 | `max_lifetime` | 30 min | Connections older than this are closed when next released or acquired. |
 | `health_check_after_idle` | 30 s | A connection idle this long is reset and checked before reuse. |
 | `transport` | `verified()` | See above. |
+| `typed_temporal_parameters` | `false` | Enable [native temporal parameters](#native-temporal-parameters). |
 
 A statement timeout has two caveats. First, the outcome of a timed-out
 autocommit write is indeterminate: the server can still finish and commit the
@@ -748,8 +749,7 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
   PostgreSQL backends hold: a type without an offset is read as UTC
   (`2026-11-09T12:34:56Z`, with the fraction when it is not zero) and a `datetimeoffset`
   keeps its offset (`2026-11-09T12:34:56+02:00`). `date` stays `2026-11-09`. What is read does
-  not depend on the session language or `DATEFORMAT`. Values are still
-  bound as text, so write ISO 8601 with a `T` to columns of the legacy `datetime` type.
+  not depend on the session language or `DATEFORMAT`.
 - a `DECIMAL` value beyond `rust_decimal`'s range (more than 28 decimal places or a 96-bit
   mantissa) is a column decode error. The driver cannot read a non-NULL value in a column
   declared with scale 38 (`DECIMAL(38,38)`) at all: it asserts while it decodes the row. The
@@ -774,6 +774,28 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
 SQL Server-specific types such as `xml`, `hierarchyid`,
 `geography`, `geometry`, `sql_variant`, `rowversion`, and table-valued columns are not first-class
 ORM scalar types in this phase.
+
+### Native temporal parameters
+
+Pass `MssqlPoolOptions::new().typed_temporal_parameters(true)` to
+`MssqlPool::connect_ado_with` for reads or
+`MssqlPool::connect_ado_external_writable_with` for reads and writes. Use the
+resulting pool to construct your `Database`. All statements through that pool,
+including transactions, use the same setting.
+
+- `chrono::NaiveDate` binds as `date`.
+- `chrono::NaiveDateTime` and `chrono::DateTime<Utc>` bind as `datetime2`.
+- `chrono::DateTime<FixedOffset>` binds as `datetimeoffset`.
+- Date filters and text fields declared with `#[date_field]` or
+  `#[filterable(type = "date")]` accept ISO dates and timestamps. A date-only
+  value binds as `date`, a timestamp without an offset binds as `datetime2`,
+  and a timestamp with an offset binds as `datetimeoffset`.
+
+Native parameters avoid conversion based on language and `DATEFORMAT`.
+Legacy `datetime` columns can round stored values differently or compare
+at a different precision when SQL Server converts between native types.
+The default sends the original text. In that mode, use ISO 8601 with a
+`T` when writing a timestamp to a legacy `datetime` column.
 
 ## Introspection and rendered DDL
 

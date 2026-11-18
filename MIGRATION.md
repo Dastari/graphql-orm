@@ -24,6 +24,32 @@ assigns the final version numbers. A version named in an entry below is the
 integration placeholder its change was written against, not a published
 release.
 
+### Exhaustive SqlValue matches (#521)
+
+**Action needed** for downstream Rust code that matches every
+`graphql_orm::graphql::orm::SqlValue` variant. Add a wildcard arm and handle
+unsupported values explicitly. The enum is now `#[non_exhaustive]` and gains
+`Temporal` for dates and timestamps. Custom binders can inspect the parsed
+value with `TemporalValue::kind()` or reproduce the previous text with
+`TemporalValue::as_text()`.
+
+### SQL Server native temporal parameters (#521)
+
+**No action** for existing SQL Server, SQLite or PostgreSQL connections.
+SQL Server continues to send temporal values as text by default. To opt in,
+pass `MssqlPoolOptions::new().typed_temporal_parameters(true)` to
+`MssqlPool::connect_ado_with` or
+`MssqlPool::connect_ado_external_writable_with` and use that pool to build the
+`Database`.
+
+In native mode, explicitly temporal text inputs and date filters require an
+ISO date or timestamp. SQL Server receives `date`, `datetime2` or
+`datetimeoffset`, so session language and `DATEFORMAT` do not affect parsing.
+Legacy `datetime` columns can round stored values differently and compare at
+different precision when SQL Server converts between native types. Validate
+those writes and filters before enabling the option. A future breaking
+release can make native parameters the default.
+
 ### GraphQL naming is selected by environment variables, not features (#508)
 
 **Action needed** only for builds that enable a `resolver-case-*`,

@@ -14,6 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - breaking batch (ORM/macros 0.173.0 placeholder)
+
+- **Breaking (Rust API):** `SqlValue` is non-exhaustive and gains typed temporal
+  values. Downstream matches need a fallback arm.
+- **Added (SQL Server, opt-in):** `MssqlPoolOptions::typed_temporal_parameters(true)`
+  sends dates and timestamps as `date`, `datetime2` or `datetimeoffset`.
+  Writes and date filters avoid session-dependent parsing. Text remains the
+  default, since legacy `datetime` storage and comparisons can round
+  differently with typed values. [Migration](MIGRATION.md#sql-server-native-temporal-parameters-521)
+  · [#521](https://github.com/Dastari/graphql-orm/issues/521)
+
 ## Unreleased - breaking batch (ORM/macros 0.167.0 placeholder)
 
 - ORM and macros 0.172.0 and AI 0.151.0 (placeholders), **breaking**; see the [migration guide](MIGRATION.md#breaking-release-unreleased).

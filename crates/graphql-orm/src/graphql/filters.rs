@@ -630,7 +630,7 @@ impl DateFilter {
             if let Some(value) = value {
                 let placeholder = backend.placeholder(start_index + values.len());
                 conditions.push(format!("{column} {operator} {placeholder}"));
-                values.push(SqlValue::String(value.clone()));
+                values.push(SqlValue::temporal_text(value.clone()));
             }
         }
         if let Some(range) = &self.between {
@@ -639,8 +639,8 @@ impl DateFilter {
             conditions.push(format!(
                 "{column} BETWEEN {start_placeholder} AND {end_placeholder}"
             ));
-            values.push(SqlValue::String(range.start.clone()));
-            values.push(SqlValue::String(range.end.clone()));
+            values.push(SqlValue::temporal_text(range.start.clone()));
+            values.push(SqlValue::temporal_text(range.end.clone()));
         }
         if let Some(is_null) = self.is_null {
             conditions.push(format!(

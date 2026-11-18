@@ -1143,6 +1143,7 @@ fn bind_sqlite_value<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
     match value {
         SqlValue::String(value) => query.bind(value),
+        SqlValue::Temporal(value) => query.bind(value.as_text()),
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
@@ -1196,6 +1197,7 @@ pub(super) fn bind_postgres_value<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match value {
         SqlValue::String(value) => query.bind(value),
+        SqlValue::Temporal(value) => query.bind(value.as_text()),
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),

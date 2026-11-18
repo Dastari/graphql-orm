@@ -82,7 +82,10 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 - **No action** — Router 0.15.5: Only the wire tests change; router behavior, configuration and public APIs are unchanged. [migration](../../crates/graphql-orm-router/MIGRATION.md#0154-to-0155) · [changelog](../../crates/graphql-orm-router/CHANGELOG.md#0155-unreleased)
 - **No action** — ORM/macros 0.167.0: test-only; the macros unit tests no longer assume the SQLite backend [migration](../../MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests)
 
-Breaking batch, collected on `next/breaking` (ORM/macros 0.172.0, backup 0.27.0, AI 0.151.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.19.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+Breaking batch, collected on `next/breaking` (ORM/macros 0.173.0, backup 0.27.0, AI 0.151.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.19.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+
+- **Action needed — ORM/macros 0.173.0:** add a fallback to exhaustive `SqlValue` matches. [Migration](../../MIGRATION.md#exhaustive-sqlvalue-matches-521)
+- **No action — ORM/macros 0.173.0:** opt in per SQL Server pool to native temporal parameters. Review legacy `datetime` storage and comparisons before enabling them. [Migration](../../MIGRATION.md#sql-server-native-temporal-parameters-521)
 
 - **Action needed — ORM/macros 0.172.0, AI 0.151.0:** the `resolver-case-*`, `argument-case-*` and `field-case-*` features (and AI's `graphql-case-pascal`) are replaced by the `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE`, `GRAPHQL_ORM_FIELD_CASE` (and `GRAPHQL_ORM_AI_CASE`) build environment variables; names are unchanged (#508). [Migration](../../MIGRATION.md#graphql-naming-is-selected-by-environment-variables-not-features-508)
 

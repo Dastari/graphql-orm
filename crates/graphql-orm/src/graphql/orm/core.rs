@@ -19,11 +19,14 @@ static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// The typed `*Null` variants let generated code preserve the intended
 /// database type for nullable fields when a backend requires typed null binds.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SqlValue {
     /// Text value.
     String(String),
     /// Typed null for text-like values.
     StringNull,
+    /// Date or timestamp with a legacy text representation.
+    Temporal(TemporalValue),
     /// Binary value.
     Bytes(Vec<u8>),
     /// Typed null for binary values.
@@ -56,6 +59,102 @@ pub enum SqlValue {
     Null,
 }
 
+/// A temporal parameter with the text spelling used by compatibility binds.
+///
+/// Construct one with [`SqlValue::from`] for a chrono value or
+/// [`SqlValue::temporal_text`] for an explicitly temporal text field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemporalValue {
+    kind: TemporalKind,
+    text: String,
+}
+
+/// Parsed type of a temporal parameter.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum TemporalKind {
+    /// Calendar date.
+    Date(chrono::NaiveDate),
+    /// Timestamp without an offset.
+    DateTime(chrono::NaiveDateTime),
+    /// Timestamp with a fixed offset.
+    DateTimeOffset(chrono::DateTime<chrono::FixedOffset>),
+    /// Text accepted by compatibility binds that has no supported native representation.
+    Unparsed,
+}
+
+impl TemporalValue {
+    /// Return the parsed temporal type and value.
+    pub fn kind(&self) -> &TemporalKind {
+        &self.kind
+    }
+
+    /// Return the original spelling used by text-compatible binders.
+    pub fn as_text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl SqlValue {
+    /// Construct a parameter from an explicitly temporal text field or filter.
+    ///
+    /// The original text is retained. SQL Server native binding requires an
+    /// ISO date, a naive ISO timestamp, or an ISO timestamp with an offset.
+    pub fn temporal_text(text: String) -> Self {
+        let value = text.trim();
+        let naive = value.strip_suffix(" UTC").unwrap_or(value);
+        let kind = if let Ok(date) = value.parse::<chrono::NaiveDate>() {
+            TemporalKind::Date(date)
+        } else if let Ok(date_time) = value.parse::<chrono::DateTime<chrono::FixedOffset>>() {
+            TemporalKind::DateTimeOffset(date_time)
+        } else if let Ok(date_time) = naive
+            .parse::<chrono::NaiveDateTime>()
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(naive, "%Y-%m-%d %H:%M:%S%.f"))
+        {
+            TemporalKind::DateTime(date_time)
+        } else {
+            TemporalKind::Unparsed
+        };
+        Self::Temporal(TemporalValue { kind, text })
+    }
+}
+
+impl From<chrono::NaiveDate> for SqlValue {
+    fn from(date: chrono::NaiveDate) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::Date(date),
+            text: date.to_string(),
+        })
+    }
+}
+
+impl From<chrono::NaiveDateTime> for SqlValue {
+    fn from(date_time: chrono::NaiveDateTime) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTime(date_time),
+            text: date_time.to_string(),
+        })
+    }
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for SqlValue {
+    fn from(date_time: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTime(date_time.naive_utc()),
+            text: date_time.to_string(),
+        })
+    }
+}
+
+impl From<chrono::DateTime<chrono::FixedOffset>> for SqlValue {
+    fn from(date_time: chrono::DateTime<chrono::FixedOffset>) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTimeOffset(date_time),
+            text: date_time.to_string(),
+        })
+    }
+}
+
 /// Produce a stable internal event/search identifier for a binary entity key.
 ///
 /// SQL bindings always retain the original bytes; this encoding is used only
@@ -77,6 +176,10 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
     fn component(value: &SqlValue) -> String {
         match value {
             SqlValue::String(value) => format!("s{}:{value}", value.len()),
+            SqlValue::Temporal(value) => {
+                let value = value.as_text();
+                format!("s{}:{value}", value.len())
+            }
             SqlValue::Bytes(value) => binary_key_id(value),
             SqlValue::Uuid(value) => format!("u:{value}"),
             SqlValue::Int(value) => format!("i:{value}"),

@@ -23,8 +23,8 @@ use graphql_orm::graphql::orm::{
     TransactionError, TransactionMode, contains_like_pattern, introspect_mssql_schema,
     render_migration_step, render_select_query, render_upsert_sql,
 };
-use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
+use graphql_orm::{chrono, prelude::*};
 use owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -1750,6 +1750,139 @@ async fn altered_columns_keep_their_collation() -> TestResult {
         Some(default)
     );
     assert_eq!(column("Label").try_get::<String, _>("type_name")?, "int");
+    server.cleanup()?;
+    Ok(())
+}
+
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.TemporalRecords",
+    schema_policy = "external_writable"
+)]
+struct TemporalRecord {
+    #[primary_key]
+    id: String,
+    #[filterable(type = "date")]
+    legacy_stamp: String,
+    #[filterable(type = "date")]
+    precise_stamp: chrono::NaiveDateTime,
+    #[filterable(type = "date")]
+    calendar_date: chrono::NaiveDate,
+    #[filterable(type = "date")]
+    offset_stamp: Option<chrono::DateTime<chrono::FixedOffset>>,
+}
+
+#[tokio::test]
+#[ignore = "starts disposable SQL Server"]
+async fn temporal_parameters_are_independent_of_session_dateformat()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::db::mssql::MssqlPoolOptions;
+    use graphql_orm::graphql::filters::DateFilter;
+    use graphql_orm::graphql::orm::{DatabaseFilter, OrmBackend};
+
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "ALTER LOGIN [sa] WITH DEFAULT_LANGUAGE = British;
+         CREATE TABLE dbo.TemporalRecords (
+             id nvarchar(64) NOT NULL PRIMARY KEY,
+             legacy_stamp datetime NOT NULL,
+             precise_stamp datetime2(7) NOT NULL,
+             calendar_date date NOT NULL,
+             offset_stamp datetimeoffset(7) NULL
+         );",
+    )
+    .await?;
+    let compatibility = MssqlPool::connect_ado(&server.connection_string).await?;
+    let typed = MssqlPool::connect_ado_external_writable_with(
+        &server.connection_string,
+        MssqlPoolOptions::new().typed_temporal_parameters(true),
+    )
+    .await?;
+    let date = "2026-04-09".parse::<chrono::NaiveDate>()?;
+    let sql = "SET LANGUAGE British; SET DATEFORMAT dmy;
+        SELECT CONVERT(char(10), CONVERT(datetime, @P1), 23) AS value";
+    for (pool, expected) in [(&compatibility, "2026-09-04"), (&typed, "2026-04-09")] {
+        let rows = pool.fetch_rows(sql, &[SqlValue::from(date)]).await?;
+        assert_eq!(rows[0].try_get::<String, _>("value")?, expected);
+    }
+    let rows = typed
+        .fetch_rows(sql, &[SqlValue::String("2026-04-09".into())])
+        .await?;
+    assert_eq!(rows[0].try_get::<String, _>("value")?, "2026-09-04");
+
+    typed.install_restore_marker().await?;
+    let database = Database::<MssqlBackend>::builder(typed.clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    let stamp = "2026-04-09T12:34:56.1234567".parse::<chrono::NaiveDateTime>()?;
+    let offset = chrono::DateTime::parse_from_rfc3339("2026-04-09T12:34:56.1234567+05:30")?;
+    let row = TemporalRecord::insert(
+        &database,
+        CreateTemporalRecordInput {
+            legacy_stamp: "2026-04-09".into(),
+            precise_stamp: stamp,
+            calendar_date: date,
+            offset_stamp: Some(offset),
+        },
+    )
+    .await?;
+    assert_eq!(row.legacy_stamp, "2026-04-09T00:00:00Z");
+    assert_eq!(row.precise_stamp, stamp);
+    assert_eq!(row.calendar_date, date);
+    let read_offset = row.offset_stamp.expect("offset round-trips");
+    assert_eq!(read_offset, offset);
+    assert_eq!(read_offset.offset(), offset.offset());
+
+    let eq = |value: &str| {
+        Some(DateFilter {
+            eq: Some(value.into()),
+            ..Default::default()
+        })
+    };
+    for filter in [
+        TemporalRecordWhereInput {
+            legacy_stamp: eq("2026-04-09"),
+            ..Default::default()
+        },
+        TemporalRecordWhereInput {
+            precise_stamp: eq("2026-04-09 12:34:56.1234567"),
+            ..Default::default()
+        },
+        TemporalRecordWhereInput {
+            calendar_date: eq("2026-04-09"),
+            ..Default::default()
+        },
+        TemporalRecordWhereInput {
+            offset_stamp: eq("2026-04-09T07:04:56.1234567Z"),
+            ..Default::default()
+        },
+    ] {
+        let (predicates, values) = filter.to_sql_conditions();
+        let query = format!(
+            "SELECT id FROM dbo.TemporalRecords WHERE {}",
+            predicates.join(" AND ")
+        );
+        let matched = MssqlBackend::fetch_rows(&typed, &query, &values).await?;
+        assert_eq!(matched.len(), 1, "{query}");
+        assert_eq!(matched[0].try_get::<String, _>("id")?, row.id);
+    }
+
+    let row = TemporalRecord::update_by_id(
+        &database,
+        &row.id,
+        UpdateTemporalRecordInput {
+            legacy_stamp: Some("2026-05-10".into()),
+            offset_stamp: Some(None),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("the row exists");
+    assert_eq!(row.legacy_stamp, "2026-05-10T00:00:00Z");
+    assert!(row.offset_stamp.is_none());
+
     server.cleanup()?;
     Ok(())
 }
