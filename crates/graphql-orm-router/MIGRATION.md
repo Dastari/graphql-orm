@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.5 to 0.16.6
+
+**No action.** Bounded HTTP retrieval, WebSocket frame encoding and the Hive
+plugin startup handoff are internal changes. Existing configuration and
+public APIs continue to work.
+
 ## 0.16.4 to 0.16.5
 
 **Action needed** only if your issuer writes `iss` as an array or adds a
