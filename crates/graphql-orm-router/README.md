@@ -13,9 +13,10 @@ supersedes: []
 Version 0.16.5 refuses, on both bearer providers, a token whose header has a
 `crit` member of any value (RFC 7515: the router understands no critical
 extension), and one whose `iss` is an array rather than the configured issuer
-string (RFC 7519). It adds
-cargo-fuzz targets for bearer and JWKS parsing with a retained corpus replayed
-in ordinary CI, a weekly bounded fuzz run, and scope-matching property tests
+string (RFC 7519). It refuses a protected header over 8 KiB encoded before
+decoding it. It adds cargo-fuzz targets for bearer and JWKS parsing with a
+retained corpus replayed in ordinary CI, a weekly bounded fuzz run, and
+scope-matching property tests
 ([#725](https://github.com/Dastari/graphql-orm/issues/725),
 [#726](https://github.com/Dastari/graphql-orm/issues/726)). See
 [`fuzz/README.md`](fuzz/README.md).

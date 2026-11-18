@@ -638,10 +638,16 @@ impl JwksAuthenticationProvider {
         envelope.validate_structure().map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue document is invalid")
         })?;
+        // Bounded, with no critical extension, before the library decodes it.
+        if refuse_protected_header(&envelope.signature) {
+            return Err(AuthenticationError::unavailable(
+                "role-scope catalogue signature header is invalid",
+            ));
+        }
         let header = decode_header(&envelope.signature).map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue signature is malformed")
         })?;
-        if header.alg != Algorithm::RS256 || protected_header_names_crit(&envelope.signature) {
+        if header.alg != Algorithm::RS256 {
             return Err(AuthenticationError::unavailable(
                 "role-scope catalogue signature algorithm is invalid",
             ));
@@ -1016,9 +1022,9 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
-        // RFC 7515 4.1.11: the router understands no critical extension, so
-        // a header that names `crit` at all is refused before any key lookup.
-        if protected_header_names_crit(token) {
+        // Refuse an oversized header, or one that names `crit` at all (RFC
+        // 7515 4.1.11), before the library decodes it or any key lookup.
+        if refuse_protected_header(token) {
             return Err(invalid_token());
         }
         let header = decode_header(token).map_err(|_| invalid_token())?;
@@ -1177,17 +1183,35 @@ where
     Ok(roles)
 }
 
-/// Whether a compact JWS's protected header names `crit`, with any value.
+/// Largest encoded protected header the router decodes: 8 KiB of base64url,
+/// about 6 KiB of JSON.
+///
+/// The router reads only `alg`, `kid` and `crit` from a header, and the
+/// headers its issuers write are well under 1 KiB. HTTP, WebSocket and
+/// catalogue-fetch limits bound their own inputs, but a provider can also be
+/// called directly, so the header is bounded here before it is decoded.
+pub(crate) const MAX_PROTECTED_HEADER_BYTES: usize = 8 * 1024;
+
+/// Whether a compact JWS's protected header must be refused before any
+/// signature or key work: it is longer than [`MAX_PROTECTED_HEADER_BYTES`]
+/// encoded, it is not base64url JSON object text, or it has a `crit` member
+/// with any value.
 ///
 /// The JWT library reads `"crit": null` as an absent member, so the header is
-/// decoded here: any `crit` member, including `null` or an empty list, counts.
-/// A header that is not base64url JSON object text also counts, so a caller
-/// that refuses on `true` fails closed.
-pub(crate) fn protected_header_names_crit(token: &str) -> bool {
+/// decoded here: any `crit` member, including `null` or an empty list, counts
+/// (RFC 7515 4.1.11; the router understands no critical extension). The end
+/// of the header is found without reading past the cap.
+pub(crate) fn refuse_protected_header(token: &str) -> bool {
     use base64::Engine as _;
-    let header = token.split('.').next().unwrap_or_default();
+    let Some(end) = token
+        .bytes()
+        .take(MAX_PROTECTED_HEADER_BYTES + 1)
+        .position(|byte| byte == b'.')
+    else {
+        return true;
+    };
     base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(header)
+        .decode(&token[..end])
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, JsonValue>>(&bytes).ok())
         .is_none_or(|members| members.contains_key("crit"))

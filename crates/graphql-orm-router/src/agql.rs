@@ -49,9 +49,10 @@ impl AuthenticationProvider for AgqlAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
-        // The pinned validator does not check `crit` (RFC 7515 4.1.11), so
-        // the adapter refuses any critical extension before calling it.
-        if crate::jwt::protected_header_names_crit(token) {
+        // The pinned validator does not check `crit` (RFC 7515 4.1.11) or
+        // bound the header, so the adapter refuses an oversized header or any
+        // critical extension before calling it.
+        if crate::jwt::refuse_protected_header(token) {
             return Err(AuthenticationError::invalid_credential(
                 "invalid bearer credential",
             ));
@@ -462,17 +463,24 @@ mod tests {
             provider.authenticate_bearer(&control).unwrap().subject(),
             "agql-user"
         );
+        // A small filler member is accepted; one over the protected-header
+        // cap is refused before the validator decodes it.
+        let padded = signed_token_with_header(&signing_key, r#","pad":"ppp""#, &claims);
+        assert!(provider.authenticate_bearer(&padded).is_ok());
+        let oversized = format!(r#","pad":"{}""#, "p".repeat(256 * 1024));
         for crit in [
             r#","crit":["exp"]"#,
             r#","crit":[]"#,
             r#","crit":null"#,
             r#","b64":false,"crit":["b64"]"#,
+            oversized.as_str(),
         ] {
             let token = signed_token_with_header(&signing_key, crit, &claims);
             assert_eq!(
                 provider.authenticate_bearer(&token).unwrap_err().kind(),
                 crate::AuthenticationErrorKind::InvalidCredential,
-                "{crit}"
+                "{}",
+                &crit[..crit.len().min(40)]
             );
         }
     }

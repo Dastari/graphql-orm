@@ -16,7 +16,9 @@ supersedes: []
 `crit` header member (including `"crit": null`) to access tokens or the signed
 role-scope catalogue: those tokens are now refused with `UNAUTHENTICATED` by
 both `JwksAuthenticationProvider` and `AgqlAuthenticationProvider`, and such
-a catalogue is refused. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
+a catalogue is refused. A protected header longer than 8 KiB encoded is also
+refused; check this only if your issuer puts large members, such as an `x5c`
+certificate chain, in access-token or catalogue headers. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
 one string and use no critical extensions, and need no change. Configuration
 and public APIs are unchanged.
 

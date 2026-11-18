@@ -329,6 +329,62 @@ fn refresh_catalogue(provider: &JwksAuthenticationProvider) -> Result<(), Authen
         .block_on(async move { provider.refresh_role_scope_catalogue().await })
 }
 
+/// Signs `claims` under a hand-written header padded with a filler member to
+/// exactly `json_bytes` bytes of header JSON.
+fn token_with_header_of_length(kid: &str, json_bytes: usize, claims: &JsonValue) -> String {
+    use base64::Engine as _;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let prefix = format!(r#"{{"typ":"JWT","alg":"RS256","kid":"{kid}","pad":""#);
+    let filler = json_bytes - prefix.len() - 2;
+    let header = format!("{prefix}{}\"}}", "p".repeat(filler));
+    assert_eq!(header.len(), json_bytes);
+    let message = format!(
+        "{}.{}",
+        encode(header.as_bytes()),
+        encode(claims.to_string().as_bytes())
+    );
+    let signature = jsonwebtoken::crypto::sign(
+        message.as_bytes(),
+        &EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap(),
+        Algorithm::RS256,
+    )
+    .unwrap();
+    format!("{message}.{signature}")
+}
+
+/// Review finding on #784: the protected header is bounded before it is
+/// decoded. 6,144 bytes of JSON encode to exactly the 8 KiB cap.
+#[test]
+fn protected_header_over_its_byte_cap_is_refused_before_decoding() {
+    assert_eq!(MAX_PROTECTED_HEADER_BYTES, 8 * 1024);
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let provider = provider(
+        &fixture,
+        Arc::new(TestClock::at(1_000)),
+        LegacyScopeClaims::Reject,
+    );
+    initialize(&provider).unwrap();
+    let at_cap = token_with_header_of_length("key-a", 6_144, &claims(1_100));
+    assert_eq!(
+        at_cap.split('.').next().unwrap().len(),
+        MAX_PROTECTED_HEADER_BYTES
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&at_cap).unwrap().subject(),
+        "user-7"
+    );
+    for json_bytes in [6_145, 256 * 1024] {
+        let oversized = token_with_header_of_length("key-a", json_bytes, &claims(1_100));
+        assert_eq!(
+            provider.authenticate_bearer(&oversized).unwrap_err().kind(),
+            AuthenticationErrorKind::InvalidCredential,
+            "{json_bytes} header bytes"
+        );
+    }
+    // No header end within the cap: refused without scanning the rest.
+    assert!(refuse_protected_header(&"e".repeat(1 << 20)));
+}
+
 #[test]
 fn jwks_provider_validates_signature_identity_audience_time_and_scope() {
     let fixture = JwksFixture::start(jwks("key-a"));
@@ -1004,11 +1060,14 @@ fn forged_role_catalogue_does_not_block_startup_and_role_bearers_fail_closed() {
 fn role_catalogue_signature_with_any_crit_member_is_refused() {
     use base64::Engine as _;
     let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+    let oversized = format!(r#","pad":"{}""#, "p".repeat(256 * 1024));
     for (crit, accepted) in [
         ("", true),
         (r#","crit":["exp"]"#, false),
         (r#","crit":[]"#, false),
         (r#","crit":null"#, false),
+        // Over the protected-header cap.
+        (oversized.as_str(), false),
     ] {
         // Re-sign the catalogue's own claims under a hand-written header.
         let mut envelope: JsonValue =
@@ -1044,7 +1103,8 @@ fn role_catalogue_signature_with_any_crit_member_is_refused() {
             assert_eq!(
                 refreshed.unwrap_err().kind(),
                 AuthenticationErrorKind::Unavailable,
-                "{crit}"
+                "{}",
+                &crit[..crit.len().min(40)]
             );
         }
     }

@@ -22,6 +22,11 @@ supersedes: []
   reads `"crit": null` as absent, and the pinned `agql-auth` validator does
   not check `crit` at all. A signed role-scope catalogue with any `crit`
   member is refused the same way.
+- Fix (authentication, bounded input): both bearer providers and the signed
+  role-scope catalogue refuse a protected header longer than 8 KiB encoded
+  (`MAX_PROTECTED_HEADER_BYTES`, about 6 KiB of JSON) before decoding it.
+  HTTP, WebSocket and catalogue-fetch limits already bounded their own inputs;
+  this bounds direct provider calls too.
 - Fix (authentication, fail closed): a bearer token's `iss` must be exactly
   the configured issuer string. The JWT library also accepted an array that
   contained the issuer, such as `["https://issuer", "https://other"]`.
