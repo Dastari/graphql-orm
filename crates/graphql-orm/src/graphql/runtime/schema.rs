@@ -67,15 +67,15 @@ pub(super) fn type_ref(ty: &str) -> TypeRef {
 /// `SearchInput` and search edges.
 pub(crate) fn search_member(camel: &str) -> String {
     use convert_case::{Case, Casing};
-    let case = if cfg!(feature = "field-case-pascal") {
+    let case = if cfg!(graphql_orm_field_case = "pascal") {
         Case::Pascal
-    } else if cfg!(feature = "field-case-snake") {
+    } else if cfg!(graphql_orm_field_case = "snake") {
         Case::Snake
-    } else if cfg!(feature = "field-case-screaming-snake") {
+    } else if cfg!(graphql_orm_field_case = "screaming_snake") {
         Case::UpperSnake
-    } else if cfg!(feature = "field-case-lower") {
+    } else if cfg!(graphql_orm_field_case = "lower") {
         Case::Flat
-    } else if cfg!(feature = "field-case-upper") {
+    } else if cfg!(graphql_orm_field_case = "upper") {
         Case::UpperFlat
     } else {
         return camel.to_owned();

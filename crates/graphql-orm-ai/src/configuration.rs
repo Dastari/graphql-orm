@@ -187,7 +187,7 @@ pub(crate) fn provider_endpoint_permitted(
 ///
 /// Non-exhaustive: new provider families may be added in minor releases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 #[non_exhaustive]
 pub enum AiProviderKindInput {
     /// OpenAI native Responses API.
@@ -223,7 +223,7 @@ impl AiProviderKindInput {
 
 /// Redacted provider profile. Credential references and values are omitted.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiProviderProfileView {
     /// Profile ID.
     pub id: Uuid,
@@ -254,7 +254,7 @@ pub struct AiProviderProfileView {
 
 /// Redacted reviewed contract for an OpenAI-compatible provider profile.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiOpenAiCompatibleProfileView {
     /// Exact retention label required in every egress manifest.
     pub retention: String,
@@ -270,7 +270,7 @@ pub struct AiOpenAiCompatibleProfileView {
 
 /// Redacted scope content-protection state.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiContentProtectionPolicyView {
     /// Scope kind.
     pub scope_kind: String,
@@ -290,7 +290,7 @@ pub struct AiContentProtectionPolicyView {
 
 /// Redacted retention and purge settings for one application scope.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiRetentionPolicyView {
     /// Scope kind.
     pub scope_kind: String,
@@ -323,7 +323,7 @@ pub struct AiRetentionPolicyView {
 
 /// Stable budget reset interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiBudgetIntervalInput {
     /// Fixed UTC-aligned minute.
     Minute,
@@ -352,7 +352,7 @@ impl AiBudgetIntervalInput {
 
 /// Redacted scope/principal budget ceiling.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiBudgetPolicyView {
     /// Policy ID.
     pub id: Uuid,
@@ -395,7 +395,7 @@ pub struct AiBudgetPolicyView {
 /// Reserved capacity that never reconciles is therefore indistinguishable from
 /// spend, which is why the stranded-reservation counts below sit beside it.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiBudgetPolicyCapacityView {
     /// Policy ID.
     pub policy_id: Uuid,
@@ -453,7 +453,7 @@ pub struct AiBudgetPolicyCapacityView {
 /// It carries capacity accounting and durable run linkage only: never a
 /// prompt, transcript, provider payload, principal identity, or credential.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiBudgetReservationCapacityView {
     /// Reservation ID.
     pub id: Uuid,
@@ -500,7 +500,7 @@ pub struct AiBudgetReservationCapacityView {
 
 /// Bounded capacity and stranded-reservation report for one exact scope.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiBudgetScopeCapacityView {
     /// Current-period capacity for every policy bound to the exact scope.
     pub policies: Vec<AiBudgetPolicyCapacityView>,
@@ -524,7 +524,7 @@ pub struct AiBudgetScopeCapacityView {
 
 /// Exact one-shot privileged reclamation of one stranded reservation.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct ReclaimAiBudgetReservationInput {
     /// Exact scope the reservation must belong to.
     pub scope: AiScopeInput,
@@ -536,7 +536,7 @@ pub struct ReclaimAiBudgetReservationInput {
 
 /// Provider profile CAS upsert.
 #[derive(InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct UpsertAiProviderProfileInput {
     /// Existing profile ID, or absent to create.
     pub id: Option<Uuid>,
@@ -558,7 +558,7 @@ pub struct UpsertAiProviderProfileInput {
 
 /// Reviewed GraphQL configuration for an OpenAI-compatible profile.
 #[derive(InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiOpenAiCompatibleProfileInput {
     /// Exact provider retention label used by egress policy.
     pub retention: String,
@@ -575,7 +575,7 @@ pub struct AiOpenAiCompatibleProfileInput {
 /// Credential rotation input. This type deliberately does not derive `Debug`,
 /// `Clone`, serialization, or equality.
 #[derive(InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SetAiProviderCredentialInput {
     /// Provider profile.
     pub profile_id: Uuid,
@@ -589,7 +589,7 @@ pub struct SetAiProviderCredentialInput {
 
 /// Credential removal input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct RemoveAiProviderCredentialInput {
     /// Provider profile.
     pub profile_id: Uuid,
@@ -599,7 +599,7 @@ pub struct RemoveAiProviderCredentialInput {
 
 /// Content-protection policy CAS input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SetAiContentProtectionPolicyInput {
     /// Owning scope.
     pub scope: AiScopeInput,
@@ -613,7 +613,7 @@ pub struct SetAiContentProtectionPolicyInput {
 
 /// Scope retention-policy CAS input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SetAiRetentionPolicyInput {
     /// Owning scope.
     pub scope: AiScopeInput,
@@ -639,7 +639,7 @@ pub struct SetAiRetentionPolicyInput {
 
 /// Budget-policy CAS create/update input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct UpsertAiBudgetPolicyInput {
     /// Existing policy ID, or absent to create.
     pub id: Option<Uuid>,
@@ -672,7 +672,7 @@ pub struct UpsertAiBudgetPolicyInput {
 
 /// GraphQL content-protection mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiContentProtectionModeInput {
     /// Deployment database/storage encryption at rest.
     DatabaseManaged,
@@ -838,10 +838,10 @@ pub trait AiConfigurationService: Send + Sync {
 pub struct AiConfigurationQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiConfigurationQueryRoot {
     /// Lists bounded redacted provider profiles.
     async fn ai_provider_profiles(
@@ -954,10 +954,10 @@ impl AiConfigurationQueryRoot {
 pub struct AiConfigurationMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiConfigurationMutationRoot {
     /// Creates or CAS-updates a provider profile.
     async fn upsert_ai_provider_profile(

@@ -1855,6 +1855,43 @@ async fn hand_built_changed_schema_requires_admission() {
     );
 }
 
+#[tokio::test]
+async fn hand_built_schema_requires_input_validation() {
+    let schema = |validated: bool| {
+        let builder = async_graphql::Schema::build(
+            QueryRoot::default(),
+            MutationRoot::default(),
+            SubscriptionRoot::default(),
+        );
+        async move {
+            let builder = builder.data(database().await);
+            if validated {
+                builder
+                    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+                    .finish()
+            } else {
+                builder.finish()
+            }
+        }
+    };
+    let query = "{ orders(where: { customerId: { eq: \"00000000-0000-0000-0000-000000000001\" } }) { edges { node { id } } } }";
+    let response = schema(false).await.execute(as_user(query)).await;
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from("INPUT_VALIDATION_REQUIRED"))
+    );
+    let response = schema(true).await.execute(as_user(query)).await;
+    assert!(
+        response.errors.iter().all(|error| error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            != Some(&async_graphql::Value::from("INPUT_VALIDATION_REQUIRED"))),
+        "{:?}",
+        response.errors
+    );
+}
+
 mod dependent_delete_contract {
     use graphql_orm::prelude::*;
     #[derive(

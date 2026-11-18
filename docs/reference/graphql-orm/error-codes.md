@@ -66,7 +66,7 @@ mapping between the two:
 | `SERVICE_UNAVAILABLE` | ORM, router | A dependency is temporarily unavailable. A retry may succeed |
 | `SUBSCRIPTION_CONTINUITY_LOST` | ORM, router | The stream ended and missed events. Subscribe again and refetch |
 | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT_VIOLATION`, `CURSOR_INVALID`, `PAGE_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `AUTHORIZATION_MISCONFIGURED`, `STEP_UP_REQUIRED` | ORM | See [codes](#codes) |
-| `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
+| `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED`, `INPUT_VALIDATION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
 | `SUBSCRIPTION_SELECTION_UNSUPPORTED` | ORM, opt-in | The `Changed` selection can never be streamed (a relation, a computed field or an unavailable key). Subscribe with a smaller selection, for example keys only |
 | `SUBSCRIPTIONS_NOT_SUPPORTED` | router | A subscription was sent over HTTP, or the router has no subscription gateway. Subscribe over the router's `graphql-transport-ws` endpoint |
 | `MUTATION_NOT_ALLOWED_OVER_HTTP_GET` | router | A mutation was sent with HTTP `GET`. Send it with `POST` |
@@ -275,7 +275,9 @@ per surface.
   `SUBSCRIPTION_SOURCE_CLOSED` on generated `Changed` subscriptions.
   Their structural multi-root admission refusal uses `subscription_root_limit_exceeded`.
   Missing/misconfigured admission on a hand-built schema refuses with
-  `SUBSCRIPTION_ADMISSION_REQUIRED`. An event-independent authority timer uses
+  `SUBSCRIPTION_ADMISSION_REQUIRED`, and a hand-built schema without
+  `GeneratedInputValidation` refuses every generated resolver that takes an
+  input object with `INPUT_VALIDATION_REQUIRED`. An event-independent authority timer uses
   `FORBIDDEN` for definite subscriber denial and `SUBSCRIPTION_CONTINUITY_LOST`
   for host/DB failures, once, then ends. A stream that lagged ends on that
   timer's next tick, with `FORBIDDEN` when its authority is gone and

@@ -9,8 +9,5 @@ async-graphql = { version = "7", default-features = false, features = ["dataload
 graphql-orm = { path = "../../../../", default-features = false, features = [
   "sqlite",
   "auth-agql",
-  "resolver-case-pascal",
-  "argument-case-pascal",
-  "field-case-pascal",
 ] }
 serde = { version = "1", features = ["derive"] }

@@ -35,9 +35,9 @@ fn fid(value: &str) -> FieldId {
 /// A search member in the configured field case, as the SDL spells it.
 fn member(camel: &str) -> String {
     use convert_case::{Case, Casing};
-    if cfg!(feature = "field-case-pascal") {
+    if cfg!(graphql_orm_field_case = "pascal") {
         camel.to_case(Case::Pascal)
-    } else if cfg!(feature = "field-case-snake") {
+    } else if cfg!(graphql_orm_field_case = "snake") {
         camel.to_case(Case::Snake)
     } else {
         camel.to_string()

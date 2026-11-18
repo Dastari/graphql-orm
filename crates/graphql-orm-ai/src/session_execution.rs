@@ -11,7 +11,7 @@ use crate::{AiError, AiProviderSessionDescriptor, AiScope, ModelReasoningEffort,
 /// GraphQL representation of a provider family, independent of host routing profiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 #[non_exhaustive]
 pub enum AiSessionProviderKind {
     /// OpenAI API.
@@ -60,7 +60,7 @@ impl From<AiSessionProviderKind> for ProviderKind {
 
 /// Untrusted requested session choice. Only the configured host resolver admits it.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionExecutionSelectionInput {
     /// Provider family.
     pub provider: AiSessionProviderKind,
@@ -82,7 +82,7 @@ pub struct AiSessionExecutionSelection {
     reasoning_effort: ModelReasoningEffort,
 }
 
-#[cfg(not(feature = "graphql-case-pascal"))]
+#[cfg(not(graphql_case_pascal))]
 #[async_graphql::Object]
 impl AiSessionExecutionSelection {
     #[graphql(name = "provider")]
@@ -103,7 +103,7 @@ impl AiSessionExecutionSelection {
     }
 }
 
-#[cfg(feature = "graphql-case-pascal")]
+#[cfg(graphql_case_pascal)]
 #[async_graphql::Object]
 impl AiSessionExecutionSelection {
     #[graphql(name = "Provider")]
@@ -251,7 +251,7 @@ pub trait AiSessionExecutionSelectionResolver: Send + Sync {
 
 /// Explicit owner request to bind a proven idle legacy session, never to reroute it.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct PinAiSessionExecutionSelectionInput {
     /// Exact owned legacy session.
     pub session_id: uuid::Uuid,

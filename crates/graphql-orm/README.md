@@ -783,9 +783,11 @@ repository reference, or build matching local rustdoc with
 | `receiver-admission` | exact delegated HTTP query admission; enables `auth-agql` | requires registered contracts and authoritative host adapters; [reference](../../docs/reference/receiver-admission.md) |
 | `router-protocol` | project-neutral generated operation export | does not run a router |
 
-The naming features `resolver-case-*`, `argument-case-*`, and `field-case-*`
-are independent groups; enable at most one feature in each group. In a
-multi-backend dependency graph, select `backend = "sqlite" | "postgres" |
+GraphQL naming is not a feature: the `GRAPHQL_ORM_RESOLVER_CASE`,
+`GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` environment variables
+select it per build; see
+[naming configuration](../../docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
+In a multi-backend dependency graph, select `backend = "sqlite" | "postgres" |
 "mssql"` on each entity and in `schema_roots!`.
 
 Companion capabilities remain separate packages rather than core features.

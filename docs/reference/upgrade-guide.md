@@ -82,7 +82,13 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 - **No action** — Router 0.15.5: Only the wire tests change; router behavior, configuration and public APIs are unchanged. [migration](../../crates/graphql-orm-router/MIGRATION.md#0154-to-0155) · [changelog](../../crates/graphql-orm-router/CHANGELOG.md#0155-unreleased)
 - **No action** — ORM/macros 0.167.0: test-only; the macros unit tests no longer assume the SQLite backend [migration](../../MIGRATION.md#ormmacros-01670-test-only-backend-agnostic-macros-unit-tests)
 
-Breaking batch, collected on `next/breaking` (ORM/macros 0.171.0, backup 0.27.0, AI 0.150.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.19.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+Breaking batch, collected on `next/breaking` (ORM/macros 0.172.0, backup 0.27.0, AI 0.151.0, catalogue 0.9.0, AI tool profiles 0.26.0, router 0.19.0; versions are placeholders, and entries may name the earlier placeholder each change was written against):
+
+- **Action needed — ORM/macros 0.172.0, AI 0.151.0:** the `resolver-case-*`, `argument-case-*` and `field-case-*` features (and AI's `graphql-case-pascal`) are replaced by the `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE`, `GRAPHQL_ORM_FIELD_CASE` (and `GRAPHQL_ORM_AI_CASE`) build environment variables; names are unchanged (#508). [Migration](../../MIGRATION.md#graphql-naming-is-selected-by-environment-variables-not-features-508)
+
+- **Action needed — ORM/macros 0.172.0:** only for hosts that build a schema from generated roots by hand: install `GeneratedInputValidation`; without it, generated resolvers that take an input object refuse with `INPUT_VALIDATION_REQUIRED` (#753). [Migration](../../MIGRATION.md#hand-built-schemas-must-install-generatedinputvalidation-753)
+
+- **Action needed — ORM/macros 0.172.0:** only for row policies that negate `ReadPredicate::related`: the relation is three-valued, so its negation no longer admits rows with a NULL key or only UNKNOWN related values (#770). [Migration](../../MIGRATION.md#readpredicaterelated-is-three-valued-its-negation-fails-closed-770)
 
 - **No action — router 0.19.0:** the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default. [Migration](../../MIGRATION.md#router-0190-opt-in-refusal-outcome-764) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0180-to-0190)
 

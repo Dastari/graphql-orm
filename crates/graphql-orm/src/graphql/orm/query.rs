@@ -1407,14 +1407,20 @@ pub enum GraphqlAggregateResultKind {
 /// owned data, so, as with `PageInfo`, the directive describes it accurately.
 #[derive(Clone, Debug, PartialEq, async_graphql::SimpleObject)]
 #[graphql(shareable)]
-#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
-#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(
-    feature = "field-case-screaming-snake",
+    graphql_orm_field_case = "pascal",
+    graphql(rename_fields = "PascalCase")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "snake",
+    graphql(rename_fields = "snake_case")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "screaming_snake",
     graphql(rename_fields = "SCREAMING_SNAKE_CASE")
 )]
-#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
-#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+#[cfg_attr(graphql_orm_field_case = "lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(graphql_orm_field_case = "upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct GraphqlAggregateResultValue {
     /// Public field name; absent only for row count.
     pub field: Option<String>,
@@ -1432,14 +1438,20 @@ pub struct GraphqlAggregateResultValue {
 /// [`GraphqlAggregateResultValue`].
 #[derive(Clone, Debug, PartialEq, async_graphql::SimpleObject)]
 #[graphql(shareable)]
-#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
-#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(
-    feature = "field-case-screaming-snake",
+    graphql_orm_field_case = "pascal",
+    graphql(rename_fields = "PascalCase")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "snake",
+    graphql(rename_fields = "snake_case")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "screaming_snake",
     graphql(rename_fields = "SCREAMING_SNAKE_CASE")
 )]
-#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
-#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+#[cfg_attr(graphql_orm_field_case = "lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(graphql_orm_field_case = "upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct GraphqlAggregateResultRow {
     /// Group keys in requested order.
     pub groups: Vec<GraphqlAggregateResultValue>,
@@ -2467,14 +2479,20 @@ pub enum ChangeKind {
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
-#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
-#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(
-    feature = "field-case-screaming-snake",
+    graphql_orm_field_case = "pascal",
+    graphql(rename_fields = "PascalCase")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "snake",
+    graphql(rename_fields = "snake_case")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "screaming_snake",
     graphql(rename_fields = "SCREAMING_SNAKE_CASE")
 )]
-#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
-#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+#[cfg_attr(graphql_orm_field_case = "lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(graphql_orm_field_case = "upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct SubscriptionFilterInput {
     /// Restrict delivered actions; an empty list matches no events.
     pub actions: Option<Vec<ChangeAction>>,
@@ -2484,14 +2502,20 @@ pub struct SubscriptionFilterInput {
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
-#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
-#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(
-    feature = "field-case-screaming-snake",
+    graphql_orm_field_case = "pascal",
+    graphql(rename_fields = "PascalCase")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "snake",
+    graphql(rename_fields = "snake_case")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "screaming_snake",
     graphql(rename_fields = "SCREAMING_SNAKE_CASE")
 )]
-#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
-#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+#[cfg_attr(graphql_orm_field_case = "lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(graphql_orm_field_case = "upper", graphql(rename_fields = "UPPERCASE"))]
 /// Offset pagination input shared by generated list, relation, and search APIs.
 ///
 /// Generated connection resolvers combine this request input with

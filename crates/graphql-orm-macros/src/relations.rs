@@ -824,6 +824,7 @@ pub(crate) fn generate_graphql_relations(
                     #[graphql(name = #order_by_arg_name)] order_by: #order_by_rust_type,
                     #[graphql(name = #page_arg_name)] page: #page_rust_type,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
+                    ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;

@@ -9,7 +9,7 @@ use crate::{AiBudgetAmounts, AiError, AiProviderKindInput, AiScope, AiScopeInput
 
 /// Immutable pricing catalog entry exposed to authorized administrators.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiPricingPolicyView {
     /// Persistent pricing version ID.
     pub id: Uuid,
@@ -43,7 +43,7 @@ pub struct AiPricingPolicyView {
 
 /// Creates one immutable pricing version.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct CreateAiPricingPolicyInput {
     /// Exact owning scope.
     pub scope: AiScopeInput,

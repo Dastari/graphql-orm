@@ -679,7 +679,7 @@ pub contacts: Vec<LegacyCardFileContact>,
 pub details: Vec<LegacyCardFileDetail>,
 ```
 
-With Pascal-case feature flags, nested reads keep the expected legacy GraphQL shape:
+With the `PascalCase` naming variables, nested reads keep the expected legacy GraphQL shape:
 
 ```graphql
 query {
@@ -842,7 +842,7 @@ cargo test -p graphql-orm --test query_ir
 MSSQL compile-time policy checks run with the MSSQL feature:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
+cargo test -p graphql-orm --no-default-features --features mssql --test compile_ui mssql_write_unavailable_ui::
 ```
 
 Composite-key read rendering and MSSQL read-only schema checks are covered by:

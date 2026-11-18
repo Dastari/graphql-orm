@@ -22,8 +22,14 @@ fn expression_parameters(
     serde::Deserialize,
 )]
 #[graphql(complex)]
-#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
-#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    graphql_orm_field_case = "pascal",
+    graphql(rename_fields = "PascalCase")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "snake",
+    graphql(rename_fields = "snake_case")
+)]
 #[graphql_entity(
     table = "input_inventory_records",
     plural = "InputInventoryRecords",
@@ -104,10 +110,10 @@ pub struct InputInventoryRecord {
 }
 
 #[cfg_attr(
-    feature = "field-case-pascal",
+    graphql_orm_field_case = "pascal",
     graphql_complex_object(rename_fields = "PascalCase")
 )]
-#[cfg_attr(not(feature = "field-case-pascal"), graphql_complex_object)]
+#[cfg_attr(not(graphql_orm_field_case = "pascal"), graphql_complex_object)]
 impl InputInventoryRecord {
     async fn document(&self) -> Option<graphql_orm::async_graphql::Json<serde_json::Value>> {
         self.document.clone().map(graphql_orm::async_graphql::Json)

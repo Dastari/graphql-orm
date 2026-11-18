@@ -21,7 +21,7 @@ use crate::{AiAccessDecision, AiError, AiScope, AiSessionId, ModelInputBlock, Pr
 /// Storage keys, upload-token hashes, scanner details, and provider file
 /// references are deliberately absent.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiAttachmentView {
     /// AI-owned opaque attachment identifier.
     pub id: Uuid,
@@ -53,7 +53,7 @@ pub struct AiAttachmentView {
 
 /// One attachment connection edge.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiAttachmentEdge {
     /// Attachment metadata.
     pub node: AiAttachmentView,
@@ -63,7 +63,7 @@ pub struct AiAttachmentEdge {
 
 /// Bounded attachment connection.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiAttachmentConnection {
     /// Bounded edges.
     pub edges: Vec<AiAttachmentEdge>,
@@ -73,7 +73,7 @@ pub struct AiAttachmentConnection {
 
 /// Creates one exact pending upload.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct CreateAiAttachmentUploadInput {
     /// Active owning session.
     pub session_id: Uuid,
@@ -138,10 +138,10 @@ impl fmt::Debug for AiAttachmentUploadTicket {
 }
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiAttachmentUploadTicket {
     /// Pending attachment metadata.
     async fn attachment_metadata(&self) -> &AiAttachmentView {
@@ -797,10 +797,10 @@ pub trait AiProviderAttachmentResolver: Send + Sync {
 pub struct AiAttachmentQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiAttachmentQueryRoot {
     /// Lists bounded metadata for one visible owned session.
     async fn ai_attachments(
@@ -823,10 +823,10 @@ impl AiAttachmentQueryRoot {
 pub struct AiAttachmentMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiAttachmentMutationRoot {
     /// Creates an expiring one-time upload ticket.
     async fn create_ai_attachment_upload(

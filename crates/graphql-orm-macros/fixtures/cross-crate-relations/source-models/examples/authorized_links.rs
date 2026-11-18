@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     db.set_field_policy(support::EndpointFixturePolicy);
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("example-user"))
         .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, SqliteBackend>(db))

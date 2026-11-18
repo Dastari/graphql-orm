@@ -33,13 +33,14 @@ run_backup_postgres() {
 run_dependent_deletes() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro
   cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro --test dependent_delete_pg_physical -- --ignored --test-threads=1
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_ui declared_parent_opt_in_is_enforced_across_crates
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test compile_ui dependent_delete_ui::declared_parent_opt_in_is_enforced_across_crates
   cargo check -p graphql-orm --locked --no-default-features --features mssql --all-targets
-  cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
+  cargo test -p graphql-orm --locked --no-default-features --features mssql --test compile_ui dependent_delete_ui::
 }
 
 run_sqlite() {
-  cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro --test dependent_delete_ui
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite --test compile_ui dependent_delete_ui::
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal \
     --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
@@ -164,7 +165,7 @@ run_migration_journal() {
 run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1
-  cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
+  cargo test -p graphql-orm --locked --no-default-features --features mssql --test compile_ui dependent_delete_ui::
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib delivery_is_at_least_once_through_failures_and_cancellation -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \

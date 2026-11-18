@@ -14,7 +14,7 @@ use crate::{AiError, AiRunId, AiSessionId};
 
 /// Exact owner cancellation request for one session/run pair.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct CancelAiRunInput {
     /// Owning session.
     pub session_id: Uuid,
@@ -26,7 +26,7 @@ pub struct CancelAiRunInput {
 
 /// Authoritative result of an accepted cancellation request.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiRunCancellationView {
     /// Owning session.
     pub session_id: Uuid,

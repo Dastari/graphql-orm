@@ -141,6 +141,7 @@ fn schema() -> AppSchema {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .enable_subscription_in_federation()
     .extension(
         graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![

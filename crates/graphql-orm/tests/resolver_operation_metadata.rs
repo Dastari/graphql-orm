@@ -19,7 +19,7 @@ fn operation(
 }
 
 fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "resolver-case-pascal") {
+    if cfg!(graphql_orm_resolver_case = "pascal") {
         pascal
     } else {
         camel
@@ -27,7 +27,7 @@ fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
 }
 
 fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "argument-case-pascal") {
+    if cfg!(graphql_orm_argument_case = "pascal") {
         pascal
     } else {
         camel
@@ -524,7 +524,7 @@ fn derive_metadata_covers_every_rich_generated_category_and_exact_names() {
             "ResolverMetadataRecordChanged"
         )
     );
-    let private_payload_name = if cfg!(feature = "field-case-pascal") {
+    let private_payload_name = if cfg!(graphql_orm_field_case = "pascal") {
         "graphql=\"PrivatePayload\""
     } else {
         "graphql=\"privatePayload\""
@@ -674,6 +674,7 @@ async fn append_only_subscription_enforces_auth_before_database_runtime_lookup()
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(AuthSubject::new("event-reader-without-scope"))
     .extension(
         graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![
@@ -753,6 +754,7 @@ fn fixed_read_scope_declarations_drive_metadata_and_sdl_without_schema_fingerpri
         graphql_orm::async_graphql::EmptyMutation,
         graphql_orm::async_graphql::EmptySubscription,
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .finish();
     let sdl =
         schema.sdl_with_options(graphql_orm::async_graphql::SDLExportOptions::new().federation());
@@ -805,6 +807,7 @@ fn argument_scope_templates_drive_metadata_without_literal_federation_scopes() {
         graphql_orm::async_graphql::EmptyMutation,
         graphql_orm::async_graphql::EmptySubscription,
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .finish();
     let sdl =
         schema.sdl_with_options(graphql_orm::async_graphql::SDLExportOptions::new().federation());
@@ -860,6 +863,7 @@ fn fixed_write_scope_declarations_drive_metadata_and_sdl() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .enable_subscription_in_federation()
     .finish();
     let sdl =
@@ -905,6 +909,7 @@ fn required_entity_auth_emits_the_standard_namespaced_federation_directive() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .enable_subscription_in_federation()
     .finish();
     let sdl =
@@ -1083,6 +1088,7 @@ async fn fixed_write_scope_declarations_are_enforced_before_runtime_access() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(AuthSubject::new("writer-without-scopes"))
     .extension(
         graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![

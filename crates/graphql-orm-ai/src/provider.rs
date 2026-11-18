@@ -210,7 +210,7 @@ impl ProviderCapabilities {
     async_graphql::Enum,
 )]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum ModelReasoningEffort {
     /// Use the provider or reviewed registration default and omit a wire
     /// override.

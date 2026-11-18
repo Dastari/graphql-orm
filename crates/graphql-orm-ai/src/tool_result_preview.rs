@@ -9,7 +9,7 @@ use crate::{AiError, AiScope, AiToolDescriptor, ToolGraphqlRequest};
 
 /// Exact owner request for one stored application-tool result.
 #[derive(Clone, Copy, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiToolCallResultPreviewInput {
     /// Exact owning session.
     pub session_id: Uuid,
@@ -19,7 +19,7 @@ pub struct AiToolCallResultPreviewInput {
 
 /// Bounded, server-projected result safe for the current browser principal.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiToolCallResultPreviewView {
     /// Exact owning session.
     pub session_id: Uuid,

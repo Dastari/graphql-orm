@@ -239,11 +239,11 @@ async fn credential_mutation_returns_only_redacted_state() {
     .data(service_data)
     .finish();
     let profile_id = Uuid::new_v4();
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let document = format!(
         "mutation {{ setAiProviderCredential(input: {{ profileId: \"{profile_id}\", credential: \"synthetic-test-secret\", expectedVersion: 1 }}) {{ id credentialConfigured rowVersion }} }}"
     );
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let document = format!(
         "mutation {{ SetAiProviderCredential(Input: {{ ProfileId: \"{profile_id}\", Credential: \"synthetic-test-secret\", ExpectedVersion: 1 }}) {{ Id CredentialConfigured RowVersion }} }}"
     );
@@ -256,7 +256,7 @@ async fn credential_mutation_returns_only_redacted_state() {
     assert!(!serialized.contains("synthetic-test-secret"));
     assert!(!serialized.contains("credentialReference"));
     assert!(!schema.sdl().contains("credentialReference"));
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     {
         assert!(schema.sdl().contains("aiRetentionPolicy(scope:"));
         assert!(schema.sdl().contains("setAiRetentionPolicy(input:"));
@@ -271,7 +271,7 @@ async fn credential_mutation_returns_only_redacted_state() {
         );
         assert!(schema.sdl().contains("parallelToolCalls: Boolean!"));
     }
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     {
         assert!(schema.sdl().contains("AiRetentionPolicy(Scope:"));
         assert!(schema.sdl().contains("SetAiRetentionPolicy(Input:"));
@@ -319,7 +319,7 @@ async fn budget_policy_mutation_uses_the_configured_case_and_redacted_view() {
     )
     .data(service)
     .finish();
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let document = r#"
         mutation {
             upsertAiBudgetPolicy(input: {
@@ -333,7 +333,7 @@ async fn budget_policy_mutation_uses_the_configured_case_and_redacted_view() {
             }) { id intervalKind maximumInputTokens maximumRuns rowVersion }
         }
     "#;
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let document = r#"
         mutation {
             UpsertAiBudgetPolicy(Input: {
@@ -370,7 +370,7 @@ async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
     .data(configuration)
     .data(pricing)
     .finish();
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let mutation = r#"
         mutation {
             createAiPricingPolicy(input: {
@@ -386,7 +386,7 @@ async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
             }) { versionReference providerKind providerModel }
         }
     "#;
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let mutation = r#"
         mutation {
             CreateAiPricingPolicy(Input: {
@@ -410,7 +410,7 @@ async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
     assert!(serialized.contains("pricing:test-v1"));
     assert!(serialized.contains("model-a"));
 
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let query = r#"
         { aiPricingPolicies(
             scope: { kind: "project", id: "project-1", tenantId: "tenant-1" }
@@ -418,7 +418,7 @@ async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
             providerModel: "model-a"
         ) { versionReference } }
     "#;
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let query = r#"
         { AiPricingPolicies(
             Scope: { Kind: "project", Id: "project-1", TenantId: "tenant-1" }

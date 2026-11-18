@@ -7,11 +7,11 @@
 #![cfg(feature = "sqlite")]
 #![cfg(not(any(feature = "postgres", feature = "mssql")))]
 #![cfg(not(any(
-    feature = "field-case-pascal",
-    feature = "field-case-snake",
-    feature = "field-case-screaming-snake",
-    feature = "field-case-lower",
-    feature = "field-case-upper",
+    graphql_orm_field_case = "pascal",
+    graphql_orm_field_case = "snake",
+    graphql_orm_field_case = "screaming_snake",
+    graphql_orm_field_case = "lower",
+    graphql_orm_field_case = "upper",
 )))]
 
 use async_graphql::{EmptyMutation, EmptySubscription, Object, SDLExportOptions, Schema};

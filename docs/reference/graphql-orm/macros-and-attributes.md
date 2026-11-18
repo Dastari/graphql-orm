@@ -327,7 +327,7 @@ They use the same encoding and declared version-field policy as generated object
 This is the whole supported declaration for an entity with a generated `NodeId`, a managed
 `RecordVersion` and a generated collection relation, with generated queries and subscriptions and
 no generated mutations. Its parent is compiled under the default names and under all three
-Pascal-case features by `crates/graphql-orm/tests/node_id_version_relations.rs`:
+`PascalCase` naming variables by `crates/graphql-orm/tests/node_id_version_relations.rs`:
 
 ```rust,ignore
 use graphql_orm::async_graphql::SimpleObject;
@@ -472,7 +472,7 @@ resolves its own fields before complex ones. The published name follows
 async-graphql: an explicit `#[graphql(name = "…")]` is used as written and also
 names every `derived(...)` copy. Otherwise the identifier, or a derived copy's
 `derived(name = "…")`, is renamed by `rename_fields` (the impl's for methods, the
-struct's for struct fields, camelCase by default); the `field-case-*` features do
+struct's for struct fields, camelCase by default); `GRAPHQL_ORM_FIELD_CASE` does
 not apply. Derived copies of a skipped struct field are still published. Names
 must be string literals, also when passed through `macro_rules!`. Remove such
 fields. The declared managed column controls subscription preflight
@@ -696,7 +696,7 @@ remove the generated operation with the entity's `query_shapes`/`mutation_shapes
 `generated_mutations` in `schema_roots!`.
 ```
 
-The check compares the exposed names: generated names follow the `resolver-case-*` features and the
+The check compares the exposed names: generated names follow `GRAPHQL_ORM_RESOLVER_CASE` and the
 entity's selected shapes, and handwritten names follow `#[graphql(name = "...")]` and the root's
 `rename_fields`, derived with the same routines async-graphql uses (so `fn s3bucket` is checked as
 `s3Bucket`, the name it is served under). It covers the Query, Mutation and Subscription roots
@@ -1007,16 +1007,39 @@ an authoritative source that implements the declared opaque cursor, watermark,
 replay, and reset contract. Generated broadcast subscriptions are explicitly
 `BestEffort` and have no bounded-wait registration limits.
 
-## Naming features
+## Naming configuration
 
-Feature groups alter generated names independently of the selected database.
-Enable at most one in each group:
+Three build-time environment variables select generated GraphQL names,
+independently of the selected database. Each takes one async-graphql rename
+rule: `camelCase` (the default when unset or empty), `PascalCase`,
+`snake_case`, `SCREAMING_SNAKE_CASE`, `lowercase` or `UPPERCASE`.
 
-| Group | Features |
+| Variable | Names it selects |
 | --- | --- |
-| resolver names | `resolver-case-pascal`, `resolver-case-snake`, `resolver-case-screaming-snake`, `resolver-case-lower`, `resolver-case-upper` |
-| argument names | `argument-case-pascal`, `argument-case-snake`, `argument-case-screaming-snake`, `argument-case-lower`, `argument-case-upper` |
-| field names | `field-case-pascal`, `field-case-snake`, `field-case-screaming-snake`, `field-case-lower`, `field-case-upper` |
+| `GRAPHQL_ORM_RESOLVER_CASE` | generated root query, mutation and subscription fields |
+| `GRAPHQL_ORM_ARGUMENT_CASE` | generated field arguments |
+| `GRAPHQL_ORM_FIELD_CASE` | generated object and input object fields, including the shared `PageInfo`, filter and search types |
+
+The `graphql-orm` and `graphql-orm-macros` build scripts read the same
+variables, so a build has exactly one naming contract, and an unknown value
+fails the build. Because the shared runtime types are compiled once per build,
+the choice is per build, not per crate: set it where the build is configured,
+usually the host workspace's `.cargo/config.toml`:
+
+```toml
+[env]
+GRAPHQL_ORM_RESOLVER_CASE = "PascalCase"
+GRAPHQL_ORM_ARGUMENT_CASE = "PascalCase"
+GRAPHQL_ORM_FIELD_CASE = "PascalCase"
+```
+
+Changing a variable rebuilds the two crates. `graphql-orm-ai` reads
+`GRAPHQL_ORM_AI_CASE` for its own types; see its configuration reference.
+
+These variables replaced the mutually exclusive `resolver-case-*`,
+`argument-case-*` and `field-case-*` Cargo features (#508). Features must be
+additive, and two dependants enabling different case features failed to
+compile; see the [migration guide](../../../MIGRATION.md#breaking-release-unreleased).
 
 ## Further reading
 
@@ -1296,7 +1319,7 @@ type Ticket {
 ```
 
 - The name is always `RecordVersion` (`graphql_orm::graphql::orm::RECORD_VERSION_FIELD`); it does
-  not follow the `field-case-*` features. The declared field keeps its own name.
+  not follow `GRAPHQL_ORM_FIELD_CASE`. The declared field keeps its own name.
 - It resolves the declared field's value and applies the same field read policy and subscription
   availability. Generated `Changed` payloads may select it.
 - It has no column and no input, filter, order or aggregate entry.

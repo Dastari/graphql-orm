@@ -29,7 +29,7 @@ pub struct AiSessionWakeup {
 /// final envelope. None of these values disclose provider, prompt, tool, or
 /// authorization detail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiSessionStreamClose {
     /// Retention removed history the client still needs. Discard derived state
     /// and reload from `aiConversationBootstrap`.
@@ -51,7 +51,7 @@ pub enum AiSessionStreamClose {
 /// Subscription item supporting explicit retention-gap reset signaling and
 /// typed terminal close signaling.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionEventEnvelope {
     /// Durable event, absent only for a reset or close signal.
     pub event: Option<AiSessionEventView>,
@@ -113,10 +113,10 @@ pub trait AiSubscriptionService: Send + Sync {
 pub struct AiSubscriptionRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Subscription(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Subscription)]
+#[cfg_attr(not(graphql_case_pascal), Subscription)]
 impl AiSubscriptionRoot {
     /// Replays durable events, then follows commit-only wakeup hints while
     /// periodically reauthorizing the principal.

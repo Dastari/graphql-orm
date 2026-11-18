@@ -1,7 +1,11 @@
-//! Qualify opt-in replay at build time, never by probing the caller's runtime.
+//! Qualify opt-in replay at build time, never by probing the caller's runtime,
+//! and select the GraphQL naming cases (`build_naming.rs`).
 use std::{env, process::Command};
 
+include!("build_naming.rs");
+
 fn main() {
+    emit_naming_cfgs();
     println!("cargo:rustc-check-cfg=cfg(graphql_orm_replay_qualified_profile)");
     println!("cargo:rustc-check-cfg=cfg(graphql_orm_replay_rust1981_profile)");
     println!("cargo:rerun-if-changed=build.rs");

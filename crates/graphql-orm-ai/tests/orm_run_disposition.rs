@@ -1118,14 +1118,14 @@ async fn retry_refusal_reaches_the_graphql_mutation_response() {
     let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
         .data(service)
         .finish();
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let mutation = format!(
         "mutation {{ retryAiRun(input: {{sessionId: \"{}\", runId: \"{}\", clientRequestId: \"{}\"}}) {{ runId }} }}",
         session.id,
         sent.run_id,
         Uuid::new_v4()
     );
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let mutation = format!(
         "mutation {{ RetryAiRun(Input: {{SessionId: \"{}\", RunId: \"{}\", ClientRequestId: \"{}\"}}) {{ RunId }} }}",
         session.id,

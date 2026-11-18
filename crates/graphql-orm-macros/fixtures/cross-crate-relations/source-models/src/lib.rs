@@ -522,6 +522,7 @@ mod tests {
             EmptyMutation,
             EmptySubscription,
         )
+        .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"));
         if loader {
@@ -590,6 +591,7 @@ mod tests {
             EmptyMutation,
             EmptySubscription,
         )
+        .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(loader)
@@ -651,6 +653,7 @@ mod tests {
         )
         .await?;
         let schema = Schema::build(SessionQueries, EmptyMutation, EmptySubscription)
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .data(db.clone())
             .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
             .finish();
@@ -958,6 +961,7 @@ mod tests {
             EmptyMutation,
             EmptySubscription,
         )
+        .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(identity("fixture-user"))
@@ -1055,6 +1059,7 @@ mod tests {
             EmptyMutation,
             EmptySubscription,
         )
+        .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, DefaultBackend>(db))
