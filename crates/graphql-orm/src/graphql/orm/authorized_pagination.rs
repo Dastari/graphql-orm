@@ -47,11 +47,20 @@ pub enum ReadPredicateOp {
 /// Entity- and backend-bound authorization predicate, built from the same typed
 /// filters used by ordinary queries (including supported relation predicates).
 /// An empty filter is rejected: use `ReadVisibility::Unrestricted` deliberately.
+///
+/// Composition is budgeted when a predicate is built, so a predicate that
+/// builds can always be rendered and run. On every backend, the rendered SQL
+/// may not exceed [`READ_PREDICATE_MAX_RENDERED_BYTES`], and closures may nest
+/// at most [`READ_PREDICATE_CLOSURE_MAX_NESTING`] deep. On SQL Server,
+/// subqueries may nest at most [`READ_PREDICATE_MSSQL_MAX_NESTING`] deep. A
+/// constructor, [`Self::not`], `and` or `or` that would exceed a limit
+/// returns `AUTHORIZATION_MISCONFIGURED` before rendering.
 #[derive(Clone, Debug)]
 pub struct ReadPredicate {
     entity: TypeId,
     backend: DatabaseBackend,
     expression: FilterExpression,
+    cost: Cost,
 }
 fn validate_column<T: Entity>(column: &str) -> async_graphql::Result<()> {
     if T::columns()
@@ -153,6 +162,116 @@ fn closure_level(predicate: &str) -> usize {
 /// `related_closure_all` behave the same on every backend.
 pub const READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH: u32 = 64;
 
+/// The largest rendered SQL, in bytes, that one [`ReadPredicate`] may hold on
+/// any backend. Relations, negations and closures inline their target (a
+/// closure four times), so composition can otherwise grow the statement
+/// geometrically. A predicate that would exceed it is refused with
+/// `AUTHORIZATION_MISCONFIGURED` before it is rendered.
+pub const READ_PREDICATE_MAX_RENDERED_BYTES: usize = 1 << 20;
+
+/// How many closures may nest inside one another, through any number of
+/// relations, negations, `and` and `or`, on any backend: a closure whose
+/// target holds a closure is allowed, a third level is refused with
+/// `AUTHORIZATION_MISCONFIGURED`. Each level evaluates the inner walk for
+/// every row the outer walk reaches, so the cost multiplies per level.
+pub const READ_PREDICATE_CLOSURE_MAX_NESTING: u32 = 2;
+
+/// The deepest subquery nesting one [`ReadPredicate`] may render on SQL
+/// Server, counted as nested `(SELECT ...)` levels. SQL Server refuses a
+/// statement nested about 100 levels deep ("nested too deeply", error 191);
+/// the rest is left for the host query, such as a page, count or relation
+/// filter around the policy. A deeper predicate is refused with
+/// `AUTHORIZATION_MISCONFIGURED` when it is built. A closure at
+/// [`READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH`] uses about 66 levels.
+pub const READ_PREDICATE_MSSQL_MAX_NESTING: u32 = MSSQL_MAX_NESTING;
+const MSSQL_MAX_NESTING: u32 = 80;
+
+/// What a predicate costs to render and run: its rendered size, its deepest
+/// subquery nesting and its deepest chain of closures inside closures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Cost {
+    bytes: usize,
+    nesting: u32,
+    closures: u32,
+}
+impl Cost {
+    fn of_expression(expression: &FilterExpression) -> Self {
+        let clause =
+            render_filter_expression(DatabaseBackend::Sqlite, expression, &mut 1, &mut Vec::new());
+        Self::of(&clause)
+    }
+    fn of(clause: &str) -> Self {
+        // Placeholders render as `$n` or `@Pn` on the server: count each as
+        // up to seven bytes rather than the anonymous `?`.
+        let placeholders = clause.bytes().filter(|byte| *byte == b'?').count();
+        Self {
+            bytes: clause.len().saturating_add(placeholders.saturating_mul(6)),
+            nesting: subquery_nesting(clause),
+            closures: closure_level(clause) as u32 - 1,
+        }
+    }
+    fn check(self, backend: DatabaseBackend) -> async_graphql::Result<Self> {
+        if self.bytes > READ_PREDICATE_MAX_RENDERED_BYTES
+            || self.closures > READ_PREDICATE_CLOSURE_MAX_NESTING
+            || (backend == DatabaseBackend::Mssql && self.nesting > MSSQL_MAX_NESTING)
+        {
+            return Err(invalid());
+        }
+        Ok(self)
+    }
+}
+
+/// Refuse before rendering when `copies` of a `bytes`-long target plus
+/// `overhead` would exceed the rendered-size budget.
+fn reserve(bytes: usize, copies: usize, overhead: usize) -> async_graphql::Result<()> {
+    if bytes.saturating_mul(copies).saturating_add(overhead) > READ_PREDICATE_MAX_RENDERED_BYTES {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// The deepest nesting of `(SELECT ...)` and `(WITH ...)` subqueries in
+/// `sql`, skipping quoted strings and identifiers.
+fn subquery_nesting(sql: &str) -> u32 {
+    let bytes = sql.as_bytes();
+    let (mut open, mut depth, mut deepest, mut index) = (Vec::new(), 0_u32, 0_u32, 0);
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"' | b'[') => {
+                let close = if quote == b'[' { b']' } else { quote };
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == close {
+                        if bytes.get(index + 1) == Some(&close) {
+                            index += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    index += 1;
+                }
+            }
+            b'(' => {
+                let rest = sql[index + 1..].trim_start().as_bytes();
+                let starts = |word: &[u8]| {
+                    rest.get(..word.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(word))
+                };
+                let subquery = starts(b"SELECT") || starts(b"WITH");
+                if subquery {
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                open.push(subquery);
+            }
+            b')' if open.pop() == Some(true) => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    deepest
+}
+
 /// The SQL Server closure. SQL Server does not allow a common table
 /// expression inside a subquery, so the bounded walk is unrolled into a
 /// breadth-first search of nested derived tables, one per hop:
@@ -171,7 +290,8 @@ pub const READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH: u32 = 64;
 ///    is not NULL and names no row, or when it is first reached at the bound
 ///    (the CTE's "at the bound and not seen before"). An all-NULL pointer
 ///    names no row and is complete: a root.
-/// 4. The authorized row's own truth is evaluated last, in the outer scope.
+/// 4. The authorized row's own truth is evaluated first, in a derived table
+///    with no FROM, so the target's columns bind to the authorized row.
 ///
 /// The CTE form expands a pointer each time it is reached, but a later
 /// expansion only reaches pointers already reached earlier, so both forms see
@@ -281,18 +401,19 @@ fn render_mssql_closure(
              THEN NULL ELSE 1 END"
         ),
     };
-    // `table` is unaliased where the target is evaluated: in `truths` it is
-    // the reached row, and in `own` (no FROM) the authorized row.
+    // `table` is unaliased where the target is evaluated. In `truths` it is
+    // the reached row. `own` has no FROM and comes first, so it sees no
+    // `__gom_` column of this subquery: the target's unqualified columns
+    // bind to the authorized row, never to the summary.
     format!(
-        "(SELECT {verdict} FROM (\
+        "(SELECT {verdict} FROM (SELECT {truth} AS __gom_truth) AS {own} CROSS APPLY (\
          SELECT MAX({reached}.__gom_max) AS __gom_max, MIN({reached}.__gom_min) AS __gom_min, \
          MAX(CASE WHEN {ambiguous}({followed} AND ({group}.__gom_depth = {max_depth} \
          OR {reached}.__gom_rows = 0)) THEN 1 ELSE 0 END) AS __gom_incomplete FROM {walk} \
          OUTER APPLY (SELECT MAX({truths}.__gom_truth) AS __gom_max, \
          MIN({truths}.__gom_truth) AS __gom_min, COUNT(*) AS __gom_rows \
          FROM (SELECT {truth} AS __gom_truth FROM {table} \
-         WHERE {step} AND {group}.__gom_depth < {max_depth}) AS {truths}) AS {reached}) AS {summary} \
-         CROSS APPLY (SELECT {truth} AS __gom_truth) AS {own}) = 1",
+         WHERE {step} AND {group}.__gom_depth < {max_depth}) AS {truths}) AS {reached}) AS {summary}) = 1",
         step = named_by(&group),
     )
 }
@@ -354,6 +475,38 @@ impl Relation {
 }
 
 impl ReadPredicate {
+    /// A predicate over `expression`, measured and checked against the
+    /// composition budget.
+    fn measured(
+        entity: TypeId,
+        backend: DatabaseBackend,
+        expression: FilterExpression,
+    ) -> async_graphql::Result<Self> {
+        let cost = Cost::of_expression(&expression).check(backend)?;
+        Ok(Self {
+            entity,
+            backend,
+            expression,
+            cost,
+        })
+    }
+
+    /// A predicate over a rendered trusted `clause`, measured and checked.
+    fn fragment(
+        entity: TypeId,
+        backend: DatabaseBackend,
+        clause: String,
+        values: Vec<SqlValue>,
+    ) -> async_graphql::Result<Self> {
+        let cost = Cost::of(&clause).check(backend)?;
+        Ok(Self {
+            entity,
+            backend,
+            expression: FilterExpression::trusted_fragment(clause, values),
+            cost,
+        })
+    }
+
     /// Compare a validated persisted physical column with a bound value.
     /// Private and non-filterable columns are accepted; this does not expose
     /// them in GraphQL inputs or grant any field access. Unknown names fail closed.
@@ -371,14 +524,12 @@ impl ReadPredicate {
             ReadPredicateOp::Gt => ">",
             ReadPredicateOp::Gte => ">=",
         };
-        Ok(Self {
-            entity: TypeId::of::<T>(),
-            backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(
-                format!("{} {operator} ?", B::DIALECT.quote_identifier(column)),
-                vec![value],
-            ),
-        })
+        Self::fragment(
+            TypeId::of::<T>(),
+            B::DIALECT,
+            format!("{} {operator} ?", B::DIALECT.quote_identifier(column)),
+            vec![value],
+        )
     }
 
     /// `column IS NULL` on a validated persisted physical column.
@@ -408,14 +559,12 @@ impl ReadPredicate {
         test: &str,
     ) -> async_graphql::Result<Self> {
         validate_column::<T>(column)?;
-        Ok(Self {
-            entity: TypeId::of::<T>(),
-            backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(
-                format!("{} {test}", B::DIALECT.quote_identifier(column)),
-                Vec::new(),
-            ),
-        })
+        Self::fragment(
+            TypeId::of::<T>(),
+            B::DIALECT,
+            format!("{} {test}", B::DIALECT.quote_identifier(column)),
+            Vec::new(),
+        )
     }
 
     /// SQL negation, rendered as `NOT (...)` with the inner bind values in
@@ -452,6 +601,7 @@ impl ReadPredicate {
         if !negatable(&self.expression) {
             return Err(invalid());
         }
+        reserve(self.cost.bytes, 1, 16)?;
         let mut values = Vec::new();
         let clause = render_filter_expression(
             DatabaseBackend::Sqlite,
@@ -462,10 +612,7 @@ impl ReadPredicate {
         if contains_match_nothing(&clause) {
             return Err(invalid());
         }
-        Ok(Self {
-            expression: FilterExpression::trusted_fragment(format!("NOT ({clause})"), values),
-            ..self
-        })
+        Self::fragment(self.entity, self.backend, format!("NOT ({clause})"), values)
     }
 
     /// Reject filters requiring residual Rust matching on this backend. A partial
@@ -477,11 +624,7 @@ impl ReadPredicate {
             return Err(invalid());
         }
         let expression = filter.to_filter_expression().ok_or_else(invalid)?;
-        Ok(Self {
-            entity: F::entity_type_id(),
-            backend: B::DIALECT,
-            expression,
-        })
+        Self::measured(F::entity_type_id(), B::DIALECT, expression)
     }
 
     /// A parameterized EXISTS join over validated persisted columns. `keys`
@@ -496,13 +639,10 @@ impl ReadPredicate {
         S: Entity + 'static,
         T: Entity + 'static,
     {
+        reserve(target.cost.bytes, 1, 1024)?;
         let relation = Relation::new::<B, S, T>(keys, &target)?;
         let clause = relation.exists(&relation.predicate);
-        Ok(Self {
-            entity: TypeId::of::<S>(),
-            backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(clause, relation.values),
-        })
+        Self::fragment(TypeId::of::<S>(), B::DIALECT, clause, relation.values)
     }
 
     /// Fail-closed absence: "no related row can match `target`".
@@ -542,6 +682,7 @@ impl ReadPredicate {
         if !negatable(&target.expression) {
             return Err(invalid());
         }
+        reserve(target.cost.bytes, 2, 2048)?;
         let relation = Relation::new::<B, S, T>(keys, &target)?;
         if relation.predicate.trim().is_empty() || contains_match_nothing(&relation.predicate) {
             return Err(invalid());
@@ -559,16 +700,14 @@ impl ReadPredicate {
         ));
         let mut values = relation.values.clone();
         values.extend(relation.values);
-        Ok(Self {
-            entity: TypeId::of::<S>(),
-            backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(
-                format!(
-                    "(CASE WHEN {null_key} THEN NULL WHEN {matching} THEN 0 WHEN {possible} THEN NULL ELSE 1 END) = 1"
-                ),
-                values,
+        Self::fragment(
+            TypeId::of::<S>(),
+            B::DIALECT,
+            format!(
+                "(CASE WHEN {null_key} THEN NULL WHEN {matching} THEN 0 WHEN {possible} THEN NULL ELSE 1 END) = 1"
             ),
-        })
+            values,
+        )
     }
 
     /// Existential closure: "some row reachable from this one matches
@@ -698,8 +837,20 @@ impl ReadPredicate {
     /// Both forms admit the same rows. No backend evaluates the closure in
     /// memory or for the whole table. Other backends are refused.
     ///
+    /// **Composition limits.** A closure inside a closure evaluates the inner
+    /// walk for every row the outer walk reaches, and the target is inlined
+    /// four times, so cost multiplies with each level. At most
+    /// [`READ_PREDICATE_CLOSURE_MAX_NESTING`] closures may nest, through any
+    /// relations, negations, `and` and `or`; the rendered SQL may not exceed
+    /// [`READ_PREDICATE_MAX_RENDERED_BYTES`]. On SQL Server, the policy's
+    /// subqueries may nest at most [`READ_PREDICATE_MSSQL_MAX_NESTING`]
+    /// levels. A closure at the default bound uses about 66 levels and each
+    /// `related` around it adds two, leaving room for six such relations, or
+    /// three around a closure inside a closure.
+    ///
     /// Refused with `AUTHORIZATION_MISCONFIGURED`: unsupported backends,
-    /// `max_depth` outside the range above, empty or
+    /// `max_depth` outside the range above, a composition over the limits
+    /// above, empty or
     /// unknown key columns, a target for another entity or backend, and an
     /// empty target. A target that renders the deny fallback `1 = 0` is
     /// accepted, as for `related`, because the positive forms only deny with
@@ -722,6 +873,17 @@ impl ReadPredicate {
         if !(1..=limit).contains(&max_depth) || !negatable(&target.expression) {
             return Err(invalid());
         }
+        // A closure inside closures multiplies the walk per level, and the
+        // target is inlined four times; refuse both before rendering.
+        if target.cost.closures >= READ_PREDICATE_CLOSURE_MAX_NESTING {
+            return Err(invalid());
+        }
+        let walk = if B::DIALECT == DatabaseBackend::Mssql {
+            max_depth as usize * (1024 + 256 * keys.len())
+        } else {
+            0
+        };
+        reserve(target.cost.bytes, 4, 4096 + walk)?;
         let relation = Relation::new::<B, T, T>(keys, &target)?;
         if relation.predicate.trim().is_empty() {
             return Err(invalid());
@@ -734,22 +896,16 @@ impl ReadPredicate {
             values.extend(relation.values.iter().cloned());
         }
         if dialect == DatabaseBackend::Mssql {
-            return Ok(Self {
-                entity: TypeId::of::<T>(),
-                backend: B::DIALECT,
-                expression: FilterExpression::trusted_fragment(
-                    render_mssql_closure(
-                        dialect,
-                        &table,
-                        &cte,
-                        keys,
-                        quantifier,
-                        &relation.predicate,
-                        max_depth,
-                    ),
-                    values,
-                ),
-            });
+            let clause = render_mssql_closure(
+                dialect,
+                &table,
+                &cte,
+                keys,
+                quantifier,
+                &relation.predicate,
+                max_depth,
+            );
+            return Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values);
         }
         let join = |items: Vec<String>, separator: &str| items.join(separator);
         let indexed = |render: &dyn Fn(usize, &str, &str) -> String| {
@@ -830,11 +986,7 @@ impl ReadPredicate {
              WHERE {cte}.__gom_depth < {max_depth}) \
              SELECT {verdict} FROM {cte}) = 1"
         );
-        Ok(Self {
-            entity: TypeId::of::<T>(),
-            backend: B::DIALECT,
-            expression: FilterExpression::trusted_fragment(clause, values),
-        })
+        Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values)
     }
 
     pub fn and(self, other: Self) -> async_graphql::Result<Self> {
@@ -847,6 +999,17 @@ impl ReadPredicate {
         if self.entity != other.entity || self.backend != other.backend {
             return Err(invalid());
         }
+        // `(a) AND (b)` adds no subquery level, so the costs combine directly.
+        let cost = Cost {
+            bytes: self
+                .cost
+                .bytes
+                .saturating_add(other.cost.bytes)
+                .saturating_add(16),
+            nesting: self.cost.nesting.max(other.cost.nesting),
+            closures: self.cost.closures.max(other.cost.closures),
+        }
+        .check(self.backend)?;
         let expressions = vec![self.expression, other.expression];
         Ok(Self {
             entity: self.entity,
@@ -856,6 +1019,7 @@ impl ReadPredicate {
             } else {
                 FilterExpression::Or(expressions)
             },
+            cost,
         })
     }
 }
@@ -921,11 +1085,7 @@ where
     }
     let predicate = ReadPredicate::related::<B, S, T>(
         keys,
-        ReadPredicate {
-            entity: TypeId::of::<T>(),
-            backend: B::DIALECT,
-            expression,
-        },
+        ReadPredicate::measured(TypeId::of::<T>(), B::DIALECT, expression)?,
     )?;
     let mut values = Vec::new();
     // Keep anonymous placeholders in this composable fragment. EntityQuery
@@ -2169,6 +2329,7 @@ mod predicate_tests {
                 entity: TypeId::of::<()>(),
                 backend: DatabaseBackend::Sqlite,
                 expression,
+                cost: Cost::default(),
             };
             assert!(predicate.not().is_err());
         }
@@ -2179,7 +2340,35 @@ mod predicate_tests {
             entity: TypeId::of::<()>(),
             backend: DatabaseBackend::Sqlite,
             expression: FilterExpression::trusted_fragment(clause, values),
+            cost: Cost::of(clause),
         }
+    }
+
+    #[test]
+    fn composition_cost_counts_subqueries_closures_and_placeholders() {
+        // Parentheses in quoted names and plain groups are not subqueries.
+        let clause = "EXISTS (SELECT 1 FROM (SELECT * FROM [a(b] WHERE (x = ?)) AS \"(SELECT\" \
+                      WHERE 'it''s (SELECT' = (SELECT 2))";
+        let cost = Cost::of(clause);
+        assert_eq!(cost.nesting, 2);
+        assert_eq!(cost.closures, 0);
+        assert_eq!(cost.bytes, clause.len() + 6);
+        assert_eq!(Cost::of("(WITH c AS (SELECT 1) SELECT 1)").nesting, 2);
+        assert_eq!(Cost::of("__gom_closure_2_l0 __gom_closure_1").closures, 2);
+        // Only SQL Server has a nesting budget; the others refuse by size.
+        let deep = Cost {
+            nesting: READ_PREDICATE_MSSQL_MAX_NESTING + 1,
+            ..Cost::default()
+        };
+        assert!(deep.check(DatabaseBackend::Mssql).is_err());
+        assert!(deep.check(DatabaseBackend::Postgres).is_ok());
+        let large = Cost {
+            bytes: READ_PREDICATE_MAX_RENDERED_BYTES + 1,
+            ..Cost::default()
+        };
+        assert!(large.check(DatabaseBackend::Sqlite).is_err());
+        assert!(reserve(READ_PREDICATE_MAX_RENDERED_BYTES / 4, 4, 1).is_err());
+        assert!(reserve(usize::MAX, 4, 0).is_err());
     }
 
     #[test]
@@ -2210,6 +2399,7 @@ mod predicate_tests {
                 entity: TypeId::of::<()>(),
                 backend: DatabaseBackend::Sqlite,
                 expression,
+                cost: Cost::default(),
             };
             assert!(predicate.clone().not().is_err(), "{predicate:?}");
             assert!(predicate.not().is_err());

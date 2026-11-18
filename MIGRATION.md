@@ -23,6 +23,21 @@ Upgrade ORM and macros together. Generated code is unchanged. See
   most `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) hops on SQL Server; the
   default bound (64) is the same on every backend. Index the key columns,
   normally the primary key. SQLite and PostgreSQL are unchanged.
+- **Read-predicate composition budget (#779). Action needed** only if a
+  policy would exceed a limit:
+  - closures nested more than two deep (`READ_PREDICATE_CLOSURE_MAX_NESTING`);
+  - over 1 MiB of rendered SQL (`READ_PREDICATE_MAX_RENDERED_BYTES`), which in
+    practice means deeply nested `not_related` or a very wide `or` of
+    closures;
+  - on SQL Server, over 80 nested subquery levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING`). For example, more than six
+    `related` around a 64-hop closure.
+
+  Such a policy is now refused with `AUTHORIZATION_MISCONFIGURED` when it is
+  built. Before, it rendered an oversized statement, ran for minutes or, on
+  SQL Server, failed every read with "nested too deeply". Flatten the
+  composition, use a shorter `related_closure_within` bound, or split the
+  policy. Policies within the limits are unchanged.
 
 ## 0.175.0 to 0.176.0: transitive read-policy closures
 

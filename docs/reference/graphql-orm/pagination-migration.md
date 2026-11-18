@@ -324,9 +324,9 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   - **Bound.** SQL Server stops compiling a statement nested about 100
     levels deep (error 191, "nested too deeply"). The SQL Server bound is
     therefore `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64), the same as the
-    default. That leaves room for the host query and for nested closures,
-    whose walk sits beside the outer one, not inside it. The shorthand
-    constructors behave identically on every backend.
+    default, so the shorthand constructors behave identically on every
+    backend. The composition limits below keep the whole policy under the
+    server's limit.
   - **Cost.** Each level is deduplicated, so the work per row is bounded by
     `max_depth` times the distinct pointers reached, whatever the fan-out of
     a non-unique key. Each hop is a correlated lookup on the key columns. Each
@@ -342,6 +342,42 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     executed only for frontier pointers. There are no hash or merge joins
     and no table scan per hop. The owned-lane performance test asserts this
     shape.
+
+- **Composition limits.** Relations, negations and closures inline their
+  target: a closure four times, `not_related` twice. A closure inside a
+  closure also evaluates the inner walk for every row the outer walk
+  reaches. Unbounded composition could therefore render a statement of many
+  megabytes, or run for minutes, before failing. Every predicate is
+  therefore measured as it is built. A constructor, `not()`, `and` or `or`
+  that would exceed a limit returns `AUTHORIZATION_MISCONFIGURED` before
+  anything is rendered. A policy that builds can always be rendered and run.
+
+  | Limit | Backends | Value |
+  | --- | --- | --- |
+  | Closures nested inside closures, through any relations, negations, `and` and `or` (`READ_PREDICATE_CLOSURE_MAX_NESTING`) | all | 2 |
+  | Rendered SQL of one predicate, with placeholders counted at full width (`READ_PREDICATE_MAX_RENDERED_BYTES`) | all | 1 MiB |
+  | Nested `(SELECT ...)` levels of one predicate (`READ_PREDICATE_MSSQL_MAX_NESTING`) | SQL Server | 80 |
+
+  - **Why these values.** On the owned servers, each extra closure level
+    multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
+    1.1 s for two and 8 s for three, while four levels exhausted server
+    memory. PostgreSQL followed the same curve: 3.7 s at two levels, 21 s at
+    three and 172 s at four. A closure inside a closure at the default bound
+    renders about 220 KB on SQL Server, well under the size budget.
+  - **SQL Server headroom.** Every read path (reads, counts, keyset and
+    connection pages, aggregates) worked up to 95 counted levels, and failed
+    with error 191 from 97. The budget of 80 leaves 15 levels for the host
+    query, such as a relation filter that wraps the policy. Relation filters
+    are budgeted too, so a wrapper that would cross the limit is refused, not
+    sent.
+  - **What fits.** A closure at the default 64 hops uses about 66 levels, and
+    each `related` or `not_related` around it adds two. That leaves room for
+    six relations around a closure, or three around a closure inside a
+    closure. A shorter bound leaves more room.
+  - **Cost guidance.** Keep closures to one level where you can. Index the key
+    columns. Prefer a shorter `related_closure_within` bound when chains are
+    known to be shallow: the work per row is at most the bound times the rows
+    the walk reaches, and on SQL Server the plan grows with the bound.
 
 ### Exact offsets remain compatible
 

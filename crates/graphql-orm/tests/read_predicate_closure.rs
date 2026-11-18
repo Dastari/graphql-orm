@@ -62,6 +62,10 @@ struct ClosureNode {
     key_b: Option<i64>,
     ptr_a: Option<i64>,
     ptr_b: Option<i64>,
+    /// A column named like the SQL Server closure's summary columns, so a
+    /// target over it must still bind to the row being authorized.
+    #[graphql_orm(db_column = "__gom_max")]
+    shadow: Option<i64>,
 }
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
@@ -281,7 +285,7 @@ mod portable {
             db.set_entity_policy(AllowEntityPolicy);
             (db, owner)
         };
-        execute(&db, "CREATE TABLE closure_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, score BIGINT NULL, key_a BIGINT NULL, key_b BIGINT NULL, ptr_a BIGINT NULL, ptr_b BIGINT NULL)").await;
+        execute(&db, "CREATE TABLE closure_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, score BIGINT NULL, key_a BIGINT NULL, key_b BIGINT NULL, ptr_a BIGINT NULL, ptr_b BIGINT NULL, __gom_max BIGINT NULL)").await;
         execute(&db, "CREATE TABLE closure_marks (id BIGINT PRIMARY KEY, node_id BIGINT NOT NULL, flag BIGINT NULL)").await;
         (db, owner)
     }
@@ -495,6 +499,236 @@ mod portable {
         for (name, predicate, expected) in cases {
             assert_eq!(visible(&db, predicate).await, expected, "{name}");
         }
+        owner.cleanup().unwrap();
+    }
+
+    /// The deepest `(SELECT ...)` nesting in `sql`, skipping quoted names.
+    fn subquery_nesting(sql: &str) -> u32 {
+        let b = sql.as_bytes();
+        let (mut open, mut d, mut m, mut i) = (Vec::new(), 0u32, 0u32, 0);
+        while i < b.len() {
+            match b[i] {
+                q @ (b'\'' | b'"' | b'[') => {
+                    let c = if q == b'[' { b']' } else { q };
+                    i += 1;
+                    while i < b.len() && b[i] != c {
+                        i += 1;
+                    }
+                }
+                b'(' => {
+                    let r = sql[i + 1..].trim_start().as_bytes();
+                    let sub = r.len() >= 6 && r[..6].eq_ignore_ascii_case(b"SELECT");
+                    if sub {
+                        d += 1;
+                        m = m.max(d);
+                    }
+                    open.push(sub);
+                }
+                b')' if open.pop() == Some(true) => d -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        m
+    }
+
+    fn related_to_itself(target: ReadPredicate) -> ReadPredicate {
+        ReadPredicate::related::<B, ClosureNode, ClosureNode>(&[("id", "id")], target).unwrap()
+    }
+    fn rendered(predicate: &ReadPredicate) -> String {
+        EntityQuery::<ClosureNode>::new()
+            .with_read_visibility(&ReadVisibility::Complete(predicate.clone()))
+            .unwrap()
+            .build_delete_sql()
+            .0
+    }
+
+    #[test]
+    fn closures_nest_at_most_two_levels_on_every_backend() {
+        assert_eq!(READ_PREDICATE_CLOSURE_MAX_NESTING, 2);
+        // Two levels build, directly or through relations, negations and or.
+        let two = any(PARENT, all(PARENT, passes()));
+        let through = any(
+            PARENT,
+            related_to_itself(all(PARENT, passes()).not().unwrap())
+                .or(passes())
+                .unwrap(),
+        );
+        // A third level is refused however it is reached.
+        for target in [two.clone(), through.clone(), related_to_itself(two.clone())] {
+            for quantifier in [ReadPredicateQuantifier::Any, ReadPredicateQuantifier::All] {
+                misconfigured(ReadPredicate::related_closure_within::<B, ClosureNode>(
+                    quantifier,
+                    PARENT,
+                    target.clone(),
+                    2,
+                ));
+            }
+        }
+        // Combining two-level closures side by side is not nesting.
+        two.or(through).unwrap();
+    }
+
+    #[test]
+    fn rendered_size_is_budgeted_before_rendering_on_every_backend() {
+        // Each not_related inlines its target twice: the doubling stops at
+        // the budget, and no predicate that built renders past it.
+        let mut predicate = passes();
+        let mut built = 0;
+        loop {
+            match ReadPredicate::not_related::<B, ClosureNode, ClosureNode>(
+                &[("id", "id")],
+                predicate.clone(),
+            ) {
+                Ok(next) => {
+                    predicate = next;
+                    built += 1;
+                    assert!(rendered(&predicate).len() <= READ_PREDICATE_MAX_RENDERED_BYTES + 1024);
+                    assert!(built < 32, "the budget never refused");
+                }
+                Err(error) => {
+                    misconfigured(Err(error));
+                    break;
+                }
+            }
+        }
+        assert!(built >= 8, "{built}");
+        // Breadth counts too: `or` of large closures stops at the budget.
+        let large = any(PARENT, related_to_itself(all(PARENT, passes())));
+        let mut wide = large.clone();
+        let refused = (0..200).find_map(|_| match wide.clone().or(large.clone()) {
+            Ok(next) => {
+                wide = next;
+                None
+            }
+            Err(error) => Some(error),
+        });
+        misconfigured(Err(refused.expect("the budget never refused a wide policy")));
+        assert!(rendered(&wide).len() <= READ_PREDICATE_MAX_RENDERED_BYTES + 1024);
+    }
+
+    /// A 64-hop closure inside as many relations as SQL Server's nesting
+    /// budget allows, and the one more that is refused there.
+    fn deepest_wrapped_closure(target: ReadPredicate) -> (ReadPredicate, usize) {
+        let mut predicate = target;
+        for wrappers in 0..40 {
+            match ReadPredicate::related::<B, ClosureNode, ClosureNode>(
+                &[("id", "id")],
+                predicate.clone(),
+            ) {
+                Ok(next) => predicate = next,
+                Err(error) => {
+                    misconfigured(Err(error));
+                    return (predicate, wrappers);
+                }
+            }
+        }
+        (predicate, 40)
+    }
+
+    #[test]
+    fn statement_nesting_is_budgeted_on_sql_server() {
+        let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
+        for target in [all(PARENT, passes()), two_levels] {
+            let (deepest, wrappers) = deepest_wrapped_closure(target);
+            let nesting = subquery_nesting(&rendered(&deepest));
+            if B::DIALECT == DatabaseBackend::Mssql {
+                // SQL Server refuses about 100 levels at run time; the
+                // budget refuses past 80 when the policy is built.
+                assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
+                assert!(nesting + 2 > READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
+                assert!(wrappers >= 3, "{wrappers}");
+            } else {
+                assert_eq!(wrappers, 40, "no nesting budget off SQL Server");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
+    async fn the_largest_policies_that_build_run_on_every_read_path() {
+        let (mut db, mut owner) = fixture().await;
+        let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
+        let mut shapes = vec![
+            (all(PARENT, passes()), vec![1, 2, 5, 6, 7]),
+            (two_levels.clone(), vec![1, 2, 3, 4, 5, 6, 7, 9, 10, 11]),
+        ];
+        if B::DIALECT == DatabaseBackend::Mssql {
+            // The deepest nesting the SQL Server budget admits.
+            for (target, expected) in shapes.clone() {
+                shapes.push((deepest_wrapped_closure(target).0, expected));
+            }
+        }
+        for (policy, expected) in shapes {
+            let policy = chains(policy);
+            assert_eq!(visible(&db, policy.clone()).await, expected);
+            db.set_row_policy(PredicatePolicy(policy));
+            let page = EntityQuery::<ClosureNode>::new()
+                .fetch_authorized_keyset(
+                    &db,
+                    None,
+                    None,
+                    KeysetPageInput {
+                        after: None,
+                        limit: Some(2),
+                        include_total_count: true,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.page_info.total_count, Some(expected.len() as i64));
+            let connection = EntityQuery::<ClosureNode>::new()
+                .fetch_authorized_keyset_connection(
+                    &db,
+                    None,
+                    None,
+                    KeysetConnectionInput {
+                        first: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(connection.edges[0].node.id, expected[0]);
+            let groups = ClosureNode::aggregate(&db)
+                .count_rows()
+                .unwrap()
+                .fetch()
+                .await
+                .unwrap();
+            assert_eq!(
+                groups[0].metrics[0].value,
+                AggregateValue::Count(expected.len() as i64)
+            );
+        }
+        owner.cleanup().unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
+    async fn a_target_column_named_like_internal_columns_binds_to_the_row() {
+        // `__gom_max` is also a summary column of the SQL Server closure.
+        let (db, mut owner) = fixture().await;
+        execute(&db, "UPDATE closure_nodes SET __gom_max = score").await;
+        let shadow = || {
+            ReadPredicate::column::<B, ClosureNode>(
+                "__gom_max",
+                ReadPredicateOp::Gte,
+                SqlValue::Int(5),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            visible(&db, chains(all(PARENT, shadow()))).await,
+            [1, 2, 5, 6, 7]
+        );
+        assert_eq!(visible(&db, chains(not(any(PARENT, shadow())))).await, [14]);
         owner.cleanup().unwrap();
     }
 
