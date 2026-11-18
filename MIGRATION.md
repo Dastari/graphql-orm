@@ -10,6 +10,35 @@ supersedes: []
 
 # Migration Guide
 
+## 0.179.0 to 0.180.0: SQL identifier quoting
+
+Upgrade ORM and macros together. Generated code and statement text are
+unchanged for every name that rendered valid SQL before.
+
+- **Malformed delimited input is quoted as one literal name (#782). Action
+  needed** only if code passes a qualified path that is already quoted, such
+  as `"app"."users"`, to the single-identifier `quote_identifier` or
+  `render_identifier`. Those calls now treat it as one name, because it is not
+  one delimited identifier; pass the path to `quote_identifier_path` or
+  `render_identifier_path`, which keep each well-formed part unchanged. No
+  in-tree caller does this. Input that is exactly one well-formed delimited
+  identifier, such as `"Mixed Case"` or `[order]`, is still returned
+  unchanged.
+- **Declared names that only look delimited are refused (#782). Action
+  needed** only if a `table` or `db_column` attribute has a path part that
+  starts and ends with a delimiter but is not one well-formed delimited
+  identifier for the backend, such as `"a"b"`, `[a]]` or `[a] , [b]`. These
+  never produced valid SQL; the derive now fails with an error naming the
+  part. Double every closing delimiter inside the part, or write the name
+  without delimiters and let the renderer quote it.
+- **SQL Server brackets names outside the regular-identifier rule (#783). No
+  action.** Names that SQL Server refused bare, such as `x²` or `雪🦀`, are now
+  bracketed and work. Every name SQL Server accepted bare keeps its exact
+  text, so existing migration plans, their hashes and stored statement
+  fingerprints are unchanged.
+- **SQLite quotes names that start with a byte-order mark. No action.** Such a
+  name previously lost its first character.
+
 ## 0.175.0 to 0.176.0: transitive read-policy closures
 
 Upgrade ORM and macros together. Generated code is unchanged. See

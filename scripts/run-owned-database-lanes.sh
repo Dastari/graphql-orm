@@ -38,7 +38,13 @@ run_dependent_deletes() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
 }
 
+run_identifier_quoting() {
+  cargo test -p graphql-orm --locked --no-default-features --features "$1" \
+    --test identifier_quoting_properties -- --test-threads=1
+}
+
 run_sqlite() {
+  run_identifier_quoting sqlite
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro --test dependent_delete_ui
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal \
     --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
@@ -62,6 +68,7 @@ run_sqlite() {
 }
 
 run_postgres() {
+  run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test postgres_table_case --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
     -- --include-ignored --test-threads=1
@@ -149,6 +156,7 @@ run_postgres_legacy() {
 }
 
 run_mssql() {
+  run_identifier_quoting mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test migration_composite_uniques -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui

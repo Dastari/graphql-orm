@@ -4269,6 +4269,24 @@ fn generate_entity_tokens(
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
+    if let Some(table) = entity_meta.table_name.as_deref() {
+        crate::backend::validate_declared_identifier_path(
+            backend,
+            table,
+            struct_name.span(),
+            "table",
+        )?;
+    }
+    for parsed in &parsed_fields {
+        if let Some(column) = parsed.meta.db_column.as_deref() {
+            crate::backend::validate_declared_identifier_path(
+                backend,
+                column,
+                syn::spanned::Spanned::span(&parsed.field),
+                "db_column",
+            )?;
+        }
+    }
     let relation_readability_columns = parsed_fields
         .iter()
         .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)

@@ -4140,7 +4140,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
         let pragma_table_info = format!(
             "PRAGMA main.table_info({})",
-            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+            DatabaseBackend::Sqlite.delimit_raw_identifier(&table_name)
         );
         let column_rows = sqlx::query(&pragma_table_info)
             .fetch_all(&mut *connection)
@@ -4189,7 +4189,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
         let pragma_index_list = format!(
             "PRAGMA main.index_list({})",
-            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+            DatabaseBackend::Sqlite.delimit_raw_identifier(&table_name)
         );
         let index_rows = sqlx::query(&pragma_index_list)
             .fetch_all(&mut *connection)
@@ -4207,7 +4207,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
             let pragma_index_info = format!(
                 "PRAGMA main.index_xinfo({})",
-                DatabaseBackend::Sqlite.quote_identifier(&index_name)
+                DatabaseBackend::Sqlite.delimit_raw_identifier(&index_name)
             );
             let index_info_rows = sqlx::query(&pragma_index_info)
                 .fetch_all(&mut *connection)
@@ -4296,7 +4296,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
         let pragma_fk_list = format!(
             "PRAGMA main.foreign_key_list({})",
-            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+            DatabaseBackend::Sqlite.delimit_raw_identifier(&table_name)
         );
         let foreign_key_rows = sqlx::query(&pragma_fk_list)
             .fetch_all(&mut *connection)
@@ -5091,7 +5091,7 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         // resolves the bare name to first.
         let rows = sqlx::query(&format!(
             "SELECT config_json::pg_catalog.text AS config_json FROM {}.{} ORDER BY entity_name",
-            DatabaseBackend::Postgres.quote_identifier(&schema_name),
+            DatabaseBackend::Postgres.delimit_raw_identifier(&schema_name),
             DatabaseBackend::Postgres.quote_identifier(super::search_metadata_table_name()),
         ))
         .fetch_all(&mut *connection)

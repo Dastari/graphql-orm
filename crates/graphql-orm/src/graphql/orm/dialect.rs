@@ -1,3 +1,5 @@
+use super::mssql_identifier_tables::{MSSQL_IDENTIFIER_PART, MSSQL_IDENTIFIER_START};
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DatabaseBackend {
     Sqlite,
@@ -1088,6 +1090,24 @@ pub(crate) fn postgres_delimited_identifier(identifier: &str) -> Option<String> 
     (!name.is_empty()).then_some(name)
 }
 
+/// Whether `character` is a Basic Multilingual Plane character in one of the
+/// generated SQL Server regular-identifier tables.
+fn mssql_identifier_character(character: char, table: &[(u16, u16)]) -> bool {
+    u16::try_from(u32::from(character)).is_ok_and(|unit| {
+        table
+            .binary_search_by(|&(low, high)| {
+                if high < unit {
+                    std::cmp::Ordering::Less
+                } else if low > unit {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    })
+}
+
 /// Whether a declared table path has a single part, with no schema.
 pub(crate) fn identifier_path_is_bare(path: &str) -> bool {
     identifier_path_parts(path)
@@ -1106,29 +1126,110 @@ impl DatabaseBackend {
         }
     }
 
+    /// Opening delimiter, closing delimiter, and whether a doubled closing
+    /// delimiter stands for one inside the name, for each delimited form this
+    /// backend's parser reads.
+    fn identifier_delimiters(self) -> &'static [(char, char, bool)] {
+        match self {
+            // SQLite reads `[...]` up to the first `]`, with no escape.
+            Self::Sqlite => &[('"', '"', true), ('`', '`', true), ('[', ']', false)],
+            Self::Postgres => &[('"', '"', true)],
+            // `"..."` assumes `QUOTED_IDENTIFIER ON`, the driver default.
+            Self::Mssql => &[('[', ']', true), ('"', '"', true)],
+            Self::Mysql => &[],
+        }
+    }
+
+    /// Whether `identifier` is exactly one well-formed, non-empty delimited
+    /// identifier for this backend: it opens with a delimiter, every closing
+    /// delimiter inside it is doubled where the form allows that (SQLite's
+    /// `[...]` allows no `]` inside), and its only undoubled closing delimiter
+    /// is its last character.
+    ///
+    /// This is the only input [`SqlDialect::quote_identifier`] returns
+    /// unchanged. Text that merely starts and ends with delimiter characters,
+    /// such as `"a"b"` or `[a] , [b]`, is not one identifier (#782).
+    fn is_one_delimited_identifier(self, identifier: &str) -> bool {
+        let mut characters = identifier.chars();
+        let Some(open) = characters.next() else {
+            return false;
+        };
+        let Some(&(_, close, doubled)) = self
+            .identifier_delimiters()
+            .iter()
+            .find(|(candidate, _, _)| *candidate == open)
+        else {
+            return false;
+        };
+        let mut empty = true;
+        while let Some(character) = characters.next() {
+            if character != close {
+                empty = false;
+                continue;
+            }
+            if doubled && characters.clone().next() == Some(close) {
+                characters.next();
+                empty = false;
+                continue;
+            }
+            return !empty && characters.next().is_none();
+        }
+        false
+    }
+
+    /// `name` delimited as exactly one identifier that names `name` itself,
+    /// even when `name` already looks delimited. For raw names read back from
+    /// a database catalog, which are names rather than SQL text: a table
+    /// whose name is literally `"x"` must not be addressed as `x`. MySQL
+    /// identifiers are returned unchanged.
+    pub(crate) fn delimit_raw_identifier(self, name: &str) -> String {
+        match self {
+            Self::Mssql => format!("[{}]", name.replace(']', "]]")),
+            Self::Postgres | Self::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
+            Self::Mysql => name.to_string(),
+        }
+    }
+
     fn identifier_needs_quoting(self, identifier: &str) -> bool {
-        if self == Self::Mysql || self.quote_identifier(identifier) == identifier {
+        if self == Self::Mysql || self.is_one_delimited_identifier(identifier) {
             // MySQL identifiers are rendered verbatim, and an identifier that is
-            // already delimited is passed through unchanged.
+            // already one well-formed delimited identifier is passed through.
             return false;
         }
         let mut characters = identifier.chars();
         let Some(first) = characters.next() else {
             return true;
         };
-        // Non-ASCII characters are identifier characters on every backend and stay
-        // bare, so their case folding is unchanged. MSSQL `#`/`@` prefixes keep
+        // Non-ASCII characters are identifier characters on SQLite and
+        // PostgreSQL and stay bare, so their case folding is unchanged. SQL
+        // Server reads a name bare only under its regular-identifier rule,
+        // the Unicode 3.2 identifier classes of the Basic Multilingual Plane
+        // (#783); see `mssql_identifier_tables`. MSSQL `#`/`@` prefixes keep
         // their temporary-table and variable meaning.
         let plain_start = |character: char| {
             character.is_ascii_alphabetic()
                 || character == '_'
-                || !character.is_ascii()
-                || (self == Self::Mssql && matches!(character, '#' | '@'))
+                || match self {
+                    Self::Mssql => {
+                        matches!(character, '#' | '@')
+                            || mssql_identifier_character(character, MSSQL_IDENTIFIER_START)
+                    }
+                    _ => !character.is_ascii(),
+                }
         };
         let plain_rest = |character: char| {
-            plain_start(character) || character.is_ascii_digit() || character == '$'
+            plain_start(character)
+                || character.is_ascii_digit()
+                || character == '$'
+                || (self == Self::Mssql
+                    && mssql_identifier_character(character, MSSQL_IDENTIFIER_PART))
         };
-        if !plain_start(first) || !characters.all(plain_rest) {
+        // SQLite reads a byte-order mark that starts a token as whitespace,
+        // so a bare name beginning with one would lose it (#725).
+        if !plain_start(first)
+            || (self == Self::Sqlite && first == '\u{feff}')
+            || !characters.all(plain_rest)
+        {
             return true;
         }
         let lowercase = identifier.to_ascii_lowercase();
@@ -1143,10 +1244,16 @@ impl DatabaseBackend {
     /// those, digits or `$`) that is not a reserved word on this backend is
     /// written bare, exactly as earlier releases wrote it, so statement text,
     /// plan hashes and PostgreSQL case folding are unchanged for every name
-    /// that was already accepted. Reserved words such as `order`, `join` or
-    /// `select`, and names with other characters, are delimited with
-    /// [`SqlDialect::quote_identifier`]; already delimited input is returned
-    /// unchanged. MySQL identifiers are returned unchanged.
+    /// that was already accepted. On SQL Server a non-ASCII character is plain
+    /// only when the server reads it in a regular identifier: a Unicode 3.2
+    /// letter or letter number (or, after the first character, a mark,
+    /// decimal digit, connector or format character) in the Basic
+    /// Multilingual Plane, so names such as `x²` or `x🦀` are bracketed.
+    /// SQLite never writes a name bare that starts with a byte-order mark. Reserved words such as `order`, `join` or `select`,
+    /// and names with other characters, are delimited with
+    /// [`SqlDialect::quote_identifier`]; input that is already exactly one
+    /// well-formed delimited identifier is returned unchanged. MySQL
+    /// identifiers are returned unchanged.
     ///
     /// ```
     /// use graphql_orm::graphql::orm::DatabaseBackend;
@@ -1364,10 +1471,38 @@ mod identifier_rendering_tests {
             sqlite.render_identifier_list(["id", "join", "select"]),
             "id, \"join\", \"select\""
         );
-        // Already delimited input is not delimited twice.
+        // One well-formed delimited identifier is not delimited twice; text
+        // that only starts and ends with delimiters is one literal name.
         assert_eq!(sqlite.render_identifier("\"join\""), "\"join\"");
         assert_eq!(mssql.render_identifier("[key]"), "[key]");
+        assert_eq!(sqlite.render_identifier("\"a\"b\""), "\"\"\"a\"\"b\"\"\"");
+        assert_eq!(mssql.render_identifier("[a] , [b]"), "[[a]] , [b]]]");
         assert_eq!(DatabaseBackend::Mysql.render_identifier("order"), "order");
+    }
+
+    #[test]
+    fn raw_catalog_names_are_always_delimited_literally() {
+        assert_eq!(
+            DatabaseBackend::Sqlite.delimit_raw_identifier("users"),
+            "\"users\""
+        );
+        assert_eq!(
+            DatabaseBackend::Sqlite.delimit_raw_identifier("\"users\""),
+            "\"\"\"users\"\"\""
+        );
+        assert_eq!(
+            DatabaseBackend::Postgres.delimit_raw_identifier("a\"b"),
+            "\"a\"\"b\""
+        );
+        assert_eq!(
+            DatabaseBackend::Mssql.delimit_raw_identifier("[x]"),
+            "[[x]]]"
+        );
+        // Quoting a declared identifier passes one well-formed token through.
+        assert_eq!(
+            DatabaseBackend::Sqlite.quote_identifier("\"users\""),
+            "\"users\""
+        );
     }
 
     #[test]
@@ -1434,7 +1569,27 @@ mod identifier_rendering_tests {
 
 pub trait SqlDialect {
     fn backend(&self) -> DatabaseBackend;
+    /// One identifier, always written as exactly one delimited identifier.
+    ///
+    /// Input that is already exactly one well-formed, non-empty delimited
+    /// identifier for the dialect is returned unchanged, so quoting is
+    /// idempotent. Any other input, including text that only starts and ends
+    /// with delimiter characters such as `"a"b"` or `[a] , [b]`, is delimited
+    /// as a literal name with the closing delimiter doubled, so the result
+    /// always reads back as one name. SQL Server uses `[...]`; SQLite and
+    /// PostgreSQL use `"..."`. MySQL identifiers are returned unchanged.
+    ///
+    /// ```
+    /// use graphql_orm::graphql::orm::{DatabaseBackend, SqlDialect};
+    ///
+    /// assert_eq!(DatabaseBackend::Postgres.quote_identifier("order"), "\"order\"");
+    /// assert_eq!(DatabaseBackend::Postgres.quote_identifier("\"order\""), "\"order\"");
+    /// assert_eq!(DatabaseBackend::Postgres.quote_identifier("\"a\"b\""), "\"\"\"a\"\"b\"\"\"");
+    /// assert_eq!(DatabaseBackend::Mssql.quote_identifier("[a] , [b]"), "[[a]] , [b]]]");
+    /// ```
     fn quote_identifier(&self, identifier: &str) -> String;
+    /// [`Self::quote_identifier`] for each part of a qualified name, split at
+    /// dots outside delimited parts.
     fn quote_identifier_path(&self, identifier: &str) -> String;
     fn placeholder(&self, index: usize) -> String;
     /// Rebase fragment placeholders by occurrence, starting at `start_index`.
@@ -1479,33 +1634,9 @@ impl SqlDialect for DatabaseBackend {
 
     fn quote_identifier(&self, identifier: &str) -> String {
         match self {
-            DatabaseBackend::Mssql => {
-                if (identifier.starts_with('[') && identifier.ends_with(']'))
-                    || (identifier.starts_with('"') && identifier.ends_with('"'))
-                {
-                    identifier.to_string()
-                } else {
-                    format!("[{}]", identifier.replace(']', "]]"))
-                }
-            }
-            DatabaseBackend::Postgres => {
-                if identifier.starts_with('"') && identifier.ends_with('"') {
-                    identifier.to_string()
-                } else {
-                    format!("\"{}\"", identifier.replace('"', "\"\""))
-                }
-            }
-            DatabaseBackend::Sqlite => {
-                if (identifier.starts_with('"') && identifier.ends_with('"'))
-                    || (identifier.starts_with('[') && identifier.ends_with(']'))
-                    || (identifier.starts_with('`') && identifier.ends_with('`'))
-                {
-                    identifier.to_string()
-                } else {
-                    format!("\"{}\"", identifier.replace('"', "\"\""))
-                }
-            }
             DatabaseBackend::Mysql => identifier.to_string(),
+            _ if self.is_one_delimited_identifier(identifier) => identifier.to_string(),
+            _ => self.delimit_raw_identifier(identifier),
         }
     }
 

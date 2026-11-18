@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.180.0 passes a declared identifier through unchanged only when it is exactly one
+well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
+delimited, and quotes SQLite names that start with a byte-order mark (#782). Generated code is
+otherwise unchanged.
+
 Version 0.176.0 pairs with the runtime transitive-closure read predicates; generated code is unchanged.
 
 Version 0.174.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
