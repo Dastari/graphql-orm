@@ -20,19 +20,22 @@ token is synthetic, the clock is fixed and no target uses the network.
 | `bearer_raw` | An `Authorization` header value, or byte edits of a valid bearer, through the strict `Bearer` extraction. |
 | `jwks_document` | A JWKS document through the refresh path's key selection. |
 
-The harnesses live in `src/fuzzing.rs`, compiled only for tests and
-`--cfg fuzzing` builds. A target fails when the router accepts a bearer that
-an independent oracle refuses, or returns a principal other than the token's
-claims name. The oracle re-implements RFC 7515/7519 and the router's policy:
-RS256 only, a trusted key ID, no `crit`, an RS256 signature checked with
-`jsonwebtoken::crypto::verify`, `iss` exactly the configured string, `aud`
-naming the configured audience, integer `exp` and `nbf` within the leeway, a
-non-empty `sub`, and well-formed scopes. Refusing a valid token is not a
-target failure.
+The harnesses live in `src/fuzzing.rs`, compiled only for tests and `--cfg
+graphql_orm_router_fuzzing` builds; the generic `--cfg fuzzing` that `cargo
+fuzz` sets for every crate does not expose it. A target fails when the router
+accepts a bearer that an independent oracle refuses, or returns a principal
+other than the token's claims name. The oracle re-implements RFC 7515/7519 and
+the router's policy: RS256 only, a trusted key ID, no `crit`, an RS256
+signature checked with `jsonwebtoken::crypto::verify`, `iss` exactly the
+configured string, `aud` naming the configured audience, integer `exp` and
+`nbf` within the leeway, a non-empty `sub`, and well-formed scopes. Refusing a
+valid token is not a target failure.
 
 The external `agql-auth` validator and signed role catalogue are outside
-these targets; only the router's adapters around them are covered, by the
-property tests in `src/agql.rs`.
+these targets; only the router's adapters around them are covered. The
+`AgqlAuthenticationProvider` adapter refuses any `crit` header member before
+calling the validator, which does not check it; `src/agql.rs` tests that and
+the adapter's syntax check and expiry conversion.
 
 ## Ordinary CI
 
@@ -50,10 +53,12 @@ workspace toolchain:
 crates/graphql-orm-router/fuzz/run.sh bearer_structured 600 2048
 ```
 
-`run.sh` passes the same coverage flags as `cargo fuzz --sanitizer none`, so it
-needs no nightly toolchain and no extra Cargo tool. `cargo fuzz run <target>`
-from this directory also works if you have cargo-fuzz and a nightly toolchain.
-New inputs go to a scratch directory; the retained corpus is read only.
+`run.sh` passes the same coverage flags as `cargo fuzz --sanitizer none`, so
+it needs no nightly toolchain and no extra Cargo tool. With cargo-fuzz and a
+nightly toolchain, run `RUSTFLAGS="--cfg graphql_orm_router_fuzzing" cargo
+fuzz run <target>` from this directory; cargo-fuzz adds its own flags to that
+`RUSTFLAGS`. New inputs go to a scratch directory; the retained corpus is read
+only.
 
 ## Retaining a failure
 

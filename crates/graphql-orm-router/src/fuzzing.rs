@@ -3,7 +3,7 @@
 //! tests that run in ordinary CI.
 //!
 //! The module is compiled only for this crate's tests and for builds with
-//! `--cfg fuzzing`; it is not part of the public API. Every key and token is
+//! `--cfg graphql_orm_router_fuzzing`; it is not part of the public API. Every key and token is
 //! synthetic, the clock is fixed, and no harness touches the network: the
 //! verification key set is installed directly, and an unknown key ID never
 //! fetches because no runtime is running.
@@ -479,6 +479,8 @@ fn extra_headers() -> Vec<&'static str> {
         r#","x5u":"https://attacker.example.test/cert.pem""#,
         r#","jwk":{"kty":"oct","k":"c2VjcmV0"}"#,
         r#","zzz":1"#,
+        // Read as absent by the JWT library; still a `crit` member.
+        r#","crit":null"#,
     ]
 }
 

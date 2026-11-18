@@ -12,12 +12,16 @@ supersedes: []
 
 ## 0.16.3 (unreleased)
 
-- Fix (authentication, fail closed): `JwksAuthenticationProvider` refuses a
-  bearer token whose JOSE header carries `crit`, including an empty list. The
-  router understands no critical extension, and RFC 7515 requires such a
-  token to be refused; before, the header was ignored, so `"b64": false` was
-  accepted without its meaning. A signed role-scope catalogue with `crit` is
-  refused the same way.
+- Fix (authentication, fail closed): both bearer providers,
+  `JwksAuthenticationProvider` and the `auth-agql` `AgqlAuthenticationProvider`,
+  refuse a token whose JOSE header has a `crit` member with any value: a list,
+  an empty list or `null`. The router understands no critical extension, and
+  RFC 7515 requires such a token to be refused; before, the header was
+  ignored, so `"b64": false` was accepted without its meaning. The check reads
+  the raw protected header before any key lookup, because the JWT library
+  reads `"crit": null` as absent, and the pinned `agql-auth` validator does
+  not check `crit` at all. A signed role-scope catalogue with any `crit`
+  member is refused the same way.
 - Fix (authentication, fail closed): a bearer token's `iss` must be exactly
   the configured issuer string. The JWT library also accepted an array that
   contained the issuer, such as `["https://issuer", "https://other"]`.

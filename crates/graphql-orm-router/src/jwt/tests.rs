@@ -992,6 +992,59 @@ fn forged_role_catalogue_does_not_block_startup_and_role_bearers_fail_closed() {
     );
 }
 
+/// Review finding on #784: the role catalogue's signature check refuses every
+/// `crit` member, including `null`, which the JWT library reads as absent.
+#[cfg(feature = "auth-agql")]
+#[test]
+fn role_catalogue_signature_with_any_crit_member_is_refused() {
+    use base64::Engine as _;
+    let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+    for (crit, accepted) in [
+        ("", true),
+        (r#","crit":["exp"]"#, false),
+        (r#","crit":[]"#, false),
+        (r#","crit":null"#, false),
+    ] {
+        // Re-sign the catalogue's own claims under a hand-written header.
+        let mut envelope: JsonValue =
+            serde_json::from_str(&signed_catalogue("key-a", 1_000, 1_010)).unwrap();
+        let payload = envelope["signature"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let message = format!(
+            "{}.{payload}",
+            encode(&format!(
+                r#"{{"typ":"JWT","alg":"RS256","kid":"key-a"{crit}}}"#
+            ))
+        );
+        let signature = jsonwebtoken::crypto::sign(
+            message.as_bytes(),
+            &EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap(),
+            Algorithm::RS256,
+        )
+        .unwrap();
+        envelope["signature"] = json!(format!("{message}.{signature}"));
+        let keys = JwksFixture::start(jwks("key-a"));
+        let catalogue = JwksFixture::start(envelope.to_string());
+        let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+        initialize(&provider).unwrap();
+        let refreshed = refresh_catalogue(&provider);
+        if accepted {
+            refreshed.unwrap();
+        } else {
+            assert_eq!(
+                refreshed.unwrap_err().kind(),
+                AuthenticationErrorKind::Unavailable,
+                "{crit}"
+            );
+        }
+    }
+}
+
 #[cfg(feature = "auth-agql")]
 #[test]
 fn first_role_catalogue_fetch_is_lazy_and_retried_on_demand() {

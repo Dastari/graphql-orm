@@ -13,8 +13,10 @@ supersedes: []
 ## 0.16.2 to 0.16.3
 
 **Action needed** only if your issuer writes `iss` as an array or adds a
-`crit` header to access tokens: those tokens are now refused with
-`UNAUTHENTICATED`. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
+`crit` header member (including `"crit": null`) to access tokens or the signed
+role-scope catalogue: those tokens are now refused with `UNAUTHENTICATED` by
+both `JwksAuthenticationProvider` and `AgqlAuthenticationProvider`, and such
+a catalogue is refused. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
 one string and use no critical extensions, and need no change. Configuration
 and public APIs are unchanged.
 

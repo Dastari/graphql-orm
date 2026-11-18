@@ -36,6 +36,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: crates/graphql-orm-router/fuzz
+      # run.sh enables the harness with `--cfg graphql_orm_router_fuzzing`.
       # Twenty minutes and 2 GiB per target. A failure prints the input in
       # base64; add it under fuzz/regressions/<target>/ with the fix.
       - run: bash crates/graphql-orm-router/fuzz/run.sh "${{ matrix.target }}" 1200 2048

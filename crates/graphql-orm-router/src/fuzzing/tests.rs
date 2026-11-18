@@ -173,6 +173,7 @@ fn retained_bearer_regressions() {
     refuse(&[0, 0, 3]); // "crit": ["exp"]
     refuse(&[0, 0, 4]); // "crit": []
     refuse(&[0, 0, 5]); // "b64": false with "crit": ["b64"]
+    refuse(&[0, 0, 10]); // "crit": null, which the JWT library reads as absent
     // Found by this harness: an issuer array containing the issuer passed.
     refuse(&[0, 0, 0, 6]); // "iss": [issuer]
     refuse(&[0, 0, 0, 9]); // "iss": [issuer, other]

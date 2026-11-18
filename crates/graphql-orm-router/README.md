@@ -10,9 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
-Version 0.16.3 refuses a bearer token whose header lists critical extensions
-(`crit`), which the router does not understand (RFC 7515), and one whose `iss`
-is an array rather than the configured issuer string (RFC 7519). It adds
+Version 0.16.3 refuses, on both bearer providers, a token whose header has a
+`crit` member of any value (RFC 7515: the router understands no critical
+extension), and one whose `iss` is an array rather than the configured issuer
+string (RFC 7519). It adds
 cargo-fuzz targets for bearer and JWKS parsing with a retained corpus replayed
 in ordinary CI, a weekly bounded fuzz run, and scope-matching property tests
 ([#725](https://github.com/Dastari/graphql-orm/issues/725),

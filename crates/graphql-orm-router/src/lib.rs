@@ -16,8 +16,9 @@ mod config;
 mod federation;
 mod file_config;
 /// Bearer-authentication fuzz and corpus harnesses (#726); tests and
-/// `--cfg fuzzing` builds only.
-#[cfg(any(test, fuzzing))]
+/// `--cfg graphql_orm_router_fuzzing` builds only, never a dependant's generic
+/// `--cfg fuzzing` build.
+#[cfg(any(test, graphql_orm_router_fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
 mod http_body;

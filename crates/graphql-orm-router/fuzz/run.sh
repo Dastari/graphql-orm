@@ -26,7 +26,7 @@ esac
 }
 
 fuzz_dir=$(cd "$(dirname "$0")" && pwd)
-export RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module \
+export RUSTFLAGS="--cfg fuzzing --cfg graphql_orm_router_fuzzing -Cpasses=sancov-module \
 -Cllvm-args=-sanitizer-coverage-level=4 \
 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters \
 -Cllvm-args=-sanitizer-coverage-pc-table \

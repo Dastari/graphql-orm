@@ -59,7 +59,8 @@ Every acceptance-gate surface has a seeded, bounded suite in ordinary CI:
   corpus and regressions replayed by `cargo test -p graphql-orm-router`, and
   a weekly 20-minute run per target (`crates/graphql-orm-router/fuzz/`).
 
-Findings fixed with regressions: a bearer `crit` header was ignored, an
+Findings fixed with regressions: a bearer `crit` header was ignored (on
+both providers, including `"crit": null`, found in review), an
 `iss` array containing the issuer was accepted, and a SQLite name starting
 with U+FEFF lost the mark. Open, with ignored regressions: #782 (malformed
 delimited input passes through `quote_identifier`) and #783 (SQL Server

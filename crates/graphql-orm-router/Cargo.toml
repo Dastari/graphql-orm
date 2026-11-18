@@ -43,9 +43,11 @@ url = { workspace = true }
 rustix = { version = "1.1.4", default-features = false, features = ["process"] }
 signal-hook = { workspace = true }
 
-# `cargo fuzz` builds every crate with `--cfg fuzzing`; see `fuzz/README.md`.
+# The fuzz harness module is compiled only with this crate-specific cfg, so a
+# downstream `cargo fuzz` build (which sets `--cfg fuzzing` for every crate)
+# never exposes it; see `fuzz/README.md`.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(graphql_orm_router_fuzzing)"] }
 
 [dev-dependencies]
 ntex = "=3.12.3"

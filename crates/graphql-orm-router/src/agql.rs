@@ -49,6 +49,13 @@ impl AuthenticationProvider for AgqlAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        // The pinned validator does not check `crit` (RFC 7515 4.1.11), so
+        // the adapter refuses any critical extension before calling it.
+        if crate::jwt::protected_header_names_crit(token) {
+            return Err(AuthenticationError::invalid_credential(
+                "invalid bearer credential",
+            ));
+        }
         let user = self
             .validator
             .authenticate_access_token(token)
@@ -399,6 +406,73 @@ mod tests {
             assert_eq!(
                 checked_system_time(unsupported).unwrap_err().kind(),
                 crate::AuthenticationErrorKind::Unavailable
+            );
+        }
+    }
+
+    /// Signs `claims` under a hand-written header with `extra` members, so a
+    /// test can send `crit` spellings the JWT library would not write.
+    fn signed_token_with_header(
+        key: &EncodingKey,
+        extra: &str,
+        claims: &serde_json::Value,
+    ) -> String {
+        use base64::Engine as _;
+        let encode = |text: String| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+        let message = format!(
+            "{}.{}",
+            encode(format!(
+                r#"{{"typ":"JWT","alg":"RS256","kid":"agql-key"{extra}}}"#
+            )),
+            encode(claims.to_string())
+        );
+        let signature =
+            jsonwebtoken::crypto::sign(message.as_bytes(), key, Algorithm::RS256).unwrap();
+        format!("{message}.{signature}")
+    }
+
+    /// Review finding on #784: the pinned validator accepted an RS256 token
+    /// with `crit`. The adapter refuses every `crit` member first.
+    #[test]
+    fn adapter_refuses_any_critical_header_before_the_validator() {
+        let signing_key = EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap();
+        let mut jwk = Jwk::from_encoding_key(&signing_key, Algorithm::RS256).unwrap();
+        jwk.common.key_id = Some("agql-key".to_owned());
+        let validator = Arc::new(
+            AccessTokenValidator::builder()
+                .issuer("https://issuer.test")
+                .audience("graphql-router")
+                .jwks_json(serde_json::to_string(&json!({"keys": [jwk]})).unwrap())
+                .build()
+                .unwrap(),
+        );
+        let provider = AgqlAuthenticationProvider::new(validator);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = json!({
+            "sub": "agql-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+            "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
+            "iat": now, "exp": now + 60, "scope": "products.read"
+        });
+        // The hand-written header is otherwise accepted.
+        let control = signed_token_with_header(&signing_key, "", &claims);
+        assert_eq!(
+            provider.authenticate_bearer(&control).unwrap().subject(),
+            "agql-user"
+        );
+        for crit in [
+            r#","crit":["exp"]"#,
+            r#","crit":[]"#,
+            r#","crit":null"#,
+            r#","b64":false,"crit":["b64"]"#,
+        ] {
+            let token = signed_token_with_header(&signing_key, crit, &claims);
+            assert_eq!(
+                provider.authenticate_bearer(&token).unwrap_err().kind(),
+                crate::AuthenticationErrorKind::InvalidCredential,
+                "{crit}"
             );
         }
     }

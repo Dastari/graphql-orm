@@ -641,7 +641,7 @@ impl JwksAuthenticationProvider {
         let header = decode_header(&envelope.signature).map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue signature is malformed")
         })?;
-        if header.alg != Algorithm::RS256 || header.crit.is_some() {
+        if header.alg != Algorithm::RS256 || protected_header_names_crit(&envelope.signature) {
             return Err(AuthenticationError::unavailable(
                 "role-scope catalogue signature algorithm is invalid",
             ));
@@ -1008,10 +1008,13 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
-        let header = decode_header(token).map_err(|_| invalid_token())?;
         // RFC 7515 4.1.11: the router understands no critical extension, so
-        // a header that lists any, even an empty list, is refused.
-        if header.alg != Algorithm::RS256 || header.crit.is_some() {
+        // a header that names `crit` at all is refused before any key lookup.
+        if protected_header_names_crit(token) {
+            return Err(invalid_token());
+        }
+        let header = decode_header(token).map_err(|_| invalid_token())?;
+        if header.alg != Algorithm::RS256 {
             return Err(invalid_token());
         }
         let kid = header.kid.as_deref().ok_or_else(invalid_token)?;
@@ -1166,13 +1169,29 @@ where
     Ok(roles)
 }
 
+/// Whether a compact JWS's protected header names `crit`, with any value.
+///
+/// The JWT library reads `"crit": null` as an absent member, so the header is
+/// decoded here: any `crit` member, including `null` or an empty list, counts.
+/// A header that is not base64url JSON object text also counts, so a caller
+/// that refuses on `true` fails closed.
+pub(crate) fn protected_header_names_crit(token: &str) -> bool {
+    use base64::Engine as _;
+    let header = token.split('.').next().unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(header)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, JsonValue>>(&bytes).ok())
+        .is_none_or(|members| members.contains_key("crit"))
+}
+
 fn parse_jwks(body: &[u8]) -> Result<BTreeMap<String, DecodingKey>, AuthenticationError> {
     let document = serde_json::from_slice::<RawJwkSet>(body)
         .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
     validate_jwks(document)
 }
 
-#[cfg(any(test, fuzzing))]
+#[cfg(any(test, graphql_orm_router_fuzzing))]
 impl JwksAuthenticationProvider {
     /// Installs a key set as a successful JWKS fetch would, without one.
     pub(crate) fn install_key_set_for_harness(
@@ -1191,7 +1210,7 @@ impl JwksAuthenticationProvider {
 }
 
 /// How many keys the refresh path keeps from one JWKS document.
-#[cfg(any(test, fuzzing))]
+#[cfg(any(test, graphql_orm_router_fuzzing))]
 pub(crate) fn key_set_from_document_for_harness(
     document: &[u8],
 ) -> Result<usize, AuthenticationError> {
