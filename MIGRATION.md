@@ -10,29 +10,39 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.0 to 0.184.0: SQL Server bulk writes lock only their targets
+## 0.179.0 to 0.184.0: SQL Server bulk writes lock only their candidates
 
 Upgrade ORM and macros together and recompile entities: generated bulk writes
 pass the runtime a key accessor. No data migration is needed.
 
-- **SQL Server bulk-write locks (#752). No action** (opt-in). With
-  `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` and a SQL
-  predicate (read visibility or a `write_target_prefilter`), generated GraphQL
-  `updateMany`/`deleteMany` on SQL Server read their candidate keys read
-  committed without a write lock, then lock only those keys by a forced key
-  seek and check the filter and predicate again on the locked rows. They no
-  longer lock or wait on rows outside the predicate. Without the setting,
-  nothing changes. If you use the setting on SQL Server:
-  - turn on `READ_COMMITTED_SNAPSHOT` for the database
-    (`ALTER DATABASE ... SET READ_COMMITTED_SNAPSHOT ON`) if a bulk write must
-    not wait for another transaction's uncommitted change to a hidden row;
-    with it off, the unlocked candidate read still waits for such a row;
-  - a row that starts to match the filter after the candidate read is not
-    written, as on PostgreSQL;
-  - the key column must be seekable with the bound key value (the primary key
-    index provides this); otherwise SQL Server refuses the statement and the
-    bulk write fails rather than scanning.
-  See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+- **SQL Server bulk-write locks (#752). Action needed** only if you turned on
+  `DatabaseBuilder::narrow_bulk_writes_to_read_visibility` and run SQL Server
+  with `READ_COMMITTED_SNAPSHOT` on; otherwise **No action**. Generated
+  GraphQL `updateMany`/`deleteMany` with a SQL predicate (read visibility or a
+  `write_target_prefilter`) now read their candidates in a snapshot without a
+  lock, lock only those keys exclusively by a forced key seek, check them
+  again, and validate the candidates in a second snapshot, so they no longer
+  lock or wait on hidden rows. This applies where every index of the table
+  allows row locks and the key is `uniqueidentifier`, `nvarchar`/`nchar` or
+  an integer. Target selection stays serializable, with two changes in
+  concurrency behaviour:
+  - when another transaction changes which rows match while the write runs,
+    the write is now refused with `errorCode = "SERVICE_UNAVAILABLE"` (marked
+    retryable) and writes nothing, where the single locking read would have
+    made that transaction wait. Retry the mutation on that code;
+  - the candidates are locked exclusively, not with update locks, until the
+    write ends, so a locking reader (for example a `SERIALIZABLE`
+    transaction) of a candidate row waits for the write. Readers that use row
+    versions do not.
+
+  With `READ_COMMITTED_SNAPSHOT` off, a `varchar`/`char` key, or an index
+  with `ALLOW_ROW_LOCKS = OFF`, the narrowed write keeps the single
+  serializable `UPDLOCK, HOLDLOCK` read, as before, and may lock hidden rows
+  a scan reads. To get the key path, turn on
+  `ALTER DATABASE ... SET READ_COMMITTED_SNAPSHOT ON`. Lock escalation to a
+  table lock still covers hidden rows; `LOCK_ESCALATION = DISABLE` on the
+  table prevents it. See
+  [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
 ## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
 

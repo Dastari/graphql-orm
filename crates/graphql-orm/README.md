@@ -10,12 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.184.0: with `narrow_bulk_writes_to_read_visibility` on, generated GraphQL
-`updateMany` and `deleteMany` on SQL Server read their candidate keys without a write lock and
-then lock only those keys by a forced key seek, so they no longer lock or wait on rows outside
-the caller's read visibility (#752). With `READ_COMMITTED_SNAPSHOT` off, the unlocked read can
-still wait for an uncommitted change to a hidden row. See the
-[migration guide](../../MIGRATION.md#01790-to-01840-sql-server-bulk-writes-lock-only-their-targets).
+Version 0.184.0: with `narrow_bulk_writes_to_read_visibility` on and `READ_COMMITTED_SNAPSHOT`
+on, generated GraphQL `updateMany` and `deleteMany` on SQL Server read their candidates in a
+snapshot without a lock, lock only those keys by a forced key seek and validate the candidates
+in a second snapshot. They no longer lock or wait on rows outside the caller's read visibility,
+and target selection stays serializable; a concurrent change to the candidates refuses the write
+with a retryable `SERVICE_UNAVAILABLE` (#752). Elsewhere SQL Server keeps the single locking read.
+See the [migration guide](../../MIGRATION.md#01790-to-01840-sql-server-bulk-writes-lock-only-their-candidates).
 
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
 read as whitespace, and adds seeded property suites for identifier quoting on every backend

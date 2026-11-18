@@ -5001,16 +5001,35 @@ where
     }
 }
 
-/// One page of bulk-write candidate keys; see
+/// `base`, or `base` followed by underscores, whichever first names no column
+/// of `T` (compared without delimiters and case), for a generated column alias.
+fn unused_column_alias<T: DatabaseEntity>(base: &str) -> String {
+    let taken = |alias: &str| {
+        T::column_names().iter().any(|column| {
+            column
+                .rsplit('.')
+                .next()
+                .unwrap_or(column)
+                .trim_matches(|c| matches!(c, '[' | ']' | '"' | '`'))
+                .eq_ignore_ascii_case(alias)
+        })
+    };
+    let mut alias = base.to_owned();
+    while taken(&alias) {
+        alias.push('_');
+    }
+    alias
+}
+
+/// The bulk-write candidate keys one read returns; see
 /// `EntityQuery::fetch_write_candidate_keys_in_transaction`.
 #[derive(Debug)]
 pub(crate) struct WriteCandidateKeys {
-    /// The keys of the rows that satisfy the residual in-memory predicates.
+    /// The keys of the rows that also satisfy the residual in-memory
+    /// predicates, in key order.
     pub(crate) keys: Vec<SqlValue>,
     /// The number of rows read.
     pub(crate) read: i64,
-    /// The key of the last row read, where the next page starts.
-    pub(crate) last: Option<SqlValue>,
 }
 
 pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
@@ -5602,34 +5621,98 @@ where
         query.decode_candidates(&rows)
     }
 
-    /// Read one page of bulk-write candidate keys without a write lock: at
-    /// most `limit` rows after the key `after`, in key order, read committed
-    /// (see [`SelectLock::MssqlReadCommitted`]).
+    /// SQL Server: whether a bulk write on this entity can read its
+    /// candidates without a write lock and then lock them by key, keeping
+    /// target selection serializable and never locking a row outside the
+    /// candidates. All of these must hold, or the write keeps the single
+    /// `UPDLOCK, HOLDLOCK` read:
+    ///
+    /// - the database has `READ_COMMITTED_SNAPSHOT` on, so the candidate read
+    ///   and its validation are each one consistent snapshot that takes no
+    ///   lock (with it off, a read committed read is neither);
+    /// - every index of the table allows row locks (otherwise a page lock
+    ///   covers the neighbouring rows);
+    /// - the key column has a type the ORM's bound key value seeks on without
+    ///   converting the column (`uniqueidentifier`, a Unicode string or an
+    ///   integer). A `char` or `varchar` key is converted to compare with the
+    ///   ORM's Unicode parameter, so seeks on it (including the generated
+    ///   per-row writes) may become scans.
+    ///
+    /// A table the session cannot see in the catalog keeps the single read.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn key_locked_write_candidates_supported(
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<bool>
+    where
+        B: WriteBackend,
+    {
+        if B::DIALECT != DatabaseBackend::Mssql || T::PRIMARY_KEYS.len() != 1 {
+            return Ok(false);
+        }
+        const ELIGIBILITY: &str = "SELECT CAST(d.is_read_committed_snapshot_on AS BIGINT) AS rcsi, \
+             CAST(CASE WHEN OBJECT_ID(@P1) IS NULL THEN 0 ELSE 1 END AS BIGINT) AS found, \
+             CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes AS i \
+                 WHERE i.object_id = OBJECT_ID(@P1) AND i.allow_row_locks = 0) THEN 1 ELSE 0 END AS BIGINT) AS page_locked, \
+             (SELECT TYPE_NAME(c.system_type_id) FROM sys.columns AS c \
+                 WHERE c.object_id = OBJECT_ID(@P1) AND c.name = @P2) AS key_type \
+             FROM sys.databases AS d WHERE d.database_id = DB_ID()";
+        let table = B::DIALECT
+            .render_identifier_path(T::TABLE_NAME)
+            .into_owned();
+        let key = T::PRIMARY_KEY
+            .trim_matches(|c| matches!(c, '[' | ']' | '"'))
+            .to_owned();
+        let rows = context
+            .fetch_rows(
+                ELIGIBILITY,
+                &[SqlValue::String(table), SqlValue::String(key)],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let seekable_key = B::try_get_optional_string(row, "key_type")?.is_some_and(|key_type| {
+            matches!(
+                key_type.as_str(),
+                "uniqueidentifier"
+                    | "nvarchar"
+                    | "nchar"
+                    | "bigint"
+                    | "int"
+                    | "smallint"
+                    | "tinyint"
+            )
+        });
+        Ok(B::try_get_i64(row, "rcsi")? == 1
+            && B::try_get_i64(row, "found")? == 1
+            && B::try_get_i64(row, "page_locked")? == 0
+            && seekable_key)
+    }
+
+    /// Read every bulk-write candidate key in one statement, without a write
+    /// lock: the rows the query's SQL filter selects, at most `limit` of them,
+    /// in key order, read committed (see [`SelectLock::MssqlReadCommitted`]),
+    /// which with `READ_COMMITTED_SNAPSHOT` on reads one consistent snapshot.
     ///
     /// Returns the keys of the rows that also satisfy the residual in-memory
-    /// predicates, the number of rows read and the key of the last row read.
-    /// Only for an entity with a single-column key.
+    /// predicates, and the number of rows read. Only for an entity with a
+    /// single-column key.
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub(crate) async fn fetch_write_candidate_keys_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
-        after: Option<&SqlValue>,
-        limit: i64,
+        limit: Option<i64>,
         key_value: fn(&T) -> SqlValue,
     ) -> crate::Result<WriteCandidateKeys>
     where
         B: WriteBackend,
     {
-        let key_column = B::DIALECT.quote_identifier_path(T::PRIMARY_KEY);
         let mut query = self.clone();
-        if let Some(after) = after {
-            query = query.where_clause(&format!("{key_column} > ?"), after.clone());
-        }
-        query.order_clauses = vec![key_column];
+        query.order_clauses = vec![B::DIALECT.quote_identifier_path(T::PRIMARY_KEY)];
         query.order_values = Vec::new();
         let rendered = render_select_query_locked(
             B::DIALECT,
-            &query.candidate_select(0, Some(limit.max(0)))?,
+            &query.candidate_select(0, limit.map(|limit| limit.max(0)))?,
             SelectLock::MssqlReadCommitted,
         );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
@@ -5637,7 +5720,6 @@ where
         let candidates = query.decode_candidates(&rows)?;
         Ok(WriteCandidateKeys {
             read: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
-            last: candidates.last().map(|(row, _)| key_value(row)),
             keys: candidates
                 .iter()
                 .filter(|(_, matches)| *matches)
@@ -5653,14 +5735,15 @@ where
     /// Each chunk of keys takes two statements, and neither reads, locks or
     /// waits on a row of the table outside those keys, whatever the filter:
     ///
-    /// 1. The lock: `WITH (UPDLOCK, FORCESEEK)` with a `WHERE` that names only
+    /// 1. The lock: `WITH (XLOCK, FORCESEEK)` with a `WHERE` that names only
     ///    the key, so the only access path is a seek on those keys. It runs
     ///    read committed (set inside its own batch, which restores the
     ///    transaction's level when it ends): at `SERIALIZABLE`, a multi-key
     ///    seek takes key-range locks that reach the next key, which may be a
     ///    hidden row, even under a `READCOMMITTED` table hint. A key that no
-    ///    longer exists returns nothing and locks nothing. The update locks
-    ///    are held until the transaction ends.
+    ///    longer exists returns nothing and locks nothing. The exclusive
+    ///    locks are held until the transaction ends, so no locking reader can
+    ///    read these rows, and act on them, before the write commits.
     /// 2. The check: at the transaction's own isolation, one singleton seek
     ///    per locked key (`CROSS APPLY`), which evaluates the filter on the
     ///    locked row. Every key exists and is held, so the seeks take key
@@ -5679,8 +5762,6 @@ where
     {
         /// Bind parameters a statement may use, below SQL Server's 2,100.
         const MAX_BINDS: usize = 2_000;
-        const KEY: &str = "__gom_key";
-        const STILL_MATCHES: &str = "__gom_still_matches";
         let dialect = B::DIALECT;
         if dialect != DatabaseBackend::Mssql {
             return Err(sqlx::Error::Protocol(
@@ -5691,6 +5772,8 @@ where
         let key_column = dialect.quote_identifier_path(T::PRIMARY_KEY);
         let table = dialect.render_identifier_path(T::TABLE_NAME);
         let columns = T::column_names().join(", ");
+        // The re-check's column must not collide with a column of the table.
+        let still_matches = unused_column_alias::<T>("__gom_still_matches");
         let filter = filter_expression_from_raw_parts(dialect, &self.where_clauses, &self.values);
         let filter_binds = self.values.len();
         let chunk = MAX_BINDS.saturating_sub(filter_binds).clamp(1, 500);
@@ -5703,7 +5786,7 @@ where
         for keys in keys.chunks(chunk) {
             let lock = format!(
                 "SET TRANSACTION ISOLATION LEVEL READ COMMITTED; \
-                 SELECT {columns} FROM {table} WITH (UPDLOCK, FORCESEEK) \
+                 SELECT {columns} FROM {table} WITH (XLOCK, FORCESEEK) \
                  WHERE {key_column} IN ({})",
                 placeholders(1, keys.len()).join(", ")
             );
@@ -5733,16 +5816,16 @@ where
                 .join(", ");
             values.extend(held);
             let check = format!(
-                "SELECT __gom_locked.* FROM (VALUES {key_rows}) AS __gom_keys({KEY}) \
+                "SELECT __gom_locked.* FROM (VALUES {key_rows}) AS __gom_keys(__gom_key) \
                  CROSS APPLY (SELECT {columns}, \
-                 CASE WHEN {recheck} THEN CAST(1 AS BIGINT) ELSE CAST(0 AS BIGINT) END AS {STILL_MATCHES} \
-                 FROM {table} WITH (UPDLOCK, FORCESEEK) WHERE {key_column} = __gom_keys.{KEY}) AS __gom_locked \
+                 CASE WHEN {recheck} THEN CAST(1 AS BIGINT) ELSE CAST(0 AS BIGINT) END AS {still_matches} \
+                 FROM {table} WITH (XLOCK, FORCESEEK) WHERE {key_column} = __gom_keys.__gom_key) AS __gom_locked \
                  ORDER BY __gom_locked.{key_column}"
             );
             let rows = context.fetch_rows(&check, &values).await?;
             context.database().observe_read(&check, rows.len());
             for (row, (entity, residual)) in rows.iter().zip(self.decode_candidates(&rows)?) {
-                let still_matches = B::try_get_i64(row, STILL_MATCHES)? == 1;
+                let still_matches = B::try_get_i64(row, &still_matches)? == 1;
                 locked.push((entity, residual && still_matches));
             }
         }

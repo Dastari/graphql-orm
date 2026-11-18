@@ -88,6 +88,17 @@ where
     }
 }
 
+/// The rows a SQL Server bulk write's filter selects changed between its
+/// candidate read and its validation. Retrying the whole write is safe.
+fn targets_changed() -> sqlx::Error {
+    let mut error = OrmPublicError::with_message(
+        OrmErrorCode::ServiceUnavailable,
+        "the bulk write's target rows changed concurrently; retry the write",
+    );
+    error.retryable = true;
+    crate::graphql::errors::sqlx_error_from_public(error)
+}
+
 fn bulk_limit_exceeded() -> sqlx::Error {
     // The message names no row count.
     crate::graphql::errors::sqlx_error_from_public(OrmPublicError::with_message(
@@ -115,11 +126,14 @@ fn bulk_limit_exceeded() -> sqlx::Error {
 ///
 /// With the opt-in and a SQL predicate, rows outside the predicate are not
 /// locked either. PostgreSQL's `FOR UPDATE` locks only the rows the predicate
-/// returns. SQL Server's `UPDLOCK` would lock every row a scan reads, so there
-/// the candidates are read in two steps: their keys first, read committed and
-/// without a write lock, then the rows with those keys, locked by a forced
-/// key seek, with the filter and predicate checked again on the locked rows.
-/// `key_value` gives a row's key for the second step.
+/// returns. SQL Server's `UPDLOCK` would lock every row a scan reads, so there,
+/// where [`EntityQuery::key_locked_write_candidates_supported`] allows it, the
+/// candidates are read in one snapshot without a lock, locked exclusively by a
+/// forced key seek and checked again, and then read again in a new snapshot:
+/// a candidate set that changed meanwhile refuses the write as a retryable
+/// conflict, so target selection stays serializable. Elsewhere SQL Server
+/// keeps the single serializable `UPDLOCK, HOLDLOCK` read. `key_value` gives a
+/// row's key.
 ///
 /// It also applies
 /// [`PaginationConfig::max_bulk_write_rows`](super::PaginationConfig::max_bulk_write_rows),
@@ -175,7 +189,8 @@ where
     // Generated bulk writes exist only for entities with a single-column key.
     let lock_by_key = narrowed
         && <B as OrmBackend>::DIALECT == DatabaseBackend::Mssql
-        && T::PRIMARY_KEYS.len() == 1;
+        && T::PRIMARY_KEYS.len() == 1
+        && EntityQuery::<T, B>::key_locked_write_candidates_supported(tx).await?;
     let config = db.pagination_config();
     let bound = config.max_bulk_write_rows.map(|bound| bound.max(0));
     let over_bound = |targets: usize| {
@@ -209,41 +224,48 @@ where
     let budget = config.max_scanned_rows.map(|budget| budget.max(0));
     let mut scanned = 0_i64;
     if lock_by_key {
-        let mut after = None;
-        loop {
-            let page = match budget {
-                Some(budget) => {
-                    CANDIDATE_PAGE.min(budget.saturating_sub(scanned).saturating_add(1))
-                }
-                None => CANDIDATE_PAGE,
-            };
-            let candidates = query
-                .fetch_write_candidate_keys_in_transaction(tx, after.as_ref(), page, key_value)
-                .await?;
-            // Refused before any of the page is locked.
-            if budget.is_some_and(|budget| scanned.saturating_add(candidates.read) > budget) {
-                return Err(super::query::scan_budget_exhausted());
-            }
-            scanned = scanned.saturating_add(candidates.read);
-            for (row, matches) in query
-                .lock_write_candidates_by_key_in_transaction(tx, &candidates.keys, key_value)
-                .await?
-            {
-                // A row that left the filter or the predicate before it was
-                // locked is not a candidate.
-                if !matches {
-                    continue;
-                }
-                targets.extend(classify(row).await?);
-                if over_bound(targets.len()) {
-                    return Err(bulk_limit_exceeded());
-                }
-            }
-            if candidates.read < page {
-                return Ok(targets);
-            }
-            after = candidates.last;
+        // One consistent read of every candidate, bounded by the budget.
+        let limit = budget.map(|budget| budget.saturating_add(1));
+        let candidates = query
+            .fetch_write_candidate_keys_in_transaction(tx, limit, key_value)
+            .await?;
+        // Refused before any candidate is locked.
+        if budget.is_some_and(|budget| candidates.read > budget) {
+            return Err(super::query::scan_budget_exhausted());
         }
+        let mut locked = std::collections::BTreeSet::new();
+        for (row, matches) in query
+            .lock_write_candidates_by_key_in_transaction(tx, &candidates.keys, key_value)
+            .await?
+        {
+            // A row that left the filter or the predicate before it was
+            // locked is not a candidate.
+            if !matches {
+                continue;
+            }
+            locked.insert(super::composite_key_id(&[key_value(&row)]));
+            targets.extend(classify(row).await?);
+            if over_bound(targets.len()) {
+                return Err(bulk_limit_exceeded());
+            }
+        }
+        // Every candidate is now locked and checked. Read the candidates
+        // again, in one snapshot: if they are exactly the locked rows, the
+        // targets are the rows the filter selects at that instant, and none
+        // of them can change before the write commits. Otherwise another
+        // transaction changed which rows match since the first read.
+        let current = query
+            .fetch_write_candidate_keys_in_transaction(tx, limit, key_value)
+            .await?;
+        let current = current
+            .keys
+            .iter()
+            .map(|key| super::composite_key_id(std::slice::from_ref(key)))
+            .collect::<std::collections::BTreeSet<_>>();
+        if current != locked {
+            return Err(targets_changed());
+        }
+        return Ok(targets);
     }
     loop {
         // One row past the budget tells an exhausted scan from a complete one.

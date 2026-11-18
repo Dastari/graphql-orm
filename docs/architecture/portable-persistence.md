@@ -47,9 +47,11 @@ uses `UPDLOCK, HOLDLOCK`; SQLite's generated top-level helpers use `BEGIN IMMEDI
 writes materialize the authorized primary-key set and mutate only those exact keys. A row that starts
 matching concurrently is therefore ordered after the operation rather than being included by a
 later broad predicate.
-With the opt-in `narrow_bulk_writes_to_read_visibility` and a SQL predicate, a SQL Server bulk
-write reads its candidate keys read committed without a write lock, then locks only those keys
-with `UPDLOCK, FORCESEEK`, so the lock never reaches a row outside the predicate; see
+With the opt-in `narrow_bulk_writes_to_read_visibility`, a SQL predicate and
+`READ_COMMITTED_SNAPSHOT` on, a SQL Server bulk write instead reads its candidates in a snapshot
+without a lock, locks only those keys with `XLOCK, FORCESEEK`, and validates the candidates in a
+second snapshot, refusing the write as a retryable conflict if they changed. Target selection
+stays serializable, and no row outside the candidates is locked; see
 [row policy on generated writes](../reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
 Upsert also has to fence the case where no row exists yet. Generated top-level upsert helpers select
