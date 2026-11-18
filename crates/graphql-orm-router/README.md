@@ -3,12 +3,21 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
+
+Version 0.16.3 refuses a bearer token whose header lists critical extensions
+(`crit`), which the router does not understand (RFC 7515), and one whose `iss`
+is an array rather than the configured issuer string (RFC 7519). It adds
+cargo-fuzz targets for bearer and JWKS parsing with a retained corpus replayed
+in ordinary CI, a weekly bounded fuzz run, and scope-matching property tests
+([#725](https://github.com/Dastari/graphql-orm/issues/725),
+[#726](https://github.com/Dastari/graphql-orm/issues/726)). See
+[`fuzz/README.md`](fuzz/README.md).
 
 Version 0.16.1 changes only the wire tests: the persisted-documents snapshot
 tests no longer read a refresh result before it is fully written, and they

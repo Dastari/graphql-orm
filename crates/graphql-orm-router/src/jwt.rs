@@ -578,9 +578,7 @@ impl JwksAuthenticationProvider {
                 None,
             )
             .await?;
-        let document = serde_json::from_slice::<RawJwkSet>(&body)
-            .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
-        let keys = validate_jwks(document)?;
+        let keys = parse_jwks(&body)?;
         let loaded_at = self.config.clock.now();
         let mut cache = self
             .cache
@@ -643,7 +641,7 @@ impl JwksAuthenticationProvider {
         let header = decode_header(&envelope.signature).map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue signature is malformed")
         })?;
-        if header.alg != Algorithm::RS256 {
+        if header.alg != Algorithm::RS256 || header.crit.is_some() {
             return Err(AuthenticationError::unavailable(
                 "role-scope catalogue signature algorithm is invalid",
             ));
@@ -1011,7 +1009,9 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
         let header = decode_header(token).map_err(|_| invalid_token())?;
-        if header.alg != Algorithm::RS256 {
+        // RFC 7515 4.1.11: the router understands no critical extension, so
+        // a header that lists any, even an empty list, is refused.
+        if header.alg != Algorithm::RS256 || header.crit.is_some() {
             return Err(invalid_token());
         }
         let kid = header.kid.as_deref().ok_or_else(invalid_token)?;
@@ -1029,6 +1029,11 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         let claims = decode::<JwtClaims>(token, &key, &validation)
             .map_err(|_| invalid_token())?
             .claims;
+        // `iss` is one string (RFC 7519 4.1.1). The library also accepts an
+        // array that contains the issuer; the typed claim refuses one.
+        if claims.iss != self.config.issuer {
+            return Err(invalid_token());
+        }
         validate_time_claims(&claims, self.config.clock.as_ref(), self.config.leeway)?;
         let scopes = parse_scope_claims(&claims.additional, self.config.legacy_scope_claims)?;
         #[cfg(feature = "auth-agql")]
@@ -1125,6 +1130,7 @@ struct RoleScopeCache {
 
 #[derive(Deserialize)]
 struct JwtClaims {
+    iss: String,
     sub: String,
     exp: u64,
     #[serde(default)]
@@ -1158,6 +1164,38 @@ where
     roles.sort();
     roles.dedup();
     Ok(roles)
+}
+
+fn parse_jwks(body: &[u8]) -> Result<BTreeMap<String, DecodingKey>, AuthenticationError> {
+    let document = serde_json::from_slice::<RawJwkSet>(body)
+        .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
+    validate_jwks(document)
+}
+
+#[cfg(any(test, fuzzing))]
+impl JwksAuthenticationProvider {
+    /// Installs a key set as a successful JWKS fetch would, without one.
+    pub(crate) fn install_key_set_for_harness(
+        &self,
+        document: &str,
+    ) -> Result<(), AuthenticationError> {
+        let keys = parse_jwks(document.as_bytes())?;
+        let loaded_at = self.config.clock.now();
+        *self
+            .cache
+            .write()
+            .map_err(|_| AuthenticationError::unavailable("JWKS cache is unavailable"))? =
+            Some(JwksCache { loaded_at, keys });
+        Ok(())
+    }
+}
+
+/// How many keys the refresh path keeps from one JWKS document.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn key_set_from_document_for_harness(
+    document: &[u8],
+) -> Result<usize, AuthenticationError> {
+    parse_jwks(document).map(|keys| keys.len())
 }
 
 /// Keeps every RS256 verification key with an ID and skips every other key.

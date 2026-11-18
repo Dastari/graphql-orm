@@ -3,12 +3,15 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
+the runtime renderer; every other name is generated as before.
 
 Version 0.176.0 pairs with the runtime transitive-closure read predicates; generated code is unchanged.
 

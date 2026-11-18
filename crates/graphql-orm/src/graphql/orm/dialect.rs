@@ -1128,7 +1128,12 @@ impl DatabaseBackend {
         let plain_rest = |character: char| {
             plain_start(character) || character.is_ascii_digit() || character == '$'
         };
-        if !plain_start(first) || !characters.all(plain_rest) {
+        // SQLite reads a byte-order mark that starts a token as whitespace,
+        // so a bare name beginning with one would lose it (#725).
+        if !plain_start(first)
+            || (self == Self::Sqlite && first == '\u{feff}')
+            || !characters.all(plain_rest)
+        {
             return true;
         }
         let lowercase = identifier.to_ascii_lowercase();

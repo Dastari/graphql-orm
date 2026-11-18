@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,8 +70,11 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.176.0, `graphql-orm-macros` 0.176.0**; `graphql-orm-operation-catalog` 0.9.0; `graphql-orm-storage` 0.17.0; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; **`graphql-orm-ai` 0.149.0**; `graphql-orm-router-protocol` 0.3.0; **`graphql-orm-router` 0.16.1**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.179.0, `graphql-orm-macros` 0.179.0**; `graphql-orm-operation-catalog` 0.9.0; **`graphql-orm-storage` 0.18.0**; `graphql-orm-backup` 0.27.0; `graphql-orm-ai-tool-profiles` 0.25.0; **`graphql-orm-ai` 0.149.0**; `graphql-orm-router-protocol` 0.3.0; **`graphql-orm-router` 0.16.3**.
 
+- **Action needed** — ORM/macros 0.179.0: only for a SQLite name declared with a leading U+FEFF, which is now delimited and keeps the mark. [Migration](../../MIGRATION.md#01760-to-01790-identifier-quoting-and-canonical-json-properties)
+- **Action needed** — router 0.16.3: only if your issuer writes `iss` as an array or adds a `crit` header; such bearer tokens are now refused. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0161-to-0163)
+- **No action** — storage 0.18.0: key-validation property tests only.
 - **No action** — Router 0.16.1: Only the wire tests change; router behavior, configuration and public APIs are unchanged. [migration](../../crates/graphql-orm-router/MIGRATION.md#0160-to-0161) · [changelog](../../crates/graphql-orm-router/CHANGELOG.md#0161-unreleased)
 - **No action** — ORM/macros 0.176.0: transitive read-policy closures. `ReadPredicate::related_closure` ("some reachable row matches P"), `related_closure_all` ("no reachable row fails P") and `related_closure_within` (an explicit hop bound, at most 1,024; the default is 64) render a recursive CTE on SQLite and PostgreSQL and fail closed on UNKNOWN values, unreachable or ambiguous steps and the depth bound. SQL Server refuses them with `AUTHORIZATION_MISCONFIGURED`. [Migration](../../MIGRATION.md#01750-to-01760-transitive-read-policy-closures)
 - **No action** — AI 0.149.0: OpenAI Responses (also xAI and OpenAI-compatible) `response.incomplete` output-limit stops and Ollama `length` stops complete with exact usage and a visible notice, and a cut-off tool request is never run; the conversation bootstrap reads its whole tool-call window, so `reset_required` no longer fires just because a conversation holds more tool calls than the page maximum. No schema change. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01480-to-01490-output-limit-stops-and-the-bootstrap-tool-call-window) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01490)

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,15 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - ORM/macros 0.179.0
+
+Security property suites for identifier quoting and canonical JSON ([#725](https://github.com/Dastari/graphql-orm/issues/725)). See the [migration guide](MIGRATION.md#01760-to-01790-identifier-quoting-and-canonical-json-properties).
+
+- **Fix: a SQLite name that starts with U+FEFF is delimited.** SQLite reads a byte-order mark that starts a token as whitespace, so `render_identifier` and the derive macros wrote such a name bare and SQLite used the name without it. Both now delimit it. Other names render exactly as before.
+- New seeded property tests check, for SQLite, PostgreSQL and SQL Server, that an undelimited name quotes to one delimited identifier that reads back as the same name, that quoting and rendering are idempotent, that a bare rendering contains only plain identifier characters, and that quoted paths keep each part one identifier. On in-memory SQLite and the owned PostgreSQL and SQL Server containers, each case creates, writes, reads and drops a table named by generated identifiers, and checks the catalogue for exactly the expected names.
+- New canonical JSON v1 property tests check that written defaults read back, that equivalent values (key order, `-0.0`, escaped spellings, whitespace) produce identical bytes, that accepted text is a fixed point and every other spelling is refused, and that arbitrary input fails closed at the depth, node and byte limits.
+- Known issues found by the suites are tracked with ignored regression tests: [#782](https://github.com/Dastari/graphql-orm/issues/782) (`quote_identifier` passes through text that only starts and ends with a delimiter) and [#783](https://github.com/Dastari/graphql-orm/issues/783) (SQL Server bare non-ASCII names that the server rejects).
 
 ## Unreleased - ORM/macros 0.176.0
 

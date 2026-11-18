@@ -15,6 +15,11 @@ mod byte_route;
 mod config;
 mod federation;
 mod file_config;
+/// Bearer-authentication fuzz and corpus harnesses (#726); tests and
+/// `--cfg fuzzing` builds only.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing;
 mod http_body;
 mod jwt;
 mod lifecycle;

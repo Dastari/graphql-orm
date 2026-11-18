@@ -408,4 +408,87 @@ mod tests {
         header.kid = Some("agql-key".to_owned());
         encode(&header, &claims, key).unwrap()
     }
+
+    /// Bounded adapter properties (#725, #726). The pinned `agql-auth`
+    /// validator and matcher are external; these cover only the router's
+    /// adapter code around them.
+    mod adapter_properties {
+        use super::*;
+        use agql_auth::HierarchicalScopeOptions;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, FileFailurePersistence, RngSeed};
+
+        fn config(cases: u32, seed: u64) -> Config {
+            let env_u64 = |name: &str| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+            };
+            Config {
+                cases: env_u64("PROPTEST_CASES").map_or(cases, |value| value as u32),
+                rng_seed: RngSeed::Fixed(env_u64("PROPTEST_RNG_SEED").unwrap_or(seed)),
+                source_file: Some(file!()),
+                failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
+                    "regressions",
+                ))),
+                ..Config::default()
+            }
+        }
+
+        fn syntax_char() -> impl Strategy<Value = char> {
+            prop_oneof![
+                3 => proptest::sample::select(vec![
+                    '.', ':', '/', '*', '#', '+', '-', '_', 'a', 'Z', '0', ' ', '\u{ff0e}',
+                ]),
+                1 => any::<char>(),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(config(1024, 0x7260_0101))]
+
+            #[test]
+            fn validated_expiry_times_convert_exactly_or_fail_closed(nanos in any::<i128>()) {
+                if let Ok(time) = checked_system_time(nanos) {
+                    let back = match time.duration_since(UNIX_EPOCH) {
+                        Ok(after) => i128::try_from(after.as_nanos()).unwrap(),
+                        Err(before) => -i128::try_from(before.duration().as_nanos()).unwrap(),
+                    };
+                    prop_assert_eq!(back, nanos);
+                }
+            }
+
+            #[test]
+            fn accepted_hierarchical_syntax_never_occurs_inside_a_template_value(
+                separator in syntax_char(),
+                wildcard in proptest::collection::vec(syntax_char(), 0..3),
+                value in "[A-Za-z0-9_-]{1,16}",
+                granted in "[A-Za-z0-9_-]{1,16}",
+            ) {
+                let wildcard: String = wildcard.into_iter().collect();
+                let accepted = validate_hierarchical_syntax(separator, &wildcard).is_ok();
+                prop_assert_eq!(
+                    accepted,
+                    !is_plain_scope_character(separator)
+                        && !wildcard.chars().all(is_plain_scope_character)
+                );
+                if !accepted {
+                    return Ok(());
+                }
+                // A plain value holds neither the separator nor the wildcard.
+                prop_assert!(!value.contains(separator) && !value.contains(wildcard.as_str()));
+                let options = HierarchicalScopeOptions::default()
+                    .with_separator(separator)
+                    .with_wildcard(wildcard.clone());
+                if let Ok(matcher) = HierarchicalScopeMatch::new(options) {
+                    let matcher = AgqlScopeMatcher::hierarchical(matcher).unwrap();
+                    let scope = |segment: &str| format!("zones{separator}{segment}{separator}read");
+                    // A grant for one plain value never authorizes another.
+                    if matcher.matches(&scope(&granted), &scope(&value)) {
+                        prop_assert_eq!(&granted, &value);
+                    }
+                }
+            }
+        }
+    }
 }

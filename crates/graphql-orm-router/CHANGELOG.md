@@ -3,12 +3,33 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.16.3 (unreleased)
+
+- Fix (authentication, fail closed): `JwksAuthenticationProvider` refuses a
+  bearer token whose JOSE header carries `crit`, including an empty list. The
+  router understands no critical extension, and RFC 7515 requires such a
+  token to be refused; before, the header was ignored, so `"b64": false` was
+  accepted without its meaning. A signed role-scope catalogue with `crit` is
+  refused the same way.
+- Fix (authentication, fail closed): a bearer token's `iss` must be exactly
+  the configured issuer string. The JWT library also accepted an array that
+  contained the issuer, such as `["https://issuer", "https://other"]`.
+- Tests: cargo-fuzz targets `bearer_structured`, `bearer_raw` and
+  `jwks_document` in `fuzz/`, with an independent acceptance oracle and
+  synthetic keys. The retained corpus and minimized regressions replay in the
+  ordinary test run, followed by a seeded property run of each target. A
+  weekly workflow fuzzes each target for 20 minutes. Seeded property tests
+  check that scope-template values can never broaden a grant under exact or
+  wildcard matching, and the `auth-agql` adapter's syntax check and expiry
+  conversion. ([#725](https://github.com/Dastari/graphql-orm/issues/725),
+  [#726](https://github.com/Dastari/graphql-orm/issues/726))
 
 ## 0.16.1 (unreleased)
 

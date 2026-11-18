@@ -3,12 +3,23 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.18.0
+
+- Tests: seeded property tests compare `validate_blob_key`,
+  `validate_portable_blob_key` and `validate_canonical_blob_key` with an
+  independent model of each documented contract over traversal, the reserved
+  namespace in every ASCII case with trailing dots and spaces, device names,
+  separators, controls and Unicode lookalikes. Accepted keys stay below their
+  root, and the local provider round-trips them without creating anything
+  beside its root. No behaviour changes.
+  ([#725](https://github.com/Dastari/graphql-orm/issues/725))
 
 ## Unreleased - 0.17.0
 

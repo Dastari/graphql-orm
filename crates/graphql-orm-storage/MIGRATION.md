@@ -3,12 +3,17 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.17.0 to 0.18.0
+
+**No action.** Only tests change; key validation, providers and APIs are
+unchanged.
 
 ## 0.17.0
 

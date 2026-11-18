@@ -1,0 +1,41 @@
+name: Scheduled bearer fuzzing
+
+# Bounded longer runs of the router's bearer-authentication fuzz targets
+# (#726). Ordinary CI replays the retained corpus in the router job; this
+# workflow explores further. Synthetic keys only; no secrets or services.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bearer-fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bearer_structured, bearer_raw, jwks_document]
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: crates/graphql-orm-router/fuzz
+      # Twenty minutes and 2 GiB per target. A failure prints the input in
+      # base64; add it under fuzz/regressions/<target>/ with the fix.
+      - run: bash crates/graphql-orm-router/fuzz/run.sh "${{ matrix.target }}" 1200 2048
