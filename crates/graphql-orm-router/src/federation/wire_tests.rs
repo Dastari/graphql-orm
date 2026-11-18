@@ -1634,6 +1634,38 @@ fn public_static_router_serves_only_after_complete_preparation() {
         "SUBGRAPH_FAILURE"
     );
 
+    // A subgraph error's `outcome` extension reaches the client unchanged
+    // beside its code, and the router adds none when the subgraph sent none.
+    for outcome in [
+        None,
+        Some("refused"),
+        Some("failed"),
+        Some("committed"),
+        Some("unknown"),
+    ] {
+        let name = format!("outcome-{}", outcome.unwrap_or("none"));
+        let response = router.graphql_at(
+            "/api/graphql",
+            json!({"query": format!("mutation {{ renameProduct(id: \"p1\", name: \"{name}\") {{ id }} }}")}),
+            &[],
+        );
+        let error = &response["errors"][0];
+        assert_eq!(
+            error["extensions"]["code"], "CONFLICT",
+            "{name}: {response}"
+        );
+        assert_eq!(
+            error["path"],
+            json!(["renameProduct"]),
+            "{name}: {response}"
+        );
+        assert_eq!(
+            error["extensions"].get("outcome").and_then(Value::as_str),
+            outcome,
+            "{name}: {response}"
+        );
+    }
+
     // Pinned engine defaults: no mutations over GET and no request batching.
     let get_mutation = raw_http(
         router.address,
@@ -5537,6 +5569,24 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
     let response = match kind {
         SubgraphKind::Products if query.contains("_entities") => {
             json!({"data": {"_entities": [{"id": "p1", "name": "desk"}]}})
+        }
+        // A refused write carrying the generated services' `outcome`
+        // extension, named by the `outcome-<value>` argument.
+        SubgraphKind::Products if query.contains("renameProduct") && query.contains("outcome-") => {
+            let mut extensions = json!({"code": "CONFLICT"});
+            for outcome in ["refused", "failed", "committed", "unknown"] {
+                if query.contains(&format!("outcome-{outcome}")) {
+                    extensions["outcome"] = json!(outcome);
+                }
+            }
+            json!({
+                "data": {"renameProduct": null},
+                "errors": [{
+                    "message": "test-owned write refusal",
+                    "path": ["renameProduct"],
+                    "extensions": extensions
+                }]
+            })
         }
         SubgraphKind::Products if query.contains("renameProduct") => {
             json!({"data": {"renameProduct": {"id": "p1", "name": "renamed"}}})

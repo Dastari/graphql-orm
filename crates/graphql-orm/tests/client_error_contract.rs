@@ -243,6 +243,8 @@ enum Fault {
     AfterHook,
     RowWrite,
     Notify,
+    /// An after hook refusing with a code the host defines.
+    HostCodedAfterHook,
     /// A notify handler that sends its own `outcome`, which must not win.
     NotifyForged,
 }
@@ -301,7 +303,14 @@ impl MutationHook for Host {
             Fault::AfterHook => event.phase == MutationPhase::After,
             _ => false,
         };
-        Box::pin(async move { if refuse { Err(refusal()) } else { Ok(()) } })
+        let host_coded = self.0 == Fault::HostCodedAfterHook && event.phase == MutationPhase::After;
+        Box::pin(async move {
+            if host_coded {
+                return Err(async_graphql::Error::new("quota reached")
+                    .extend_with(|_, ext| ext.set("code", "HOST_QUOTA_REACHED")));
+            }
+            if refuse { Err(refusal()) } else { Ok(()) }
+        })
     }
 }
 async fn notify(
@@ -557,6 +566,56 @@ async fn mutation_result_error_code_is_opt_in_per_entity() {
         result["result"]["errorCode"],
         serde_json::Value::Null,
         "{result}"
+    );
+    owner.cleanup().unwrap();
+}
+
+/// #763: a bulk write's `errorCode` is the code the host's refusal carried,
+/// which need not be an ORM code, with or without `mutation_error_codes`.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires test-owned disposable database"
+)]
+async fn a_host_refusal_code_reaches_the_bulk_error_code() {
+    let (db, mut owner) = fixture().await.unwrap();
+    let schema = schema(&db, Fault::HostCodedAfterHook, false);
+    for root in [
+        r#"updateCodedRecords(where: {recordKey: {eq: "existing"}}, input: {label: "after"}) { success error errorCode }"#,
+        r#"deleteCodedRecords(where: {recordKey: {eq: "existing"}}) { success error errorCode }"#,
+        r#"updateOutcomeRecords(where: {recordKey: {eq: "existing"}}, input: {label: "after"}) { success error errorCode }"#,
+    ] {
+        reset(&db).await;
+        let before = snapshot(&db).await;
+        let response = schema
+            .execute(format!("mutation {{ result: {root} }}"))
+            .await;
+        assert!(response.errors.is_empty(), "{root}: {response:?}");
+        let result = response.data.into_json().unwrap();
+        assert_eq!(result["result"]["success"], false, "{root}: {result}");
+        assert_eq!(
+            result["result"]["error"], "quota reached",
+            "{root}: {result}"
+        );
+        assert_eq!(
+            result["result"]["errorCode"], "HOST_QUOTA_REACHED",
+            "{root}: {result}"
+        );
+        assert_eq!(snapshot(&db).await, before, "{root}: nothing was written");
+    }
+    // A single-row root reports the same refusal as a top-level error with
+    // that code.
+    reset(&db).await;
+    let response = schema
+        .execute(format!(r#"mutation {{ updateCodedRecord(id: "{EXISTING}", input: {{label: "after"}}) {{ success errorCode }} }}"#))
+        .await;
+    assert_eq!(response.errors.len(), 1, "{response:?}");
+    assert_eq!(
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code")),
+        Some(&async_graphql::Value::from("HOST_QUOTA_REACHED"))
     );
     owner.cleanup().unwrap();
 }

@@ -19,6 +19,10 @@ in ordinary CI, a weekly bounded fuzz run, and scope-matching property tests
 [#726](https://github.com/Dastari/graphql-orm/issues/726)). See
 [`fuzz/README.md`](fuzz/README.md).
 
+Version 0.16.2 changes only the wire tests, which now check that a subgraph
+error's `extensions.outcome` reaches the client unchanged. Router behavior,
+configuration and public APIs are unchanged.
+
 Version 0.16.1 changes only the wire tests: the persisted-documents snapshot
 tests no longer read a refresh result before it is fully written, and they
 check each response's status and media type before decoding it. Router

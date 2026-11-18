@@ -10,13 +10,18 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
-## 0.16.1 to 0.16.3
+## 0.16.2 to 0.16.3
 
 **Action needed** only if your issuer writes `iss` as an array or adds a
 `crit` header to access tokens: those tokens are now refused with
 `UNAUTHENTICATED`. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
 one string and use no critical extensions, and need no change. Configuration
 and public APIs are unchanged.
+
+## 0.16.1 to 0.16.2
+
+**No action.** No consumer migration is required. Only the wire tests change;
+router behavior, configuration and public APIs are unchanged.
 
 ## 0.16.0 to 0.16.1
 
