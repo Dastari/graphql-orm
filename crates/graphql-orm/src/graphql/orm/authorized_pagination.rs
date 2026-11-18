@@ -48,13 +48,24 @@ pub enum ReadPredicateOp {
 /// filters used by ordinary queries (including supported relation predicates).
 /// An empty filter is rejected: use `ReadVisibility::Unrestricted` deliberately.
 ///
-/// Composition is budgeted when a predicate is built, so a predicate that
-/// builds can always be rendered and run. On every backend, the rendered SQL
-/// may not exceed [`READ_PREDICATE_MAX_RENDERED_BYTES`], and closures may nest
-/// at most [`READ_PREDICATE_CLOSURE_MAX_NESTING`] deep. On SQL Server,
-/// subqueries may nest at most [`READ_PREDICATE_MSSQL_MAX_NESTING`] deep. A
-/// constructor, [`Self::not`], `and` or `or` that would exceed a limit
-/// returns `AUTHORIZATION_MISCONFIGURED` before rendering.
+/// Composition is budgeted when a predicate is built. A constructor,
+/// [`Self::not`], `and` or `or` that would exceed a limit returns
+/// `AUTHORIZATION_MISCONFIGURED` before rendering:
+///
+/// - on every backend, at most [`READ_PREDICATE_MAX_RENDERED_BYTES`] of
+///   rendered SQL, [`READ_PREDICATE_MAX_EXPRESSION_DEPTH`] levels of
+///   expression nesting and [`READ_PREDICATE_CLOSURE_MAX_NESTING`] closures
+///   nested inside one another;
+/// - on SQL Server, also at most [`READ_PREDICATE_MSSQL_MAX_NESTING`] nested
+///   subqueries and [`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`] weighted
+///   levels.
+///
+/// `and` and `or` flatten a child of the same kind, so a fold of any length
+/// is one level deep, and long lists render in balanced groups. Within these
+/// limits a predicate renders, formats and drops without deep recursion, and
+/// the server accepts its nesting. The limits do not cover a statement's
+/// bind-parameter count, which each server caps itself (SQL Server at 2,100
+/// for the whole statement).
 #[derive(Clone, Debug)]
 pub struct ReadPredicate {
     entity: TypeId,
@@ -186,11 +197,42 @@ pub const READ_PREDICATE_CLOSURE_MAX_NESTING: u32 = 2;
 pub const READ_PREDICATE_MSSQL_MAX_NESTING: u32 = MSSQL_MAX_NESTING;
 const MSSQL_MAX_NESTING: u32 = 80;
 
+/// The deepest expression nesting one [`ReadPredicate`] may render on any
+/// backend, counted as nested parentheses: each `not()`, each `and`/`or`
+/// level, each relation and each subquery adds at least one. Rendering and
+/// dropping a predicate recurse once per level, so this keeps that recursion
+/// far inside a 2 MiB thread stack, even in debug builds. A deeper predicate
+/// is refused with `AUTHORIZATION_MISCONFIGURED` when it is built. `and` and
+/// `or` folds are flattened, so folding any number of terms adds one level.
+pub const READ_PREDICATE_MAX_EXPRESSION_DEPTH: u32 = MAX_EXPRESSION_DEPTH;
+const MAX_EXPRESSION_DEPTH: u32 = 256;
+
+/// The deepest weighted nesting one [`ReadPredicate`] may render on SQL
+/// Server. SQL Server's "nested too deeply" (error 191) counts subqueries,
+/// negations and plain parentheses together, at different weights. On the
+/// owned server, a statement failed from about 96 nested subqueries alone,
+/// from about 525 nested `NOT (...)` alone, and in between on mixtures, in
+/// proportion. So each level along the deepest path is weighted: a subquery
+/// 11, a `NOT (` 2 and any other parenthesis 1. Failures start at about
+/// 1,050 units; this limit leaves about 15% under that. It applies together
+/// with [`READ_PREDICATE_MSSQL_MAX_NESTING`] and
+/// [`READ_PREDICATE_MAX_EXPRESSION_DEPTH`].
+pub const READ_PREDICATE_MSSQL_MAX_NESTING_UNITS: u32 = MSSQL_MAX_NESTING_UNITS;
+const MSSQL_MAX_NESTING_UNITS: u32 = 900;
+const SUBQUERY_UNITS: u32 = 11;
+const NEGATION_UNITS: u32 = 2;
+
 /// What a predicate costs to render and run: its rendered size, its deepest
-/// subquery nesting and its deepest chain of closures inside closures.
+/// parenthesis and subquery nesting, and its deepest chain of closures inside
+/// closures. `units` is the SQL Server weighted nesting. `inner` and
+/// `inner_units` are those of the deepest child of a flattened `and`/`or`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Cost {
     bytes: usize,
+    depth: u32,
+    inner: u32,
+    units: u32,
+    inner_units: u32,
     nesting: u32,
     closures: u32,
 }
@@ -204,16 +246,27 @@ impl Cost {
         // Placeholders render as `$n` or `@Pn` on the server: count each as
         // up to seven bytes rather than the anonymous `?`.
         let placeholders = clause.bytes().filter(|byte| *byte == b'?').count();
+        let Nesting {
+            depth,
+            units,
+            subqueries: nesting,
+        } = nesting(clause);
         Self {
             bytes: clause.len().saturating_add(placeholders.saturating_mul(6)),
-            nesting: subquery_nesting(clause),
+            depth,
+            inner: depth,
+            units,
+            inner_units: units,
+            nesting,
             closures: closure_level(clause) as u32 - 1,
         }
     }
     fn check(self, backend: DatabaseBackend) -> async_graphql::Result<Self> {
         if self.bytes > READ_PREDICATE_MAX_RENDERED_BYTES
             || self.closures > READ_PREDICATE_CLOSURE_MAX_NESTING
-            || (backend == DatabaseBackend::Mssql && self.nesting > MSSQL_MAX_NESTING)
+            || self.depth > MAX_EXPRESSION_DEPTH
+            || (backend == DatabaseBackend::Mssql
+                && (self.nesting > MSSQL_MAX_NESTING || self.units > MSSQL_MAX_NESTING_UNITS))
         {
             return Err(invalid());
         }
@@ -230,11 +283,28 @@ fn reserve(bytes: usize, copies: usize, overhead: usize) -> async_graphql::Resul
     Ok(())
 }
 
-/// The deepest nesting of `(SELECT ...)` and `(WITH ...)` subqueries in
-/// `sql`, skipping quoted strings and identifiers.
-fn subquery_nesting(sql: &str) -> u32 {
+/// How deeply rendered SQL nests along its deepest paths.
+struct Nesting {
+    /// Parentheses of any kind.
+    depth: u32,
+    /// SQL Server weighted levels: see [`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`].
+    units: u32,
+    /// `(SELECT ...)` and `(WITH ...)` subqueries.
+    subqueries: u32,
+}
+
+/// Measure `sql` in one pass, skipping quoted strings and identifiers.
+fn nesting(sql: &str) -> Nesting {
     let bytes = sql.as_bytes();
-    let (mut open, mut depth, mut deepest, mut index) = (Vec::new(), 0_u32, 0_u32, 0);
+    // Per open parenthesis: (is a subquery, weight).
+    let mut open: Vec<(bool, u32)> = Vec::new();
+    let (mut subqueries, mut units) = (0_u32, 0_u32);
+    let mut deepest = Nesting {
+        depth: 0,
+        units: 0,
+        subqueries: 0,
+    };
+    let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
             quote @ (b'\'' | b'"' | b'[') => {
@@ -257,14 +327,33 @@ fn subquery_nesting(sql: &str) -> u32 {
                     rest.get(..word.len())
                         .is_some_and(|head| head.eq_ignore_ascii_case(word))
                 };
+                let before = sql[..index].trim_end().as_bytes();
+                let negation = before.len() >= 3
+                    && before[before.len() - 3..].eq_ignore_ascii_case(b"NOT")
+                    && !before
+                        .get(before.len().wrapping_sub(4))
+                        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
                 let subquery = starts(b"SELECT") || starts(b"WITH");
-                if subquery {
-                    depth += 1;
-                    deepest = deepest.max(depth);
-                }
-                open.push(subquery);
+                let weight = if subquery {
+                    SUBQUERY_UNITS
+                } else if negation {
+                    NEGATION_UNITS
+                } else {
+                    1
+                };
+                subqueries += u32::from(subquery);
+                units += weight;
+                open.push((subquery, weight));
+                deepest.depth = deepest.depth.max(open.len() as u32);
+                deepest.units = deepest.units.max(units);
+                deepest.subqueries = deepest.subqueries.max(subqueries);
             }
-            b')' if open.pop() == Some(true) => depth -= 1,
+            b')' => {
+                if let Some((subquery, weight)) = open.pop() {
+                    subqueries -= u32::from(subquery);
+                    units -= weight;
+                }
+            }
             _ => {}
         }
         index += 1;
@@ -999,28 +1088,108 @@ impl ReadPredicate {
         if self.entity != other.entity || self.backend != other.backend {
             return Err(invalid());
         }
-        // `(a) AND (b)` adds no subquery level, so the costs combine directly.
+        // A child of the same kind is flattened into this node, so a fold of
+        // any length stays one level deep: `(a) OR (b) OR (c)`. Its rendered
+        // depth is its deepest child plus one, plus the grouping levels a long
+        // chain is rendered with.
+        let mut children = Vec::new();
+        let (mut inner, mut inner_units) = (0, 0);
+        for (expression, cost) in [(self.expression, self.cost), (other.expression, other.cost)] {
+            match expression {
+                FilterExpression::And(nested) if and && !nested.is_empty() => {
+                    inner = inner.max(cost.inner);
+                    inner_units = inner_units.max(cost.inner_units);
+                    children.extend(nested);
+                }
+                FilterExpression::Or(nested) if !and && !nested.is_empty() => {
+                    inner = inner.max(cost.inner);
+                    inner_units = inner_units.max(cost.inner_units);
+                    children.extend(nested);
+                }
+                expression => {
+                    inner = inner.max(cost.depth);
+                    inner_units = inner_units.max(cost.units);
+                    children.push(expression);
+                }
+            }
+        }
+        // Each child is wrapped in plain parentheses, one unit each.
+        let levels = 1 + super::query::filter_chain_levels(children.len());
+        let depth = inner.saturating_add(levels);
+        let units = inner_units.saturating_add(levels);
         let cost = Cost {
             bytes: self
                 .cost
                 .bytes
                 .saturating_add(other.cost.bytes)
-                .saturating_add(16),
+                // `(` `)` and ` AND `, plus amortised chunk grouping.
+                .saturating_add(8),
+            depth,
+            inner,
+            units,
+            inner_units,
             nesting: self.cost.nesting.max(other.cost.nesting),
             closures: self.cost.closures.max(other.cost.closures),
         }
         .check(self.backend)?;
-        let expressions = vec![self.expression, other.expression];
         Ok(Self {
             entity: self.entity,
             backend: self.backend,
             expression: if and {
-                FilterExpression::And(expressions)
+                FilterExpression::And(children)
             } else {
-                FilterExpression::Or(expressions)
+                FilterExpression::Or(children)
             },
             cost,
         })
+    }
+}
+
+/// The most rendered policy SQL, in bytes, that the generated relation
+/// filters and relation-count orderings of one statement may add together.
+/// Each fragment is also checked like a [`ReadPredicate`]; this caps their
+/// sum, so a request with many where-input nodes cannot multiply a large
+/// policy into one oversized statement. Exceeding it is refused with
+/// `AUTHORIZATION_MISCONFIGURED` before the statement is rendered.
+pub const READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES: usize = 1 << 20;
+
+/// Per-statement budget threaded through generated where-input and ordering
+/// preparation: where-input nodes left, and relation policy SQL added so far.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct RelationFilterBudget {
+    nodes: usize,
+    bytes: usize,
+}
+impl Default for RelationFilterBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl RelationFilterBudget {
+    /// The budget for one statement: 128 where-input nodes.
+    pub fn new() -> Self {
+        Self {
+            nodes: 128,
+            bytes: 0,
+        }
+    }
+    /// Spend one where-input node; false once none are left.
+    pub fn take_node(&mut self) -> bool {
+        if self.nodes == 0 {
+            return false;
+        }
+        self.nodes -= 1;
+        true
+    }
+    /// Check a rendered relation fragment and add it to this statement.
+    fn charge<B: OrmBackend>(&mut self, fragment: &str) -> async_graphql::Result<()> {
+        let cost = Cost::of(fragment).check(B::DIALECT)?;
+        self.bytes = self.bytes.saturating_add(cost.bytes);
+        if self.bytes > READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES {
+            return Err(invalid());
+        }
+        Ok(())
     }
 }
 
@@ -1031,6 +1200,7 @@ pub async fn prepare_static_relation_filter<B, S, T, F>(
     ctx: &async_graphql::Context<'_>,
     keys: &[(&str, &str)],
     alternatives: &[F],
+    budget: &mut RelationFilterBudget,
 ) -> async_graphql::Result<(Vec<String>, Vec<SqlValue>)>
 where
     B: OrmBackend,
@@ -1100,6 +1270,7 @@ where
     if values.len() > 512 {
         return Err(input_error());
     }
+    budget.charge::<B>(&clause)?;
     Ok((vec![clause], values))
 }
 
@@ -1119,6 +1290,7 @@ pub async fn prepare_relation_count_order<B, T>(
     ctx: &async_graphql::Context<'_>,
     alias: &str,
     join: &str,
+    budget: &mut RelationFilterBudget,
 ) -> async_graphql::Result<(String, Vec<SqlValue>)>
 where
     B: OrmBackend,
@@ -1162,12 +1334,14 @@ where
     if values.len() > 512 {
         return Err(input_error());
     }
-    Ok((
-        format!(
-            "(SELECT COUNT(*) FROM (SELECT * FROM {table} WHERE {predicate}) AS {alias} WHERE {join})"
-        ),
-        values,
-    ))
+    // The count wraps the policy in two more subquery levels: check the
+    // wrapped expression, as for a relation filter.
+    reserve(predicate.len(), 1, 1024)?;
+    let count = format!(
+        "(SELECT COUNT(*) FROM (SELECT * FROM {table} WHERE {predicate}) AS {alias} WHERE {join})"
+    );
+    budget.charge::<B>(&count)?;
+    Ok((count, values))
 }
 
 /// The policy's explicit read decision for one request/entity/surface.
@@ -2345,12 +2519,100 @@ mod predicate_tests {
     }
 
     #[test]
+    fn folds_stay_flat_and_deep_trees_are_refused_within_a_small_stack() {
+        // Build, render, format, clone, compare and drop on an explicit 2 MiB
+        // stack, the size of a default tokio worker or test thread.
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                let render = |predicate: &ReadPredicate| {
+                    render_filter_expression(
+                        DatabaseBackend::Sqlite,
+                        &predicate.expression,
+                        &mut 1,
+                        &mut Vec::new(),
+                    )
+                };
+                let leaf = || sqlite_fragment("x = ?", vec![SqlValue::Int(1)]);
+                // A 50,000-term `or` fold is one node, rendered in chunks.
+                let mut wide = leaf();
+                for _ in 0..50_000 {
+                    wide = wide.or(leaf()).unwrap();
+                }
+                assert!(
+                    matches!(&wide.expression, FilterExpression::Or(children) if children.len() == 50_001)
+                );
+                let clause = render(&wide);
+                assert_eq!(wide.cost.depth, Cost::of(&clause).depth);
+                assert_eq!(wide.cost.units, Cost::of(&clause).units);
+                assert_eq!(wide.cost.depth, 1 + super::super::query::filter_chain_levels(50_001));
+                assert!(!format!("{wide:?}").is_empty());
+                let copy = wide.clone();
+                assert!(copy.expression == wide.expression);
+                drop((copy, wide));
+                // Alternating `and`/`or` and `not` chains are refused at the
+                // depth limit; the deepest that builds is measured exactly.
+                for alternate in [true, false] {
+                    let (mut deepest, mut levels) = (leaf(), 0);
+                    loop {
+                        let next = if !alternate {
+                            deepest.clone().not()
+                        } else if levels % 2 == 0 {
+                            deepest.clone().and(leaf())
+                        } else {
+                            deepest.clone().or(leaf())
+                        };
+                        match next {
+                            Ok(next) => {
+                                deepest = next;
+                                levels += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    assert_eq!(levels, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
+                    let clause = render(&deepest);
+                    assert_eq!(Cost::of(&clause).depth, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
+                    assert_eq!(deepest.cost.depth, Cost::of(&clause).depth);
+                    assert!(!format!("{deepest:?}").is_empty());
+                    let copy = deepest.clone();
+                    assert!(copy.expression == deepest.expression);
+                    drop((copy, deepest));
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn relation_policy_sql_is_budgeted_per_statement() {
+        let fragment = "x".repeat(READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES / 3);
+        let mut budget = RelationFilterBudget::new();
+        for _ in 0..3 {
+            budget
+                .charge::<crate::graphql::orm::DefaultBackend>(&fragment)
+                .unwrap();
+        }
+        assert!(
+            budget
+                .charge::<crate::graphql::orm::DefaultBackend>(&fragment)
+                .is_err()
+        );
+        let mut nodes = RelationFilterBudget::new();
+        assert_eq!((0..200).filter(|_| nodes.take_node()).count(), 128);
+    }
+
+    #[test]
     fn composition_cost_counts_subqueries_closures_and_placeholders() {
         // Parentheses in quoted names and plain groups are not subqueries.
         let clause = "EXISTS (SELECT 1 FROM (SELECT * FROM [a(b] WHERE (x = ?)) AS \"(SELECT\" \
                       WHERE 'it''s (SELECT' = (SELECT 2))";
         let cost = Cost::of(clause);
         assert_eq!(cost.nesting, 2);
+        // Three parentheses deep; SQL Server units 11 + 11 + 1.
+        assert_eq!((cost.depth, cost.units), (3, 23));
+        assert_eq!(Cost::of("NOT (NOT (x)) AND KNOT (y)").units, 4);
         assert_eq!(cost.closures, 0);
         assert_eq!(cost.bytes, clause.len() + 6);
         assert_eq!(Cost::of("(WITH c AS (SELECT 1) SELECT 1)").nesting, 2);
@@ -2362,6 +2624,17 @@ mod predicate_tests {
         };
         assert!(deep.check(DatabaseBackend::Mssql).is_err());
         assert!(deep.check(DatabaseBackend::Postgres).is_ok());
+        let weighted = Cost {
+            units: READ_PREDICATE_MSSQL_MAX_NESTING_UNITS + 1,
+            ..Cost::default()
+        };
+        assert!(weighted.check(DatabaseBackend::Mssql).is_err());
+        assert!(weighted.check(DatabaseBackend::Sqlite).is_ok());
+        let nested = Cost {
+            depth: READ_PREDICATE_MAX_EXPRESSION_DEPTH + 1,
+            ..Cost::default()
+        };
+        assert!(nested.check(DatabaseBackend::Postgres).is_err());
         let large = Cost {
             bytes: READ_PREDICATE_MAX_RENDERED_BYTES + 1,
             ..Cost::default()

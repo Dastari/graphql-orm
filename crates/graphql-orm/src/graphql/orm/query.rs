@@ -3022,31 +3022,63 @@ pub fn render_filter_expression(
             bind_values.extend(values.iter().cloned());
             rendered
         }
-        FilterExpression::And(filters) => filters
-            .iter()
-            .map(|filter| render_filter_expression(dialect, filter, next_index, bind_values))
-            .filter(|sql| !sql.is_empty())
-            .map(|sql| format!("({sql})"))
-            .collect::<Vec<_>>()
-            .join(" AND "),
+        FilterExpression::And(filters) => join_balanced(
+            filters
+                .iter()
+                .map(|filter| render_filter_expression(dialect, filter, next_index, bind_values))
+                .filter(|sql| !sql.is_empty())
+                .map(|sql| format!("({sql})"))
+                .collect(),
+            " AND ",
+        ),
         FilterExpression::Or(filters) => {
             if filters.is_empty() {
                 return "1 = 0".to_owned();
             }
-            filters
-                .iter()
-                .map(|filter| {
-                    let sql = render_filter_expression(dialect, filter, next_index, bind_values);
-                    if sql.is_empty() {
-                        "(1 = 1)".to_owned()
-                    } else {
-                        format!("({sql})")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ")
+            join_balanced(
+                filters
+                    .iter()
+                    .map(|filter| {
+                        let sql =
+                            render_filter_expression(dialect, filter, next_index, bind_values);
+                        if sql.is_empty() {
+                            "(1 = 1)".to_owned()
+                        } else {
+                            format!("({sql})")
+                        }
+                    })
+                    .collect(),
+                " OR ",
+            )
         }
     }
+}
+
+/// The most operands one rendered `AND` or `OR` chain joins. SQL parsers build
+/// `a OR b OR c` as a left-deep tree, so a long chain is as deep as it is long
+/// (SQLite refuses expressions over 1,000 deep). Longer lists are grouped in
+/// parenthesised chunks of this size, so parse depth grows with the logarithm
+/// of the length. Operand order, and therefore bind order, is unchanged.
+pub(crate) const FILTER_CHAIN_CHUNK: usize = 32;
+
+/// Grouping levels [`join_balanced`] adds around `operands` terms.
+pub(crate) fn filter_chain_levels(mut operands: usize) -> u32 {
+    let mut levels = 0;
+    while operands > FILTER_CHAIN_CHUNK {
+        operands = operands.div_ceil(FILTER_CHAIN_CHUNK);
+        levels += 1;
+    }
+    levels
+}
+
+fn join_balanced(mut parts: Vec<String>, separator: &str) -> String {
+    while parts.len() > FILTER_CHAIN_CHUNK {
+        parts = parts
+            .chunks(FILTER_CHAIN_CHUNK)
+            .map(|chunk| format!("({})", chunk.join(separator)))
+            .collect();
+    }
+    parts.join(separator)
 }
 
 fn render_select_query_inner(

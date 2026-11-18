@@ -29,15 +29,29 @@ Upgrade ORM and macros together. Generated code is unchanged. See
   - over 1 MiB of rendered SQL (`READ_PREDICATE_MAX_RENDERED_BYTES`), which in
     practice means deeply nested `not_related` or a very wide `or` of
     closures;
+  - over 256 levels of expression nesting
+    (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`), such as a long `not()` chain or
+    deeply alternating `and(or(and(...)))`. Folds of one kind are flattened
+    and do not count;
   - on SQL Server, over 80 nested subquery levels
-    (`READ_PREDICATE_MSSQL_MAX_NESTING`). For example, more than six
-    `related` around a 64-hop closure.
+    (`READ_PREDICATE_MSSQL_MAX_NESTING`), or over 900 weighted levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than six
+    `related` around a 64-hop closure;
+  - more than 1 MiB of policy SQL from the generated relation filters and
+    relation-count orderings of one statement
+    (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`).
 
   Such a policy is now refused with `AUTHORIZATION_MISCONFIGURED` when it is
-  built. Before, it rendered an oversized statement, ran for minutes or, on
-  SQL Server, failed every read with "nested too deeply". Flatten the
+  built or, for relation filters, when the request is prepared. Before, it
+  rendered an oversized statement, ran for minutes, overflowed the stack or,
+  on SQL Server, failed every read with "nested too deeply". Flatten the
   composition, use a shorter `related_closure_within` bound, or split the
   policy. Policies within the limits are unchanged.
+- **`and`/`or` folds no longer overflow the stack (#779). No action.** A
+  `p = p.or(q)?` fold over a few thousand terms used to build a predicate
+  whose render overflowed a 2 MiB stack and aborted the process. Folds are
+  now flattened, and long lists render in balanced groups. The rendered SQL
+  groups operands differently but means the same. Bind order is unchanged.
 
 ## 0.176.0 to 0.177.0: bulk-write target visibility and coded dependent-delete refusals
 

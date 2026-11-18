@@ -633,15 +633,105 @@ mod portable {
             let (deepest, wrappers) = deepest_wrapped_closure(target);
             let nesting = subquery_nesting(&rendered(&deepest));
             if B::DIALECT == DatabaseBackend::Mssql {
-                // SQL Server refuses about 100 levels at run time; the
-                // budget refuses past 80 when the policy is built.
+                // SQL Server refuses about 96 subquery levels at run time;
+                // the budget refuses past 80, or past its weighted units,
+                // when the policy is built.
                 assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
-                assert!(nesting + 2 > READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
                 assert!(wrappers >= 3, "{wrappers}");
             } else {
                 assert_eq!(wrappers, 40, "no nesting budget off SQL Server");
             }
         }
+    }
+
+    /// Apply `step` until it is refused; the last predicate that built and
+    /// how many steps it took.
+    fn grow(
+        mut predicate: ReadPredicate,
+        step: impl Fn(ReadPredicate, usize) -> async_graphql::Result<ReadPredicate>,
+    ) -> (ReadPredicate, usize) {
+        for steps in 0..100_000 {
+            match step(predicate.clone(), steps) {
+                Ok(next) => predicate = next,
+                Err(error) => {
+                    misconfigured(Err(error));
+                    return (predicate, steps);
+                }
+            }
+        }
+        panic!("the expression budget never refused");
+    }
+    fn negations(predicate: ReadPredicate) -> (ReadPredicate, usize) {
+        grow(predicate, |predicate, _| predicate.not())
+    }
+    fn alternations(predicate: ReadPredicate) -> (ReadPredicate, usize) {
+        grow(predicate, |predicate, steps| {
+            if steps % 2 == 0 {
+                predicate.and(score(ReadPredicateOp::Lt, 9))
+            } else {
+                predicate.or(id_below(3))
+            }
+        })
+    }
+
+    #[test]
+    fn expression_depth_is_budgeted_on_every_backend() {
+        assert_eq!(READ_PREDICATE_MAX_EXPRESSION_DEPTH, 256);
+        // Each not() and each alternation of and/or adds one level.
+        assert_eq!(negations(passes()).1, 256);
+        assert_eq!(alternations(passes()).1, 256);
+        // A fold of one kind stays one level deep, however long.
+        let mut fold = passes();
+        for _ in 0..20_000 {
+            fold = fold
+                .or(ReadPredicate::is_null::<B, ClosureNode>("id").unwrap())
+                .unwrap();
+        }
+        fold.not().unwrap();
+        // On SQL Server a negation weighs more next to subqueries: around a
+        // closure inside six relations, only a few fit.
+        let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
+        let (_, around) = negations(wrapped);
+        if B::DIALECT == DatabaseBackend::Mssql {
+            assert!(around < 50, "{around}");
+        } else {
+            assert!(around > 100, "{around}");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
+    async fn a_fifty_thousand_term_or_fold_builds_flat_and_runs() {
+        let (mut db, mut owner) = fixture().await;
+        let mut wide = ReadPredicate::is_not_null::<B, ClosureNode>("score").unwrap();
+        for _ in 0..50_000 {
+            wide = wide
+                .or(ReadPredicate::is_null::<B, ClosureNode>("id").unwrap())
+                .unwrap();
+        }
+        let expected = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14, 200, 201, 202, 203, 204, 205,
+        ];
+        assert_eq!(visible(&db, wide.clone()).await, expected);
+        db.set_row_policy(PredicatePolicy(wide));
+        let page = EntityQuery::<ClosureNode>::new()
+            .fetch_authorized_keyset(
+                &db,
+                None,
+                None,
+                KeysetPageInput {
+                    after: None,
+                    limit: Some(2),
+                    include_total_count: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.page_info.total_count, Some(expected.len() as i64));
+        owner.cleanup().unwrap();
     }
 
     #[tokio::test]
@@ -662,9 +752,30 @@ mod portable {
                 shapes.push((deepest_wrapped_closure(target).0, expected));
             }
         }
+        let mut shapes = shapes
+            .into_iter()
+            .map(|(policy, expected)| (chains(policy), Some(expected)))
+            .collect::<Vec<_>>();
+        // The deepest expressions that build, alone and around the deepest
+        // closure nesting: an even number of negations is the identity.
+        let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
+        for (base, expected) in [
+            (
+                passes(),
+                vec![1, 2, 4, 5, 6, 7, 8, 10, 200, 201, 202, 203, 205],
+            ),
+            (chains(wrapped), vec![1, 2, 5, 6, 7]),
+        ] {
+            let (negated, count) = negations(base.clone());
+            shapes.push((negated, (count % 2 == 0).then_some(expected)));
+            shapes.push((alternations(base).0, None));
+        }
         for (policy, expected) in shapes {
-            let policy = chains(policy);
-            assert_eq!(visible(&db, policy.clone()).await, expected);
+            let ids = visible(&db, policy.clone()).await;
+            if let Some(expected) = &expected {
+                assert_eq!(&ids, expected);
+            }
+            let expected = ids;
             db.set_row_policy(PredicatePolicy(policy));
             let page = EntityQuery::<ClosureNode>::new()
                 .fetch_authorized_keyset(
@@ -692,7 +803,10 @@ mod portable {
                 )
                 .await
                 .unwrap();
-            assert_eq!(connection.edges[0].node.id, expected[0]);
+            assert_eq!(
+                connection.edges.first().map(|edge| edge.node.id),
+                expected.first().copied()
+            );
             let groups = ClosureNode::aggregate(&db)
                 .count_rows()
                 .unwrap()

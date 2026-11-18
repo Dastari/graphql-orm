@@ -6009,8 +6009,11 @@ fn generate_graphql_operations_unfiltered(
     // any list/count/scan SQL, using the same public identities as field reads.
     let filter_read_authorization = quote! {
         let mut where_input = where_input;
+        // One budget per statement: where-input nodes, and the relation
+        // policy SQL that relation filters and count orderings add.
+        let mut __gom_statement_budget = ::graphql_orm::graphql::orm::RelationFilterBudget::new();
         if let Some(filter) = where_input.as_mut() {
-            filter.__gom_prepare_read(ctx, 0, &mut 128).await?;
+            filter.__gom_prepare_read(ctx, 0, &mut __gom_statement_budget).await?;
         }
 
         if let Some(filter) = where_input.as_ref() {
@@ -6027,7 +6030,7 @@ fn generate_graphql_operations_unfiltered(
         let mut order_by = order_by;
         if let Some(orders) = order_by.as_mut() {
             for order in orders.iter_mut() {
-                order.__gom_prepare_read(ctx).await?;
+                order.__gom_prepare_read(ctx, &mut __gom_statement_budget).await?;
             }
             ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
                 db,
