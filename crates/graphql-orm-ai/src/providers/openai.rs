@@ -2025,13 +2025,24 @@ struct OpenAiEventNormalizer {
     message_output_indices: BTreeMap<String, u32>,
     seen_call_ids: BTreeSet<String>,
     completed_calls: BTreeSet<String>,
+    /// Function-call events held until the response completes. An
+    /// output-limit stop can cut a request off, and a started call cannot be
+    /// withdrawn once it reaches the executor.
+    held_tool_events: Vec<ProviderEvent>,
     response_id: Option<String>,
     started: bool,
     completed: bool,
+    answered_text: bool,
     visible_bytes: usize,
     reasoning_summary_bytes: u64,
     wire_events: usize,
 }
+
+/// Appended when a response stopped at the output-token limit.
+const OUTPUT_LIMIT_NOTICE: &str =
+    "The response stopped at the output limit, so it may be incomplete.";
+/// Appended when that stop cut off one or more function-call requests.
+const DROPPED_TOOL_NOTICE: &str = " A tool request was cut off, so no tool was run.";
 
 impl OpenAiEventNormalizer {
     fn new(
@@ -2052,9 +2063,11 @@ impl OpenAiEventNormalizer {
             message_output_indices: BTreeMap::new(),
             seen_call_ids: BTreeSet::new(),
             completed_calls: BTreeSet::new(),
+            held_tool_events: Vec::new(),
             response_id: None,
             started: false,
             completed: false,
+            answered_text: false,
             visible_bytes: 0,
             reasoning_summary_bytes: 0,
             wire_events: 0,
@@ -2081,6 +2094,7 @@ impl OpenAiEventNormalizer {
             "response.output_text.delta" => {
                 let text = required_string(event, "delta")?;
                 self.record_visible_bytes(text.len())?;
+                self.answered_text |= !text.is_empty();
                 Ok(vec![ProviderEvent::TextDelta { text }])
             }
             "response.reasoning_summary_text.delta" => {
@@ -2110,10 +2124,12 @@ impl OpenAiEventNormalizer {
                     return Err(ProviderError::Rejected);
                 }
                 state.arguments.push_str(&delta);
-                Ok(vec![ProviderEvent::ToolArgumentsDelta {
-                    call_id: state.call_id.clone(),
-                    delta,
-                }])
+                self.held_tool_events
+                    .push(ProviderEvent::ToolArgumentsDelta {
+                        call_id: state.call_id.clone(),
+                        delta,
+                    });
+                Ok(Vec::new())
             }
             "response.function_call_arguments.done" => {
                 let item_id = required_string(event, "item_id")?;
@@ -2149,6 +2165,7 @@ impl OpenAiEventNormalizer {
             | "response.code_interpreter_call.completed"
             | "response.image_generation_call.completed" => self.complete_builtin(event),
             "response.completed" => self.response_completed(event),
+            "response.incomplete" => self.response_incomplete(event),
             _ => Ok(vec![ProviderEvent::Unknown {
                 event_type: event_type.to_owned(),
             }]),
@@ -2195,6 +2212,70 @@ impl OpenAiEventNormalizer {
         {
             return Err(ProviderError::Rejected);
         }
+        let terminal = self.terminal_events(response, response_id)?;
+        // Every request finished in a completed response, so the held
+        // requests are released in their original order.
+        let mut events = std::mem::take(&mut self.held_tool_events);
+        events.extend(terminal);
+        self.completed = true;
+        Ok(events)
+    }
+
+    /// Completes a response that stopped at the output-token limit.
+    ///
+    /// The provider spent the tokens and ended the response early, so the
+    /// turn completes metered with what was said and a visible notice that
+    /// counts against the visible-text bound. Every function-call request in
+    /// it is dropped and never dispatched: the stop can cut its arguments off,
+    /// and a stored response that holds such a call is never continued from,
+    /// because no tool result can follow a turn without tool calls. Any other
+    /// incomplete reason, such as a content filter, is refused, as is a
+    /// provider-run built-in call that did not finish.
+    fn response_incomplete(&mut self, event: &Value) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let response = event.get("response").ok_or(ProviderError::Rejected)?;
+        let response_id = required_string(response, "id")?;
+        if response_id != self.response_id.as_deref().ok_or(ProviderError::Rejected)?
+            || !response
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| super::http::echoed_model_matches(&self.expected_model, model))
+            || response.get("status").and_then(Value::as_str) != Some("incomplete")
+            || response
+                .pointer("/incomplete_details/reason")
+                .and_then(Value::as_str)
+                != Some("max_output_tokens")
+            || self
+                .builtin_calls
+                .values()
+                .any(|(call_id, _)| !self.completed_calls.contains(call_id))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let terminal = self.terminal_events(response, response_id)?;
+        let dropped = !self.function_calls.is_empty();
+        self.held_tool_events.clear();
+        let mut text = String::new();
+        if self.answered_text {
+            text.push_str("\n\n");
+        }
+        text.push_str(OUTPUT_LIMIT_NOTICE);
+        if dropped {
+            text.push_str(DROPPED_TOOL_NOTICE);
+        }
+        // The notice is visible text and counts against the same bound.
+        self.record_visible_bytes(text.len())?;
+        self.completed = true;
+        let mut events = vec![ProviderEvent::TextDelta { text }];
+        events.extend(terminal);
+        Ok(events)
+    }
+
+    /// Exact usage and the terminal event of a finished response.
+    fn terminal_events(
+        &self,
+        response: &Value,
+        response_id: String,
+    ) -> Result<[ProviderEvent; 2], ProviderError> {
         let usage = response.get("usage").ok_or(ProviderError::Rejected)?;
         let input_tokens = required_u64(usage, "input_tokens")?;
         let output_tokens = required_u64(usage, "output_tokens")?;
@@ -2207,8 +2288,7 @@ impl OpenAiEventNormalizer {
         {
             return Err(ProviderError::Rejected);
         }
-        self.completed = true;
-        Ok(vec![
+        Ok([
             ProviderEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -2277,10 +2357,11 @@ impl OpenAiEventNormalizer {
                     projection: binding.projection,
                 },
             );
-            return Ok(vec![ProviderEvent::ToolCallStarted {
+            self.held_tool_events.push(ProviderEvent::ToolCallStarted {
                 call_id,
                 tool_id: binding.tool_id,
-            }]);
+            });
+            return Ok(Vec::new());
         }
         if item_type == "message" {
             if item.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -2359,10 +2440,12 @@ impl OpenAiEventNormalizer {
         if !self.completed_calls.insert(state.call_id.clone()) {
             return Ok(Vec::new());
         }
-        Ok(vec![ProviderEvent::ToolCallCompleted {
-            call_id: state.call_id.clone(),
-            arguments,
-        }])
+        self.held_tool_events
+            .push(ProviderEvent::ToolCallCompleted {
+                call_id: state.call_id.clone(),
+                arguments,
+            });
+        Ok(Vec::new())
     }
 
     fn complete_builtin(&mut self, event: &Value) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -4708,5 +4791,342 @@ mod tests {
             openai_http_error(reqwest::StatusCode::UNAUTHORIZED),
             Some(ProviderError::CredentialUnavailable)
         ));
+    }
+
+    /// #749 fixtures: a normalizer offering one function tool.
+    fn incomplete_normalizer() -> OpenAiEventNormalizer {
+        OpenAiEventNormalizer::new(
+            "test-model".to_owned(),
+            Some(32),
+            BTreeMap::from([(
+                "records_read".to_owned(),
+                OpenAiToolBinding {
+                    tool_id: "records.read".to_owned(),
+                    projection: None,
+                },
+            )]),
+            BTreeSet::new(),
+            None,
+        )
+    }
+
+    fn incomplete_event(reason: &str, output_tokens: u64) -> Value {
+        json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp-cut",
+                "model": "test-model",
+                "status": "incomplete",
+                "incomplete_details": {"reason": reason},
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": output_tokens,
+                    "input_tokens_details": {"cached_tokens": 2}
+                }
+            }
+        })
+    }
+
+    fn normalize_sequence(
+        normalizer: &mut OpenAiEventNormalizer,
+        events: &[Value],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let mut normalized = Vec::new();
+        for event in events {
+            normalized.extend(normalizer.normalize(event)?);
+        }
+        normalizer.finish()?;
+        Ok(normalized)
+    }
+
+    fn visible_text(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn created_event() -> Value {
+        json!({
+            "type": "response.created",
+            "response": {"id": "resp-cut", "model": "test-model"}
+        })
+    }
+
+    #[test]
+    fn an_output_limit_stop_completes_metered_with_a_visible_notice() {
+        let events = normalize_sequence(
+            &mut incomplete_normalizer(),
+            &[
+                created_event(),
+                json!({"type": "response.output_text.delta", "delta": "partial answer"}),
+                incomplete_event("max_output_tokens", 32),
+            ],
+        )
+        .expect("an output-limit stop completes the turn");
+        let text = visible_text(&events);
+        assert!(text.starts_with("partial answer\n\n"), "{text:?}");
+        assert!(text.contains("may be incomplete"), "{text:?}");
+        assert!(!text.contains("no tool was run"), "{text:?}");
+        assert_eq!(
+            events[events.len() - 2..],
+            [
+                ProviderEvent::Usage {
+                    input_tokens: 7,
+                    output_tokens: 32,
+                    cached_input_tokens: 2,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some("resp-cut".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_function_call_cut_off_by_the_output_limit_is_never_dispatched() {
+        // One call whose arguments finished and one cut off mid-arguments:
+        // the turn did not finish, so neither may run.
+        let events = normalize_sequence(
+            &mut incomplete_normalizer(),
+            &[
+                created_event(),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": "records_read"}
+                }),
+                json!({"type": "response.function_call_arguments.delta", "item_id": "fc-1", "delta": "{\"id\":1}"}),
+                json!({"type": "response.function_call_arguments.done", "item_id": "fc-1", "arguments": "{\"id\":1}"}),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 1,
+                    "item": {"type": "function_call", "id": "fc-2", "call_id": "call-2", "name": "records_read"}
+                }),
+                json!({"type": "response.function_call_arguments.delta", "item_id": "fc-2", "delta": "{\"id\":"}),
+                incomplete_event("max_output_tokens", 32),
+            ],
+        )
+        .expect("a cut-off tool turn completes without the tool");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ToolCallStarted { .. }
+                    | ProviderEvent::ToolArgumentsDelta { .. }
+                    | ProviderEvent::ToolCallCompleted { .. }
+            )),
+            "{events:?}"
+        );
+        let text = visible_text(&events);
+        assert!(text.contains("may be incomplete"), "{text:?}");
+        assert!(text.contains("no tool was run"), "{text:?}");
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted {
+                response_id: Some(id)
+            }) if id == "resp-cut"
+        ));
+    }
+
+    #[test]
+    fn complete_function_calls_are_released_in_order_only_on_completion() {
+        let mut normalizer = incomplete_normalizer();
+        let mut events = Vec::new();
+        for event in [
+            created_event(),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": "records_read"}
+            }),
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc-1", "delta": "{\"id\":1}"}),
+            json!({"type": "response.function_call_arguments.done", "item_id": "fc-1", "arguments": "{\"id\":1}"}),
+        ] {
+            events.extend(normalizer.normalize(&event).expect("event normalizes"));
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ToolCallStarted { .. })),
+            "a request is held until the response completes: {events:?}"
+        );
+        events.extend(
+            normalizer
+                .normalize(&json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-cut",
+                        "model": "test-model",
+                        "status": "completed",
+                        "usage": {"input_tokens": 7, "output_tokens": 5}
+                    }
+                }))
+                .expect("a complete tool turn completes"),
+        );
+        normalizer.finish().expect("stream finished");
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ProviderEvent::ResponseStarted { .. },
+                ProviderEvent::ToolCallStarted { call_id: started, tool_id },
+                ProviderEvent::ToolArgumentsDelta { call_id: delta, .. },
+                ProviderEvent::ToolCallCompleted { call_id: completed, arguments },
+                ProviderEvent::Usage { output_tokens: 5, .. },
+                ProviderEvent::ResponseCompleted { .. },
+            ] if started == "call-1"
+                && delta == "call-1"
+                && completed == "call-1"
+                && tool_id == "records.read"
+                && arguments == &json!({"id": 1})
+        ));
+    }
+
+    #[test]
+    fn other_incomplete_responses_and_overspent_usage_are_refused() {
+        for reason in ["content_filter", "unknown_reason"] {
+            assert!(matches!(
+                normalize_sequence(
+                    &mut incomplete_normalizer(),
+                    &[created_event(), incomplete_event(reason, 3)],
+                ),
+                Err(ProviderError::Rejected)
+            ));
+        }
+        // The output-limit stop still enforces the requested token bound.
+        assert!(matches!(
+            normalize_sequence(
+                &mut incomplete_normalizer(),
+                &[created_event(), incomplete_event("max_output_tokens", 33)],
+            ),
+            Err(ProviderError::Rejected)
+        ));
+        // A provider-run built-in call that did not finish is not metered by
+        // guesswork; the turn is refused as before.
+        let mut builtin = OpenAiEventNormalizer::new(
+            "test-model".to_owned(),
+            Some(32),
+            BTreeMap::new(),
+            BTreeSet::from(["web_search".to_owned()]),
+            None,
+        );
+        assert!(matches!(
+            normalize_sequence(
+                &mut builtin,
+                &[
+                    created_event(),
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {"type": "web_search_call", "id": "ws-1"}
+                    }),
+                    incomplete_event("max_output_tokens", 3),
+                ],
+            ),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn the_incomplete_notice_counts_against_the_visible_text_bound() {
+        let mut normalizer = incomplete_normalizer();
+        normalizer
+            .normalize(&created_event())
+            .expect("response starts");
+        normalizer.visible_bytes = MAXIMUM_RESPONSES_VISIBLE_BYTES - 8;
+        assert!(matches!(
+            normalizer.normalize(&incomplete_event("max_output_tokens", 3)),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    async fn incomplete_stream(
+        store_responses: bool,
+        continuation_mode: crate::ModelContinuationMode,
+    ) -> Vec<ProviderEvent> {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cut\",\"model\":\"test-model\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_cut\",\"model\":\"test-model\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":32}}}\n\n"
+        );
+        let (endpoint, server) = mock_server(sse).await;
+        let reference = SecretRef::parse("openai/test").expect("reference should parse");
+        let mut config = OpenAiProviderConfig::new(reference.clone());
+        config.store_responses = store_responses;
+        let provider = OpenAiProvider::for_loopback_test(
+            config,
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("provider should build");
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec!["Respond briefly.".to_owned()],
+            input: vec![ModelInputBlock::Text {
+                text: "synthetic hello".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode,
+            tools: vec![],
+            builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(32),
+        };
+        let estimated_bytes = request.conservative_egress_bytes();
+        let context = if store_responses {
+            background_context("test-model", estimated_bytes)
+        } else {
+            context("test-model", estimated_bytes)
+        };
+        let events = provider
+            .stream(request.into(), context)
+            .await
+            .expect("stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("an output-limit stop completes the stream");
+        server.await.expect("server task should finish");
+        events
+    }
+
+    #[tokio::test]
+    async fn an_output_limit_stop_completes_in_both_continuation_modes() {
+        // Provider-retained: the stored response keeps its ID, so the
+        // stored-response ledger records it for deletion.
+        let stored = incomplete_stream(true, crate::ModelContinuationMode::ProviderRetained).await;
+        assert!(visible_text(&stored).contains("may be incomplete"));
+        assert!(stored.contains(&ProviderEvent::Usage {
+            input_tokens: 3,
+            output_tokens: 32,
+            cached_input_tokens: 0,
+        }));
+        assert_eq!(
+            stored.last(),
+            Some(&ProviderEvent::ResponseCompleted {
+                response_id: Some("resp_cut".to_owned())
+            })
+        );
+        // Stateless replay surfaces no response reference at all.
+        let stateless =
+            incomplete_stream(false, crate::ModelContinuationMode::StatelessReplay).await;
+        assert!(visible_text(&stateless).contains("may be incomplete"));
+        assert_eq!(
+            stateless.last(),
+            Some(&ProviderEvent::ResponseCompleted { response_id: None })
+        );
+        assert!(!stateless.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ResponseStarted {
+                response_id: Some(_)
+            }
+        )));
     }
 }

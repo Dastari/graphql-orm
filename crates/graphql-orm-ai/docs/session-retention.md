@@ -455,7 +455,12 @@ a response from a provider that sends `store: false` is never recorded.
   call `AiProviderCallExecutor` directly and persist through the checkpoint
   and output services);
 - a background submission acknowledged with `store: true`, at its terminal
-  commit, whatever its terminal status.
+  commit, whatever its terminal status;
+- a streamed turn that stopped at the output limit (`response.incomplete` with
+  `max_output_tokens`, since AI 0.149.0). It returns a result like any other
+  turn, so its stored response is recorded and deleted with the session. It
+  may hold a cut-off function call; no later turn continues from it (see
+  [OpenAI output-limit stops](read-only-tool-loop.md#openai-output-limit-stops)).
 
 Recording is idempotent, so a response met on several of these paths keeps
 one row. The coordinator record is refused with `InvalidInput` when the
@@ -468,7 +473,8 @@ releases it at the purge cutoff.
 **Not recorded:**
 
 - a turn whose stream fails before the executor returns a result: a rejected
-  or malformed stream, a transport failure, a failure in the executor's own
+  or malformed stream (including any incomplete response other than an
+  output-limit stop), a transport failure, a failure in the executor's own
   post-stream checks, or a lease lost while the call is still in flight. The
   response may exist at the provider, but the crate never received a complete
   result for it;

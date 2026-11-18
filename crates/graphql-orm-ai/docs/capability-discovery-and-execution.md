@@ -494,6 +494,14 @@ recovery-required turns authoritative after browser reconnect, service restart
 or HMR. `reset_required` means retention or a configured bootstrap bound
 prevents exact reconstruction and the client must discard older derived state.
 
+The tool-call window for the selected runs is read whole, up to the requested
+`toolCallLimit` (at most 500), in pages no larger than the database's maximum
+page limit. Tool calls set `reset_required` only when the selected runs hold
+more calls than that requested window. Before AI 0.149.0 the window was
+clamped to the page maximum (100 by default), so a conversation with more tool
+calls than that always reported `reset_required`. The terminal-run window still
+follows the page maximum and does not set `reset_required`.
+
 ## Host readiness and recovery
 
 The existing recovery APIs are sufficient; readiness is a host sequence, not

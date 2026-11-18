@@ -29,6 +29,16 @@ The initial adapter supports:
 - an explicit maximum output-token request; and
 - authoritative `prompt_eval_count` and `eval_count` usage.
 
+Tool requests are held until the final `done` chunk. A `done_reason` of
+`length` means the model spent its output tokens and stopped early. The turn
+completes with its usage settled and a visible notice that the response
+stopped at the output limit and may be incomplete; the notice counts against
+the visible-text bound. A tool request in that turn is dropped and never
+dispatched, and the notice says that no tool was run. Any other or missing
+`done_reason` completes the turn as before and releases the held requests in
+order. Ollama keeps no response state, so there is no stored response to
+continue from or delete.
+
 It sends `think: false` and never emits or persists Ollama thinking content.
 It rejects provider built-ins, non-image files, provider-retained response
 continuation, arbitrary roles, and model-authored instructions. Custom tools
