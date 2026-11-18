@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -57,14 +57,25 @@ except for the per-backend path splitting below.
   bracketed and work. Every name SQL Server accepted bare keeps its exact
   text, so existing migration plans, their hashes and stored statement
   fingerprints are unchanged.
-- **SQLite quotes names that start with a byte-order mark. No action.** Such a
-  name previously lost its first character.
 - **Introspection reads catalogue names literally (#782). No action.** SQL
   Server introspection quotes the raw names it reads back from the catalogue
   unconditionally, and SQLite and PostgreSQL introspection never pass such a
   name through as SQL text, so a table literally named
   `[ledger]` is reported, and its indexes and foreign keys read, as that
   table rather than as `ledger`. Ordinary names are reported as before.
+
+## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
+
+Upgrade ORM and macros together.
+
+- **SQLite names that start with U+FEFF (#725). Action needed** only if a
+  SQLite entity, column or index name declared in your schema begins with a
+  byte-order mark (U+FEFF). It is now delimited, so it names the declared
+  object; before, SQLite dropped the mark and used the rest of the name. If an
+  existing database holds such an object under the shortened name, rename it
+  to the declared name. Every other name renders as before.
+- **Property suites (#725). No action.** The new tests change no API or
+  stored data.
 
 ## 0.176.0 to 0.177.0: bulk-write target visibility and coded dependent-delete refusals
 

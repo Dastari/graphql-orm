@@ -141,7 +141,9 @@ NON_IMAGE_TEST_LITERALS.update(
                                                                    'dep:graphql-orm-router',
                                                                    'dep:tempfile'],
  # Storage keys with the SMB stream separator, refused by key validation.
- 'crates/graphql-orm-storage/tests/blob.rs': ['a:b', 'dir/file:stream']}
+ 'crates/graphql-orm-storage/tests/blob.rs': ['a:b', 'dir/file:stream'],
+ # A portable-key property regression: `:` is refused on SMB and Windows.
+ 'crates/graphql-orm-storage/tests/key_properties.rs': ['a:b']}
 )
 TEST_IMAGE = re.compile('(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)(?::[0-9]+)?/)*[a-z0-9]+(?:[._-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@sha256:[a-f0-9]{64})?')
 

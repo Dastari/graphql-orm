@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,6 +14,10 @@ Version 0.180.0 fixes SQL identifier quoting: only exactly one well-formed delim
 is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
 writes a name bare only under its regular-identifier rule (#783).
 See the [migration guide](../../MIGRATION.md#01790-to-01800-sql-identifier-quoting).
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
+read as whitespace, and adds seeded property suites for identifier quoting on every backend
+and for canonical JSON defaults ([#725](https://github.com/Dastari/graphql-orm/issues/725)).
 
 Version 0.177.0 adds the opt-in
 `DatabaseBuilder::narrow_bulk_writes_to_read_visibility`, which narrows the

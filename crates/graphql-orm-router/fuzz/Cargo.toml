@@ -1,0 +1,42 @@
+# cargo-fuzz targets for the router's bearer-authentication boundary (#726).
+# Not a workspace member and never published; see README.md.
+[package]
+name = "graphql-orm-router-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+graphql-orm-router = { path = ".." }
+libfuzzer-sys = "0.4.13"
+
+[[bin]]
+name = "bearer_structured"
+path = "fuzz_targets/bearer_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bearer_raw"
+path = "fuzz_targets/bearer_raw.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwks_document"
+path = "fuzz_targets/jwks_document.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace, so the repository workspace and lockfile are unchanged.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1

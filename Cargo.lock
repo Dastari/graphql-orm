@@ -3257,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.16.4"
+version = "0.16.5"
 dependencies = [
  "agql-auth",
  "arc-swap",
@@ -3272,6 +3272,7 @@ dependencies = [
  "jsonwebtoken 11.0.0",
  "ntex",
  "opentelemetry",
+ "proptest",
  "reqwest 0.13.4",
  "rustix",
  "serde",
@@ -3297,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-storage"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "async-trait",
  "aws-credential-types",
@@ -3310,6 +3311,7 @@ dependencies = [
  "md-5 0.10.6",
  "picky",
  "picky-krb",
+ "proptest",
  "rustix",
  "secrecy",
  "serde",

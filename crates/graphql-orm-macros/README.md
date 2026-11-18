@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,8 +12,11 @@ supersedes: []
 
 Version 0.180.0 passes a declared identifier through unchanged only when it is exactly one
 well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
-delimited, and quotes SQLite names that start with a byte-order mark (#782). Generated code is
-otherwise unchanged.
+delimited or contains NUL, and splits declared paths with each backend's own delimiters (#782).
+Generated code is otherwise unchanged.
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
+the runtime renderer; every other name is generated as before.
 
 Version 0.177.0 gives the root delete of a `dependent_deletes` entity the
 same `errorCode` as a direct delete under `mutation_error_codes` (#763), and
