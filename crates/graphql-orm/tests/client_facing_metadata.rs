@@ -539,7 +539,13 @@ fn interpretation_fingerprint_is_stable_and_follows_its_inputs() {
         assert_eq!(captured["default_sort"], default_sort, "{captured}");
         let captured_keys = captured["keys"].as_array().unwrap();
         assert_eq!(captured_keys.len(), keys.len(), "{captured}");
-        assert_eq!(captured_keys[0][0], "id", "{captured}");
+        // The public key name follows the build's field case (`id` or `Id`).
+        assert!(
+            captured_keys[0][0]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("id")),
+            "{captured}"
+        );
         assert!(
             captured_keys[0][1]
                 .as_str()
