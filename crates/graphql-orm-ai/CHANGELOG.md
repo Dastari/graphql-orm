@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.150.0
+
+- Reuse compiled registered-tool argument validators and share ORM conversion
+  helpers, lifecycle state handling and SSE framing. Approval digests, stored
+  state strings, API errors and the database schema are unchanged.
+- Emit a content-free ORM error code at debug level when a shared mapper returns
+  a persistence failure.
+
 ## Unreleased - 0.149.0
 
 - **Providers (OpenAI Responses, also xAI and OpenAI-compatible routes):** a streamed `response.incomplete` with `incomplete_details.reason = "max_output_tokens"` completes the turn with exact usage and a visible notice that the response may be incomplete, instead of ending the stream with no usage after the tokens were spent. Function-call events are held until the response finishes; a request in a turn cut off this way is dropped and never dispatched, including one whose arguments had finished, and the notice says no tool was run. The notice counts against the visible-text bound. Other incomplete reasons, and a provider-run built-in call that did not finish, stay refused. Fixes #749.

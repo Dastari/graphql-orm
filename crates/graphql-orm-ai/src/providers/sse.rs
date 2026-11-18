@@ -19,7 +19,21 @@ impl SseDecoder {
 
     /// Appends bytes and returns every complete `data:` payload. `[DONE]` and
     /// comment-only frames yield nothing.
+    #[cfg(any(
+        feature = "provider-openai-core",
+        feature = "provider-xai-core",
+        feature = "provider-openai-compatible-core",
+        feature = "provider-chat-completions-core"
+    ))]
     pub(super) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, ProviderError> {
+        self.push_frames(bytes, decode_sse_frame)
+    }
+
+    pub(super) fn push_frames<T>(
+        &mut self,
+        bytes: &[u8],
+        decode: impl Fn(&[u8]) -> Result<Option<T>, ProviderError>,
+    ) -> Result<Vec<T>, ProviderError> {
         self.buffer.extend_from_slice(bytes);
         if self.buffer.len() > self.maximum_event_bytes {
             return Err(ProviderError::Rejected);
@@ -28,7 +42,7 @@ impl SseDecoder {
         while let Some((position, delimiter_length)) = find_sse_delimiter(&self.buffer) {
             let frame = self.buffer.drain(..position).collect::<Vec<_>>();
             self.buffer.drain(..delimiter_length);
-            if let Some(payload) = decode_sse_frame(&frame)? {
+            if let Some(payload) = decode(&frame)? {
                 payloads.push(payload);
             }
         }
@@ -58,6 +72,12 @@ fn find_sse_delimiter(bytes: &[u8]) -> Option<(usize, usize)> {
         })
 }
 
+#[cfg(any(
+    feature = "provider-openai-core",
+    feature = "provider-xai-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
+))]
 fn decode_sse_frame(frame: &[u8]) -> Result<Option<String>, ProviderError> {
     let frame = std::str::from_utf8(frame).map_err(|_| ProviderError::Rejected)?;
     let mut data = String::new();

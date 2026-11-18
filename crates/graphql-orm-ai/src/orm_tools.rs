@@ -9,11 +9,14 @@ pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
 };
 
+use crate::orm_support::map_orm;
+use crate::persisted_state::ToolCallState;
+use crate::sha256::valid_sha256;
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReferenceKind, ResolvedPrincipal};
 use async_trait::async_trait;
-use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::errors::OrmPublicError;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::Duration;
@@ -348,6 +351,33 @@ impl AiApplicationToolCallState {
             Self::EgressAuditFailed => "egress_audit_failed",
         }
     }
+}
+
+struct ToolExecutionOutcome {
+    state: AiApplicationToolCallState,
+    model_output: serde_json::Value,
+    classification: DataClassification,
+    source_trust: AiSourceTrust,
+    authorization_code: String,
+    policy_version: Option<String>,
+    authorization_state_digest: Option<String>,
+    application_audit_ref: Option<String>,
+    failure_code: Option<crate::AiApplicationToolFailureCode>,
+}
+
+struct ApprovedExecutionOutcome {
+    model_output: serde_json::Value,
+    classification: DataClassification,
+    source_trust: AiSourceTrust,
+    failure_code: Option<crate::AiApplicationToolFailureCode>,
+    policy_version: Option<String>,
+    authorization_digest: Option<String>,
+    audit_ref: Option<String>,
+}
+
+struct BrokerToolOutcome {
+    execution: ToolExecutionOutcome,
+    disclosure_fingerprint: String,
 }
 
 /// Protected and fenced application-tool outcome.
@@ -1550,46 +1580,53 @@ impl OrmAiApplicationToolCallService {
         let outcome = self
             .run_capability_broker(lease, &context, id, provider_result, delivery, operation)
             .await;
-        let (
-            mut state,
-            mut model_output,
-            mut classification,
-            mut source_trust,
-            mut authorization_code,
-            mut policy_version,
-            mut authorization_state_digest,
-            mut application_audit_ref,
-            mut failure_code,
+        let BrokerToolOutcome {
+            execution:
+                ToolExecutionOutcome {
+                    mut state,
+                    mut model_output,
+                    mut classification,
+                    mut source_trust,
+                    mut authorization_code,
+                    mut policy_version,
+                    mut authorization_state_digest,
+                    mut application_audit_ref,
+                    mut failure_code,
+                },
             mut disclosure_fingerprint,
-        ) = match outcome {
-            Ok(success) => (
-                AiApplicationToolCallState::Completed,
-                success.output,
-                success.classification,
-                success.source_trust,
-                "allowed".to_owned(),
-                success.policy_version,
-                success.authorization_state_digest,
-                success.application_audit_ref,
-                None,
-                success.disclosure_fingerprint,
-            ),
+        } = match outcome {
+            Ok(success) => BrokerToolOutcome {
+                execution: ToolExecutionOutcome {
+                    state: AiApplicationToolCallState::Completed,
+                    model_output: success.output,
+                    classification: success.classification,
+                    source_trust: success.source_trust,
+                    authorization_code: "allowed".to_owned(),
+                    policy_version: success.policy_version,
+                    authorization_state_digest: success.authorization_state_digest,
+                    application_audit_ref: success.application_audit_ref,
+                    failure_code: None,
+                },
+                disclosure_fingerprint: success.disclosure_fingerprint,
+            },
             Err(error) => {
                 let code = crate::classify_safe_application_tool_error(&error.error)
                     .unwrap_or(crate::AiApplicationToolFailureCode::ToolUnavailable);
                 let (output, fingerprint) = error.model_failure(code);
-                (
-                    AiApplicationToolCallState::ExecutionFailed,
-                    output,
-                    DataClassification::Public,
-                    AiSourceTrust::TrustedRuntime,
-                    code.as_str().to_owned(),
-                    None,
-                    None,
-                    None,
-                    Some(code),
-                    fingerprint,
-                )
+                BrokerToolOutcome {
+                    execution: ToolExecutionOutcome {
+                        state: AiApplicationToolCallState::ExecutionFailed,
+                        model_output: output,
+                        classification: DataClassification::Public,
+                        source_trust: AiSourceTrust::TrustedRuntime,
+                        authorization_code: code.as_str().to_owned(),
+                        policy_version: None,
+                        authorization_state_digest: None,
+                        application_audit_ref: None,
+                        failure_code: Some(code),
+                    },
+                    disclosure_fingerprint: fingerprint,
+                }
             }
         };
         let mut output_bytes =
@@ -2464,7 +2501,7 @@ impl OrmAiApplicationToolCallService {
         .await;
         let execution = execution.unwrap_or(Err(AiError::ToolExecutionFailed));
         let lease = &renewed_lease;
-        let (
+        let ToolExecutionOutcome {
             state,
             model_output,
             classification,
@@ -2474,18 +2511,18 @@ impl OrmAiApplicationToolCallService {
             authorization_state_digest,
             application_audit_ref,
             failure_code,
-        ) = match execution {
-            Ok(result) => (
-                AiApplicationToolCallState::Completed,
-                result.model_output(),
-                result.disclosure().maximum_classification,
-                AiSourceTrust::ResolverResult,
-                "allowed".to_owned(),
-                Some(result.policy_version().to_owned()),
-                Some(result.authorization_state_digest().to_owned()),
-                result.response().application_audit_ref.clone(),
-                None,
-            ),
+        } = match execution {
+            Ok(result) => ToolExecutionOutcome {
+                state: AiApplicationToolCallState::Completed,
+                model_output: result.model_output(),
+                classification: result.disclosure().maximum_classification,
+                source_trust: AiSourceTrust::ResolverResult,
+                authorization_code: "allowed".to_owned(),
+                policy_version: Some(result.policy_version().to_owned()),
+                authorization_state_digest: Some(result.authorization_state_digest().to_owned()),
+                application_audit_ref: result.response().application_audit_ref.clone(),
+                failure_code: None,
+            },
             Err(ref error)
                 if matches!(mode, UnapprovedToolMode::AutomaticMutation)
                     && !matches!(error, AiError::ToolRejectedBeforeExecution(_)) =>
@@ -2501,17 +2538,17 @@ impl OrmAiApplicationToolCallService {
             Err(error) => {
                 let code = crate::classify_safe_application_tool_error(&error)
                     .unwrap_or(crate::AiApplicationToolFailureCode::ToolUnavailable);
-                (
-                    AiApplicationToolCallState::ExecutionFailed,
-                    crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
-                    DataClassification::Public,
-                    AiSourceTrust::TrustedRuntime,
-                    code.as_str().to_owned(),
-                    None,
-                    None,
-                    None,
-                    Some(code),
-                )
+                ToolExecutionOutcome {
+                    state: AiApplicationToolCallState::ExecutionFailed,
+                    model_output: crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                    classification: DataClassification::Public,
+                    source_trust: AiSourceTrust::TrustedRuntime,
+                    authorization_code: code.as_str().to_owned(),
+                    policy_version: None,
+                    authorization_state_digest: None,
+                    application_audit_ref: None,
+                    failure_code: Some(code),
+                }
             }
         };
         let provenance = provenance.map(|origin| {
@@ -3763,7 +3800,7 @@ impl OrmAiConsequentialToolCallService {
             .ok_or(AiError::NotFound)?;
             if call.run_id != lease.run_id().0
                 || call.lease_generation != lease.lease_generation()
-                || call.state != "waiting_approval"
+                || call.state != ToolCallState::WaitingApproval.as_str()
                 || call.approval_id != Some(approval_id.0)
                 || call.completed_at.is_some()
                 || call.protected_result.is_some()
@@ -4113,7 +4150,7 @@ impl OrmAiConsequentialToolCallService {
                     .run_with_lease_heartbeat(&running_lease, Box::pin(approved_execution)),
             )
             .await;
-            let (
+            let ApprovedExecutionOutcome {
                 model_output,
                 classification,
                 source_trust,
@@ -4121,27 +4158,27 @@ impl OrmAiConsequentialToolCallService {
                 policy_version,
                 authorization_digest,
                 audit_ref,
-            ) = match execution {
-                Ok(Ok(result)) => (
-                    result.model_output(),
-                    result.disclosure().maximum_classification,
-                    AiSourceTrust::ResolverResult,
-                    None,
-                    Some(result.policy_version().to_owned()),
-                    Some(result.authorization_state_digest().to_owned()),
-                    result.response().application_audit_ref.clone(),
-                ),
+            } = match execution {
+                Ok(Ok(result)) => ApprovedExecutionOutcome {
+                    model_output: result.model_output(),
+                    classification: result.disclosure().maximum_classification,
+                    source_trust: AiSourceTrust::ResolverResult,
+                    failure_code: None,
+                    policy_version: Some(result.policy_version().to_owned()),
+                    authorization_digest: Some(result.authorization_state_digest().to_owned()),
+                    audit_ref: result.response().application_audit_ref.clone(),
+                },
                 Ok(Err(AiError::ToolRejectedBeforeExecution(proof))) => {
                     let code = crate::AiApplicationToolFailureCode::NotStarted(proof.reason());
-                    (
-                        crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
-                        DataClassification::Public,
-                        AiSourceTrust::TrustedRuntime,
-                        Some(code),
-                        Some(binding.policy_version.clone()),
-                        Some(binding.authorization_state_digest.clone()),
-                        None,
-                    )
+                    ApprovedExecutionOutcome {
+                        model_output: crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                        classification: DataClassification::Public,
+                        source_trust: AiSourceTrust::TrustedRuntime,
+                        failure_code: Some(code),
+                        policy_version: Some(binding.policy_version.clone()),
+                        authorization_digest: Some(binding.authorization_state_digest.clone()),
+                        audit_ref: None,
+                    }
                 }
                 Ok(Err(_)) | Err(_) => {
                     return self
@@ -4648,7 +4685,7 @@ fn build_approval_binding(
     preview: &AiCanonicalActionPreview,
 ) -> Result<AiApprovalBinding, AiError> {
     if preauthorization.tool_fingerprint() != descriptor.fingerprint
-        || !valid_sha256_fingerprint(binding_fingerprint)
+        || !valid_sha256(binding_fingerprint)
     {
         return Err(AiError::Conflict);
     }
@@ -4674,13 +4711,6 @@ fn build_approval_binding(
     };
     binding.validate(preview)?;
     Ok(binding)
-}
-
-fn valid_sha256_fingerprint(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn validate_session_binding(
@@ -4900,23 +4930,6 @@ const fn risk_value(value: AiToolRisk) -> &'static str {
         AiToolRisk::NonIdempotentWrite => "non_idempotent_write",
         AiToolRisk::HighImpact => "high_impact",
         AiToolRisk::Secret => "secret",
-    }
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 

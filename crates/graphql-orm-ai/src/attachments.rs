@@ -1,5 +1,6 @@
 //! Owner-isolated attachment intake, scanning, and GraphQL contracts.
 
+use crate::sha256::valid_sha256;
 use std::fmt;
 use std::sync::Arc;
 
@@ -896,13 +897,6 @@ pub(crate) fn valid_mime(value: &str) -> bool {
                 || byte.is_ascii_digit()
                 || matches!(byte, b'/' | b'+' | b'-' | b'.')
         })
-}
-
-pub(crate) fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(crate) fn valid_safe_reference(value: &str, maximum: usize) -> bool {

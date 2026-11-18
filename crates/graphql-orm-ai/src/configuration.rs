@@ -103,6 +103,20 @@ pub trait AiProviderEndpointPolicy: Send + Sync {
     }
 }
 
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "provider-anthropic-core",
+    feature = "provider-ollama-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
+))]
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderEndpointError {
+    InvalidUrl,
+    UnsafeShape,
+}
+
 /// Parses the endpoint shape shared by every configurable provider: `http`
 /// or `https`, a host, and no user information, query or fragment. Path rules
 /// stay with each caller.
@@ -114,8 +128,8 @@ pub trait AiProviderEndpointPolicy: Send + Sync {
     feature = "provider-openai-compatible-core",
     feature = "provider-chat-completions-core"
 ))]
-pub(crate) fn parse_provider_endpoint(value: &str) -> Option<url::Url> {
-    let mut url = url::Url::parse(value).ok()?;
+pub(crate) fn parse_provider_endpoint(value: &str) -> Result<url::Url, ProviderEndpointError> {
+    let mut url = url::Url::parse(value).map_err(|_| ProviderEndpointError::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -123,11 +137,11 @@ pub(crate) fn parse_provider_endpoint(value: &str) -> Option<url::Url> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return None;
+        return Err(ProviderEndpointError::UnsafeShape);
     }
     url.set_query(None);
     url.set_fragment(None);
-    Some(url)
+    Ok(url)
 }
 
 /// Returns whether an endpoint names a loopback host.
