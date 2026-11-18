@@ -489,7 +489,37 @@ pub enum StaticWriteResult<T> {
     /// The direct operation succeeded or is ready to apply.
     Ready(T),
     /// The direct operation returned a false mutation result and public message.
-    Rejected(String),
+    Rejected(StaticRejection),
+}
+/// A direct mutation result's public refusal: its message, and its code when
+/// the entity reports `mutation_error_codes`.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StaticRejection {
+    /// The public message.
+    pub message: String,
+    /// The payload's `errorCode`, if the result carried one.
+    pub code: Option<String>,
+}
+impl StaticRejection {
+    /// A refusal with this message and optional code.
+    pub fn new(message: impl Into<String>, code: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            code,
+        }
+    }
+    /// The refusal for a missing (or hidden) root row.
+    fn not_found() -> Self {
+        Self::new(
+            "Entity not found",
+            Some(
+                crate::graphql::errors::OrmErrorCode::NotFound
+                    .as_str()
+                    .to_owned(),
+            ),
+        )
+    }
 }
 impl<T> StaticWriteResult<T> {
     fn dependent(self) -> Result<T> {
@@ -636,7 +666,7 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         ctx: &Context<'_>,
         key: SqlValue,
         expected: Option<i64>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<StaticRejection>> {
         let table = T::TABLE_NAME;
         // A physical table may have multiple GraphQL views. Never substitute
         // another view's policies, assurance, hooks or event type for this root.
@@ -669,7 +699,10 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         table: &str,
         key: SqlValue,
         expected: Option<i64>,
-    ) -> Result<(Option<String>, Vec<Box<dyn StaticCommittedNotification<B>>>)> {
+    ) -> Result<(
+        Option<StaticRejection>,
+        Vec<Box<dyn StaticCommittedNotification<B>>>,
+    )> {
         let db = ctx.data::<crate::db::Database<B>>()?;
         // Every registered entity that declares a write policy needs its row
         // provider, checked before any dependent is selected or locked.
@@ -703,7 +736,7 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
             .select(&mut tx, root.metadata().primary_key, key, 2)
             .await?;
         if rows.is_empty() {
-            return Ok((Some("Entity not found".to_owned()), Vec::new()));
+            return Ok((Some(StaticRejection::not_found()), Vec::new()));
         }
         if rows.len() != 1 {
             return Err(refusal());

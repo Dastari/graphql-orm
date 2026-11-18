@@ -108,6 +108,11 @@ subscriber may not read in that field is not delivered to that subscriber, so
 a client that wants every event should select only fields without a policy;
 `has_field_policy` in the semantic catalogue says which ones have one.
 
+`carried_fields` states only what a subscription may select. It grants no
+access: the field and row policies above still decide what each subscriber
+receives. It also does not say whether a field's value is sensitive; the
+semantic catalogue's `classification` marks which carried fields are `secret`.
+
 ### Lifetime fields
 
 ```rust,ignore

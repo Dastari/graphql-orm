@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.2 changes only the wire tests, which now check that a subgraph
+error's `extensions.outcome` reaches the client unchanged. Router behavior,
+configuration and public APIs are unchanged.
+
 Version 0.16.1 changes only the wire tests: the persisted-documents snapshot
 tests no longer read a refresh result before it is fully written, and they
 check each response's status and media type before decoding it. Router

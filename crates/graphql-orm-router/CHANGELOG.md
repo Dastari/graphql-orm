@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.16.2
+
+- Tests: a wire test checks that a subgraph error's `extensions.outcome`
+  (`refused`, `failed`, `committed`, `unknown`, or none) reaches the client
+  unchanged beside its `code` over HTTP. No router behavior changes.
+  ([#763](https://github.com/Dastari/graphql-orm/issues/763))
+
 ## 0.16.1 (unreleased)
 
 - Tests: the persisted-documents snapshot wire tests' router child publishes
