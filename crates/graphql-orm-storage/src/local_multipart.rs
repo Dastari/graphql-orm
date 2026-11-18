@@ -162,6 +162,7 @@ fn write_durably(dir: &Dir, name: &str, bytes: &[u8]) -> Result<(), StorageError
         sync_dir(dir)
     })();
     if result.is_err() {
+        // Best-effort cleanup preserves the receipt write error.
         let _ = dir.remove_file(&temp);
     }
     result
@@ -388,6 +389,7 @@ impl MultipartBlobStore for LocalStorageBackend {
             Err(error) => {
                 let dir = Arc::clone(&upload.dir);
                 let name = data_file.clone();
+                // Best-effort cleanup preserves the original part error.
                 let _ = tokio::task::spawn_blocking(move || dir.remove_file(&name)).await;
                 return Err(error);
             }
@@ -406,20 +408,35 @@ impl MultipartBlobStore for LocalStorageBackend {
         let dir = Arc::clone(&upload.dir);
         locked(upload.uploads, lock_name(&id), key.clone(), move || {
             if read_manifest(&dir, &key)?.is_none() {
+                // Best-effort cleanup preserves the original part error.
                 let _ = dir.remove_file(&stored.data_file);
                 return Err(multipart_error(&key, MultipartErrorKind::UnknownUpload));
             }
             let receipt_name = part_receipt_name(part_number);
+            // The previous receipt is only needed to reclaim superseded data.
+            // Keep allowing a replacement even if that receipt is damaged.
             let previous = read_file(&dir, &receipt_name, &key)
+                .inspect_err(|_| {
+                    tracing::warn!("local multipart replacement could not read the old receipt")
+                })
                 .ok()
                 .flatten()
-                .and_then(|bytes| serde_json::from_slice::<StoredPart>(&bytes).ok());
+                .and_then(|bytes| {
+                    serde_json::from_slice::<StoredPart>(&bytes)
+                        .inspect_err(|_| {
+                            tracing::warn!(
+                                "local multipart replacement could not decode the old receipt"
+                            )
+                        })
+                        .ok()
+                });
             sync_dir(&dir)?;
             let bytes = serde_json::to_vec(&stored).map_err(json_error)?;
             write_durably(&dir, &receipt_name, &bytes)?;
             if let Some(previous) = previous
                 && previous.data_file != stored.data_file
             {
+                // The replacement receipt is committed, so old part cleanup is best effort.
                 let _ = dir.remove_file(&previous.data_file);
             }
             Ok(())
@@ -538,6 +555,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                 let outcome = match assembled {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        // Best-effort cleanup preserves the assembly error.
                         let _ = target.dir.remove_file(&temp);
                         return Err(error);
                     }
@@ -570,6 +588,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                         .map_err(io(&target_path))
                 };
                 // Gone after a rename; left behind after a refused create.
+                // Best-effort unlink preserves the publication result.
                 let _ = target.dir.remove_file(&temp);
                 published?;
                 trace_published(Some(&temp_path), &target_path);
@@ -584,6 +603,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         )
         .await?;
         let lock = lock_name(&id);
+        // The upload is gone and its leftover lock can be cleaned up later.
         let _ = tokio::task::spawn_blocking(move || uploads.remove_file(&lock)).await;
         Ok(MultipartCompleteOutcome {
             size_bytes: outcome.size_bytes,
@@ -613,6 +633,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                     .map_err(io(&uploads.child_path(&lookup.0)))?
                     .is_some();
                 if !present {
+                    // The upload is gone and its leftover lock can be cleaned up later.
                     let _ = uploads.remove_file(&lock_name(&lookup.0));
                     return Ok(None);
                 }
@@ -630,6 +651,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         })
         .await?;
         let lock = lock_name(&id);
+        // The upload is gone and its leftover lock can be cleaned up later.
         let _ = tokio::task::spawn_blocking(move || uploads.remove_file(&lock)).await;
         Ok(())
     }
@@ -726,6 +748,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                     upload_id: id.clone(),
                     if_not_exists,
                 },
+                // An unrepresentable initiation time is reported as unknown.
                 started_at: OffsetDateTime::from_unix_timestamp(started).ok(),
             });
             if page.uploads.len() == limit.max(1) && more {

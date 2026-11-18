@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## 0.16.3 (unreleased)
+## 0.16.5 (unreleased)
 
 - Fix (authentication, fail closed): both bearer providers,
   `JwksAuthenticationProvider` and the `auth-agql` `AgqlAuthenticationProvider`,
@@ -34,6 +34,13 @@ supersedes: []
   wildcard matching, and the `auth-agql` adapter's syntax check and expiry
   conversion. ([#725](https://github.com/Dastari/graphql-orm/issues/725),
   [#726](https://github.com/Dastari/graphql-orm/issues/726))
+
+## Unreleased - 0.16.4
+
+- Count failed scheduled authentication refreshes in process-local metrics and
+  include the static task identity in their redacted warnings.
+- Surface previously discarded refresh scheduler errors and malformed messages
+  from the private subscription endpoint without logging their contents.
 
 ## Unreleased - 0.16.2
 

@@ -42,7 +42,7 @@ security-sensitive findings through the maintainer's private reporting path.
 
 ## Current checkpoint
 
-Implemented for #725 and #726 (ORM 0.179.0, storage 0.18.0, router 0.16.3).
+Implemented for #725 and #726 (ORM 0.179.0, storage 0.18.2, router 0.16.5).
 Every acceptance-gate surface has a seeded, bounded suite in ordinary CI:
 
 - Scope matching: router scope-template properties under exact and wildcard

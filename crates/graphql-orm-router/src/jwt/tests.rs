@@ -120,11 +120,14 @@ impl JwksFixture {
                         #[cfg(feature = "auth-agql")]
                         let last_request = thread_last_request.clone();
                         thread::spawn(move || {
-                            let _ = stream.set_nonblocking(false);
+                            if stream.set_nonblocking(false).is_err() {
+                                tracing::debug!("could not configure the JWKS fixture socket");
+                            }
                             let mut request = [0_u8; 2048];
                             #[cfg(feature = "auth-agql")]
                             let bytes_read = stream.read(&mut request).unwrap_or_default();
                             #[cfg(not(feature = "auth-agql"))]
+                            // The client may close this test connection early.
                             let _ = stream.read(&mut request);
                             #[cfg(feature = "auth-agql")]
                             {
@@ -138,6 +141,7 @@ impl JwksFixture {
                                 body.len()
                             );
                             // A bounded client may close immediately after rejecting Content-Length.
+                            // The client may close this test connection early.
                             let _ = stream.write_all(response.as_bytes());
                         });
                     }
@@ -182,6 +186,7 @@ impl JwksFixture {
 impl Drop for JwksFixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Wake the listener if it is still accepting connections.
         let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();

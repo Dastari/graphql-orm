@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
-## 0.16.2 to 0.16.3
+## 0.16.4 to 0.16.5
 
 **Action needed** only if your issuer writes `iss` as an array or adds a
 `crit` header member (including `"crit": null`) to access tokens or the signed
@@ -19,6 +19,12 @@ both `JwksAuthenticationProvider` and `AgqlAuthenticationProvider`, and such
 a catalogue is refused. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
 one string and use no critical extensions, and need no change. Configuration
 and public APIs are unchanged.
+
+## 0.16.2 to 0.16.4
+
+**No action.** The authenticated metrics response adds
+`router_authentication_refresh_failure_total`. Public readiness still checks
+for an active graph. No configuration changes are required.
 
 ## 0.16.1 to 0.16.2
 

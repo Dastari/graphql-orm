@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-router
 
-Version 0.16.3 refuses, on both bearer providers, a token whose header has a
+Version 0.16.5 refuses, on both bearer providers, a token whose header has a
 `crit` member of any value (RFC 7515: the router understands no critical
 extension), and one whose `iss` is an array rather than the configured issuer
 string (RFC 7519). It adds
@@ -271,6 +271,11 @@ composition warnings before serving.
 | Subscriptions | Disabled by default; require authentication and a declared owner. |
 | Prometheus | Disabled by default; binds the public listener's IP address unless an explicit scrape `host` is set; deployment network policy protects its listener. |
 | Byte routes | Disabled by default; each streams `GET`/`HEAD` from one static prefix to one upstream, authenticated unless explicitly public. |
+
+Failed scheduled authentication verification refreshes emit a warning with the
+failure category and increment `router_authentication_refresh_failure_total`
+in the authenticated `/_router/metrics` response. Public readiness continues to
+indicate whether the router has an active graph.
 
 The [configuration reference](docs/configuration.md) is the complete field,
 secret-loading, default, and hard-limit source. Never put secret header values

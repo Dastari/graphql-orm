@@ -88,6 +88,7 @@ const MAX_COLLECT_PREALLOCATION: usize = 8 * 1024 * 1024;
 pub async fn collect_storage_stream(stream: StorageByteStream) -> Result<Bytes, StorageError> {
     let capacity = stream
         .size_hint()
+        // An unrepresentable size hint only affects preallocation.
         .and_then(|size| usize::try_from(size).ok())
         .unwrap_or_default()
         .min(MAX_COLLECT_PREALLOCATION);
