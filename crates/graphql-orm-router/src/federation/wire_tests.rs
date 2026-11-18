@@ -300,6 +300,7 @@ fn router_child_entrypoint() {
                             ),
                     );
                 }
+                // Fixture defaults apply when this override is unavailable.
                 let control = env::var("PERSISTED_CONTROL").ok();
                 if let Some(control) = &control {
                     config = config.with_schema_poll_interval(Duration::from_secs(3600)).validate().unwrap();
@@ -365,6 +366,7 @@ pub(crate) fn bind_test_listener(address: SocketAddr, kind: &str) -> io::Result<
         let mut listeners = CHILD_LISTENERS.lock().unwrap();
         listeners
             .iter()
+            // An unreadable address cannot match the listener sought here.
             .position(|listener| listener.local_addr().ok() == Some(address))
             .map(|index| listeners.swap_remove(index))
     };
@@ -381,6 +383,7 @@ pub(crate) fn bind_test_listener(address: SocketAddr, kind: &str) -> io::Result<
 
 async fn run_wire_app() {
     use hive_router::{background_tasks, config::load_config, ntex::web};
+    // Fixture defaults apply when this override is unavailable.
     let config = load_config(env::var("ROUTER_CONFIG_FILE_PATH").ok())
         .unwrap()
         .into_static();
@@ -429,6 +432,7 @@ async fn run_wire_app() {
                         .guard(web::guard::fn_guard(|head| {
                             head.headers()
                                 .get(hive_router::ntex::http::header::UPGRADE)
+                                // Non-text headers are treated as absent by this fixture.
                                 .and_then(|value| value.to_str().ok())
                                 .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
                         }))
@@ -482,6 +486,7 @@ impl TestAuthority {
             clock_ms: None,
         };
         let content = env::var_os(AUTHORITY_CONTROL_ENV)
+            // Use the default fixture authority while its control file is unavailable.
             .and_then(|path| fs::read_to_string(path).ok())
             .unwrap_or_default();
         for line in content.lines().map(str::trim) {
@@ -707,6 +712,7 @@ impl RouterPlugin for WireProofPlugin {
                 .router_http_request
                 .headers()
                 .get("x-graphql-orm-wire-switch")
+                // Non-text headers are treated as absent by this fixture.
                 .and_then(|value| value.to_str().ok())
             {
                 Some("v2") => self.replace(PRODUCTS_V2, REVIEWS),
@@ -726,6 +732,7 @@ impl RouterPlugin for WireProofPlugin {
             .router_http_request
             .headers
             .get("x-graphql-orm-wire-deny")
+            // Non-text headers are treated as absent by this fixture.
             .and_then(|value| value.to_str().ok())
             == Some("root");
         if deny_roots {
@@ -1634,6 +1641,38 @@ fn public_static_router_serves_only_after_complete_preparation() {
         "SUBGRAPH_FAILURE"
     );
 
+    // A subgraph error's `outcome` extension reaches the client unchanged
+    // beside its code, and the router adds none when the subgraph sent none.
+    for outcome in [
+        None,
+        Some("refused"),
+        Some("failed"),
+        Some("committed"),
+        Some("unknown"),
+    ] {
+        let name = format!("outcome-{}", outcome.unwrap_or("none"));
+        let response = router.graphql_at(
+            "/api/graphql",
+            json!({"query": format!("mutation {{ renameProduct(id: \"p1\", name: \"{name}\") {{ id }} }}")}),
+            &[],
+        );
+        let error = &response["errors"][0];
+        assert_eq!(
+            error["extensions"]["code"], "CONFLICT",
+            "{name}: {response}"
+        );
+        assert_eq!(
+            error["path"],
+            json!(["renameProduct"]),
+            "{name}: {response}"
+        );
+        assert_eq!(
+            error["extensions"].get("outcome").and_then(Value::as_str),
+            outcome,
+            "{name}: {response}"
+        );
+    }
+
     // Pinned engine defaults: no mutations over GET and no request batching.
     let get_mutation = raw_http(
         router.address,
@@ -1670,6 +1709,7 @@ fn public_static_router_serves_only_after_complete_preparation() {
         .unwrap();
     let started = Instant::now();
     let mut stalled = Vec::new();
+    // This fixture checks shutdown timing and bytes even if the peer resets.
     let _ = slow.read_to_end(&mut stalled);
     assert!(
         started.elapsed() < TEST_TIMEOUT,
@@ -1775,6 +1815,7 @@ fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
     let mut scrape = None;
     wait_until("Prometheus scrape", || {
         scrape = raw_http(metrics, "GET", "/internal/metrics", &[], None)
+            // The exporter may still be starting during this bounded retry.
             .ok()
             .filter(|response| response.status == 200);
         scrape.is_some()
@@ -3747,6 +3788,7 @@ fn websocket_upgrade_status(address: SocketAddr, path: &str) -> u16 {
         .split("\r\n")
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
+        // Malformed fixture values are treated as absent.
         .and_then(|value| value.parse::<u16>().ok())
         .expect("router WebSocket response status")
 }
@@ -4108,6 +4150,7 @@ impl TestWebSocket {
             .split("\r\n")
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
+            // Malformed fixture values are treated as absent.
             .and_then(|value| value.parse::<u16>().ok());
         assert_eq!(status, Some(101), "WebSocket upgrade response: {head}");
         assert!(
@@ -4278,6 +4321,7 @@ impl TestWebSocket {
         });
         let bytes =
             serde_json::to_vec(&message).expect("oversized WebSocket JSON should serialize");
+        // The peer may already be closing the failed connection.
         let _ = write_websocket_frame(&mut self.stream, 0x1, &bytes);
     }
 
@@ -4350,6 +4394,7 @@ impl TestWebSocket {
                     return;
                 }
                 Ok((0x9, payload)) => {
+                    // The peer may already be closing the failed connection.
                     let _ = write_websocket_frame(&mut self.stream, 0xA, &payload);
                 }
                 Ok(_) => {}
@@ -4497,6 +4542,7 @@ impl TestRouter {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if let Some(bound) = line.strip_prefix("WIRE_BOUND ") {
+                    // Once startup returns there is no readiness receiver.
                     let _ = sender.send(bound.to_owned());
                 }
             }
@@ -4797,6 +4843,7 @@ impl TestRouter {
         let Some(mut child) = lock_child(&self.child).take() else {
             return;
         };
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = child.kill();
         let status = child.wait().expect("router child should terminate");
         assert!(
@@ -4814,7 +4861,9 @@ impl Drop for TestRouter {
         let Some(mut child) = lock_child(&self.child).take() else {
             return;
         };
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = child.kill();
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = child.wait();
     }
 }
@@ -4857,6 +4906,7 @@ impl TemporaryConfig {
 
 impl Drop for TemporaryConfig {
     fn drop(&mut self) {
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -5025,6 +5075,7 @@ impl Drop for LoopbackSubgraph {
         self.stopping.store(true, Ordering::Release);
         self.slow_gate.release();
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -5075,6 +5126,7 @@ impl LoopbackSdl {
                             continue;
                         };
                         if !has_header(&head, "authorization", "Bearer schema-secret") {
+                            // The client may close this fixture connection early.
                             let _ = write_http_response(stream, 401, b"{}");
                             continue;
                         }
@@ -5084,12 +5136,14 @@ impl LoopbackSdl {
                             .expect("loopback SDL endpoint state")
                             .clone();
                         if let Some(location) = &snapshot.redirect {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                 snapshot.status, location
                             );
                         } else if snapshot.status != 200 {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -5101,10 +5155,12 @@ impl LoopbackSdl {
                             &format!("\"{}\"", snapshot.etag),
                         ) {
                             thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                            // The client may close this fixture connection early.
                             let _ = stream.write_all(
                                 b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
                             );
                         } else {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/graphql\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5156,6 +5212,7 @@ impl Drop for LoopbackSdl {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -5199,6 +5256,7 @@ impl LoopbackProtocol {
                             continue;
                         };
                         if !has_header(&head, "authorization", "Bearer schema-secret") {
+                            // The client may close this fixture connection early.
                             let _ = write_http_response(stream, 401, b"{}");
                             continue;
                         }
@@ -5208,12 +5266,14 @@ impl LoopbackProtocol {
                             .expect("loopback protocol endpoint state")
                             .clone();
                         if let Some(location) = &snapshot.redirect {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                 snapshot.status, location
                             );
                         } else if snapshot.status != 200 {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -5225,10 +5285,12 @@ impl LoopbackProtocol {
                             &format!("\"{}\"", snapshot.etag),
                         ) {
                             thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                            // The client may close this fixture connection early.
                             let _ = stream.write_all(
                                 b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
                             );
                         } else {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5296,6 +5358,7 @@ impl Drop for LoopbackProtocol {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -5475,6 +5538,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
         return;
     };
     if matches!(kind, SubgraphKind::Products) && has_header(&request.head, "upgrade", "websocket") {
+        // The client may close this fixture connection early.
         let _ = handle_subgraph_websocket(request, &state);
         return;
     }
@@ -5512,6 +5576,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
                 }
             }
             if state.quiet.burst_quiet_tail.load(Ordering::Acquire) {
+                // The client may close this fixture connection early.
                 let _ = stream.flush();
                 while !state.stopping.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(25));
@@ -5525,11 +5590,14 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
                 }
                 return;
             }
+            // The client may close this fixture connection early.
             let _ = stream.write_all(b"event: complete\ndata: {}\n\n");
+            // The client may close this fixture connection early.
             let _ = stream.flush();
             return;
         }
         let event = json!({"data": {field: {"id": "p1", "name": name}}});
+        // The client may close this fixture connection early.
         let _ = write_sse_subscription(request.stream, &event, &state.stopping);
         return;
     }
@@ -5537,6 +5605,24 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
     let response = match kind {
         SubgraphKind::Products if query.contains("_entities") => {
             json!({"data": {"_entities": [{"id": "p1", "name": "desk"}]}})
+        }
+        // A refused write carrying the generated services' `outcome`
+        // extension, named by the `outcome-<value>` argument.
+        SubgraphKind::Products if query.contains("renameProduct") && query.contains("outcome-") => {
+            let mut extensions = json!({"code": "CONFLICT"});
+            for outcome in ["refused", "failed", "committed", "unknown"] {
+                if query.contains(&format!("outcome-{outcome}")) {
+                    extensions["outcome"] = json!(outcome);
+                }
+            }
+            json!({
+                "data": {"renameProduct": null},
+                "errors": [{
+                    "message": "test-owned write refusal",
+                    "path": ["renameProduct"],
+                    "extensions": extensions
+                }]
+            })
         }
         SubgraphKind::Products if query.contains("renameProduct") => {
             json!({"data": {"renameProduct": {"id": "p1", "name": "renamed"}}})
@@ -5558,6 +5644,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
             json!({"data": {"_entities": [{"reviews": [{"body": "excellent"}]}]}})
         }
     };
+    // The client may close this fixture connection early.
     let _ = write_http_response(
         request.stream,
         200,
@@ -5815,6 +5902,7 @@ fn write_sse_subscription(
         if stream.write_all(b": heartbeat\n\n").is_err() {
             break;
         }
+        // The client may close this fixture connection early.
         let _ = stream.flush();
     }
     Ok(())
@@ -5924,6 +6012,7 @@ fn read_http_response(mut stream: TcpStream) -> io::Result<HttpResponse> {
         .split("\r\n")
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
+        // Malformed fixture values are treated as absent.
         .and_then(|status| status.parse().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP status"))?;
     read_http_body(&mut stream, &head, &mut body)?;

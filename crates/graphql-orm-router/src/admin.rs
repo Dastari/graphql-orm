@@ -65,6 +65,7 @@ impl AdminRuntime {
         let Some(value) = request
             .headers()
             .get(hive_router::ntex::http::header::AUTHORIZATION)
+            // Non-text authorization headers are refused as invalid credentials.
             .and_then(|value| value.to_str().ok())
         else {
             return Err(admin_error(
@@ -369,6 +370,7 @@ async fn metrics_handler(
         "router_websocket_rejections_total": metrics.websocket_rejections_total(),
         "router_websocket_send_failures_total": metrics.websocket_send_failures_total(),
         "router_schema_refresh_total": metrics.schema_refresh_total(),
+        "router_authentication_refresh_failure_total": metrics.authentication_refresh_failure_total(),
         "router_composition_success_total": metrics.composition_success_total(),
         "router_composition_failure_total": metrics.composition_failure_total(),
         "router_rejected_subgraphs_total": metrics.rejected_subgraphs_total(),
@@ -520,6 +522,7 @@ fn unix_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
     value.and_then(|value| {
         value
             .duration_since(UNIX_EPOCH)
+            // An unrepresentable status timestamp is reported as unknown.
             .ok()
             .map(|value| value.as_secs())
     })
@@ -579,6 +582,7 @@ async fn fetch_resource(
     let etag = response
         .headers()
         .get(ETAG)
+        // An unreadable ETag disables conditional fetches for this response.
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let bytes = read_bounded_body(response, maximum)
@@ -613,6 +617,7 @@ fn validate_identity(
 }
 
 fn same_url(left: &str, right: &str) -> bool {
+    // The trusted metadata URL has already been validated.
     Url::parse(left).ok() == Url::parse(right).ok()
 }
 

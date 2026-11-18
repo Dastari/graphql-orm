@@ -15,6 +15,16 @@ is passed through unchanged, and anything else is quoted as one literal name (#7
 writes a name bare only under its regular-identifier rule (#783).
 See the [migration guide](../../MIGRATION.md#01790-to-01800-sql-identifier-quoting).
 
+Version 0.177.0 adds the opt-in
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`, which narrows the
+locking read of generated GraphQL `updateMany` and `deleteMany` to the SQL
+predicate of the row policy's `read_visibility` when no
+`write_target_prefilter` is declared, so rows outside the caller's read
+visibility are not passed to row callbacks, and on PostgreSQL not locked
+(#752). Off by default. The root delete of a `dependent_deletes` entity now
+reports its `errorCode` under `mutation_error_codes` (#763). See the
+[migration guide](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+
 Version 0.176.0 adds transitive-closure read predicates: `ReadPredicate::related_closure`,
 `related_closure_all` and `related_closure_within`, rendered as a recursive CTE on SQLite and
 PostgreSQL and refused on SQL Server.
@@ -177,7 +187,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -694,7 +703,6 @@ that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
 
-
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
 preserve compiler-native hashes and have separate admission; format 1, default-off
@@ -728,7 +736,6 @@ PostgreSQL migration default alterations are corrected in the paired 0.48.2
 runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
-
 
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD

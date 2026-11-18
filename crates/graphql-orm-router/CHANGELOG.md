@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.16.4
+
+- Count failed scheduled authentication refreshes in process-local metrics and
+  include the static task identity in their redacted warnings.
+- Surface previously discarded refresh scheduler errors and malformed messages
+  from the private subscription endpoint without logging their contents.
+
+## Unreleased - 0.16.2
+
+- Tests: a wire test checks that a subgraph error's `extensions.outcome`
+  (`refused`, `failed`, `committed`, `unknown`, or none) reaches the client
+  unchanged beside its `code` over HTTP. No router behavior changes.
+  ([#763](https://github.com/Dastari/graphql-orm/issues/763))
+
 ## 0.16.1 (unreleased)
 
 - Tests: the persisted-documents snapshot wire tests' router child publishes

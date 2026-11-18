@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-storage"
-version = "0.17.0"
+version = "0.18.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = ["local"]
-local = ["dep:rustix", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:winapi-util", "dep:windows-sys"]
+local = ["dep:rustix", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:tracing", "dep:winapi-util", "dep:windows-sys"]
 s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:base64", "dep:md-5", "dep:tokio", "dep:tokio-util"]
 smb = [
     "dep:binrw",

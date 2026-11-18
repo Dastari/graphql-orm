@@ -1732,6 +1732,16 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! { let _ = code; }
     };
+    let rejected_error_code = if entity_meta.mutation_error_codes {
+        quote! { result.error_code = code; }
+    } else {
+        quote! { let _ = code; }
+    };
+    let result_error_code_get = if entity_meta.mutation_error_codes {
+        quote! { self.error_code.clone() }
+    } else {
+        quote! { None }
+    };
     let notify_bulk = |action: proc_macro2::TokenStream| {
         if let Some(ref handler) = notify_handler_path {
             quote! {
@@ -9670,6 +9680,20 @@ fn generate_graphql_operations_unfiltered(
                 let mut result = Self::err(error.message.clone());
                 #result_error_code_from_graphql
                 result
+            }
+            /// A refusal carried from another step with its already rendered
+            /// code, kept under `mutation_error_codes`.
+            #[doc(hidden)]
+            pub fn __gom_rejected(msg: impl Into<String>, code: Option<String>) -> Self {
+                #[allow(unused_mut)]
+                let mut result = Self::err(msg);
+                #rejected_error_code
+                result
+            }
+            /// This result's `errorCode` under `mutation_error_codes`, else `None`.
+            #[doc(hidden)]
+            pub fn __gom_error_code(&self) -> Option<String> {
+                #result_error_code_get
             }
             /// A committed delete, which returns no entity.
             #[doc(hidden)]

@@ -25,6 +25,12 @@ SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issu
 - **Schema introspection addresses catalog names literally.** SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read now delimit the raw names they read back from the catalog, so a table literally named `"x"` is no longer read as `x`.
 - New tests: a seeded property suite (`identifier_quoting_properties`) checks that every input quotes to exactly one identifier naming it, that bare renderings are plain and unreserved, and that each rendering round-trips through `CREATE TABLE`, `INSERT`, `SELECT` and `DROP` on in-memory SQLite and owned PostgreSQL and SQL Server, with the minimized cases from both issues retained. An owned SQL Server test compares the generated tables with the server for every non-ASCII Basic Multilingual Plane character. The shared runtime/derive cases gain the minimized malformed inputs, and a derive unit test covers the compile-time refusal.
 
+## Unreleased - ORM/macros 0.177.0
+
+- **Opt-in: bulk writes narrowed to read visibility ([#752](https://github.com/Dastari/graphql-orm/issues/752), part).** `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or `Database::with_narrow_bulk_writes_to_read_visibility`) makes generated GraphQL `updateMany` and `deleteMany` add the SQL predicate of `RowPolicy::read_visibility` (`Prefilter` or `Complete`, `GraphqlMutation` surface) to their locking read when the policy declares no `write_target_prefilter`. Rows outside it are not passed to `can_write_row`/`can_read_row` or counted against the bulk bound or scan budget. On PostgreSQL they are also not locked, so another transaction's lock on a hidden row no longer delays the write. On SQL Server the `UPDLOCK, HOLDLOCK` read still locks rows a scan reads before testing the predicate; an index seek avoids it. Every selected row is still classified by the row callbacks, and visible rows give the same payload and writes. With the setting on, a row outside read visibility that `can_write_row` allows is left out (a declared `write_target_prefilter` takes precedence and keeps it), and a `read_visibility` error refuses the bulk write. Off by default: bulk writes are unchanged. The residual lock and timing behaviour is documented in [strict authorization](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes). Single-row writes are unchanged.
+- **Coded dependent-delete root refusals ([#763](https://github.com/Dastari/graphql-orm/issues/763)).** On an entity with `dependent_deletes` and `mutation_error_codes`, a root delete the plan refuses (for example `Entity not found` for a row hidden once the transaction holds it) reports the direct delete's `errorCode` (`NOT_FOUND`) instead of null.
+- **Error-code reference ([#763](https://github.com/Dastari/graphql-orm/issues/763)).** Lists the router codes `SUBSCRIPTIONS_NOT_SUPPORTED` and `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`, states that a bulk payload's `errorCode` can be a host refusal's own code, and that a subgraph's `extensions.outcome` passes through the router (now covered by a router wire test). The client metadata reference states that `carried_fields` grants no access and points to `classification` for secret fields. A new test checks that a key-field or default-sort change changes the interpretation fingerprint.
+
 ## Unreleased - ORM/macros 0.176.0
 
 Transitive-closure read predicates ([#772](https://github.com/Dastari/graphql-orm/issues/772)). See [read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures) and the [migration guide](MIGRATION.md#01750-to-01760-transitive-read-policy-closures).
@@ -1226,7 +1232,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   Align ORM/macros at 0.55.1. No source, public API, generated code, SDL,
   persistence or behavior change.
 
-
 ## 0.55.0 (unreleased)
 
 - Add typed, bounded runtime literal defaults for UUID, JSON (canonical JSON v1),
@@ -1267,7 +1272,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   new `RuntimeSchemaDiagnosticCode::InvalidFormat`. Align ORM/macros at 0.55.0;
   no generated code, stored-data or automatic database migration.
 
-
 ## 0.54.1 (unreleased)
 
 - Pair ORM/macros 0.54.1 and AI 0.107.4 with published Auth `v0.22.1` at
@@ -1275,14 +1279,12 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   correction. Align direct host fixtures and regenerate their real Cargo locks.
   No generated code, public ORM API, SDL, persistence or AI schema change.
 
-
 ## Router 0.6.3 (unreleased)
 
 - Increase the finite default signed role-catalogue response bound to 2 MiB,
   retaining exact signature/content binding and explicit smaller host bounds.
   This requires the coordinated Auth signature-envelope correction; no new
   router artifact or workspace release is implied by the source change.
-
 
 ## 0.54.0 (unreleased)
 
@@ -1296,7 +1298,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   barriers, explicit lag/refetch signals and an owned Auth bridge adapter.
   Align ORM/macros at 0.54.0; no automatic database migration.
 
-
 ## 0.53.0 (unreleased)
 
 - Re-read original status and current authority after binding and successful
@@ -1308,7 +1309,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   `997707e060bcf5fabf879a5f98146dc2732b1c99` for explicit validated
   current-session proofs that retain the exact original credential reference.
 - Align ORM/macros at 0.53.0. No generated code, SDL, stored-data or schema change.
-
 
 ## 0.52.0 (unreleased)
 
@@ -1437,7 +1437,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   Recheck status, identity, grants, bindings and expiry for each sensitive operation;
   deny changed authority and context-free repository bypasses.
 - Align ORM/macros at 0.47.0 and adopt a reviewed full external auth revision.
-
 
 ## 0.46.0 (unreleased)
 
@@ -1797,7 +1796,6 @@ See the [pagination guide](docs/reference/graphql-orm/pagination-migration.md)
 for backend/capability boundaries, consistency, and migration details. The new
 scan fields extend keyset-enabled GraphQL SDL and operation catalogues.
 No stored-data migration is required.
-
 
 ## 0.32.0 - 2026-09-17
 

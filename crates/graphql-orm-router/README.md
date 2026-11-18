@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.2 changes only the wire tests, which now check that a subgraph
+error's `extensions.outcome` reaches the client unchanged. Router behavior,
+configuration and public APIs are unchanged.
+
 Version 0.16.1 changes only the wire tests: the persisted-documents snapshot
 tests no longer read a refresh result before it is fully written, and they
 check each response's status and media type before decoding it. Router
@@ -257,6 +261,11 @@ composition warnings before serving.
 | Subscriptions | Disabled by default; require authentication and a declared owner. |
 | Prometheus | Disabled by default; binds the public listener's IP address unless an explicit scrape `host` is set; deployment network policy protects its listener. |
 | Byte routes | Disabled by default; each streams `GET`/`HEAD` from one static prefix to one upstream, authenticated unless explicitly public. |
+
+Failed scheduled authentication verification refreshes emit a warning with the
+failure category and increment `router_authentication_refresh_failure_total`
+in the authenticated `/_router/metrics` response. Public readiness continues to
+indicate whether the router has an active graph.
 
 The [configuration reference](docs/configuration.md) is the complete field,
 secret-loading, default, and hard-limit source. Never put secret header values

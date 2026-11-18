@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.18.1
+
+- Return an I/O error if a local listing cannot verify a directory's identity
+  against the reserved internal directory.
+- Log redacted failures in local storage setup, superseded multipart receipt
+  lookup, and SMB connection recovery.
+
 ## Unreleased - 0.17.0
 
 Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.

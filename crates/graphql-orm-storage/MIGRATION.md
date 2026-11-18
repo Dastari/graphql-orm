@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.17.0 to 0.18.1
+
+**Action needed** if a caller relies on listings succeeding after a failure to
+read a directory's identity. Handle the returned `StorageError::Io` and resolve
+the underlying filesystem error before retrying the listing. No stored data
+or configuration migration is required.
+
 ## 0.17.0
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
