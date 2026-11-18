@@ -1182,6 +1182,7 @@ async fn fetch_bounded(
     let etag = response
         .headers()
         .get(ETAG)
+        // An unreadable ETag disables conditional fetches for this response.
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let bytes = read_bounded_body(response, max_bytes)
@@ -1768,6 +1769,7 @@ mod tests {
         let (tx, rx) = futures::channel::oneshot::channel();
         let first = handle.clone();
         hive_router::ntex::rt::spawn(async move {
+            // A cancelled fixture receiver no longer observes the refresh.
             let _ = tx.send(first.refresh().await);
         });
         endpoint.wait_for_requests(request_target).await;
@@ -1804,6 +1806,7 @@ mod tests {
         let (tx, rx) = futures::channel::oneshot::channel();
         let refreshing = handle.clone();
         hive_router::ntex::rt::spawn(async move {
+            // A cancelled fixture receiver no longer observes the refresh.
             let _ = tx.send(refreshing.refresh().await);
         });
         reviews.wait_for_requests(request_target).await;
@@ -1912,6 +1915,7 @@ mod tests {
                             let requests = thread_requests.clone();
                             let conditional = thread_conditional.clone();
                             thread::spawn(move || {
+                                // The client may leave before the fixture can write its response.
                                 let _ = serve_endpoint(stream, state, requests, conditional);
                             });
                         }
@@ -1968,6 +1972,7 @@ mod tests {
         fn drop(&mut self) {
             self.stopping.store(true, Ordering::Release);
             if let Some(thread) = self.thread.take() {
+                // Join the fixture worker during best-effort teardown.
                 let _ = thread.join();
             }
         }

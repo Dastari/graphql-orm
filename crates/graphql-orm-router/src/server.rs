@@ -126,6 +126,7 @@ fn run_on_owned_runtime(
             };
             #[cfg(not(target_family = "unix"))]
             let shutdown = async {
+                // Closing the signal source also ends the runtime.
                 let _ = hive_router::ntex::rt::signals::signal().await;
             };
 
@@ -518,6 +519,7 @@ impl PreparedRouter {
                                     .guard(web::guard::fn_guard(|head| {
                                         head.headers()
                                             .get(hive_router::ntex::http::header::UPGRADE)
+                                            // Non-text Upgrade values do not select the WebSocket route.
                                             .and_then(|value| value.to_str().ok())
                                             .is_some_and(|value| {
                                                 value.eq_ignore_ascii_case("websocket")
@@ -807,6 +809,7 @@ impl RouterPlugin for StaticGraphPlugin {
                 payload.register_background_task(AuthenticationRefreshTask {
                     id,
                     provider: provider.clone(),
+                    metrics: runtime.lifecycle.metrics(),
                     interval,
                 });
             }
@@ -838,6 +841,7 @@ impl RouterPlugin for StaticGraphPlugin {
                     .router_http_request
                     .headers()
                     .get(INTERNAL_SUBSCRIPTION_HEADER)
+                    // Non-text credentials are refused by the authorization check.
                     .and_then(|value| value.to_str().ok());
                 if !internal.authorizes(payload.router_http_request.path(), supplied) {
                     return invalid_bearer_response(payload);
@@ -1257,6 +1261,7 @@ impl RouterPlugin for StaticGraphPlugin {
 }
 
 struct AuthenticationRefreshTask {
+    metrics: Arc<crate::metrics::RouterMetrics>,
     id: &'static str,
     provider: Arc<dyn AuthenticationProvider>,
     interval: std::time::Duration,
@@ -1284,6 +1289,7 @@ impl background_tasks::BackgroundTask for SchemaRefreshTask {
             // preserves the exact active snapshot during graceful shutdown.
             hive_router::tokio::select! {
                 _ = token.cancelled() => return,
+                // The lifecycle records failures in status and metrics.
                 _ = self.lifecycle.refresh() => {}
             }
         }
@@ -1304,7 +1310,9 @@ impl background_tasks::BackgroundTask for AuthenticationRefreshTask {
                     // The provider keeps its previous verification state on
                     // failure; record the failure without credential detail.
                     if let Err(error) = self.provider.refresh().await {
+                        self.metrics.authentication_refresh_failed();
                         tracing::warn!(
+                            task = self.id,
                             kind = ?error.kind(),
                             "authentication verification refresh failed; keeping the previous state"
                         );
@@ -1633,6 +1641,49 @@ mod tests {
         ) -> Result<AuthenticatedPrincipal, crate::AuthenticationError> {
             Err(crate::AuthenticationError::invalid_credential("rejected"))
         }
+    }
+
+    #[test]
+    fn scheduled_authentication_refresh_failure_is_counted() {
+        use background_tasks::BackgroundTask;
+        use std::time::Duration;
+
+        #[derive(Debug)]
+        struct FailingRefresh(background_tasks::CancellationToken);
+
+        impl AuthenticationProvider for FailingRefresh {
+            fn authenticate_bearer(
+                &self,
+                token: &str,
+            ) -> Result<AuthenticatedPrincipal, crate::AuthenticationError> {
+                RejectingProvider.authenticate_bearer(token)
+            }
+
+            fn refresh(
+                &self,
+            ) -> futures::future::BoxFuture<'_, Result<(), crate::AuthenticationError>>
+            {
+                Box::pin(async {
+                    self.0.cancel();
+                    Err(crate::AuthenticationError::unavailable("refresh failed"))
+                })
+            }
+        }
+
+        let token = background_tasks::CancellationToken::new();
+        let metrics = Arc::new(crate::metrics::RouterMetrics::default());
+        let task = AuthenticationRefreshTask {
+            id: "test-authentication-refresh",
+            provider: Arc::new(FailingRefresh(token.clone())),
+            metrics: metrics.clone(),
+            interval: Duration::from_millis(1),
+        };
+        hive_router::tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime")
+            .block_on(task.run(token));
+        assert_eq!(metrics.snapshot().authentication_refresh_failure_total(), 1);
     }
 
     #[test]

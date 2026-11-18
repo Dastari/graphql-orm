@@ -30,6 +30,11 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Local listings return an I/O error when the backend cannot check a directory's
+identity against the reserved internal directory. Local setup, multipart
+receipt recovery, and SMB reconnect failures are logged through `tracing`
+without paths, object keys, or credential details.
+
 Version 0.16.0 resolves every Unix local storage operation relative to held
 directory handles without following links, so local storage refuses every
 read, write, copy and delete through a filesystem link below its root, even

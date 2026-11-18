@@ -262,6 +262,11 @@ composition warnings before serving.
 | Prometheus | Disabled by default; binds the public listener's IP address unless an explicit scrape `host` is set; deployment network policy protects its listener. |
 | Byte routes | Disabled by default; each streams `GET`/`HEAD` from one static prefix to one upstream, authenticated unless explicitly public. |
 
+Failed scheduled authentication verification refreshes emit a warning with the
+failure category and increment `router_authentication_refresh_failure_total`
+in the authenticated `/_router/metrics` response. Public readiness continues to
+indicate whether the router has an active graph.
+
 The [configuration reference](docs/configuration.md) is the complete field,
 secret-loading, default, and hard-limit source. Never put secret header values
 in JSON: map header names to environment-variable names. `--check` performs

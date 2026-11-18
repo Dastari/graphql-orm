@@ -59,8 +59,10 @@ mod tests {
         thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut request = [0_u8; 1024];
+                // The loopback client may close this fixture connection early.
                 let _ = stream.read(&mut request);
                 // The client may close after refusing the declared length.
+                // The loopback client may close this fixture connection early.
                 let _ = stream.write_all(response);
             }
         });

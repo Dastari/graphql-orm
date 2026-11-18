@@ -819,6 +819,7 @@ fn connection_init_authorization(message: &Value) -> Option<&str> {
 // select a query from a document that also contains a subscription or fragments.
 fn selected_subscription(message: &Value) -> Option<bool> {
     let payload = message.get("payload")?;
+    // The execution path handles malformed queries.
     let document = cynic_parser::parse_executable_document(payload.get("query")?.as_str()?).ok()?;
     let name = match payload.get("operationName") {
         None | Some(Value::Null) => None,
@@ -846,7 +847,12 @@ impl BridgeFrame {
     /// would drop it later.
     fn parse(frame: ws::Frame) -> Option<Self> {
         match frame {
-            ws::Frame::Text(bytes) => serde_json::from_slice(&bytes).ok().map(Self::Message),
+            ws::Frame::Text(bytes) => serde_json::from_slice(&bytes)
+                .inspect_err(|_| {
+                    tracing::warn!("private subscription endpoint sent malformed JSON")
+                })
+                .ok()
+                .map(Self::Message),
             frame => Some(Self::Control(frame)),
         }
     }
@@ -1620,6 +1626,7 @@ mod tests {
 
     /// The pre-parse test entry point: frames arrive as text.
     fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
+        // Malformed fixture payloads have no translatable message.
         super::public_server_message(serde_json::from_slice(bytes).ok()?, state)
     }
 

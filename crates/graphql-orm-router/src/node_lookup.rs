@@ -191,7 +191,9 @@ pub(crate) fn node_candidate(types: &BTreeSet<String>) -> CandidateSubgraph {
 pub(crate) fn node_id_typename(node_id: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(node_id)
+        // Invalid encodings are handled as unknown node IDs.
         .ok()?;
+    // Invalid encodings are handled as unknown node IDs.
     match serde_json::from_slice::<Json>(&bytes).ok()? {
         Json::Array(parts) if parts.len() >= 2 => parts.first()?.as_str().map(str::to_owned),
         _ => None,

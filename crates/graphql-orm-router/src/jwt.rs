@@ -695,6 +695,7 @@ impl JwksAuthenticationProvider {
             AuthenticationError::unavailable("role-scope catalogue expansion is invalid")
         })?;
         let expires_at = u64::try_from(claims.exp)
+            // Negative expiry is handled by the same error as timestamp overflow.
             .ok()
             .and_then(|value| UNIX_EPOCH.checked_add(Duration::from_secs(value)))
             .ok_or_else(|| {
@@ -740,6 +741,9 @@ impl JwksAuthenticationProvider {
             let retry_after = self
                 .role_scope_retry_after
                 .read()
+                .inspect_err(|_| {
+                    tracing::warn!("could not read the role-scope catalogue refresh backoff")
+                })
                 .ok()
                 .and_then(|retry_after| *retry_after);
             if retry_after.is_some_and(|retry_after| self.config.clock.now() < retry_after) {
@@ -849,6 +853,9 @@ impl JwksAuthenticationProvider {
         let due = self
             .last_unknown_key_refresh
             .write()
+            .inspect_err(|_| {
+                tracing::warn!("could not update the unknown-key JWKS refresh cooldown")
+            })
             .ok()
             .is_some_and(|mut last| {
                 let due = last.is_none_or(|previous| {
@@ -991,6 +998,7 @@ impl fmt::Debug for JwksAuthenticationProvider {
         let key_count = self
             .cache
             .read()
+            // Debug output omits the count if the cache cannot be read.
             .ok()
             .and_then(|cache| cache.as_ref().map(|cache| cache.keys.len()));
         formatter
