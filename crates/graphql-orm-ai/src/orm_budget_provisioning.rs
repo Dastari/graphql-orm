@@ -7,9 +7,10 @@
 //! and never reachable from [`crate::OrmAiConfigurationService`].
 
 use crate::orm_configuration::{
-    AuditFact, budget_policy_view, insert_audit, map_transaction,
-    normalize_and_validate_budget_policy_input, scope_key, validate_scope,
+    AuditFact, budget_policy_view, insert_audit, normalize_and_validate_budget_policy_input,
+    scope_key, validate_scope,
 };
+use crate::orm_support::map_transaction;
 use crate::persistence::CreateAiBudgetPolicyRecordInput;
 use crate::persistence::{AiBudgetPolicyRecord, AiBudgetPolicyRecordWhereInput};
 use crate::{

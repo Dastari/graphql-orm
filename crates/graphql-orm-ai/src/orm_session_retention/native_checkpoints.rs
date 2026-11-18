@@ -282,7 +282,7 @@ pub(super) async fn validate(
             };
             if candidate.settled_checkpoint_id != Some(source.id)
                 || candidate.finalized_at.is_none()
-                || source_attempt.final_state != "waiting_approval"
+                || source_attempt.final_state != crate::AiRunState::WaitingApproval.as_str()
                 || source_attempt.outcome_code != "approval_wait_parked"
                 || source_attempt.provider_response_id != source.provider_response_id
                 || approval.tool_call_id != candidate.id

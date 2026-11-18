@@ -10,7 +10,10 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
-Version 0.24.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+Version 0.26.0 reuses compiled plan and argument validators. See the
+[migration guide](MIGRATION.md#0250-to-0260).
+
+Version 0.25.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 `graphql-orm-ai-tool-profiles` compiles reviewed static profiles and automatic,

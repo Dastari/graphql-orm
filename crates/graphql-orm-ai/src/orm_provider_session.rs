@@ -149,9 +149,11 @@ mod service {
 
     use super::*;
     use crate::orm_runs::{canonical_second, load_and_validate_active_lease, validate_worker_id};
-    use crate::orm_sessions::{
-        content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
+    use crate::orm_sessions::map_protection;
+    use crate::orm_support::{
+        content_context, map_orm, map_transaction, principal_identity, record_scope,
     };
+    use crate::persisted_state::ToolCallState;
     use crate::persistence::{
         AiApprovalRecord, AiAuditEventRecord, AiMessageRecord, AiMessageRecordWhereInput,
         AiNativeApprovalCandidateRecord, AiNativeApprovalCandidateRecordWhereInput,
@@ -3402,7 +3404,7 @@ mod service {
                     || approval.expires_at <= now.unix_timestamp()
                     || call.run_id != run.id
                     || call.approval_id != Some(approval.id)
-                    || call.state != "waiting_approval"
+                    || call.state != ToolCallState::WaitingApproval.as_str()
                     || call.lease_generation != source_checkpoint.lease_generation
                     || call.provider_response_id != source_checkpoint.provider_response_id
                     || call.budget_reservation_id != source_checkpoint.budget_reservation_id

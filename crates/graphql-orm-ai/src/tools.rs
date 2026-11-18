@@ -1,6 +1,7 @@
 //! Runtime registration and current-principal policy for canonical AI tools.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use agql_auth::ResolvedPrincipal;
@@ -40,6 +41,9 @@ pub struct AiToolCatalog {
 struct RegisteredAiTool {
     descriptor: AiToolDescriptor,
     disclosure_schema: Option<AiDisclosureSchema>,
+    // The built-in validator has no host callbacks and leaves the
+    // registered descriptor immutable. Preserve the catalog's unwind traits.
+    argument_validator: Arc<AssertUnwindSafe<jsonschema::Validator>>,
 }
 
 /// Explicit deployment policy for generated GraphQL capabilities on one
@@ -628,13 +632,17 @@ impl AiToolCatalog {
                 return Err(AiError::Forbidden);
             }
         }
+        let invalid_schema = || {
+            AiError::InvalidConfiguration(
+                "tool arguments must use a valid JSON Schema 2020-12 contract".to_owned(),
+            )
+        };
         if !descriptor.has_valid_fingerprint()
             || descriptor
                 .argument_schema
                 .get("$schema")
                 .and_then(serde_json::Value::as_str)
                 != Some(JSON_SCHEMA_2020_12)
-            || jsonschema::validator_for(&descriptor.argument_schema).is_err()
             || descriptor.browser_result_preview.is_some_and(|preview| {
                 preview.maximum_bytes > descriptor.maximum_result_bytes
                     || preview.maximum_records > descriptor.maximum_result_records
@@ -642,10 +650,10 @@ impl AiToolCatalog {
                     || preview.maximum_classification == DataClassification::Secret
             })
         {
-            return Err(AiError::InvalidConfiguration(
-                "tool arguments must use a valid JSON Schema 2020-12 contract".to_owned(),
-            ));
+            return Err(invalid_schema());
         }
+        let argument_validator =
+            jsonschema::validator_for(&descriptor.argument_schema).map_err(|_| invalid_schema())?;
         // An internal tool may omit its document; every present document must
         // parse and stay outside the AI control plane and introspection.
         let document_present = descriptor.operation_kind != AiToolOperationKind::Internal
@@ -671,6 +679,7 @@ impl AiToolCatalog {
             RegisteredAiTool {
                 descriptor,
                 disclosure_schema,
+                argument_validator: Arc::new(AssertUnwindSafe(argument_validator)),
             },
         );
         Ok(())
@@ -982,10 +991,7 @@ impl AiToolCatalog {
         {
             return Err(AiError::Forbidden);
         }
-        let validator = jsonschema::validator_for(&descriptor.argument_schema).map_err(|_| {
-            AiError::InvalidConfiguration("registered tool argument schema is invalid".to_owned())
-        })?;
-        if !validator.is_valid(&request.variables) {
+        if !registered.argument_validator.is_valid(&request.variables) {
             return Err(AiError::InvalidInput(
                 "tool arguments do not match the registered schema".to_owned(),
             ));
@@ -1477,7 +1483,7 @@ mod tests {
     /// catalogue's `canonical_json_hash`. The two must stay byte-identical or
     /// an approved call stops matching its claim.
     #[test]
-    fn canonical_digest_matches_the_catalogue_canonical_hash() {
+    fn canonical_digest_matches_the_tool_profiles_canonical_hash() {
         let values = [
             serde_json::json!(null),
             serde_json::json!({}),
@@ -1492,7 +1498,7 @@ mod tests {
         for value in values {
             assert_eq!(
                 canonical_json_digest(&value),
-                crate::canonical_json_hash(&value),
+                graphql_orm_ai_tool_profiles::canonical_json_hash(&value),
                 "canonical JSON diverged for {value}"
             );
         }
@@ -1500,11 +1506,45 @@ mod tests {
             canonical_json_digest(&serde_json::json!({"b": [1, {"d": 4, "c": 3}], "a": 1})),
             canonical_json_digest(&serde_json::json!({"a": 1, "b": [1, {"c": 3, "d": 4}]})),
         );
+        for (left, right) in [
+            (
+                r#"{"z":{"é":"😀","n":[1.5,0.0]},"a":true}"#,
+                r#"{"a":true,"z":{"n":[15e-1,0e0],"\u00e9":"\ud83d\ude00"}}"#,
+            ),
+            (
+                r#"[{"z":18446744073709551615,"a":[[1],-0.0]}]"#,
+                r#"[{"a":[[1],-0e0],"z":18446744073709551615}]"#,
+            ),
+        ] {
+            let left = serde_json::from_str(left).unwrap();
+            let right = serde_json::from_str(right).unwrap();
+            assert_eq!(
+                canonical_json_digest(&left),
+                graphql_orm_ai_tool_profiles::canonical_json_hash(&right),
+            );
+        }
+        // Integer and float representations remain distinct in the approval digest.
+        for (json, encoded) in [("1", "1"), ("1.0", "1.0"), ("-0.0", "-0.0")] {
+            use sha2::Digest;
+            let value = serde_json::from_str(json).unwrap();
+            let expected = hex::encode(sha2::Sha256::digest(encoded.as_bytes()));
+            assert_eq!(canonical_json_digest(&value), expected);
+            assert_eq!(
+                graphql_orm_ai_tool_profiles::canonical_json_hash(&value),
+                expected
+            );
+        }
         // Compact encoding with no added whitespace.
         assert_eq!(canonical_json_digest(&serde_json::json!({})), {
             use sha2::Digest;
             hex::encode(sha2::Sha256::digest(b"{}"))
         });
+    }
+
+    #[test]
+    fn catalog_retains_its_unwind_traits() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<AiToolCatalog>();
     }
 
     use crate::GraphqlOperationContract;

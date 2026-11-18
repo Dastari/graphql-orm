@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.149.0 to 0.150.0
+
+**No action**. Registered tools reuse their compiled argument validators.
+Durable state values, the schema module, and existing fingerprints and
+approvals are unchanged. No data migration is needed.
+
 ## 0.148.0 to 0.149.0: output-limit stops and the bootstrap tool-call window
 
 No data migration is needed. GraphQL SDL and AI schema module `0.82.0` are

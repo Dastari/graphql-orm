@@ -89,7 +89,7 @@ async fn validate_static_reset_graph(
                 ..Default::default()
             }),
             state: Some(StringFilter {
-                not_in: Some(vec!["committed".into(), "released".into()]),
+                not_in: Some(vec![crate::AiBudgetReservationState::Committed.as_str().to_owned(), crate::AiBudgetReservationState::Released.as_str().to_owned()]),
                 ..Default::default()
             }),
             ..Default::default()

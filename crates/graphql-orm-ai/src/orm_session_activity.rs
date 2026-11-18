@@ -108,19 +108,14 @@ fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
 }
 
 pub(crate) fn activity_state(state: &str) -> Option<AiSessionActivityState> {
+    use crate::AiRunState::*;
     use AiSessionActivityState::*;
-    match state {
-        "queued"
-        | "leased"
-        | "running"
-        | "waiting_tool"
-        | "waiting_provider"
-        | "waiting_subscription"
-        | "retry_scheduled" => Some(Working),
-        "waiting_approval" | "waiting_reauth" => Some(Prompt),
-        "completed" => Some(Done),
-        "failed" | "cancelled" | "recovery_required" => Some(Error),
-        _ => None,
+    match crate::AiRunState::from_persisted(state)? {
+        Queued | Leased | Running | WaitingTool | WaitingProvider | WaitingSubscription
+        | RetryScheduled => Some(Working),
+        WaitingApproval | WaitingReauth => Some(Prompt),
+        Completed => Some(Done),
+        Failed | Cancelled | RecoveryRequired => Some(Error),
     }
 }
 

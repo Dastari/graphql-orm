@@ -6,7 +6,7 @@ use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use graphql_orm::db::Database;
-use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::errors::OrmPublicError;
 use graphql_orm::graphql::orm::{
     DefaultWriteBackend, OrderDirection, PaginationConfig, TransactionError, TransactionMode,
 };
@@ -1216,12 +1216,16 @@ fn restored_attachment_is_valid(
     // Only stable post-restore states can complete this graph. Live upload,
     // scanner, deletion, and cleanup claims require repair first even if an
     // unredacted live database still contains their external references.
+    use crate::persisted_state::{
+        AttachmentProcessingState as Processing, AttachmentQuarantineState as Quarantine,
+        AttachmentScanState as Scan,
+    };
     match (
-        record.quarantine_state.as_str(),
-        record.scan_state.as_str(),
-        record.processing_state.as_str(),
+        Quarantine::from_persisted(&record.quarantine_state),
+        Scan::from_persisted(&record.scan_state),
+        Processing::from_persisted(&record.processing_state),
     ) {
-        ("ready", "clean", "ready") => {
+        (Some(Quarantine::Ready), Some(Scan::Clean), Some(Processing::Ready)) => {
             record.message_id.is_none()
                 && has_verifiable_object_metadata
                 && expected_bytes.is_some()
@@ -1232,7 +1236,7 @@ fn restored_attachment_is_valid(
                 && record.finalized_at.is_none()
                 && record.deleted_at.is_none()
         }
-        ("released", "clean", "complete") => {
+        (Some(Quarantine::Released), Some(Scan::Clean), Some(Processing::Complete)) => {
             // Schema 0.14 deliberately left upload expiry and the new scanner
             // provenance columns nullable for pre-intake finalized rows. Their
             // clean/released state, object digest, owner, and parents remain
@@ -1242,7 +1246,8 @@ fn restored_attachment_is_valid(
                 && record.finalized_at.is_some()
                 && record.deleted_at.is_none()
         }
-        ("rejected", "rejected", "complete") | ("failed", "failed", "complete") => {
+        (Some(Quarantine::Rejected), Some(Scan::Rejected), Some(Processing::Complete))
+        | (Some(Quarantine::Failed), Some(Scan::Failed), Some(Processing::Complete)) => {
             record.message_id.is_none()
                 && record.upload_token_hash.is_none()
                 && record.rejection_code.is_some()
@@ -1251,7 +1256,7 @@ fn restored_attachment_is_valid(
                 && record.blob_reference.is_none()
                 && record.quarantine_blob_reference.is_none()
         }
-        ("expired", "failed", "complete") => {
+        (Some(Quarantine::Expired), Some(Scan::Failed), Some(Processing::Complete)) => {
             record.message_id.is_none()
                 && record.blob_reference.is_none()
                 && record.quarantine_blob_reference.is_none()
@@ -1261,7 +1266,11 @@ fn restored_attachment_is_valid(
                 && record.cleanup_generation.is_some_and(|value| value > 0)
                 && record.deleted_at.is_some()
         }
-        ("deleted", "pending" | "clean" | "rejected" | "failed", "complete") => {
+        (
+            Some(Quarantine::Deleted),
+            Some(Scan::Pending | Scan::Clean | Scan::Rejected | Scan::Failed),
+            Some(Processing::Complete),
+        ) => {
             record.blob_reference.is_none()
                 && record.quarantine_blob_reference.is_none()
                 && record.upload_token_hash.is_none()
@@ -1272,41 +1281,43 @@ fn restored_attachment_is_valid(
 }
 
 fn valid_attachment_cleanup_shape(record: &AiAttachmentRecord) -> bool {
-    match record.processing_state.as_str() {
-        "pending" | "scanning" | "ready" => {
-            record.processing_expires_at.is_some() == (record.processing_state == "scanning")
+    use crate::persisted_state::AttachmentProcessingState as Processing;
+    let state = Processing::from_persisted(&record.processing_state);
+    match state {
+        Some(Processing::Pending | Processing::Scanning | Processing::Ready) => {
+            record.processing_expires_at.is_some() == (state == Some(Processing::Scanning))
                 && record.cleanup_generation.is_none()
                 && record.cleanup_lease_expires_at.is_none()
                 && record.cleanup_retry_count.is_none()
                 && record.cleanup_next_attempt_at.is_none()
         }
-        "deleting" => {
+        Some(Processing::Deleting) => {
             record.processing_expires_at.is_some()
                 && record.cleanup_generation.is_none()
                 && record.cleanup_lease_expires_at.is_none()
                 && record.cleanup_next_attempt_at.is_none()
         }
-        "cleanup_required" | "retention_cleanup_required" => {
+        Some(Processing::CleanupRequired | Processing::RetentionCleanupRequired) => {
             record.processing_expires_at.is_none()
                 && record.cleanup_generation.is_none()
                 && record.cleanup_lease_expires_at.is_none()
                 && record.cleanup_retry_count.is_none()
                 && record.cleanup_next_attempt_at.is_none()
         }
-        "cleanup_in_progress" => {
+        Some(Processing::CleanupInProgress) => {
             record.processing_expires_at.is_none()
                 && record.cleanup_generation.is_some()
                 && record.cleanup_lease_expires_at.is_some()
                 && record.cleanup_next_attempt_at.is_none()
         }
-        "cleanup_backoff" => {
+        Some(Processing::CleanupBackoff) => {
             record.processing_expires_at.is_none()
                 && record.cleanup_generation.is_some()
                 && record.cleanup_lease_expires_at.is_none()
                 && record.cleanup_retry_count.is_some_and(|value| value > 0)
                 && record.cleanup_next_attempt_at.is_some()
         }
-        "complete" => {
+        Some(Processing::Complete) => {
             record.processing_expires_at.is_none()
                 && record.cleanup_lease_expires_at.is_none()
                 && record.cleanup_next_attempt_at.is_none()
@@ -1351,7 +1362,13 @@ fn restored_attachment_artifact_is_valid(record: &AiAttachmentArtifactRecord) ->
                     && record.cleanup_next_attempt_at.is_none()
                     && (record.blob_reference.is_none() || record.sha256.is_some())
             }
-            Some("complete") => !has_content && record.deleted_at.is_some(),
+            Some(state)
+                if state
+                    == crate::persisted_state::AttachmentArtifactCleanupState::Complete
+                        .as_str() =>
+            {
+                !has_content && record.deleted_at.is_some()
+            }
             Some(_) => false,
         }
 }
@@ -1752,21 +1769,11 @@ const fn audit_status(truncated: bool, invalid_count: u64) -> AiRestoreAuditStat
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.public_error().code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => {
+    match crate::orm_support::map_transaction(error) {
+        AiError::InvalidInput(_) => {
             AiError::InvalidInput("restore fact collection query was rejected".to_owned())
         }
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+        other => other,
     }
 }
 
