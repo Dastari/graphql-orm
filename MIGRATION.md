@@ -12,7 +12,9 @@ supersedes: []
 
 ## 0.179.0 to 0.180.0: closure read predicates on SQL Server
 
-Upgrade ORM and macros together. Generated code is unchanged. See
+Upgrade ORM and macros together and recompile entities: generated where
+inputs render their nested lists as balanced pairs and share a
+per-statement relation budget. No data migration is needed. See
 [read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
 
 - **`related_closure`, `related_closure_all` and `related_closure_within` on
@@ -33,9 +35,10 @@ Upgrade ORM and macros together. Generated code is unchanged. See
     (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`), such as a long `not()` chain or
     deeply alternating `and(or(and(...)))`. Folds of one kind are flattened
     and do not count;
-  - on SQL Server, over 80 nested subquery levels
-    (`READ_PREDICATE_MSSQL_MAX_NESTING`), or over 900 weighted levels
-    (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than six
+  - on SQL Server, over 75 nested subquery levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING`), over 28 nested relations
+    (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`), or over 900 weighted levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than four
     `related` around a 64-hop closure;
   - more than 1 MiB of policy SQL from the generated relation filters and
     relation-count orderings of one statement
@@ -50,8 +53,11 @@ Upgrade ORM and macros together. Generated code is unchanged. See
 - **`and`/`or` folds no longer overflow the stack (#779). No action.** A
   `p = p.or(q)?` fold over a few thousand terms used to build a predicate
   whose render overflowed a 2 MiB stack and aborted the process. Folds are
-  now flattened, and long lists render in balanced groups. The rendered SQL
-  groups operands differently but means the same. Bind order is unchanged.
+  now flattened, and every `and`/`or` list of three or more operands,
+  including in generated where inputs, renders as balanced parenthesised
+  pairs. The rendered SQL groups operands differently but means the same, and
+  bind order is unchanged. Long generated `or` lists that SQLite refused past
+  its 1,000-deep expression limit now run.
 
 ## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
 

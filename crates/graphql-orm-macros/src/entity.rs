@@ -6886,17 +6886,19 @@ fn generate_entity_tokens(
                             let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
                             // An empty branch is true. Keep it explicit so earlier
                             // binds retain their numbered placeholder positions.
+                            // Balanced, so a long list stays shallow for
+                            // the SQL parser; order and binds are unchanged.
                             or_parts.push(if sub_conds.is_empty() {
                                 "1 = 1".to_owned()
                             } else {
-                                format!("({})", sub_conds.join(" AND "))
+                                ::graphql_orm::graphql::orm::join_conditions_balanced(&sub_conds, " AND ")
                             });
                             values.extend(sub_vals);
                         }
                         conditions.push(if or_parts.is_empty() {
                             "1 = 0".to_owned()
                         } else {
-                            format!("({})", or_parts.join(" OR "))
+                            format!("({})", ::graphql_orm::graphql::orm::join_conditions_balanced(&or_parts, " OR "))
                         });
                     }
 
@@ -6904,7 +6906,10 @@ fn generate_entity_tokens(
                     if let Some(ref not_filter) = self.not {
                         let (sub_conds, sub_vals) = not_filter.__gom_sql_conditions(_gom_spatial_prefilter);
                         if !sub_conds.is_empty() {
-                            conditions.push(format!("NOT ({})", sub_conds.join(" AND ")));
+                            conditions.push(format!(
+                                "NOT ({})",
+                                ::graphql_orm::graphql::orm::join_conditions_balanced(&sub_conds, " AND ")
+                            ));
                             values.extend(sub_vals);
                         }
                     }

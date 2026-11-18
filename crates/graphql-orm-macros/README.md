@@ -10,7 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.180.0 pairs with the runtime's SQL Server closure read predicates; generated code is unchanged.
+Version 0.180.0 pairs with the runtime's SQL Server closure read predicates. Generated where inputs
+render their nested `and`, `or` and `not` lists as balanced parenthesised pairs, which keeps long
+lists shallow for the SQL parser with the same meaning and bind order. Generated where-input and
+ordering preparation share one per-statement relation-policy budget.
 
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
 the runtime renderer; every other name is generated as before.

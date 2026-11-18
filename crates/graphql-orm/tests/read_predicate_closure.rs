@@ -629,15 +629,18 @@ mod portable {
     #[test]
     fn statement_nesting_is_budgeted_on_sql_server() {
         let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
-        for target in [all(PARENT, passes()), two_levels] {
+        // A closure at the default bound uses 67 subquery levels, a closure
+        // inside a closure 73, and each relation around them two more.
+        for (target, room) in [(all(PARENT, passes()), 4), (two_levels, 1)] {
             let (deepest, wrappers) = deepest_wrapped_closure(target);
             let nesting = subquery_nesting(&rendered(&deepest));
             if B::DIALECT == DatabaseBackend::Mssql {
                 // SQL Server refuses about 96 subquery levels at run time;
-                // the budget refuses past 80, or past its weighted units,
+                // the budget refuses past 75, or past its weighted units,
                 // when the policy is built.
+                assert_eq!(READ_PREDICATE_MSSQL_MAX_NESTING, 75);
                 assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
-                assert!(wrappers >= 3, "{wrappers}");
+                assert_eq!(wrappers, room);
             } else {
                 assert_eq!(wrappers, 40, "no nesting budget off SQL Server");
             }
@@ -689,7 +692,7 @@ mod portable {
         }
         fold.not().unwrap();
         // On SQL Server a negation weighs more next to subqueries: around a
-        // closure inside six relations, only a few fit.
+        // closure inside four relations, only a few fit.
         let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
         let (_, around) = negations(wrapped);
         if B::DIALECT == DatabaseBackend::Mssql {

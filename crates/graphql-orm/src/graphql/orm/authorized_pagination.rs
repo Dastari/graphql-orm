@@ -50,22 +50,27 @@ pub enum ReadPredicateOp {
 ///
 /// Composition is budgeted when a predicate is built. A constructor,
 /// [`Self::not`], `and` or `or` that would exceed a limit returns
-/// `AUTHORIZATION_MISCONFIGURED` before rendering:
+/// `AUTHORIZATION_MISCONFIGURED`. Steps that inline their target (relations,
+/// negations, closures) check the size before rendering the larger string;
+/// [`Self::from_filter`] renders the filter once to measure it.
 ///
 /// - on every backend, at most [`READ_PREDICATE_MAX_RENDERED_BYTES`] of
 ///   rendered SQL, [`READ_PREDICATE_MAX_EXPRESSION_DEPTH`] levels of
 ///   expression nesting and [`READ_PREDICATE_CLOSURE_MAX_NESTING`] closures
 ///   nested inside one another;
 /// - on SQL Server, also at most [`READ_PREDICATE_MSSQL_MAX_NESTING`] nested
-///   subqueries and [`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`] weighted
+///   subqueries, [`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`] nested
+///   relations and [`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`] weighted
 ///   levels.
 ///
 /// `and` and `or` flatten a child of the same kind, so a fold of any length
-/// is one level deep, and long lists render in balanced groups. Within these
-/// limits a predicate renders, formats and drops without deep recursion, and
-/// the server accepts its nesting. The limits do not cover a statement's
-/// bind-parameter count, which each server caps itself (SQL Server at 2,100
-/// for the whole statement).
+/// is one node, and every list of three or more renders as a balanced binary
+/// tree of parenthesised pairs. Each counted level is then one level of the
+/// parser's expression tree. Within these limits a predicate renders,
+/// formats and drops without deep recursion, and every shape tested at the
+/// limits ran. The limits do not cover a statement's bind-parameter count,
+/// which each server caps itself (SQL Server at 2,100 for the whole
+/// statement), nor optimizer resource failures beyond the tested shapes.
 #[derive(Clone, Debug)]
 pub struct ReadPredicate {
     entity: TypeId,
@@ -188,14 +193,23 @@ pub const READ_PREDICATE_MAX_RENDERED_BYTES: usize = 1 << 20;
 pub const READ_PREDICATE_CLOSURE_MAX_NESTING: u32 = 2;
 
 /// The deepest subquery nesting one [`ReadPredicate`] may render on SQL
-/// Server, counted as nested `(SELECT ...)` levels. SQL Server refuses a
-/// statement nested about 100 levels deep ("nested too deeply", error 191);
-/// the rest is left for the host query, such as a page, count or relation
-/// filter around the policy. A deeper predicate is refused with
-/// `AUTHORIZATION_MISCONFIGURED` when it is built. A closure at
-/// [`READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH`] uses about 66 levels.
+/// Server, counted as nested `(SELECT ...)` levels. On the owned server,
+/// statements failed with "nested too deeply" (error 191) from 97 levels,
+/// and shapes up to 83 ran; the rest is left for the host query, such as a
+/// page, count or relation filter around the policy. A deeper predicate is
+/// refused with `AUTHORIZATION_MISCONFIGURED` when it is built. A closure at
+/// [`READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH`] uses 67 levels.
 pub const READ_PREDICATE_MSSQL_MAX_NESTING: u32 = MSSQL_MAX_NESTING;
-const MSSQL_MAX_NESTING: u32 = 80;
+const MSSQL_MAX_NESTING: u32 = 75;
+
+/// The deepest nesting of relation subqueries (`EXISTS (SELECT ...)`, as
+/// [`ReadPredicate::related`] and [`ReadPredicate::not_related`] render) one
+/// [`ReadPredicate`] may render on SQL Server. Nested relations are
+/// correlated joins the optimizer must plan together: on the owned server,
+/// 39 or 40 of them failed with "insufficient resources" (error 8623) while
+/// 35 ran. A deeper predicate is refused with `AUTHORIZATION_MISCONFIGURED`.
+pub const READ_PREDICATE_MSSQL_MAX_RELATION_NESTING: u32 = MSSQL_MAX_RELATION_NESTING;
+const MSSQL_MAX_RELATION_NESTING: u32 = 28;
 
 /// The deepest expression nesting one [`ReadPredicate`] may render on any
 /// backend, counted as nested parentheses: each `not()`, each `and`/`or`
@@ -203,7 +217,9 @@ const MSSQL_MAX_NESTING: u32 = 80;
 /// dropping a predicate recurse once per level, so this keeps that recursion
 /// far inside a 2 MiB thread stack, even in debug builds. A deeper predicate
 /// is refused with `AUTHORIZATION_MISCONFIGURED` when it is built. `and` and
-/// `or` folds are flattened, so folding any number of terms adds one level.
+/// `or` folds are flattened and render as balanced pairs, so a list of `n`
+/// terms adds about `log2(n)` levels. SQLite parses one level per counted
+/// parenthesis here, well under its 1,000-deep expression limit.
 pub const READ_PREDICATE_MAX_EXPRESSION_DEPTH: u32 = MAX_EXPRESSION_DEPTH;
 const MAX_EXPRESSION_DEPTH: u32 = 256;
 
@@ -234,6 +250,7 @@ struct Cost {
     units: u32,
     inner_units: u32,
     nesting: u32,
+    relations: u32,
     closures: u32,
 }
 impl Cost {
@@ -250,6 +267,7 @@ impl Cost {
             depth,
             units,
             subqueries: nesting,
+            relations,
         } = nesting(clause);
         Self {
             bytes: clause.len().saturating_add(placeholders.saturating_mul(6)),
@@ -258,6 +276,7 @@ impl Cost {
             units,
             inner_units: units,
             nesting,
+            relations,
             closures: closure_level(clause) as u32 - 1,
         }
     }
@@ -266,7 +285,9 @@ impl Cost {
             || self.closures > READ_PREDICATE_CLOSURE_MAX_NESTING
             || self.depth > MAX_EXPRESSION_DEPTH
             || (backend == DatabaseBackend::Mssql
-                && (self.nesting > MSSQL_MAX_NESTING || self.units > MSSQL_MAX_NESTING_UNITS))
+                && (self.nesting > MSSQL_MAX_NESTING
+                    || self.relations > MSSQL_MAX_RELATION_NESTING
+                    || self.units > MSSQL_MAX_NESTING_UNITS))
         {
             return Err(invalid());
         }
@@ -291,18 +312,21 @@ struct Nesting {
     units: u32,
     /// `(SELECT ...)` and `(WITH ...)` subqueries.
     subqueries: u32,
+    /// `EXISTS (SELECT ...)` relation subqueries.
+    relations: u32,
 }
 
 /// Measure `sql` in one pass, skipping quoted strings and identifiers.
 fn nesting(sql: &str) -> Nesting {
     let bytes = sql.as_bytes();
-    // Per open parenthesis: (is a subquery, weight).
-    let mut open: Vec<(bool, u32)> = Vec::new();
-    let (mut subqueries, mut units) = (0_u32, 0_u32);
+    // Per open parenthesis: (is a subquery, is a relation, weight).
+    let mut open: Vec<(bool, bool, u32)> = Vec::new();
+    let (mut subqueries, mut relations, mut units) = (0_u32, 0_u32, 0_u32);
     let mut deepest = Nesting {
         depth: 0,
         units: 0,
         subqueries: 0,
+        relations: 0,
     };
     let mut index = 0;
     while index < bytes.len() {
@@ -328,12 +352,16 @@ fn nesting(sql: &str) -> Nesting {
                         .is_some_and(|head| head.eq_ignore_ascii_case(word))
                 };
                 let before = sql[..index].trim_end().as_bytes();
-                let negation = before.len() >= 3
-                    && before[before.len() - 3..].eq_ignore_ascii_case(b"NOT")
-                    && !before
-                        .get(before.len().wrapping_sub(4))
-                        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+                let after = |word: &[u8]| {
+                    before.len() >= word.len()
+                        && before[before.len() - word.len()..].eq_ignore_ascii_case(word)
+                        && !before
+                            .get(before.len().wrapping_sub(word.len() + 1))
+                            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                };
+                let negation = after(b"NOT");
                 let subquery = starts(b"SELECT") || starts(b"WITH");
+                let relation = subquery && after(b"EXISTS");
                 let weight = if subquery {
                     SUBQUERY_UNITS
                 } else if negation {
@@ -342,15 +370,18 @@ fn nesting(sql: &str) -> Nesting {
                     1
                 };
                 subqueries += u32::from(subquery);
+                relations += u32::from(relation);
                 units += weight;
-                open.push((subquery, weight));
+                open.push((subquery, relation, weight));
                 deepest.depth = deepest.depth.max(open.len() as u32);
                 deepest.units = deepest.units.max(units);
                 deepest.subqueries = deepest.subqueries.max(subqueries);
+                deepest.relations = deepest.relations.max(relations);
             }
             b')' => {
-                if let Some((subquery, weight)) = open.pop() {
+                if let Some((subquery, relation, weight)) = open.pop() {
                     subqueries -= u32::from(subquery);
+                    relations -= u32::from(relation);
                     units -= weight;
                 }
             }
@@ -933,9 +964,9 @@ impl ReadPredicate {
     /// relations, negations, `and` and `or`; the rendered SQL may not exceed
     /// [`READ_PREDICATE_MAX_RENDERED_BYTES`]. On SQL Server, the policy's
     /// subqueries may nest at most [`READ_PREDICATE_MSSQL_MAX_NESTING`]
-    /// levels. A closure at the default bound uses about 66 levels and each
-    /// `related` around it adds two, leaving room for six such relations, or
-    /// three around a closure inside a closure.
+    /// levels. A closure at the default bound uses 67 levels and each
+    /// `related` around it adds two, leaving room for four such relations, or
+    /// one around a closure inside a closure.
     ///
     /// Refused with `AUTHORIZATION_MISCONFIGURED`: unsupported backends,
     /// `max_depth` outside the range above, a composition over the limits
@@ -1129,6 +1160,7 @@ impl ReadPredicate {
             units,
             inner_units,
             nesting: self.cost.nesting.max(other.cost.nesting),
+            relations: self.cost.relations.max(other.cost.relations),
             closures: self.cost.closures.max(other.cost.closures),
         }
         .check(self.backend)?;

@@ -3054,31 +3054,71 @@ pub fn render_filter_expression(
     }
 }
 
-/// The most operands one rendered `AND` or `OR` chain joins. SQL parsers build
-/// `a OR b OR c` as a left-deep tree, so a long chain is as deep as it is long
-/// (SQLite refuses expressions over 1,000 deep). Longer lists are grouped in
-/// parenthesised chunks of this size, so parse depth grows with the logarithm
-/// of the length. Operand order, and therefore bind order, is unchanged.
-pub(crate) const FILTER_CHAIN_CHUNK: usize = 32;
-
-/// Grouping levels [`join_balanced`] adds around `operands` terms.
-pub(crate) fn filter_chain_levels(mut operands: usize) -> u32 {
-    let mut levels = 0;
-    while operands > FILTER_CHAIN_CHUNK {
-        operands = operands.div_ceil(FILTER_CHAIN_CHUNK);
-        levels += 1;
+/// Grouping levels [`join_balanced`] adds above each operand's own
+/// parentheses when it joins `operands` terms: none for one or two, and one
+/// more each time the larger half needs its own pair.
+pub(crate) fn filter_chain_levels(operands: usize) -> u32 {
+    if operands <= 2 {
+        0
+    } else {
+        1 + filter_chain_levels(operands.div_ceil(2))
     }
-    levels
 }
 
-fn join_balanced(mut parts: Vec<String>, separator: &str) -> String {
-    while parts.len() > FILTER_CHAIN_CHUNK {
-        parts = parts
-            .chunks(FILTER_CHAIN_CHUNK)
-            .map(|chunk| format!("({})", chunk.join(separator)))
-            .collect();
+/// Join already-parenthesised `parts` with `separator` (` AND ` or ` OR `) as
+/// a balanced binary tree: `(a) OR ((b) OR (c))`. SQL parsers build a chain
+/// `a OR b OR c` left-deep, as deep as it is long (SQLite refuses
+/// expressions over 1,000 deep), so a long list is split in halves instead.
+/// Its parse depth is then about `log2` of its length, and every level is a
+/// counted parenthesis. Operand order, and therefore bind order, is
+/// unchanged.
+fn join_balanced(parts: Vec<String>, separator: &str) -> String {
+    fn join(parts: &[String], separator: &str, out: &mut String) {
+        match parts {
+            [] => {}
+            [only] => out.push_str(only),
+            [left, right] => {
+                out.push_str(left);
+                out.push_str(separator);
+                out.push_str(right);
+            }
+            _ => {
+                let (left, right) = parts.split_at(parts.len() / 2);
+                for (index, half) in [left, right].into_iter().enumerate() {
+                    if index == 1 {
+                        out.push_str(separator);
+                    }
+                    if half.len() == 1 {
+                        out.push_str(&half[0]);
+                    } else {
+                        out.push('(');
+                        join(half, separator, out);
+                        out.push(')');
+                    }
+                }
+            }
+        }
     }
-    parts.join(separator)
+    let mut out = String::with_capacity(
+        parts.iter().map(String::len).sum::<usize>() + parts.len() * (separator.len() + 2),
+    );
+    join(&parts, separator, &mut out);
+    out
+}
+
+/// Join SQL `conditions` with `separator` (` AND ` or ` OR `) as
+/// [`render_filter_expression`] does: each condition in parentheses, in a
+/// balanced binary tree, in order. Generated filters use this for their
+/// nested `and`, `or` and `not` lists, so a long list stays shallow.
+#[doc(hidden)]
+pub fn join_conditions_balanced(conditions: &[String], separator: &str) -> String {
+    join_balanced(
+        conditions
+            .iter()
+            .map(|condition| format!("({condition})"))
+            .collect(),
+        separator,
+    )
 }
 
 fn render_select_query_inner(
