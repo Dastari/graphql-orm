@@ -10,12 +10,23 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.16.1
+## Unreleased - 0.16.2
 
 - Tests: a wire test checks that a subgraph error's `extensions.outcome`
   (`refused`, `failed`, `committed`, `unknown`, or none) reaches the client
   unchanged beside its `code` over HTTP. No router behavior changes.
   ([#763](https://github.com/Dastari/graphql-orm/issues/763))
+
+## 0.16.1 (unreleased)
+
+- Tests: the persisted-documents snapshot wire tests' router child publishes
+  each refresh result with an atomic rename, so the test can no longer read
+  the result file between its creation and its contents being written. That
+  window caused intermittent `EOF while parsing a value` failures in
+  `persisted_review_snapshot_rewrite`, `persisted_review_snapshot_retry` and
+  `persisted_review_snapshot_delete`. The persisted wire tests now assert each
+  HTTP response's status and JSON media type before decoding it. No router
+  behavior changes. ([#759](https://github.com/Dastari/graphql-orm/issues/759))
 
 ## Unreleased - 0.16.0
 

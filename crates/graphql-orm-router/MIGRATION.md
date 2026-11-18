@@ -10,10 +10,15 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
-## 0.16.0 to 0.16.1
+## 0.16.1 to 0.16.2
 
 **No action.** No consumer migration is required. Only the wire tests change;
 router behavior, configuration and public APIs are unchanged.
+
+## 0.16.0 to 0.16.1
+
+No consumer migration is required. Only the wire tests change; router
+behavior, configuration and public APIs are unchanged.
 
 ## 0.16.0
 
