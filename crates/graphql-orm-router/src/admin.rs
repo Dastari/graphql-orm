@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
 use graphql_orm_router_protocol::SubgraphDescriptor;
-use reqwest::header::ETAG;
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
@@ -9,7 +8,7 @@ use url::Url;
 use crate::{
     AdminConfig, AuthenticatedPrincipal, AuthenticationErrorKind, AuthenticationProvider,
     RouterError, RouterErrorKind, ScopeMatcher, StaticSubgraph, TrustedSubgraph,
-    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
+    http_body::{FetchError, USER_AGENT, fetch_bounded},
     lifecycle::{FetchedSubgraph, GraphLifecycle},
     network::{NetworkPolicy, ResolvedUrl},
     server::strict_bearer_token,
@@ -566,39 +565,23 @@ async fn fetch_resource(
     for (name, value) in headers {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|_| {
-        RouterError::new(
-            RouterErrorKind::Registration,
-            format!("failed to fetch {field}"),
-        )
-    })?;
-    policy.validate_peer(&response, target, field)?;
-    if !response.status().is_success() {
-        return Err(RouterError::new(
-            RouterErrorKind::Registration,
-            format!("{field} returned a non-success status"),
-        ));
-    }
-    let etag = response
-        .headers()
-        .get(ETAG)
-        // An unreadable ETag disables conditional fetches for this response.
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let bytes = read_bounded_body(response, maximum)
-        .await
-        .map_err(|error| {
-            RouterError::new(
-                RouterErrorKind::Registration,
-                match error {
-                    BoundedBodyError::TooLarge => {
-                        format!("{field} exceeds its configured size limit")
-                    }
-                    BoundedBodyError::Read => format!("failed while reading {field}"),
-                },
-            )
-        })?;
-    Ok((bytes, etag))
+    let response = fetch_bounded(
+        request,
+        maximum,
+        false,
+        |response| policy.validate_peer(response, target, field),
+        |error| {
+            let detail = match error {
+                FetchError::Send => format!("failed to fetch {field}"),
+                FetchError::Status(_) => format!("{field} returned a non-success status"),
+                FetchError::TooLarge => format!("{field} exceeds its configured size limit"),
+                FetchError::Read => format!("failed while reading {field}"),
+            };
+            RouterError::new(RouterErrorKind::Registration, detail)
+        },
+    )
+    .await?;
+    Ok((response.bytes, response.etag))
 }
 
 fn validate_identity(

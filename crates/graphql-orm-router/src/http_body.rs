@@ -1,41 +1,83 @@
-//! Bounded outbound HTTP response bodies shared by every router fetch: schema
+//! Bounded outbound HTTP retrieval shared by every router fetch: schema
 //! and descriptor polling, dynamic registration, JWKS, and the role-scope
 //! catalogue. Callers keep their own redacted error messages.
 
 use futures::StreamExt;
+use reqwest::{RequestBuilder, Response, StatusCode, header::ETAG};
 
 /// The router's outbound `User-Agent`, tracking the crate version.
 pub(crate) const USER_AGENT: &str = concat!("graphql-orm-router/", env!("CARGO_PKG_VERSION"));
 
-/// Why a bounded body could not be read. Neither variant carries the URL,
-/// header values, or body bytes.
+/// Transport failures without URLs, header values, or body bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BoundedBodyError {
-    /// The declared `Content-Length` or the bytes received exceed the limit.
+pub(crate) enum FetchError {
+    Send,
+    Status(StatusCode),
     TooLarge,
-    /// The response stream failed before it completed.
     Read,
 }
 
-/// Reads at most `maximum` body bytes. A declared `Content-Length` above the
-/// limit is refused before any byte is read, and a streamed body is refused
-/// as soon as it would cross the limit.
-pub(crate) async fn read_bounded_body(
-    response: reqwest::Response,
+pub(crate) struct BoundedResponse {
+    pub(crate) status: StatusCode,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) etag: Option<String>,
+}
+
+/// Sends the caller's request and bounds the response by both declared and
+/// streamed length. Dynamic registration verifies the response peer before
+/// its status or body is used. Only schema polling accepts a 304.
+pub(crate) async fn fetch_bounded<E>(
+    request: RequestBuilder,
     maximum: usize,
-) -> Result<Vec<u8>, BoundedBodyError> {
+    accept_not_modified: bool,
+    verify_peer: impl FnOnce(&Response) -> Result<(), E>,
+    map_error: impl Fn(FetchError) -> E,
+) -> Result<BoundedResponse, E> {
+    let response = request
+        .send()
+        .await
+        .map_err(|_| map_error(FetchError::Send))?;
+    verify_peer(&response)?;
+    let status = response.status();
+    if accept_not_modified && status == StatusCode::NOT_MODIFIED {
+        return Ok(BoundedResponse {
+            status,
+            bytes: Vec::new(),
+            etag: None,
+        });
+    }
+    if !status.is_success() {
+        return Err(map_error(FetchError::Status(status)));
+    }
+    let etag = response
+        .headers()
+        .get(ETAG)
+        // An unreadable ETag disables conditional fetches for this response.
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let bytes = read_bounded_body(response, maximum)
+        .await
+        .map_err(map_error)?;
+    Ok(BoundedResponse {
+        status,
+        bytes,
+        etag,
+    })
+}
+
+async fn read_bounded_body(response: Response, maximum: usize) -> Result<Vec<u8>, FetchError> {
     if response
         .content_length()
         .is_some_and(|length| length > maximum as u64)
     {
-        return Err(BoundedBodyError::TooLarge);
+        return Err(FetchError::TooLarge);
     }
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| BoundedBodyError::Read)?;
+        let chunk = chunk.map_err(|_| FetchError::Read)?;
         if body.len().saturating_add(chunk.len()) > maximum {
-            return Err(BoundedBodyError::TooLarge);
+            return Err(FetchError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
@@ -62,29 +104,58 @@ mod tests {
                 // The loopback client may close this fixture connection early.
                 let _ = stream.read(&mut request);
                 // The client may close after refusing the declared length.
-                // The loopback client may close this fixture connection early.
                 let _ = stream.write_all(response);
             }
         });
         format!("http://{address}/")
     }
 
-    fn read(response: &'static [u8], maximum: usize) -> Result<Vec<u8>, BoundedBodyError> {
-        let url = serve_once(response);
+    fn request(response: &'static [u8]) -> RequestBuilder {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(serve_once(response))
+    }
+
+    fn read(response: &'static [u8], maximum: usize) -> Result<Vec<u8>, FetchError> {
         ntex::rt::System::build()
             .name("bounded-body-test")
             .build(ntex::rt::DefaultRuntime)
             .block_on(async move {
-                let response = reqwest::Client::builder()
-                    .no_proxy()
-                    .build()
-                    .unwrap()
-                    .get(url)
-                    .send()
+                fetch_bounded(request(response), maximum, false, |_| Ok(()), |error| error)
                     .await
-                    .unwrap();
-                read_bounded_body(response, maximum).await
+                    .map(|response| response.bytes)
             })
+    }
+
+    #[ntex::test]
+    async fn conditional_status_and_peer_validation() {
+        let not_modified =
+            b"HTTP/1.1 304 Not Modified\r\nContent-Length: 100\r\nConnection: close\r\n\r\n";
+        let response = fetch_bounded(request(not_modified), 0, true, |_| Ok(()), |error| error)
+            .await
+            .unwrap();
+        assert_eq!(response.status, StatusCode::NOT_MODIFIED);
+        assert!(response.bytes.is_empty());
+        assert!(matches!(
+            fetch_bounded(request(not_modified), 0, false, |_| Ok(()), |error| error).await,
+            Err(FetchError::Status(StatusCode::NOT_MODIFIED))
+        ));
+
+        let unavailable =
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        assert!(matches!(
+            fetch_bounded(
+                request(unavailable),
+                0,
+                false,
+                |_| Err("peer refused"),
+                |_| "unexpected transport error",
+            )
+            .await,
+            Err("peer refused")
+        ));
     }
 
     #[test]
@@ -101,7 +172,7 @@ mod tests {
                 b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nbodyX",
                 4
             ),
-            Err(BoundedBodyError::TooLarge)
+            Err(FetchError::TooLarge)
         );
         // Without a declared length the streamed bytes are counted.
         assert_eq!(
@@ -109,7 +180,7 @@ mod tests {
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
                 5
             ),
-            Err(BoundedBodyError::TooLarge)
+            Err(FetchError::TooLarge)
         );
         assert_eq!(
             read(
@@ -124,7 +195,7 @@ mod tests {
                 b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc",
                 64
             ),
-            Err(BoundedBodyError::Read)
+            Err(FetchError::Read)
         );
         assert!(USER_AGENT.starts_with("graphql-orm-router/"));
         assert!(USER_AGENT.ends_with(env!("CARGO_PKG_VERSION")));
