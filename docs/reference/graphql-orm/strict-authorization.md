@@ -350,29 +350,49 @@ cannot grant a write; a row it leaves out is treated as missing even where the
 callbacks would have allowed it, so it must not exclude rows the caller can
 write. The default returns `None`. Repository writes do not ask.
 
-GraphQL `updateMany` and `deleteMany` also narrow their locking read by read
+**Narrowing bulk writes to read visibility (opt-in).** With
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or
+`Database::with_narrow_bulk_writes_to_read_visibility(true)`), GraphQL
+`updateMany` and `deleteMany` also narrow their locking read by read
 visibility when the policy declares no `write_target_prefilter`. If
 `RowPolicy::read_visibility` returns `Prefilter` or `Complete` for the
 `GraphqlMutation` surface, its predicate is added to the bulk write's locking
-read, so a row outside the caller's read visibility is never selected, locked,
-passed to a row callback or counted. The predicate only narrows. Every
-selected row is still classified as in the table above, so the payload and the
-rows written for visible rows are unchanged. A row outside read visibility
-that `can_write_row` would allow is then left out, as a missing row is. If
-callers may bulk-write rows they cannot read, return a `write_target_prefilter`
-that selects them. It takes precedence, and the bulk write uses it instead of
-read visibility. An error from `read_visibility` fails the bulk write closed
-before any row is selected. Single-row updates and deletes use only the
-`write_target_prefilter`.
+read. A row outside the caller's read visibility is then never passed to a row
+callback or counted. The predicate only narrows. Every selected row is still
+classified as in the table above, so the payload and the rows written for
+visible rows are unchanged.
 
-Without either predicate (`CallbackOnly` or `Unrestricted` visibility and no
-prefilter) the bulk write still selects and locks every matching row and
-passes each one to the row callbacks before it leaves hidden rows out. The
-payload still does not depend on hidden rows, but how many hidden rows match a
-readable filter can still be observed. It shows in latency and, on PostgreSQL
-and SQL Server, in waits on locks that other transactions hold on hidden rows.
-The caller also briefly locks rows it cannot see. Return a SQL predicate from
-`read_visibility` or `write_target_prefilter` to remove this.
+The setting is off by default, and bulk writes then select the same rows as
+before. With it on:
+
+- A row outside read visibility that `can_write_row` would allow is left out,
+  as a missing row is. If callers may bulk-write rows they cannot read, return
+  a `write_target_prefilter` that selects them. It takes precedence in both
+  modes, and the bulk write uses it instead of read visibility.
+- An error from `read_visibility` on the `GraphqlMutation` surface refuses the
+  bulk write before any row is selected. A policy that returns `Err` for some
+  callers, such as write-only ones, must return `CallbackOnly` for them instead
+  to keep their bulk writes working.
+- Single-row updates and deletes still use only the `write_target_prefilter`.
+
+**Locks on hidden rows.** On PostgreSQL a row a SQL predicate leaves out (a
+`write_target_prefilter`, or read visibility with the setting on) is never
+locked: the row lock is taken only on rows that pass the `WHERE` clause. On
+SQL Server it depends on the access path. The locking read uses
+`WITH (UPDLOCK, HOLDLOCK)`, which locks each row it reads before testing the
+predicate, so a scan still locks, and waits on, rows outside the predicate; an
+index seek on the predicate's columns avoids reading them. SQLite locks the
+whole database for a write, so there are no row locks to observe.
+
+Without any SQL predicate (`CallbackOnly` or `Unrestricted` visibility, no
+prefilter, or the setting off) the bulk write still selects and locks every
+matching row and passes each one to the row callbacks before it leaves hidden
+rows out. The payload still does not depend on hidden rows, but how many hidden
+rows match a readable filter can still be observed. It shows in latency and,
+on PostgreSQL and SQL Server, in waits on locks that other transactions hold on
+hidden rows. The caller also briefly locks rows it cannot see. A SQL predicate
+removes the callback and counting difference on every backend, and the lock
+difference on PostgreSQL.
 
 A generated GraphQL bulk write may write at most
 `PaginationConfig::max_bulk_write_rows` rows (default `10_000`) per mutation
@@ -383,16 +403,16 @@ rows after the classification above, so hidden rows never decide whether it is
 reached. With a row policy installed the candidates are classified in pages
 under the read scan budget (`max_scanned_rows`); a scan that would need more
 candidates is refused as an authorized read is, which is the one way hidden
-rows can still affect the outcome. A prefilter, or a read-visibility
-predicate, removes them from the scan.
+rows can still affect the outcome. A prefilter, or with the opt-in a
+read-visibility predicate, removes them from the scan.
 
 For a dependent delete, leaving hidden rows out holds for
 the root row only. A dependent child row the caller can neither read nor write is
 not left out. Like any other unauthorized dependent, it makes the whole delete
 refuse with `Dependent delete refused`, so the refusal can reveal that such a
 child exists. A write-only caller still writes rows it can't
-read, except that a bulk write narrowed by read visibility leaves them out
-(see above). Reading a row means entity read access plus `can_read_row`, which runs
+read, except that a bulk write narrowed by read visibility, with that
+setting on, leaves them out (see above). Reading a row means entity read access plus `can_read_row`, which runs
 only for rows `can_write_row` refuses. An upsert whose conflicting row is
 unwritable refuses with `FORBIDDEN` whether or not the caller can read it. Its
 key is unique, so the row can't be treated as absent; a plain create discloses

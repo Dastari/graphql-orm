@@ -46,10 +46,13 @@ where
 /// Narrow the locking read of a generated GraphQL bulk write in SQL.
 ///
 /// A declared write-target prefilter decides alone, as for single-row writes.
-/// Without one, a SQL predicate from the policy's `GraphqlMutation`-surface
+/// Without one, and only when the host opted in with
+/// [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility),
+/// a SQL predicate from the policy's `GraphqlMutation`-surface
 /// [`read_visibility`](super::RowPolicy::read_visibility) (`Prefilter` or
 /// `Complete`) narrows the read, so rows outside the caller's read visibility
-/// are never selected, locked or passed to a row callback. The predicate only
+/// are never passed to a row callback, and on PostgreSQL never locked. On SQL
+/// Server a scan may still lock rows outside the predicate. The predicate only
 /// narrows: every selected row is still classified by the row callbacks.
 /// `CallbackOnly` and `Unrestricted` leave the read unchanged, and so does a
 /// database without a row policy.
@@ -68,6 +71,9 @@ where
     let surface = EntityAccessSurface::GraphqlMutation;
     if let Some(predicate) = db.write_target_prefilter::<T>(ctx, surface).await? {
         return query.with_read_visibility(&ReadVisibility::Prefilter(predicate));
+    }
+    if !db.narrow_bulk_writes_to_read_visibility_enabled() {
+        return Ok(query);
     }
     match db.read_visibility::<T>(ctx, surface).await? {
         ReadVisibility::Prefilter(predicate) | ReadVisibility::Complete(predicate) => {
@@ -93,13 +99,14 @@ fn bulk_limit_exceeded() -> sqlx::Error {
 /// GraphQL caller can neither read nor write is left out, and any other
 /// unwritable row refuses the whole write.
 ///
-/// A GraphQL bulk write narrows its locking read in SQL: with the
-/// write-target prefilter when the row policy declares one, otherwise with the
-/// SQL predicate of the policy's `GraphqlMutation`-surface read visibility, so
-/// rows outside it are neither locked nor classified. A row the caller may
-/// write but not read is therefore a target only when a write-target prefilter
-/// selects it, or when the read visibility has no SQL predicate. It also
-/// applies
+/// A GraphQL bulk write narrows its locking read in SQL with the write-target
+/// prefilter when the row policy declares one. Without one, a host that opted
+/// in with
+/// [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
+/// narrows it with the SQL predicate of the policy's `GraphqlMutation`-surface
+/// read visibility, so rows outside it are not classified (and, on PostgreSQL,
+/// not locked); a row the caller may write but not read is then a target only
+/// when a write-target prefilter selects it. It also applies
 /// [`PaginationConfig::max_bulk_write_rows`](super::PaginationConfig::max_bulk_write_rows),
 /// which counts targets only, so rows the caller cannot see never decide
 /// whether the bound is reached. When no row policy is installed and the

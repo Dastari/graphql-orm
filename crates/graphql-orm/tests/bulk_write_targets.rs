@@ -139,6 +139,8 @@ enum Visibility {
     Prefilter,
     /// `owner = 'mine'`, sufficient for reads.
     Complete,
+    /// The policy fails.
+    Error,
 }
 
 /// The caller owns the rows whose `owner` is `mine`, and can neither read nor
@@ -193,6 +195,9 @@ impl RowPolicy for OwnerRows {
                 Visibility::CallbackOnly => ReadVisibility::CallbackOnly,
                 Visibility::Prefilter => ReadVisibility::Prefilter(mine()),
                 Visibility::Complete => ReadVisibility::Complete(mine()),
+                Visibility::Error => {
+                    return Err(async_graphql::Error::new("visibility unavailable"));
+                }
             })
         })
     }
@@ -455,40 +460,70 @@ fn keys(keys: &[&str]) -> Vec<String> {
     keys.iter().map(|key| (*key).to_owned()).collect()
 }
 
-/// #752: a SQL predicate from the row policy's read visibility narrows the
-/// locking read of `updateMany` and `deleteMany`, so a hidden row is never
-/// passed to a row callback. The payloads and stored rows equal the
-/// callback-only ones.
-#[tokio::test]
-async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks() {
-    let mut outcomes = Vec::new();
-    for visibility in [
-        Visibility::CallbackOnly,
-        Visibility::Prefilter,
-        Visibility::Complete,
-    ] {
-        let narrowed = visibility != Visibility::CallbackOnly;
-        let mut outcome = Vec::new();
-        for mutation in [UPDATE_ALL, DELETE_ALL] {
-            let (mut db, mut owner) = setup().await;
-            let asked = Arc::new(Mutex::new(Vec::new()));
-            db.set_row_policy(OwnerRows::new(false, asked.clone()).with_visibility(visibility));
-            let payload = mutate(&db, mutation).await;
-            assert_eq!(payload["success"], true, "{visibility:?} {payload}");
-            let expected = if narrowed {
-                keys(&["key1", "key2"])
-            } else {
-                keys(&["key1", "key2", "key3", "key4"])
-            };
-            assert_eq!(take_asked(&asked), expected, "{visibility:?} {mutation}");
-            outcome.push((payload, stored(&db).await));
-            owner.cleanup().unwrap();
-        }
-        outcomes.push(outcome);
+/// The setting under test: `None` is the default handle, `Some(on)` sets
+/// `Database::with_narrow_bulk_writes_to_read_visibility(on)` explicitly.
+const MODES: [Option<bool>; 3] = [None, Some(false), Some(true)];
+
+fn in_mode(db: Database, mode: Option<bool>) -> Database {
+    match mode {
+        None => db,
+        Some(on) => db.with_narrow_bulk_writes_to_read_visibility(on),
     }
-    assert_eq!(outcomes[0], outcomes[1], "Prefilter matches callback-only");
-    assert_eq!(outcomes[0], outcomes[2], "Complete matches callback-only");
-    let (update, rows) = &outcomes[0][0];
+}
+
+/// #752: with `narrow_bulk_writes_to_read_visibility` on, a SQL predicate from
+/// the row policy's read visibility narrows the locking read of `updateMany`
+/// and `deleteMany`, so a hidden row is never passed to a row callback. By
+/// default (and with the setting off) every matching row is still asked about,
+/// as before. Payloads and stored rows are the same in every mode.
+#[tokio::test]
+async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks_when_opted_in() {
+    let mut outcomes = Vec::new();
+    for mode in MODES {
+        for visibility in [
+            Visibility::CallbackOnly,
+            Visibility::Prefilter,
+            Visibility::Complete,
+        ] {
+            let narrowed = mode == Some(true) && visibility != Visibility::CallbackOnly;
+            let mut outcome = Vec::new();
+            for mutation in [UPDATE_ALL, DELETE_ALL] {
+                let (mut db, mut owner) = setup().await;
+                // Off unless the host opts in, on the handle and the builder.
+                assert!(!db.narrow_bulk_writes_to_read_visibility_enabled());
+                assert!(
+                    Database::builder(db.pool().clone())
+                        .narrow_bulk_writes_to_read_visibility(true)
+                        .build()
+                        .narrow_bulk_writes_to_read_visibility_enabled()
+                );
+                let asked = Arc::new(Mutex::new(Vec::new()));
+                db.set_row_policy(OwnerRows::new(false, asked.clone()).with_visibility(visibility));
+                let payload = mutate(&in_mode(db.clone(), mode), mutation).await;
+                assert_eq!(
+                    payload["success"], true,
+                    "{mode:?} {visibility:?} {payload}"
+                );
+                let expected = if narrowed {
+                    keys(&["key1", "key2"])
+                } else {
+                    keys(&["key1", "key2", "key3", "key4"])
+                };
+                assert_eq!(
+                    take_asked(&asked),
+                    expected,
+                    "{mode:?} {visibility:?} {mutation}"
+                );
+                outcome.push((payload, stored(&db).await));
+                owner.cleanup().unwrap();
+            }
+            outcomes.push(((mode, visibility), outcome));
+        }
+    }
+    for ((mode, visibility), outcome) in &outcomes[1..] {
+        assert_eq!(&outcomes[0].1, outcome, "{mode:?} {visibility:?}");
+    }
+    let (update, rows) = &outcomes[0].1[0];
     assert_eq!(update["affectedCount"], 2);
     assert_eq!(
         rows,
@@ -500,48 +535,80 @@ async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks() {
         ]
         .map(|(key, other)| (key.to_owned(), other.to_owned()))
     );
-    let (delete, rows) = &outcomes[0][1];
+    let (delete, rows) = &outcomes[0].1[1];
     assert_eq!(delete["deletedCount"], 2);
     assert_eq!(rows.len(), 2);
 }
 
-/// A row the caller may write but not read is outside its read visibility,
-/// so a bulk write narrowed by that visibility leaves it out. A
-/// write-target prefilter that selects it takes precedence and keeps it a
-/// target, as a callback-only policy does.
+/// A row the caller may write but not read stays a bulk-write target by
+/// default, whatever the read visibility. With the setting on, a bulk write
+/// narrowed by read visibility leaves it out, and a write-target prefilter
+/// that selects it takes precedence and keeps it a target.
 #[tokio::test]
-async fn a_write_target_prefilter_keeps_write_only_rows_bulk_targets() {
-    for (visibility, prefilter, expected) in [
-        (Visibility::CallbackOnly, false, 4),
-        (Visibility::Prefilter, false, 2),
-        (Visibility::Complete, false, 2),
-        (Visibility::Prefilter, true, 4),
-        (Visibility::Complete, true, 4),
-    ] {
+async fn write_only_rows_stay_bulk_targets_unless_narrowing_is_opted_in() {
+    for mode in MODES {
+        for (visibility, prefilter) in [
+            (Visibility::CallbackOnly, false),
+            (Visibility::Prefilter, false),
+            (Visibility::Complete, false),
+            (Visibility::Prefilter, true),
+            (Visibility::Complete, true),
+        ] {
+            let expected =
+                if mode == Some(true) && visibility != Visibility::CallbackOnly && !prefilter {
+                    2
+                } else {
+                    4
+                };
+            let (mut db, mut owner) = setup().await;
+            let mut policy =
+                OwnerRows::new(prefilter, Default::default()).with_visibility(visibility);
+            policy.writes_theirs = true;
+            db.set_row_policy(policy);
+            let payload = mutate(&in_mode(db.clone(), mode), UPDATE_ALL).await;
+            assert_eq!(payload["success"], true, "{payload}");
+            assert_eq!(
+                payload["affectedCount"], expected,
+                "{mode:?} {visibility:?} prefilter={prefilter}"
+            );
+            owner.cleanup().unwrap();
+        }
+    }
+}
+
+/// With the setting on, a `read_visibility` error on the mutation surface
+/// refuses a bulk write before any row changes. By default the bulk write
+/// does not ask, and proceeds as before.
+#[tokio::test]
+async fn a_read_visibility_error_refuses_only_an_opted_in_bulk_write() {
+    for mode in MODES {
         let (mut db, mut owner) = setup().await;
-        let mut policy = OwnerRows::new(prefilter, Default::default()).with_visibility(visibility);
-        policy.writes_theirs = true;
-        db.set_row_policy(policy);
-        let payload = mutate(&db, UPDATE_ALL).await;
-        assert_eq!(payload["success"], true, "{payload}");
-        assert_eq!(
-            payload["affectedCount"], expected,
-            "{visibility:?} prefilter={prefilter}"
+        db.set_row_policy(
+            OwnerRows::new(false, Default::default()).with_visibility(Visibility::Error),
         );
+        let payload = mutate(&in_mode(db.clone(), mode), UPDATE_ALL).await;
+        if mode == Some(true) {
+            assert_eq!(payload["success"], false, "{payload}");
+            assert!(all_before(&stored(&db).await), "nothing was written");
+        } else {
+            assert_eq!(payload["success"], true, "{mode:?} {payload}");
+            assert_eq!(payload["affectedCount"], 2, "{mode:?}");
+        }
         owner.cleanup().unwrap();
     }
 }
 
-/// #752 on PostgreSQL: another transaction's lock on a hidden row does not
-/// block a bulk write narrowed by read visibility. Without the predicate the
-/// bulk write waits for that lock (here, until `lock_timeout`).
+/// #752 on PostgreSQL: with the setting on, another transaction's lock on a
+/// hidden row does not block a bulk write narrowed by read visibility. By
+/// default, and without a predicate, the bulk write waits for that lock (here,
+/// until `lock_timeout`).
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn a_lock_on_a_hidden_row_does_not_block_a_narrowed_bulk_write() {
+async fn a_lock_on_a_hidden_row_does_not_block_an_opted_in_narrowed_bulk_write() {
     use graphql_orm::sqlx::Connection as _;
     let (db, mut owner) = setup().await;
     // New sessions give up on a lock after a bounded wait, so the control
-    // case below fails instead of hanging.
+    // cases below fail instead of hanging.
     execute(
         &db,
         "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET lock_timeout = %L', current_database(), '2s'); END $$",
@@ -564,8 +631,8 @@ async fn a_lock_on_a_hidden_row_does_not_block_a_narrowed_bulk_write() {
         .execute(&mut locker)
         .await
         .unwrap();
-    let with_policy = |visibility| {
-        let mut db = Database::new(pool.clone());
+    let with_policy = |visibility, narrow: bool| {
+        let mut db = Database::new(pool.clone()).with_narrow_bulk_writes_to_read_visibility(narrow);
         db.set_entity_policy(AllowEntityPolicy);
         db.set_row_policy(OwnerRows::new(false, Default::default()).with_visibility(visibility));
         db
@@ -580,25 +647,32 @@ async fn a_lock_on_a_hidden_row_does_not_block_a_narrowed_bulk_write() {
         .expect("lock_timeout bounds every wait")
     };
 
-    // Control: the callback-only policy selects, and so waits for, the
-    // locked hidden row; the write gives up and changes nothing.
-    let response = run(with_policy(Visibility::CallbackOnly), UPDATE_ALL).await;
-    let refused = !response.errors.is_empty()
-        || response.data.clone().into_json().unwrap()["updateTargetRecords"]["success"] == false;
-    assert!(
-        refused,
-        "the callback-only write waits on the lock: {response:?}"
-    );
-    assert!(all_before(&stored(&db).await));
+    // Controls: without a predicate, and with one but the setting off, the
+    // bulk write selects, and so waits for, the locked hidden row; it gives up
+    // and changes nothing.
+    for (visibility, narrow) in [
+        (Visibility::CallbackOnly, true),
+        (Visibility::Prefilter, false),
+    ] {
+        let response = run(with_policy(visibility, narrow), UPDATE_ALL).await;
+        let refused = !response.errors.is_empty()
+            || response.data.clone().into_json().unwrap()["updateTargetRecords"]["success"]
+                == false;
+        assert!(
+            refused,
+            "{visibility:?} narrow={narrow}: the write waits on the lock: {response:?}"
+        );
+        assert!(all_before(&stored(&db).await));
+    }
 
     for visibility in [Visibility::Prefilter, Visibility::Complete] {
-        let response = run(with_policy(visibility), UPDATE_ALL).await;
+        let response = run(with_policy(visibility, true), UPDATE_ALL).await;
         assert!(response.errors.is_empty(), "{response:?}");
         let payload = &response.data.into_json().unwrap()["updateTargetRecords"];
         assert_eq!(payload["success"], true, "{visibility:?} {payload}");
         assert_eq!(payload["affectedCount"], 2, "{visibility:?}");
     }
-    let response = run(with_policy(Visibility::Prefilter), DELETE_ALL).await;
+    let response = run(with_policy(Visibility::Prefilter, true), DELETE_ALL).await;
     assert!(response.errors.is_empty(), "{response:?}");
     let payload = &response.data.into_json().unwrap()["deleteTargetRecords"];
     assert_eq!(payload["success"], true, "{payload}");

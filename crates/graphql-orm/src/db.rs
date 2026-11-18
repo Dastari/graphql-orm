@@ -104,6 +104,8 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     subscription_selection_unsupported_code: bool,
     /// Opt-in `extensions.outcome` on generated mutation root errors.
     mutation_error_outcome: bool,
+    /// Opt-in narrowing of GraphQL bulk-write targets by read visibility.
+    narrow_bulk_writes_to_read_visibility: bool,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
@@ -132,6 +134,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             refuse_oversized_limit: self.refuse_oversized_limit,
             subscription_selection_unsupported_code: self.subscription_selection_unsupported_code,
             mutation_error_outcome: self.mutation_error_outcome,
+            narrow_bulk_writes_to_read_visibility: self.narrow_bulk_writes_to_read_visibility,
             max_page_offset: self.max_page_offset,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
@@ -212,6 +215,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -247,6 +251,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -279,6 +284,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -311,6 +317,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -343,6 +350,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -378,6 +386,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -420,6 +429,7 @@ impl<B: OrmBackend> Database<B> {
             refuse_oversized_limit: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
             max_page_offset: None,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -493,6 +503,20 @@ impl<B: OrmBackend> Database<B> {
     /// carry `extensions.outcome`; see [`DatabaseBuilder::mutation_error_outcome`].
     pub fn with_mutation_error_outcome(mut self, enabled: bool) -> Self {
         self.mutation_error_outcome = enabled;
+        self
+    }
+
+    /// Whether generated GraphQL bulk writes narrow their targets by read
+    /// visibility; see [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`].
+    pub fn narrow_bulk_writes_to_read_visibility_enabled(&self) -> bool {
+        self.narrow_bulk_writes_to_read_visibility
+    }
+
+    /// Return a copy of this handle whose generated GraphQL bulk writes narrow
+    /// their targets by read visibility; see
+    /// [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`].
+    pub fn with_narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
+        self.narrow_bulk_writes_to_read_visibility = enabled;
         self
     }
 
@@ -2380,6 +2404,34 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// `success: false`, so `success: false` always means nothing was written.
     pub fn mutation_error_outcome(mut self, enabled: bool) -> Self {
         self.database.mutation_error_outcome = enabled;
+        self
+    }
+
+    /// Narrow the target rows of generated GraphQL `updateMany` and
+    /// `deleteMany` to the caller's read visibility. Off by default, so bulk
+    /// writes select the same rows as before.
+    ///
+    /// When on and the row policy declares no
+    /// [`write_target_prefilter`](crate::graphql::orm::RowPolicy::write_target_prefilter),
+    /// a `Prefilter` or `Complete` predicate from
+    /// [`RowPolicy::read_visibility`](crate::graphql::orm::RowPolicy::read_visibility)
+    /// on the `GraphqlMutation` surface is added to the bulk write's locking
+    /// read. Rows outside it are not passed to a row callback or counted
+    /// against the bulk bound or scan budget, and on PostgreSQL they are not
+    /// locked. On SQL Server, whether a scanned row outside the predicate is
+    /// locked depends on the access path: an index seek on the predicate
+    /// avoids it, a scan does not. Every selected row is still classified by
+    /// the row callbacks, so visible rows give the same payload and writes.
+    ///
+    /// A row the caller may write but not read is then left out, as a missing
+    /// row is; a declared `write_target_prefilter` takes precedence in both
+    /// modes and keeps such rows targets. With this on, an error from
+    /// `read_visibility` on the `GraphqlMutation` surface refuses the bulk
+    /// write, so a policy that returns `Err` for some callers (for example
+    /// write-only ones) must return `CallbackOnly` instead to keep their bulk
+    /// writes working. Single-row and repository writes are unaffected.
+    pub fn narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
+        self.database.narrow_bulk_writes_to_read_visibility = enabled;
         self
     }
 

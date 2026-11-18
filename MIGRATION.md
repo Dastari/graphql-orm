@@ -15,17 +15,22 @@ supersedes: []
 Upgrade ORM and macros together and recompile entities. No data migration is
 needed.
 
-- **Bulk writes narrowed by read visibility (#752). Action needed** only if
-  your `RowPolicy::read_visibility` returns `Prefilter` or `Complete` on the
-  `GraphqlMutation` surface, you declare no `write_target_prefilter`, and
-  GraphQL callers may `updateMany`/`deleteMany` rows outside their read
-  visibility that `can_write_row` allows. Those rows are now left out of the
-  bulk write, as missing rows are. To keep them targets, return a
-  `write_target_prefilter` that selects every row the caller can read or
-  write; it takes precedence over read visibility. Otherwise **no action**:
-  visible rows give the same payload and writes, and rows outside read
-  visibility are no longer locked or passed to row callbacks. Single-row
-  writes and repository writes are unchanged. See
+- **Bulk writes narrowed to read visibility (#752). No action** (opt-in).
+  `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` makes
+  generated GraphQL `updateMany`/`deleteMany` add the SQL predicate of
+  `RowPolicy::read_visibility` (`Prefilter` or `Complete`, `GraphqlMutation`
+  surface) to their locking read when no `write_target_prefilter` is
+  declared, so rows outside the caller's read visibility are not passed to row
+  callbacks or counted, and on PostgreSQL not locked (on SQL Server a scan
+  still locks rows it reads). Off by default; bulk writes are unchanged
+  without it. Before you turn it on:
+  - rows the caller may write but not read are left out of narrowed bulk
+    writes; return a `write_target_prefilter` that selects every row the
+    caller can read or write to keep them (it takes precedence in both modes);
+  - an error from `read_visibility` on the `GraphqlMutation` surface refuses
+    the bulk write, so return `CallbackOnly` instead of `Err` for callers, such
+    as write-only ones, whose bulk writes must keep working.
+  The default is planned to become on in the next breaking release. See
   [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 - **Dependent-delete root `errorCode` (#763). No action.** An entity with
   `dependent_deletes` and `mutation_error_codes` reports `NOT_FOUND` (or the

@@ -514,6 +514,42 @@ fn interpretation_fingerprint_is_stable_and_follows_its_inputs() {
         interpretation_fingerprint(dialect, &entities()[..2], None),
         unsalted
     );
+    // The generated entities feed their key fields and effective default
+    // sort, so a change to either reaches the fingerprint (the unit test in
+    // `client_metadata.rs` shows each such change changes the value).
+    for (captured, default_sort, keys) in [
+        (
+            serde_json::to_value(InterpretationEntity::of::<MetaPlain, DefaultBackend>(
+                MetaPlain::__GOM_INTERPRETATION_SOURCE,
+            ))
+            .unwrap(),
+            <MetaPlain as graphql_orm::graphql::orm::DatabaseEntity>::DEFAULT_SORT,
+            <MetaPlain as graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS,
+        ),
+        (
+            serde_json::to_value(InterpretationEntity::of::<MetaChild, DefaultBackend>(
+                MetaChild::__GOM_INTERPRETATION_SOURCE,
+            ))
+            .unwrap(),
+            <MetaChild as graphql_orm::graphql::orm::DatabaseEntity>::DEFAULT_SORT,
+            <MetaChild as graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS,
+        ),
+    ] {
+        assert!(!default_sort.is_empty(), "{captured}");
+        assert_eq!(captured["default_sort"], default_sort, "{captured}");
+        let captured_keys = captured["keys"].as_array().unwrap();
+        assert_eq!(captured_keys.len(), keys.len(), "{captured}");
+        assert_eq!(captured_keys[0][0], "id", "{captured}");
+        assert!(
+            captured_keys[0][1]
+                .as_str()
+                .is_some_and(|kind| !kind.is_empty())
+                && captured_keys[0][2]
+                    .as_str()
+                    .is_some_and(|sql| !sql.is_empty()),
+            "{captured}"
+        );
+    }
     // The order of `entities:` does not matter.
     let mut reordered = entities();
     reordered.reverse();

@@ -10,12 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.177.0 narrows the locking read of generated GraphQL `updateMany`
-and `deleteMany` by the SQL predicate of the row policy's `read_visibility`
-when no `write_target_prefilter` is declared, so rows outside the caller's
-read visibility are neither locked nor passed to row callbacks (#752). The
-root delete of a `dependent_deletes` entity now reports its `errorCode` under
-`mutation_error_codes` (#763). See the
+Version 0.177.0 adds the opt-in
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`, which narrows the
+locking read of generated GraphQL `updateMany` and `deleteMany` to the SQL
+predicate of the row policy's `read_visibility` when no
+`write_target_prefilter` is declared, so rows outside the caller's read
+visibility are not passed to row callbacks, and on PostgreSQL not locked
+(#752). Off by default. The root delete of a `dependent_deletes` entity now
+reports its `errorCode` under `mutation_error_codes` (#763). See the
 [migration guide](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
 
 Version 0.176.0 adds transitive-closure read predicates: `ReadPredicate::related_closure`,

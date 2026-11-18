@@ -3340,15 +3340,18 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// (or `Unrestricted`) replaces row callbacks only on read paths that
     /// explicitly support this contract (including typed projections and group pages). Errors fail the request closed.
     ///
-    /// Generated GraphQL `updateMany` and `deleteMany` also ask, on the
-    /// `GraphqlMutation` surface, when [`Self::write_target_prefilter`]
-    /// returns `None`: a `Prefilter` or `Complete` predicate narrows their
-    /// locking read, so rows outside it are never selected, locked or passed
-    /// to a row callback. Every selected row is still classified by the row
-    /// callbacks. A row outside the predicate is left out even if
+    /// With [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
+    /// on (it is off by default), generated GraphQL `updateMany` and
+    /// `deleteMany` also ask, on the `GraphqlMutation` surface, when
+    /// [`Self::write_target_prefilter`] returns `None`. A `Prefilter` or
+    /// `Complete` predicate then narrows their locking read: rows outside it
+    /// are never passed to a row callback, and on PostgreSQL never locked. On
+    /// SQL Server, a scan may still lock rows outside it; an index seek on the
+    /// predicate avoids that. Every selected row is still classified by the
+    /// row callbacks. A row outside the predicate is left out even if
     /// [`Self::can_write_row`] would allow it; return a write-target
     /// prefilter that selects such rows if callers may bulk-write rows they
-    /// cannot read.
+    /// cannot read. An error then refuses the bulk write.
     fn read_visibility<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,
@@ -3417,10 +3420,12 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// row callbacks, so it can never grant a write. A row it leaves out is
     /// treated exactly like a missing row, including a row the callbacks
     /// would have allowed, so it must not exclude rows the caller can write.
-    /// The default, `None`, keeps the callback-only behaviour for single-row
-    /// writes; a bulk write then narrows by the SQL predicate of
-    /// [`Self::read_visibility`], when it has one. A returned predicate takes
-    /// precedence over read visibility for bulk writes. `policy_key` is the
+    /// The default, `None`, keeps the callback-only behaviour; a bulk write
+    /// on a database that opted into
+    /// [`narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
+    /// then narrows by the SQL predicate of [`Self::read_visibility`], when it
+    /// has one. A returned predicate takes precedence over read visibility in
+    /// both modes. `policy_key` is the
     /// entity's write policy key. Errors fail the write closed. Repository
     /// writes do not ask.
     fn write_target_prefilter<'a>(

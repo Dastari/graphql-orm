@@ -13,8 +13,8 @@ supersedes: []
 Version 0.177.0 gives the root delete of a `dependent_deletes` entity the
 same `errorCode` as a direct delete under `mutation_error_codes` (#763), and
 generates `updateMany` and `deleteMany` against the runtime's bulk-target
-selection that applies read visibility (#752). Upgrade ORM and macros
-together; see the
+selection, which can narrow targets to read visibility when the host opts in
+(#752). Upgrade ORM and macros together; see the
 [migration guide](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
 
 Version 0.176.0 pairs with the runtime transitive-closure read predicates; generated code is unchanged.
