@@ -60,8 +60,8 @@ static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Hive builds plugins from serialisable configuration only, so the plugin
 /// config carries a process-unique `runtime_id` and `on_plugin_init` removes
-/// the matching entry. Every failure before that point removes it too, so an
-/// entry never outlives one router start and is never shared between routers.
+/// the matching entry. The startup guard removes any unclaimed runtime on
+/// failure or cancellation.
 static PLUGIN_RUNTIMES: OnceLock<Mutex<BTreeMap<u64, PluginRuntime>>> = OnceLock::new();
 
 /// Prepares and runs a router on its owned Ntex runtime.
@@ -390,22 +390,11 @@ impl PreparedRouter {
                 .as_ref()
                 .is_some_and(|documents| documents.strict),
         };
-        plugin_runtimes()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(runtime_id, runtime);
         let hive_config =
-            match build_hive_config(&self.config, runtime_id, internal_subscription.as_ref()) {
-                Ok(config) => config,
-                Err(error) => {
-                    remove_plugin_runtime(runtime_id);
-                    return Err(error);
-                }
-            };
-        let hive_config = hive_config.into_static();
+            build_hive_config(&self.config, runtime_id, internal_subscription.as_ref())?
+                .into_static();
         let mut telemetry =
             hive_router::telemetry::Telemetry::init_global(hive_config).map_err(|error| {
-                remove_plugin_runtime(runtime_id);
                 RouterError::new(
                     RouterErrorKind::Runtime,
                     format!("failed to initialize router telemetry: {error}"),
@@ -428,17 +417,19 @@ impl PreparedRouter {
             tracing::warn!("{warning}");
         }
         let mut background_tasks = background_tasks::BackgroundTasksManager::new();
-        let configured = hive_router::configure_app_from_config(
-            hive_config,
-            telemetry.context.clone(),
-            &mut background_tasks,
-            PluginRegistry::new().register::<StaticGraphPlugin>(),
-        )
-        .await;
+        let configured = {
+            let _pending = PendingPluginRuntime::register(runtime_id, runtime);
+            hive_router::configure_app_from_config(
+                hive_config,
+                telemetry.context.clone(),
+                &mut background_tasks,
+                PluginRegistry::new().register::<StaticGraphPlugin>(),
+            )
+            .await
+        };
         let (shared_state, schema_state) = match configured {
             Ok(configured) => configured,
             Err(error) => {
-                remove_plugin_runtime(runtime_id);
                 background_tasks.shutdown();
                 telemetry.graceful_shutdown().await;
                 return Err(RouterError::new(
@@ -585,7 +576,6 @@ impl PreparedRouter {
         background_tasks.shutdown();
         telemetry.graceful_shutdown().await;
         hive_router::invoke_shutdown_hooks(&shared_state).await;
-        remove_plugin_runtime(runtime_id);
         result
     }
 }
@@ -661,6 +651,24 @@ struct PluginRuntime {
     persisted_documents_enabled: bool,
     persisted_documents: Option<crate::persisted::PersistedDocuments>,
     verified_runtimes: Arc<hive_router::tokio::sync::Mutex<BTreeMap<u64, VerifiedRuntime>>>,
+}
+
+struct PendingPluginRuntime(u64);
+
+impl PendingPluginRuntime {
+    fn register(id: u64, runtime: PluginRuntime) -> Self {
+        plugin_runtimes()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, runtime);
+        Self(id)
+    }
+}
+
+impl Drop for PendingPluginRuntime {
+    fn drop(&mut self) {
+        remove_plugin_runtime(self.0);
+    }
 }
 
 fn plugin_runtimes() -> &'static Mutex<BTreeMap<u64, PluginRuntime>> {

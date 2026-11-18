@@ -35,7 +35,7 @@ use url::Url;
 use crate::{
     AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, RouterError,
     RouterErrorKind,
-    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
+    http_body::{FetchError, USER_AGENT, fetch_bounded},
 };
 
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -571,7 +571,7 @@ impl JwksAuthenticationProvider {
         // the key set committed last is always the one fetched last.
         let _round = self.key_refresh_round.lock().await;
         let body = self
-            .fetch_bounded(
+            .fetch_document(
                 self.config.jwks_url.clone(),
                 self.config.max_jwks_bytes,
                 "JWKS",
@@ -588,7 +588,7 @@ impl JwksAuthenticationProvider {
         Ok(())
     }
 
-    async fn fetch_bounded(
+    async fn fetch_document(
         &self,
         url: Url,
         maximum_bytes: usize,
@@ -599,24 +599,27 @@ impl JwksAuthenticationProvider {
         if let Some(headers) = request_headers {
             request = request.headers(headers.clone());
         }
-        let response = request.send().await.map_err(|_| {
-            AuthenticationError::unavailable(format!("{resource} retrieval failed"))
-        })?;
-        if !response.status().is_success() {
-            return Err(AuthenticationError::unavailable(format!(
-                "{resource} endpoint returned an unsuccessful status"
-            )));
-        }
-        read_bounded_body(response, maximum_bytes)
-            .await
-            .map_err(|error| match error {
-                BoundedBodyError::TooLarge => AuthenticationError::unavailable(format!(
-                    "{resource} response exceeded its configured body limit"
-                )),
-                BoundedBodyError::Read => {
-                    AuthenticationError::unavailable(format!("{resource} response read failed"))
-                }
-            })
+        let response = fetch_bounded(
+            request,
+            maximum_bytes,
+            false,
+            |_| Ok(()),
+            |error| {
+                let detail = match error {
+                    FetchError::Send => format!("{resource} retrieval failed"),
+                    FetchError::Status(_) => {
+                        format!("{resource} endpoint returned an unsuccessful status")
+                    }
+                    FetchError::TooLarge => {
+                        format!("{resource} response exceeded its configured body limit")
+                    }
+                    FetchError::Read => format!("{resource} response read failed"),
+                };
+                AuthenticationError::unavailable(detail)
+            },
+        )
+        .await?;
+        Ok(response.bytes)
     }
 
     #[cfg(feature = "auth-agql")]
@@ -625,7 +628,7 @@ impl JwksAuthenticationProvider {
             return Ok(());
         };
         let body = self
-            .fetch_bounded(
+            .fetch_document(
                 config.url.clone(),
                 config.max_body_bytes,
                 "role-scope catalogue",
