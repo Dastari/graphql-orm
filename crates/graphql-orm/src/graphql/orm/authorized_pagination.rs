@@ -56,21 +56,28 @@ pub enum ReadPredicateOp {
 ///
 /// - on every backend, at most [`READ_PREDICATE_MAX_RENDERED_BYTES`] of
 ///   rendered SQL, [`READ_PREDICATE_MAX_EXPRESSION_DEPTH`] levels of
-///   expression nesting and [`READ_PREDICATE_CLOSURE_MAX_NESTING`] closures
-///   nested inside one another;
-/// - on SQL Server, also at most [`READ_PREDICATE_MSSQL_MAX_NESTING`] nested
-///   subqueries, [`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`] nested
-///   relations and [`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`] weighted
-///   levels.
+///   expression nesting, [`READ_PREDICATE_MAX_CASE_NESTING`] nested `CASE`
+///   expressions and [`READ_PREDICATE_CLOSURE_MAX_NESTING`] closures nested
+///   inside one another;
+/// - on SQLite and PostgreSQL, at most [`READ_PREDICATE_MAX_RELATION_NESTING`]
+///   nested relations and [`READ_PREDICATE_MAX_RELATIONS`] in total;
+/// - on SQL Server, at most [`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`]
+///   nested relations, [`READ_PREDICATE_MSSQL_MAX_RELATIONS`] in total,
+///   [`READ_PREDICATE_MSSQL_MAX_NESTING`] nested subqueries and
+///   [`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`] weighted levels.
+///
+/// The generated relation filters and count orderings of one statement are
+/// budgeted together as well: see [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`].
 ///
 /// `and` and `or` flatten a child of the same kind, so a fold of any length
 /// is one node, and every list of three or more renders as a balanced binary
-/// tree of parenthesised pairs. Each counted level is then one level of the
-/// parser's expression tree. Within these limits a predicate renders,
+/// tree of parenthesised pairs, so its parse depth grows with the logarithm
+/// of its length. Within these limits a predicate renders,
 /// formats and drops without deep recursion, and every shape tested at the
-/// limits ran. The limits do not cover a statement's bind-parameter count,
-/// which each server caps itself (SQL Server at 2,100 for the whole
-/// statement), nor optimizer resource failures beyond the tested shapes.
+/// limits ran within bounded server memory. They do not cover a statement's
+/// bind-parameter count, which each server caps itself (SQL Server at 2,100
+/// for the whole statement), nor server resource use beyond the tested
+/// shapes and data: set a statement timeout on the server as well.
 #[derive(Clone, Debug)]
 pub struct ReadPredicate {
     entity: TypeId,
@@ -204,12 +211,46 @@ const MSSQL_MAX_NESTING: u32 = 75;
 
 /// The deepest nesting of relation subqueries (`EXISTS (SELECT ...)`, as
 /// [`ReadPredicate::related`] and [`ReadPredicate::not_related`] render) one
-/// [`ReadPredicate`] may render on SQL Server. Nested relations are
-/// correlated joins the optimizer must plan together: on the owned server,
-/// 39 or 40 of them failed with "insufficient resources" (error 8623) while
-/// 35 ran. A deeper predicate is refused with `AUTHORIZATION_MISCONFIGURED`.
+/// [`ReadPredicate`] may render on SQL Server. Relations are correlated
+/// joins the optimizer plans together: on the owned server, 39 or 40 nested
+/// ones failed with "insufficient resources" (error 8623), and so did two
+/// 27-deep relations from a parent to its children. A deeper predicate is
+/// refused with `AUTHORIZATION_MISCONFIGURED`.
 pub const READ_PREDICATE_MSSQL_MAX_RELATION_NESTING: u32 = MSSQL_MAX_RELATION_NESTING;
-const MSSQL_MAX_RELATION_NESTING: u32 = 28;
+const MSSQL_MAX_RELATION_NESTING: u32 = 16;
+
+/// The deepest nesting of relation subqueries one [`ReadPredicate`] may
+/// render on SQLite and PostgreSQL. PostgreSQL plans nested relations
+/// together, and its memory per statement grows steeply with their depth:
+/// on a memory-capped server, a chain of 32 nested relations peaked at about
+/// 30 MB, 64 at 230 MB, 96 at 900 MB and 128 at 2.5 GB. A deeper predicate is
+/// refused with `AUTHORIZATION_MISCONFIGURED`.
+pub const READ_PREDICATE_MAX_RELATION_NESTING: u32 = MAX_RELATION_NESTING;
+const MAX_RELATION_NESTING: u32 = 32;
+
+/// The most relation subqueries (`EXISTS (SELECT ...)`) one
+/// [`ReadPredicate`] may render in total on SQLite and PostgreSQL, however
+/// they are arranged. Each one is planned, so memory grows with the total as
+/// well as the depth. A predicate over it is refused with
+/// `AUTHORIZATION_MISCONFIGURED`. See also
+/// [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`].
+pub const READ_PREDICATE_MAX_RELATIONS: u32 = MAX_RELATIONS;
+const MAX_RELATIONS: u32 = 128;
+
+/// The most relation subqueries one [`ReadPredicate`] may render in total on
+/// SQL Server. Relations that fan out (a parent's relation to many children)
+/// exhausted the optimizer (error 8623) from about 112 relation subqueries
+/// in one statement.
+pub const READ_PREDICATE_MSSQL_MAX_RELATIONS: u32 = MSSQL_MAX_RELATIONS;
+const MSSQL_MAX_RELATIONS: u32 = 16;
+
+/// The deepest nesting of `CASE` expressions one [`ReadPredicate`] may
+/// render, on every backend. SQL Server refuses `CASE` nested deeper than
+/// ten (error 125). [`ReadPredicate::not_related`] adds two levels and a
+/// closure one, so this also bounds `not_related` chains, whose target is
+/// inlined twice per level, to five levels.
+pub const READ_PREDICATE_MAX_CASE_NESTING: u32 = MAX_CASE_NESTING;
+const MAX_CASE_NESTING: u32 = 10;
 
 /// The deepest expression nesting one [`ReadPredicate`] may render on any
 /// backend, counted as nested parentheses: each `not()`, each `and`/`or`
@@ -218,8 +259,10 @@ const MSSQL_MAX_RELATION_NESTING: u32 = 28;
 /// far inside a 2 MiB thread stack, even in debug builds. A deeper predicate
 /// is refused with `AUTHORIZATION_MISCONFIGURED` when it is built. `and` and
 /// `or` folds are flattened and render as balanced pairs, so a list of `n`
-/// terms adds about `log2(n)` levels. SQLite parses one level per counted
-/// parenthesis here, well under its 1,000-deep expression limit.
+/// terms adds about `log2(n)` levels. SQLite, which refuses expressions over
+/// 1,000 deep, counts about one level per counted parenthesis for negations
+/// and `and`/`or`, and about two for relation chains (themselves limited to
+/// [`READ_PREDICATE_MAX_RELATION_NESTING`]), so this stays well under it.
 pub const READ_PREDICATE_MAX_EXPRESSION_DEPTH: u32 = MAX_EXPRESSION_DEPTH;
 const MAX_EXPRESSION_DEPTH: u32 = 256;
 
@@ -251,6 +294,8 @@ struct Cost {
     inner_units: u32,
     nesting: u32,
     relations: u32,
+    exists: u32,
+    cases: u32,
     closures: u32,
 }
 impl Cost {
@@ -268,6 +313,8 @@ impl Cost {
             units,
             subqueries: nesting,
             relations,
+            exists,
+            cases,
         } = nesting(clause);
         Self {
             bytes: clause.len().saturating_add(placeholders.saturating_mul(6)),
@@ -277,17 +324,25 @@ impl Cost {
             inner_units: units,
             nesting,
             relations,
+            exists,
+            cases,
             closures: closure_level(clause) as u32 - 1,
         }
     }
     fn check(self, backend: DatabaseBackend) -> async_graphql::Result<Self> {
+        let mssql = backend == DatabaseBackend::Mssql;
+        let (relation_nesting, relations) = if mssql {
+            (MSSQL_MAX_RELATION_NESTING, MSSQL_MAX_RELATIONS)
+        } else {
+            (MAX_RELATION_NESTING, MAX_RELATIONS)
+        };
         if self.bytes > READ_PREDICATE_MAX_RENDERED_BYTES
             || self.closures > READ_PREDICATE_CLOSURE_MAX_NESTING
             || self.depth > MAX_EXPRESSION_DEPTH
-            || (backend == DatabaseBackend::Mssql
-                && (self.nesting > MSSQL_MAX_NESTING
-                    || self.relations > MSSQL_MAX_RELATION_NESTING
-                    || self.units > MSSQL_MAX_NESTING_UNITS))
+            || self.cases > MAX_CASE_NESTING
+            || self.relations > relation_nesting
+            || self.exists > relations
+            || (mssql && (self.nesting > MSSQL_MAX_NESTING || self.units > MSSQL_MAX_NESTING_UNITS))
         {
             return Err(invalid());
         }
@@ -314,6 +369,10 @@ struct Nesting {
     subqueries: u32,
     /// `EXISTS (SELECT ...)` relation subqueries.
     relations: u32,
+    /// Relation subqueries in total, along every path.
+    exists: u32,
+    /// `CASE ... END` expressions.
+    cases: u32,
 }
 
 /// Measure `sql` in one pass, skipping quoted strings and identifiers.
@@ -327,7 +386,11 @@ fn nesting(sql: &str) -> Nesting {
         units: 0,
         subqueries: 0,
         relations: 0,
+        exists: 0,
+        cases: 0,
     };
+    let mut cases = 0_u32;
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
@@ -371,6 +434,7 @@ fn nesting(sql: &str) -> Nesting {
                 };
                 subqueries += u32::from(subquery);
                 relations += u32::from(relation);
+                deepest.exists += u32::from(relation);
                 units += weight;
                 open.push((subquery, relation, weight));
                 deepest.depth = deepest.depth.max(open.len() as u32);
@@ -384,6 +448,19 @@ fn nesting(sql: &str) -> Nesting {
                     relations -= u32::from(relation);
                     units -= weight;
                 }
+            }
+            byte if word(byte) && (index == 0 || !word(bytes[index - 1])) => {
+                let end = (index..bytes.len())
+                    .find(|&at| !word(bytes[at]))
+                    .unwrap_or(bytes.len());
+                let token = &bytes[index..end];
+                if token.eq_ignore_ascii_case(b"CASE") {
+                    cases += 1;
+                    deepest.cases = deepest.cases.max(cases);
+                } else if token.eq_ignore_ascii_case(b"END") {
+                    cases = cases.saturating_sub(1);
+                }
+                index = end - 1;
             }
             _ => {}
         }
@@ -1153,14 +1230,18 @@ impl ReadPredicate {
                 .cost
                 .bytes
                 .saturating_add(other.cost.bytes)
-                // `(` `)` and ` AND `, plus amortised chunk grouping.
-                .saturating_add(8),
+                // Each operand of a balanced pair tree costs at most its own
+                // `(` `)`, one separator and one grouping pair: nine bytes
+                // with ` AND `, eight with ` OR `.
+                .saturating_add(if and { 9 } else { 8 }),
             depth,
             inner,
             units,
             inner_units,
             nesting: self.cost.nesting.max(other.cost.nesting),
             relations: self.cost.relations.max(other.cost.relations),
+            exists: self.cost.exists.saturating_add(other.cost.exists),
+            cases: self.cost.cases.max(other.cost.cases),
             closures: self.cost.closures.max(other.cost.closures),
         }
         .check(self.backend)?;
@@ -1185,6 +1266,21 @@ impl ReadPredicate {
 /// `AUTHORIZATION_MISCONFIGURED` before the statement is rendered.
 pub const READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES: usize = 1 << 20;
 
+/// The most relation subqueries (`EXISTS (SELECT ...)`) that the generated
+/// relation filters and relation-count orderings of one statement may add
+/// together on SQLite and PostgreSQL. With the entity's own policy (at most
+/// [`READ_PREDICATE_MAX_RELATIONS`]), a statement holds at most 256. On a
+/// memory-capped PostgreSQL server, 264 relation subqueries nested 32 deep
+/// peaked at about 590 MB.
+pub const READ_PREDICATE_MAX_STATEMENT_RELATIONS: u32 = MAX_STATEMENT_RELATIONS;
+const MAX_STATEMENT_RELATIONS: u32 = 128;
+
+/// As [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`], on SQL Server. With the
+/// entity's own policy (at most [`READ_PREDICATE_MSSQL_MAX_RELATIONS`]), a
+/// statement holds at most 64; fan-out relations failed from about 112.
+pub const READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS: u32 = MSSQL_MAX_STATEMENT_RELATIONS;
+const MSSQL_MAX_STATEMENT_RELATIONS: u32 = 16;
+
 /// Per-statement budget threaded through generated where-input and ordering
 /// preparation: where-input nodes left, and relation policy SQL added so far.
 #[doc(hidden)]
@@ -1192,6 +1288,7 @@ pub const READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES: usize = 1 << 20;
 pub struct RelationFilterBudget {
     nodes: usize,
     bytes: usize,
+    relations: u32,
 }
 impl Default for RelationFilterBudget {
     fn default() -> Self {
@@ -1204,6 +1301,7 @@ impl RelationFilterBudget {
         Self {
             nodes: 128,
             bytes: 0,
+            relations: 0,
         }
     }
     /// Spend one where-input node; false once none are left.
@@ -1218,7 +1316,13 @@ impl RelationFilterBudget {
     fn charge<B: OrmBackend>(&mut self, fragment: &str) -> async_graphql::Result<()> {
         let cost = Cost::of(fragment).check(B::DIALECT)?;
         self.bytes = self.bytes.saturating_add(cost.bytes);
-        if self.bytes > READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES {
+        self.relations = self.relations.saturating_add(cost.exists);
+        let relations = if B::DIALECT == DatabaseBackend::Mssql {
+            MSSQL_MAX_STATEMENT_RELATIONS
+        } else {
+            MAX_STATEMENT_RELATIONS
+        };
+        if self.bytes > READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES || self.relations > relations {
             return Err(invalid());
         }
         Ok(())
@@ -2615,6 +2719,55 @@ mod predicate_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn fold_byte_estimates_never_undercount_the_render() {
+        let render = |predicate: &ReadPredicate| {
+            render_filter_expression(
+                DatabaseBackend::Sqlite,
+                &predicate.expression,
+                &mut 1,
+                &mut Vec::new(),
+            )
+        };
+        for and in [true, false] {
+            let leaf = || sqlite_fragment("x IS NULL", Vec::new());
+            let step = |fold: ReadPredicate| {
+                if and {
+                    fold.and(leaf())
+                } else {
+                    fold.or(leaf())
+                }
+            };
+            let mut fold = leaf();
+            let mut terms = 1;
+            // Grow without copying until close to the budget, checking the
+            // estimate on the way, then step carefully up to the refusal.
+            while fold.cost.bytes + 64 < READ_PREDICATE_MAX_RENDERED_BYTES {
+                fold = step(fold).unwrap();
+                terms += 1;
+                if terms % 9_973 == 0 {
+                    assert!(fold.cost.bytes >= render(&fold).len(), "{terms}");
+                }
+            }
+            while let Ok(next) = step(fold.clone()) {
+                fold = next;
+            }
+            // The last fold that builds renders within the budget.
+            let clause = render(&fold);
+            assert!(fold.cost.bytes >= clause.len());
+            assert!(
+                clause.len() <= READ_PREDICATE_MAX_RENDERED_BYTES,
+                "{}",
+                clause.len()
+            );
+            assert!(
+                clause.len() > READ_PREDICATE_MAX_RENDERED_BYTES * 9 / 10,
+                "{}",
+                clause.len()
+            );
+        }
     }
 
     #[test]

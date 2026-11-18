@@ -35,19 +35,31 @@ per-statement relation budget. No data migration is needed. See
     (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`), such as a long `not()` chain or
     deeply alternating `and(or(and(...)))`. Folds of one kind are flattened
     and do not count;
+  - over 10 nested `CASE` expressions (`READ_PREDICATE_MAX_CASE_NESTING`),
+    such as more than five nested `not_related`;
+  - over 32 nested relations or 128 relations in total on SQLite and
+    PostgreSQL (`READ_PREDICATE_MAX_RELATION_NESTING`,
+    `READ_PREDICATE_MAX_RELATIONS`), or over 16 of either on SQL Server
+    (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`,
+    `READ_PREDICATE_MSSQL_MAX_RELATIONS`);
   - on SQL Server, over 75 nested subquery levels
-    (`READ_PREDICATE_MSSQL_MAX_NESTING`), over 28 nested relations
-    (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`), or over 900 weighted levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING`) or over 900 weighted levels
     (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than four
     `related` around a 64-hop closure;
-  - more than 1 MiB of policy SQL from the generated relation filters and
-    relation-count orderings of one statement
-    (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`).
+  - more than 1 MiB of policy SQL, or more than 128 relations (16 on SQL
+    Server), from the generated relation filters and relation-count
+    orderings of one statement (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`,
+    `READ_PREDICATE_MAX_STATEMENT_RELATIONS`,
+    `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`). A client request with
+    more relation filters than that is refused.
 
   Such a policy is now refused with `AUTHORIZATION_MISCONFIGURED` when it is
   built or, for relation filters, when the request is prepared. Before, it
-  rendered an oversized statement, ran for minutes, overflowed the stack or,
-  on SQL Server, failed every read with "nested too deeply". Flatten the
+  rendered an oversized statement, ran for minutes, overflowed the stack,
+  exhausted PostgreSQL memory, or on SQL Server failed every read or
+  exhausted the server's resources. Also set PostgreSQL `statement_timeout`
+  (and on SQL Server a query timeout): the limits are measured on tested
+  shapes, not a proof for every plan and data volume. Flatten the
   composition, use a shorter `related_closure_within` bound, or split the
   policy. Policies within the limits are unchanged.
 - **`and`/`or` folds no longer overflow the stack (#779). No action.** A

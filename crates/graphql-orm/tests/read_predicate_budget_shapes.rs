@@ -97,6 +97,9 @@ impl BatchLoadEntity for ZrKid {
 schema_roots! { query_custom_ops: [], entities: [ZrParent, ZrKid], }
 
 static KID_POLICY: Mutex<Option<ReadPredicate>> = Mutex::new(None);
+/// Held by every test that sets `KID_POLICY`, so tests running in parallel
+/// never see each other's policy.
+static KID_POLICY_TESTS: Mutex<()> = Mutex::new(());
 
 struct Policy;
 impl RowPolicy<Backend> for Policy {
@@ -204,7 +207,7 @@ async fn database() -> (Database<Backend>, Owned) {
     );
     #[cfg(feature = "postgres")]
     let (db, owned) = {
-        let owned = owned_postgres::OwnedPostgres::start("recheck-781d").unwrap();
+        let owned = owned_postgres::OwnedPostgres::start("budget-shapes").unwrap();
         let db = Database::<Backend>::connect_postgres(&owned.url)
             .await
             .unwrap();
@@ -536,6 +539,9 @@ async fn run_graphql_paths(
 )]
 fn near_limit_shapes_execute_on_every_path() {
     on_thread(2 << 20, || {
+        let _serial = KID_POLICY_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         block_on(async {
             let (mut db, owned) = database().await;
             db.set_row_policy(Policy);
@@ -905,6 +911,142 @@ fn generated_or_lists_render_shallow_and_run() {
                     Err(e) => failures.push(format!("or {n}: {e}")),
                 }
             }
+            let _keep = owned;
+            assert!(failures.is_empty(), "{failures:#?}");
+        })
+    });
+}
+
+/// A where input asking for `filters` kid relation filters joined by `or`.
+async fn parents_with_kid_filters(
+    schema: &async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>,
+    filters: usize,
+) -> async_graphql::Response {
+    let alternatives = (0..filters)
+        .map(|_| json!({ f("kids"): [{ f("score"): { f("gte"): 0 } }] }))
+        .collect::<Vec<_>>();
+    schema
+        .execute(
+            async_graphql::Request::new(format!(
+                "query($w: ZrParentWhereInput!) {{ rows: {}({}: $w) {{ edges {{ node {{ {} }} }} }} }}",
+                r("zrParents"),
+                a("where"),
+                f("id")
+            ))
+            .variables(async_graphql::Variables::from_json(
+                json!({ "w": { f("or"): alternatives } }),
+            )),
+        )
+        .await
+}
+
+fn code(response: &async_graphql::Response) -> Option<String> {
+    response.errors.first().and_then(|error| {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+    })
+}
+
+#[test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+fn relation_subqueries_are_budgeted_per_statement() {
+    on_thread(2 << 20, || {
+        let _serial = KID_POLICY_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        block_on(async {
+            let (mut db, owned) = database().await;
+            db.set_row_policy(Policy);
+            db.set_entity_policy(Policy);
+            let mssql = cfg!(feature = "mssql");
+            let (nesting, total, statement) = if mssql {
+                (
+                    READ_PREDICATE_MSSQL_MAX_RELATION_NESTING,
+                    READ_PREDICATE_MSSQL_MAX_RELATIONS,
+                    READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS,
+                )
+            } else {
+                (
+                    READ_PREDICATE_MAX_RELATION_NESTING,
+                    READ_PREDICATE_MAX_RELATIONS,
+                    READ_PREDICATE_MAX_STATEMENT_RELATIONS,
+                )
+            };
+            // A host chain deeper than the nesting limit is refused when it
+            // is built (the reviewed shape was 126 deep).
+            let (deepest, depth) = grow(leaf(), &|p, _| wrap(p), &|_| true);
+            assert_eq!(depth as u32, nesting);
+            assert!(wrap(deepest.clone()).is_err());
+            // So is an `or` of chains past the total.
+            let one = grow(
+                leaf(),
+                &|p, n| {
+                    if n < 3 {
+                        wrap(p)
+                    } else {
+                        Err(async_graphql::Error::new("stop"))
+                    }
+                },
+                &|_| true,
+            )
+            .0;
+            let (_, terms) = grow(one.clone(), &|p, _| p.or(one.clone()), &|_| true);
+            assert_eq!((terms + 1) * 3, total as usize / 3 * 3, "{terms}");
+            // Each kid relation filter embeds the kid policy (three nested
+            // relations) plus its own: four relation subqueries. The statement
+            // budget admits `statement / 4` of them, and refuses one more.
+            *KID_POLICY.lock().unwrap() = Some(one);
+            let schema = async_graphql::Schema::build(
+                QueryRoot::default(),
+                MutationRoot::default(),
+                SubscriptionRoot::default(),
+            )
+            .data(db)
+            .data(AuthSubject::builder("reader").build())
+            .finish();
+            let admitted = statement as usize / 4;
+            let response = parents_with_kid_filters(&schema, admitted).await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let response = parents_with_kid_filters(&schema, admitted + 1).await;
+            assert_eq!(
+                code(&response).as_deref(),
+                Some("\"AUTHORIZATION_MISCONFIGURED\""),
+                "{:?}",
+                response.errors
+            );
+            *KID_POLICY.lock().unwrap() = None;
+            let _keep = owned;
+        })
+    });
+}
+
+#[test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+fn not_related_chains_stop_at_the_case_and_relation_limits() {
+    on_thread(2 << 20, || {
+        let _serial = KID_POLICY_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        block_on(async {
+            let (db, owned) = database().await;
+            let (deepest, levels) = grow(
+                leaf(),
+                &|p, _| ReadPredicate::not_related::<B, ZrKid, ZrKid>(&[("id", "id")], p),
+                &|_| true,
+            );
+            // Two CASE levels each: at most five within the CASE limit of 10.
+            // SQL Server's 16-relation total stops it at three.
+            assert_eq!(levels, if cfg!(feature = "mssql") { 3 } else { 5 });
+            let failures = run_statement_paths(&db, "deepest not_related chain", &deepest).await;
             let _keep = owned;
             assert!(failures.is_empty(), "{failures:#?}");
         })

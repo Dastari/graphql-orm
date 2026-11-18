@@ -359,72 +359,92 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   | Closures nested inside closures, through any relations, negations, `and` and `or` (`READ_PREDICATE_CLOSURE_MAX_NESTING`) | one predicate | all | 2 |
   | Rendered SQL, with placeholders counted at full width (`READ_PREDICATE_MAX_RENDERED_BYTES`) | one predicate | all | 1 MiB |
   | Expression nesting, counted as nested parentheses (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`) | one predicate | all | 256 |
+  | Nested `CASE` expressions (`READ_PREDICATE_MAX_CASE_NESTING`) | one predicate | all | 10 |
+  | Nested relations, `EXISTS (SELECT ...)` (`READ_PREDICATE_MAX_RELATION_NESTING`, `READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`) | one predicate | SQLite, PostgreSQL / SQL Server | 32 / 16 |
+  | Relations in total, along every path (`READ_PREDICATE_MAX_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_RELATIONS`) | one predicate | SQLite, PostgreSQL / SQL Server | 128 / 16 |
   | Nested `(SELECT ...)` levels (`READ_PREDICATE_MSSQL_MAX_NESTING`) | one predicate | SQL Server | 75 |
-  | Nested relations, `EXISTS (SELECT ...)` (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`) | one predicate | SQL Server | 28 |
   | Weighted nesting: 11 per subquery, 2 per `NOT (`, 1 per other parenthesis (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`) | one predicate | SQL Server | 900 |
   | Policy SQL that all generated relation filters and relation-count orderings add (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`) | one statement | all | 1 MiB |
+  | Relations that all generated relation filters and relation-count orderings add (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 128 / 16 |
 
-  What these limits guarantee:
+  A generated statement therefore holds at most its entity's own policy
+  plus its relation filters and count orderings: 2 MiB of policy SQL, and
+  256 relation subqueries on SQLite and PostgreSQL or 32 on SQL Server.
+
+  What these limits are measured to cover:
   - **Rendering.** A predicate that builds renders, formats, clones and drops
     without recursion deeper than the expression limit. That is far inside a
     2 MiB thread stack in a debug build, which overflowed only between about
     1,500 and 2,000 levels.
-  - **Nesting.** Each counted level is one level of the parser's
-    expression tree, and every family of shapes tested at the limits ran on
-    SQLite, PostgreSQL and SQL Server: negations, plain and wide `and`/`or`
-    levels, relation chains, closures, and mixtures of them. On SQLite,
-    which refuses expressions over 1,000 deep, the families failed only from
-    450 counted levels (relation chains, which SQLite counts twice) to about
-    1,050, so the 256 limit leaves at least 1.7 times that.
-  - **Not covered: plan resources.** On SQL Server the limits are set below
-    the shapes that failed. A plan-resource failure (such as error 8623) on a
-    shape unlike the tested ones is not ruled out. It fails the read, and
-    admits nothing.
-  - **Statement size.** A generated statement carries at most its entity's
-    own policy (1 MiB) plus 1 MiB of relation policy SQL.
-  - **Not covered: bind parameters.** The limits do not count bind
-    parameters, which each server caps per statement: SQL Server at 2,100,
-    SQLite at 32,766 by default and PostgreSQL at 65,535. A statement over
-    that cap fails when it runs, and admits nothing.
+  - **Parsing.** Every family of shapes tested at the limits ran on SQLite,
+    PostgreSQL and SQL Server: negations, plain and wide `and`/`or` levels,
+    relation chains, closures, `not_related` chains and mixtures of them.
+    SQLite refuses expressions over 1,000 deep. Its depth grows by about
+    one for each counted level of negations and `and`/`or`, and by about two
+    for each counted level of a relation chain. With the relation limit
+    lifted, the families failed from 450 counted levels (relation chains) to
+    about 1,050, so the 256 limit leaves at least 1.7 times that, and
+    relation chains are now limited to 32.
+  - **PostgreSQL memory.** PostgreSQL plans nested relations together, and
+    its memory per statement grows steeply with their depth and their
+    total. On a server capped at 4 GB, a chain of 128 nested relations
+    peaked at 2.5 GB, and 16 relation filters each embedding a 126-deep
+    policy would have needed about 40 GB (extrapolated). At the limits above, the largest
+    statement measured peaked at about 470 MB of server memory (a policy of
+    128 relations 32 deep, plus four relation filters at the statement
+    budget) and ran in about half a second.
+  - **SQL Server plan resources.** The optimizer plans the relations of one
+    statement as joins together. Errors 8623 ("insufficient resources") and
+    701 (out of memory, which affects every session on the server) struck
+    on shapes the earlier limits allowed: 40 nested relations, two
+    27-deep relations from a parent to its children, 16 or more such
+    relations combined with `and`, and an `or` of 128 relation chains. Every
+    shape tested within 32 relation subqueries per statement ran, including
+    32 parent-to-children relations combined with `and`. Failures started at
+    48.
+  - **Not covered.**
+    - **Bind parameters.** The limits do not count bind parameters, which
+      each server caps per statement: SQL Server at 2,100, SQLite at 32,766
+      by default and PostgreSQL at 65,535. A statement over that cap fails
+      when it runs.
+    - **Untested shapes.** Server resource use beyond the tested shapes,
+      data volumes and plans is not ruled out. Exhausting PostgreSQL memory
+      or the SQL Server resource pool is a server-wide outage, not one
+      failed read. Set a statement timeout on the server and the
+      connection: PostgreSQL `statement_timeout`, and on SQL Server a query
+      timeout and Resource Governor limits.
   - **Folds stay flat.** `and` and `or` flatten a child of the same kind, so
     `p = p.or(q)?` over any number of grants is one node. Every list of three
     or more operands, in predicates and in generated where inputs, renders
     as a balanced binary tree of parenthesised pairs: `(a) OR ((b) OR (c))`.
     A list of `n` operands is about `log2(n)` levels deep, where the plain
-    chain `a OR b OR c` would be `n` levels deep to the parser. A 50,000-term
-    `or` is 18 levels deep, and it builds and runs on all three backends.
-    Operand order, and therefore bind order, is unchanged.
-
+    chain `a OR b OR c` would be `n` levels deep to the parser. A
+    50,000-term `or` of short terms is 18 levels deep and about 1 MB, within
+    the byte budget, and it builds and runs on all three backends. Operand
+    order, and therefore bind order, is unchanged.
   - **Why these values.** On the owned servers, each extra closure level
     multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
     1.1 s for two and 8 s for three, while four levels exhausted server
     memory. PostgreSQL followed the same curve: 3.7 s at two levels, 21 s at
-    three and 172 s at four. A closure inside a closure at the default bound
-    renders about 220 KB on SQL Server, well under the size budget.
-  - **SQL Server headroom.** SQL Server refuses statements in two ways:
-    - **"Nested too deeply" (error 191).** It counts subqueries, negations
-      and parentheses together, at different weights. On the owned server, a
-      closure wrapped in relations failed from 97 subquery levels, and shapes
-      up to 83 ran. A `NOT` chain ran at 500 and failed from 550. Mixtures
-      failed in proportion: 79 subqueries with 100 negations failed, 67 with
-      150 ran, and 79 with 170 `and`/`or` levels ran. Weights of 11, 2 and 1
-      fit every measurement, with failures from about 1,050 units.
-    - **"Insufficient resources" (error 8623).** It struck earlier on chains
-      of relations, which the optimizer plans as joins together: 40 nested
-      relations failed, as did 39 with nine negations, while 35 ran.
-
-    The limits are therefore 75 subqueries, 28 nested relations and 900
-    units. Every shape tested at those limits ran, on every read path. They
-    leave room for the host query, such as a relation filter that wraps the
-    policy. Relation filters and count orderings are checked too, so a
-    wrapper that would cross a limit is refused, not sent.
+    three and 172 s at four. A `not_related` chain inlines its target twice
+    per level: on PostgreSQL eight levels took 150 s and nine 542 s, while
+    five, the most the `CASE` limit allows, take about 30 ms.
+  - **SQL Server nesting.** SQL Server's "nested too deeply" (error 191)
+    counts subqueries, negations and parentheses together, at different
+    weights. On the owned server, a closure wrapped in relations failed from
+    97 subquery levels, and shapes up to 83 ran. A `NOT` chain ran at 500
+    and failed from 550. Mixtures failed in proportion: 79 subqueries with
+    100 negations failed, 67 with 150 ran, and 79 with 170 `and`/`or` levels
+    ran. Weights of 11, 2 and 1 fit every measurement, with failures from
+    about 1,050 units. It also refuses `CASE` nested deeper than ten (error
+    125).
   - **What fits on SQL Server.** A closure at the default 64 hops uses 67
-    subquery levels, and each `related` or `not_related` around it adds two.
-    That leaves room for four relations, then about 37 more negations. A
-    closure inside a closure leaves room for one relation. A relation chain
-    alone may be 28 deep, then take about 140 negations or reach the
-    256-level expression limit with `and`/`or` levels. On SQLite and
-    PostgreSQL, only the 256-level expression limit applies.
+    subquery levels and no relations, and each `related` or `not_related`
+    around it adds two subquery levels. That leaves room for four relations,
+    then about 37 more negations. A closure inside a closure leaves room for
+    one relation. A relation chain alone may be 16 deep. On SQLite and
+    PostgreSQL, a relation chain may be 32 deep, and the 256-level
+    expression limit applies around it.
   - **Cost guidance.** Keep closures to one level where you can. Index the key
     columns. Prefer a shorter `related_closure_within` bound when chains are
     known to be shallow: the work per row is at most the bound times the rows

@@ -592,7 +592,47 @@ mod portable {
                 }
             }
         }
-        assert!(built >= 8, "{built}");
+        // Each level adds two nested CASE expressions: the CASE limit stops
+        // the chain at five levels, before its doubled target grows large.
+        // SQL Server's 16-relation total stops it at three.
+        assert_eq!(READ_PREDICATE_MAX_CASE_NESTING, 10);
+        assert_eq!(
+            built,
+            if B::DIALECT == DatabaseBackend::Mssql {
+                3
+            } else {
+                5
+            }
+        );
+        // A fold of one kind is refused at the byte budget, and the last
+        // fold that builds renders within it.
+        let term = || ReadPredicate::is_not_null::<B, ClosureNode>("id").unwrap();
+        let mut fold = term();
+        // About 25 bytes a term: grow without copying well short of the
+        // budget, then step to the refusal.
+        for _ in 0..40_000 {
+            fold = fold.and(term()).unwrap();
+        }
+        loop {
+            match fold.clone().and(term()) {
+                Ok(next) => fold = next,
+                Err(error) => {
+                    misconfigured(Err(error));
+                    break;
+                }
+            }
+        }
+        let clause = rendered(&fold);
+        assert!(
+            clause.len() <= READ_PREDICATE_MAX_RENDERED_BYTES + 1024,
+            "{}",
+            clause.len()
+        );
+        assert!(
+            clause.len() > READ_PREDICATE_MAX_RENDERED_BYTES * 9 / 10,
+            "{}",
+            clause.len()
+        );
         // Breadth counts too: `or` of large closures stops at the budget.
         let large = any(PARENT, related_to_itself(all(PARENT, passes())));
         let mut wide = large.clone();
@@ -642,7 +682,10 @@ mod portable {
                 assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
                 assert_eq!(wrappers, room);
             } else {
-                assert_eq!(wrappers, 40, "no nesting budget off SQL Server");
+                // No subquery budget off SQL Server: the relation nesting
+                // limit stops it, counting the closure's own relations.
+                assert!((28..=32).contains(&wrappers), "{wrappers}");
+                assert_eq!(READ_PREDICATE_MAX_RELATION_NESTING, 32);
             }
         }
     }
