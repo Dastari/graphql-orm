@@ -13,7 +13,8 @@ supersedes: []
 ## 0.179.0 to 0.180.0: SQL identifier quoting
 
 Upgrade ORM and macros together. Generated code and statement text are
-unchanged for every name that rendered valid SQL before.
+unchanged for every name that rendered as exactly one identifier before,
+except for the per-backend path splitting below.
 
 - **Malformed delimited input is quoted as one literal name (#782). Action
   needed** only if code passes a qualified path that is already quoted, such
@@ -27,10 +28,30 @@ unchanged for every name that rendered valid SQL before.
 - **Declared names that only look delimited are refused (#782). Action
   needed** only if a `table` or `db_column` attribute has a path part that
   starts and ends with a delimiter but is not one well-formed delimited
-  identifier for the backend, such as `"a"b"`, `[a]]` or `[a] , [b]`. These
-  never produced valid SQL; the derive now fails with an error naming the
-  part. Double every closing delimiter inside the part, or write the name
-  without delimiters and let the renderer quote it.
+  identifier for the backend, such as `"a"b"`, `[a]]` or `[a] , [b]`, or a
+  name that contains NUL. Most such parts were an unterminated identifier and
+  failed with a syntax error; `[a] , [b]` was accepted by SQL Server where a
+  column list was expected, as two columns rather than one. The derive now
+  fails with an error naming the part. Double every closing delimiter inside
+  the part, or write the name without delimiters and let the renderer quote
+  it.
+- **Paths are split with each backend's own delimiters (#782). Action
+  needed** only if a declared or rendered path has a part that the old
+  shared splitter read as delimited but the database does not: a PostgreSQL
+  part that starts with `[` or a backtick, a SQLite `[...]` part with `]`
+  inside, or a SQL Server part that starts with a backtick. Such a part is now
+  split at its dots as the database reads it. For example, PostgreSQL
+  `[s.t` now names table `t` in schema `[s` (`"[s".t`), where it was one
+  name (`"[s.t"`), and SQL Server `` `a.b` `` is now `` [`a].[b`] ``. Write
+  the part in the backend's own delimited form, such as `"[s.t"` on
+  PostgreSQL, to keep one name. Paths using each backend's own forms are
+  unchanged.
+- **Empty and NUL names (#782). No action.** SQLite still accepts `""`, `[]`
+  and two backticks as an empty name, and they are passed through unchanged.
+  PostgreSQL and SQL Server refuse an empty delimited identifier, so there
+  `""` or `[]` is now quoted as a literal two-character name instead of being
+  passed through to a syntax error. A delimited name that contains NUL is no
+  longer passed through; SQLite and PostgreSQL refuse NUL in any statement.
 - **SQL Server brackets names outside the regular-identifier rule (#783). No
   action.** Names that SQL Server refused bare, such as `x²` or `雪🦀`, are now
   bracketed and work. Every name SQL Server accepted bare keeps its exact
@@ -38,6 +59,12 @@ unchanged for every name that rendered valid SQL before.
   fingerprints are unchanged.
 - **SQLite quotes names that start with a byte-order mark. No action.** Such a
   name previously lost its first character.
+- **Introspection reads catalogue names literally (#782). No action.** SQL
+  Server introspection quotes the raw names it reads back from the catalogue
+  unconditionally, and SQLite and PostgreSQL introspection never pass such a
+  name through as SQL text, so a table literally named
+  `[ledger]` is reported, and its indexes and foreign keys read, as that
+  table rather than as `ledger`. Ordinary names are reported as before.
 
 ## 0.176.0 to 0.177.0: bulk-write target visibility and coded dependent-delete refusals
 

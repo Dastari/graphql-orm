@@ -3808,7 +3808,10 @@ where
         if options.exclude_blank {
             filters.push(FilterExpression::trusted_fragment(
                 {
-                    let trim = format!("TRIM({})", B::DIALECT.quote_identifier(field.column_name));
+                    let trim = format!(
+                        "TRIM({})",
+                        B::DIALECT.quote_identifier_path(field.column_name)
+                    );
                     if B::DIALECT == DatabaseBackend::Postgres {
                         format!("{} <> ?", group_binary_comparison(B::DIALECT, &trim))
                     } else {

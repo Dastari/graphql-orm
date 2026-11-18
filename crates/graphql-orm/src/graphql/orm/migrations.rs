@@ -4953,8 +4953,8 @@ pub(super) async fn introspect_owned_postgres_connection_including(
                             None if target_schema == schema_name => target_table,
                             None => format!(
                                 "{}.{}",
-                                DatabaseBackend::Postgres.render_identifier(&target_schema),
-                                DatabaseBackend::Postgres.render_identifier(&target_table)
+                                DatabaseBackend::Postgres.render_raw_identifier(&target_schema),
+                                DatabaseBackend::Postgres.render_raw_identifier(&target_table)
                             ),
                         }
                     },
@@ -5998,12 +5998,14 @@ pub async fn introspect_mssql_schema(
     for row in table_rows {
         let schema_name = super::MssqlBackend::try_get_string(&row, "table_schema")?;
         let raw_table_name = super::MssqlBackend::try_get_string(&row, "table_name")?;
-        // Quote each part on its own: a `.` inside a table name is not a
-        // schema separator.
+        // Quote each raw catalogue part on its own and always literally: a
+        // `.` inside a table name is not a schema separator, and a table
+        // literally named `[ledger]` must not resolve to `ledger` in the
+        // `OBJECT_ID` lookups below or collide with it in the model.
         let table_path = format!(
             "{}.{}",
-            DatabaseBackend::Mssql.quote_identifier(&schema_name),
-            DatabaseBackend::Mssql.quote_identifier(&raw_table_name)
+            DatabaseBackend::Mssql.delimit_raw_identifier(&schema_name),
+            DatabaseBackend::Mssql.delimit_raw_identifier(&raw_table_name)
         );
         if is_internal_graphql_orm_table(&raw_table_name) {
             continue;
@@ -6053,7 +6055,7 @@ pub async fn introspect_mssql_schema(
             .into_iter()
             .map(|row| {
                 super::MssqlBackend::try_get_string(&row, "column_name")
-                    .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
+                    .map(|column| DatabaseBackend::Mssql.delimit_raw_identifier(&column))
             })
             .collect::<Result<Vec<_>, _>>()?;
         // A table without a primary key reports none, not an invented `[id]`.
@@ -6083,10 +6085,9 @@ pub async fn introspect_mssql_schema(
             .map(|row| {
                 Ok((
                     super::MssqlBackend::try_get_string(&row, "constraint_name")?,
-                    DatabaseBackend::Mssql.quote_identifier(&super::MssqlBackend::try_get_string(
-                        &row,
-                        "column_name",
-                    )?),
+                    DatabaseBackend::Mssql.delimit_raw_identifier(
+                        &super::MssqlBackend::try_get_string(&row, "column_name")?,
+                    ),
                     row.try_get::<i64, _>("key_ordinal")?,
                 ))
             })
@@ -6120,10 +6121,12 @@ pub async fn introspect_mssql_schema(
         for row in foreign_key_rows {
             let constraint_name = super::MssqlBackend::try_get_string(&row, "constraint_name")?;
             let pair = super::core::ForeignKeyColumnPairModel {
-                source_column: DatabaseBackend::Mssql
-                    .quote_identifier(&super::MssqlBackend::try_get_string(&row, "source_column")?),
-                target_column: DatabaseBackend::Mssql
-                    .quote_identifier(&super::MssqlBackend::try_get_string(&row, "target_column")?),
+                source_column: DatabaseBackend::Mssql.delimit_raw_identifier(
+                    &super::MssqlBackend::try_get_string(&row, "source_column")?,
+                ),
+                target_column: DatabaseBackend::Mssql.delimit_raw_identifier(
+                    &super::MssqlBackend::try_get_string(&row, "target_column")?,
+                ),
             };
             match foreign_keys.last_mut() {
                 Some(last) if last.constraint_name.as_deref() == Some(&constraint_name) => {
@@ -6134,10 +6137,10 @@ pub async fn introspect_mssql_schema(
                     column_pairs: vec![pair],
                     target_table: format!(
                         "{}.{}",
-                        DatabaseBackend::Mssql.quote_identifier(
+                        DatabaseBackend::Mssql.delimit_raw_identifier(
                             &super::MssqlBackend::try_get_string(&row, "target_schema")?
                         ),
-                        DatabaseBackend::Mssql.quote_identifier(
+                        DatabaseBackend::Mssql.delimit_raw_identifier(
                             &super::MssqlBackend::try_get_string(&row, "target_table")?
                         )
                     ),
@@ -6156,7 +6159,7 @@ pub async fn introspect_mssql_schema(
             .into_iter()
             .map(|row| {
                 let raw_name = super::MssqlBackend::try_get_string(&row, "column_name")?;
-                let name = DatabaseBackend::Mssql.quote_identifier(&raw_name);
+                let name = DatabaseBackend::Mssql.delimit_raw_identifier(&raw_name);
                 Ok(ColumnModel {
                     is_primary_key: primary_keys.iter().any(|column| column == &name),
                     is_unique: unique_columns.contains(&name),

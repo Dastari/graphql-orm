@@ -1559,7 +1559,7 @@ fn scalar_output_is_readable(
 fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -> String {
     let rendered = reference.then(|| backend_render_identifier_path(backend, name));
     let name = rendered.as_deref().map_or(name, |rendered| {
-        crate::backend::identifier_path_parts(rendered)
+        crate::backend::identifier_path_parts(backend, rendered)
             .last()
             .unwrap_or("")
     });

@@ -410,10 +410,13 @@ fn delimiters(backend: DatabaseBackend) -> &'static [(char, char, bool)] {
     }
 }
 
-/// The name `text` denotes when it is exactly one well-formed, non-empty
-/// delimited identifier: the only input `quote_identifier` returns unchanged.
+/// The name `text` denotes when it is exactly one well-formed delimited
+/// identifier the database accepts: no NUL, and an empty name only on SQLite.
+/// This is the only input `quote_identifier` returns unchanged.
 fn well_formed_delimited(backend: DatabaseBackend, text: &str) -> Option<String> {
-    read_one_delimited(backend, text).filter(|name| !name.is_empty())
+    read_one_delimited(backend, text).filter(|name| {
+        (!name.is_empty() || backend == DatabaseBackend::Sqlite) && !name.contains('\0')
+    })
 }
 
 /// Reads `text` as exactly one delimited identifier and returns the name it
@@ -574,10 +577,14 @@ fn quoted_paths_keep_each_undelimited_part_as_one_identifier() {
     runner
         .run(&vec(part, 1..4), |parts| {
             for backend in TEXT_BACKENDS {
-                // The path splitter reads `"`, `` ` `` and `[` as opening
-                // delimiters on every backend, so a part that starts with
-                // one is a delimited part rather than undelimited input.
-                if parts.iter().any(|part| part.starts_with(['"', '`', '['])) {
+                // The path splitter reads the backend's own opening
+                // delimiters, so a part that starts with one is a delimited
+                // part rather than undelimited input.
+                if parts.iter().any(|part| {
+                    delimiters(backend)
+                        .iter()
+                        .any(|(open, _, _)| part.starts_with(*open))
+                }) {
                     continue;
                 }
                 let quoted = backend.quote_identifier_path(&parts.join("."));
@@ -603,7 +610,9 @@ fn malformed_delimited_input_is_not_passed_through() {
         (DatabaseBackend::Sqlite, "\"\"\"", "\"\"\"\"\"\"\"\""),
         (DatabaseBackend::Sqlite, "[a]b]", "\"[a]b]\""),
         (DatabaseBackend::Sqlite, "`a`b`", "\"`a`b`\""),
-        (DatabaseBackend::Sqlite, "\"\"", "\"\"\"\"\"\""),
+        (DatabaseBackend::Sqlite, "\"a\0b\"", "\"\"\"a\0b\"\"\""),
+        (DatabaseBackend::Postgres, "\"a\0b\"", "\"\"\"a\0b\"\"\""),
+        (DatabaseBackend::Mssql, "[a\0b]", "[[a\0b]]]"),
         (DatabaseBackend::Postgres, "\"\"", "\"\"\"\"\"\""),
         (DatabaseBackend::Postgres, "\"", "\"\"\"\""),
         (
@@ -649,6 +658,10 @@ fn well_formed_delimited_input_is_unchanged() {
         (DatabaseBackend::Sqlite, "\"a\"\"b\""),
         (DatabaseBackend::Sqlite, "[a b]"),
         (DatabaseBackend::Sqlite, "`a``b`"),
+        // SQLite accepts an empty delimited name; it is passed through.
+        (DatabaseBackend::Sqlite, "\"\""),
+        (DatabaseBackend::Sqlite, "[]"),
+        (DatabaseBackend::Sqlite, "``"),
         (DatabaseBackend::Postgres, "\"Mixed\"\"Case\""),
         (DatabaseBackend::Mssql, "[a]]b]"),
         (DatabaseBackend::Mssql, "\"a\"\"b\""),
@@ -663,6 +676,43 @@ fn well_formed_delimited_input_is_unchanged() {
     ] {
         assert_eq!(backend.quote_identifier_path(path), path, "{backend:?}");
         assert_eq!(backend.render_identifier_path(path), path, "{backend:?}");
+    }
+}
+
+/// Round 2 of #782: each dialect splits a path with its own delimited
+/// forms. PostgreSQL has no `[...]` or backtick form, so a leading `[` does
+/// not swallow the separator; SQLite closes `[...]` at the first `]`; SQL
+/// Server has no backtick form.
+#[test]
+fn paths_split_with_each_dialects_own_delimiters() {
+    use DatabaseBackend::{Mssql, Postgres, Sqlite};
+    for (backend, path, rendered, quoted) in [
+        (Postgres, "[s.t", "\"[s\".t", "\"[s\".\"t\""),
+        (Postgres, "[a.b]", "\"[a\".\"b]\"", "\"[a\".\"b]\""),
+        (Postgres, "`a.b`", "\"`a\".\"b`\"", "\"`a\".\"b`\""),
+        (Postgres, "\"a.b\".c", "\"a.b\".c", "\"a.b\".\"c\""),
+        (Sqlite, "[a]].b]", "\"[a]]\".\"b]\"", "\"[a]]\".\"b]\""),
+        (Sqlite, "[a.b].c", "[a.b].c", "[a.b].\"c\""),
+        (Sqlite, "`a``.b`.c", "`a``.b`.c", "`a``.b`.\"c\""),
+        (Mssql, "`a.b`", "[`a].[b`]", "[`a].[b`]"),
+        (Mssql, "[a]].b].c", "[a]].b].c", "[a]].b].[c]"),
+        (Mssql, "\"a.b\".c", "\"a.b\".c", "\"a.b\".[c]"),
+    ] {
+        assert_eq!(
+            backend.render_identifier_path(path),
+            rendered,
+            "{backend:?} {path}"
+        );
+        assert_eq!(
+            backend.quote_identifier_path(path),
+            quoted,
+            "{backend:?} {path}"
+        );
+        assert_eq!(
+            backend.quote_identifier_path(quoted),
+            quoted,
+            "{backend:?} {path}"
+        );
     }
 }
 
@@ -803,6 +853,106 @@ fn table_and_column() -> impl Strategy<Value = (Written, Written)> {
     )
 }
 
+/// Spellings of the schema the catalogue checks inspect, in each form the
+/// backend reads.
+fn default_schemas() -> &'static [&'static str] {
+    match BACKEND {
+        DatabaseBackend::Sqlite => &["main", "\"main\"", "[main]", "`main`", "MAIN"],
+        DatabaseBackend::Postgres => &["public", "\"public\""],
+        _ => &["dbo", "[dbo]", "\"dbo\"", "DBO"],
+    }
+}
+
+/// `name` as one path part: written raw when it has no dot, or in one of the
+/// backend's delimited forms with its closing delimiter doubled where the
+/// form allows it.
+fn path_part(name: &str, form: usize) -> Option<String> {
+    let forms = delimiters(BACKEND);
+    let Some(&(open, close, doubled)) = forms.get(form % (forms.len() + 1)) else {
+        return (!name.contains('.')).then(|| name.to_owned());
+    };
+    if !doubled && name.contains(close) {
+        return None;
+    }
+    let inner = name.replace(close, &format!("{close}{close}"));
+    Some(format!("{open}{inner}{close}"))
+}
+
+/// A table named through a two-part path, `schema.table`, rendered as
+/// generated SQL renders declared paths, with the name the catalogue must
+/// report for it (#782 round 2: dialect-specific path splitting).
+fn qualified_table_and_column() -> impl Strategy<Value = (Written, Written)> {
+    (
+        proptest::sample::select(default_schemas()),
+        any_input(),
+        any::<usize>(),
+        any::<bool>(),
+        any_input(),
+        any::<bool>(),
+    )
+        .prop_filter_map(
+            "outside the backend's storable names",
+            |(schema, name, form, quote_path, column, cq)| {
+                let part = path_part(&name, form)?;
+                let path = format!("{schema}.{part}");
+                let sql = if quote_path {
+                    BACKEND.quote_identifier_path(&path)
+                } else {
+                    BACKEND.render_identifier_path(&path).into_owned()
+                };
+                // What the part names: the inside of a well-formed delimited
+                // part, a bare PostgreSQL name folded, or the text itself.
+                let catalog = if let Some(inner) = well_formed_delimited(BACKEND, &part) {
+                    inner
+                } else if !quote_path
+                    && BACKEND == DatabaseBackend::Postgres
+                    && BACKEND.render_identifier(&part) == part.as_str()
+                {
+                    part.to_ascii_lowercase()
+                } else {
+                    part.clone()
+                };
+                if !storable(&catalog)
+                    || catalog.contains('\0')
+                    || (BACKEND == DatabaseBackend::Mssql && catalog.starts_with('#'))
+                {
+                    return None;
+                }
+                // The rendered path must still name the schema and that table.
+                Some((Written { sql, catalog }, written(&column, cq)?))
+            },
+        )
+}
+
+fn retained_qualified_written() -> Vec<(Written, Written)> {
+    let schema = default_schemas()[0];
+    let mut cases = Vec::new();
+    for name in ["a.b", "a\".b", "a].b", "a`.b", "order", "Mixed.Case"] {
+        for form in 0..=delimiters(BACKEND).len() {
+            let Some(part) = path_part(name, form) else {
+                continue;
+            };
+            let catalog = well_formed_delimited(BACKEND, &part).unwrap_or_else(|| {
+                if BACKEND == DatabaseBackend::Postgres
+                    && BACKEND.render_identifier(&part) == part.as_str()
+                {
+                    part.to_ascii_lowercase()
+                } else {
+                    part.clone()
+                }
+            });
+            let sql = BACKEND
+                .render_identifier_path(&format!("{schema}.{part}"))
+                .into_owned();
+            cases.push((
+                Written { sql, catalog },
+                written("value", false).expect("plain column"),
+            ));
+        }
+    }
+    cases
+}
+
 fn db_config(cases: u32, seed: u64) -> Config {
     Config {
         max_shrink_iters: 256,
@@ -941,6 +1091,12 @@ async fn identifiers_round_trip_through_sqlite() -> Result<(), Box<dyn std::erro
     TestRunner::new(db_config(256, 0x7250_0101))
         .run(&table_and_column(), case)
         .map_err(|error| error.to_string())?;
+    for retained in retained_qualified_written() {
+        case(retained.clone()).map_err(|error| format!("{retained:?}: {error}"))?;
+    }
+    TestRunner::new(db_config(256, 0x7250_0201))
+        .run(&qualified_table_and_column(), case)
+        .map_err(|error| error.to_string())?;
     pool.close().await;
     Ok(())
 }
@@ -992,11 +1148,48 @@ async fn identifiers_round_trip_through_owned_postgres() -> Result<(), Box<dyn s
         }
         TestRunner::new(db_config(128, 0x7250_0102))
             .run(&table_and_column(), case)
+            .map_err(|error| error.to_string())?;
+        for retained in retained_qualified_written() {
+            case(retained.clone()).map_err(|error| format!("{retained:?}: {error}"))?;
+        }
+        TestRunner::new(db_config(128, 0x7250_0202))
+            .run(&qualified_table_and_column(), case)
             .map_err(|error| error.to_string())
     })();
+    // A leading `[` is an ordinary character on PostgreSQL, so `[s.t` names
+    // table `t` in schema `[s` and keeps its separator.
+    let bracket_schema = async {
+        let path = BACKEND.render_identifier_path("[s.t").into_owned();
+        sqlx::query("CREATE SCHEMA \"[s\";").execute(&pool).await?;
+        sqlx::query(&format!("CREATE TABLE {path} (v INTEGER);"))
+            .execute(&pool)
+            .await?;
+        sqlx::query(&format!("INSERT INTO {path} (v) VALUES (7);"))
+            .execute(&pool)
+            .await?;
+        let value: i32 = sqlx::query_scalar(&format!("SELECT v FROM {path} WHERE 1 = 1;"))
+            .fetch_one(&pool)
+            .await?;
+        let names: Vec<(String, String)> = sqlx::query_as(
+            "SELECT table_schema::text, table_name::text FROM information_schema.tables \
+             WHERE table_schema = '[s';",
+        )
+        .fetch_all(&pool)
+        .await?;
+        sqlx::query(&format!("DROP TABLE {path};"))
+            .execute(&pool)
+            .await?;
+        sqlx::query("DROP SCHEMA \"[s\";").execute(&pool).await?;
+        Ok::<_, sqlx::Error>((path, value, names))
+    }
+    .await;
     pool.close().await;
     postgres.cleanup()?;
     result?;
+    let (path, value, names) = bracket_schema?;
+    assert_eq!(path, "\"[s\".t");
+    assert_eq!(value, 7);
+    assert_eq!(names, vec![("[s".to_owned(), "t".to_owned())]);
     Ok(())
 }
 
@@ -1089,6 +1282,12 @@ async fn identifiers_round_trip_through_owned_sql_server() -> Result<(), Box<dyn
         }
         TestRunner::new(db_config(96, 0x7250_0103))
             .run(&table_and_column(), case)
+            .map_err(|error| error.to_string())?;
+        for retained in retained_qualified_written() {
+            case(retained.clone()).map_err(|error| format!("{retained:?}: {error}"))?;
+        }
+        TestRunner::new(db_config(96, 0x7250_0203))
+            .run(&qualified_table_and_column(), case)
             .map_err(|error| error.to_string())
     })();
     drop(client);
@@ -1162,6 +1361,83 @@ async fn sql_server_regular_identifier_tables_match_the_server()
             mismatches.len(),
             &mismatches[..mismatches.len().min(40)]
         );
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    server.cleanup()?;
+    result
+}
+
+/// Round 2 of #782: SQL Server introspection treats raw catalogue names as
+/// literal names. A table literally named `[ledger]` is reported, and its
+/// index and foreign-key metadata read, as that table, never as `ledger`.
+#[cfg(feature = "mssql")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_server_introspection_reads_each_raw_table_name_literally()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::db::mssql::MssqlPool;
+    use graphql_orm::graphql::orm::introspect_mssql_schema;
+
+    let mut server = owned_mssql::OwnedSqlServer::start().await?;
+    let result = async {
+        owned_mssql::execute_batch(
+            &server.connection_string,
+            "CREATE TABLE dbo.ledger (id int NOT NULL PRIMARY KEY, a int NULL); \
+             CREATE INDEX ix_ledger_a ON dbo.ledger (a); \
+             CREATE TABLE dbo.[[ledger]]] (id int NOT NULL PRIMARY KEY, b int NULL, \
+                 ledger_id int NULL CONSTRAINT fk_bracket_ledger REFERENCES dbo.ledger (id)); \
+             CREATE INDEX ix_bracket_b ON dbo.[[ledger]]] (b);",
+        )
+        .await?;
+        let pool = MssqlPool::connect_ado(&server.connection_string).await?;
+        let schema = introspect_mssql_schema(&pool).await?;
+        let table = |name: &str| {
+            let matching = schema
+                .tables
+                .iter()
+                .filter(|table| table.table_name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{name}: {:#?}", schema.tables);
+            matching[0]
+        };
+        let plain = table("[dbo].[ledger]");
+        let bracketed = table("[dbo].[[ledger]]]");
+        let index_names = |table: &graphql_orm::graphql::orm::TableModel| {
+            table
+                .indexes
+                .iter()
+                .map(|index| index.name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            index_names(plain).contains(&"ix_ledger_a".to_owned()),
+            "{:?}",
+            index_names(plain)
+        );
+        assert!(!index_names(plain).contains(&"ix_bracket_b".to_owned()));
+        assert!(
+            index_names(bracketed).contains(&"ix_bracket_b".to_owned()),
+            "{:?}",
+            index_names(bracketed)
+        );
+        assert!(!index_names(bracketed).contains(&"ix_ledger_a".to_owned()));
+        assert!(plain.foreign_keys.is_empty(), "{:?}", plain.foreign_keys);
+        assert_eq!(
+            bracketed.foreign_keys.len(),
+            1,
+            "{:?}",
+            bracketed.foreign_keys
+        );
+        assert_eq!(bracketed.foreign_keys[0].target_table, "[dbo].[ledger]");
+        let columns = |table: &graphql_orm::graphql::orm::TableModel| {
+            table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(columns(plain), ["[id]", "[a]"]);
+        assert_eq!(columns(bracketed), ["[id]", "[b]", "[ledger_id]"]);
         Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;

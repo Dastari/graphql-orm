@@ -222,7 +222,7 @@ impl ReadPredicate {
             entity: TypeId::of::<T>(),
             backend: B::DIALECT,
             expression: FilterExpression::trusted_fragment(
-                format!("{} {operator} ?", B::DIALECT.quote_identifier(column)),
+                format!("{} {operator} ?", B::DIALECT.quote_identifier_path(column)),
                 vec![value],
             ),
         })
@@ -259,7 +259,7 @@ impl ReadPredicate {
             entity: TypeId::of::<T>(),
             backend: B::DIALECT,
             expression: FilterExpression::trusted_fragment(
-                format!("{} {test}", B::DIALECT.quote_identifier(column)),
+                format!("{} {test}", B::DIALECT.quote_identifier_path(column)),
                 Vec::new(),
             ),
         })

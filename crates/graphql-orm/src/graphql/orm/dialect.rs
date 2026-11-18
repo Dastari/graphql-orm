@@ -1005,35 +1005,43 @@ const MSSQL_RESERVED_IDENTIFIERS: &[&str] = &[
 ];
 
 // SQL identifier delimiters may contain dots and doubled closing delimiters.
-// Slice only at unquoted dots; byte offsets are safe because delimiters are ASCII.
-fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
+// Slice only at dots outside a delimited part, reading each part with the
+// backend's own delimited forms (`DatabaseBackend::identifier_delimiters`):
+// PostgreSQL has only `"..."`, SQLite closes `[...]` at the first `]`, and
+// SQL Server has no backtick form. Byte offsets are safe because every
+// delimiter is ASCII.
+fn identifier_path_parts(backend: DatabaseBackend, identifier: &str) -> impl Iterator<Item = &str> {
+    let delimiters = backend.identifier_delimiters();
     let bytes = identifier.as_bytes();
     let mut start = 0;
     let mut offset = 0;
     std::iter::from_fn(move || {
-        let mut closing = None;
+        let mut closing: Option<(u8, bool)> = None;
         while offset < bytes.len() {
             let character = bytes[offset];
             offset += 1;
             match closing {
-                Some(delimiter) if character == delimiter => {
-                    if bytes.get(offset) == Some(&delimiter) {
+                Some((close, doubled)) if character == close => {
+                    if doubled && bytes.get(offset) == Some(&close) {
                         offset += 1;
                     } else {
                         closing = None;
                     }
                 }
-                None => match character {
-                    b'"' | b'`' if offset - 1 == start => closing = Some(character),
-                    b'[' if offset - 1 == start => closing = Some(b']'),
-                    b'.' => {
+                Some(_) => {}
+                None => {
+                    if offset - 1 == start
+                        && let Some(&(_, close, doubled)) = delimiters
+                            .iter()
+                            .find(|(open, _, _)| u32::from(*open) == u32::from(character))
+                    {
+                        closing = Some((close as u8, doubled));
+                    } else if character == b'.' {
                         let part = &identifier[start..offset - 1];
                         start = offset;
                         return Some(part);
                     }
-                    _ => {}
-                },
-                _ => {}
+                }
             }
         }
         if start <= bytes.len() {
@@ -1051,7 +1059,7 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
 /// a delimited part keeps its case, a part rendered bare folds to lower case,
 /// and a part that rendering quotes keeps its case.
 pub(crate) fn postgres_resolved_identifier_parts(path: &str) -> Vec<String> {
-    identifier_path_parts(path)
+    identifier_path_parts(DatabaseBackend::Postgres, path)
         .filter(|part| !part.is_empty())
         .map(postgres_resolved_identifier)
         .collect()
@@ -1108,9 +1116,10 @@ fn mssql_identifier_character(character: char, table: &[(u16, u16)]) -> bool {
     })
 }
 
-/// Whether a declared table path has a single part, with no schema.
-pub(crate) fn identifier_path_is_bare(path: &str) -> bool {
-    identifier_path_parts(path)
+/// Whether a declared table path has a single part, with no schema, as
+/// `backend` splits it.
+pub(crate) fn identifier_path_is_bare(backend: DatabaseBackend, path: &str) -> bool {
+    identifier_path_parts(backend, path)
         .filter(|part| !part.is_empty())
         .count()
         == 1
@@ -1140,16 +1149,21 @@ impl DatabaseBackend {
         }
     }
 
-    /// Whether `identifier` is exactly one well-formed, non-empty delimited
-    /// identifier for this backend: it opens with a delimiter, every closing
-    /// delimiter inside it is doubled where the form allows that (SQLite's
-    /// `[...]` allows no `]` inside), and its only undoubled closing delimiter
-    /// is its last character.
+    /// Whether `identifier` is exactly one well-formed delimited identifier
+    /// for this backend: it opens with a delimiter, every closing delimiter
+    /// inside it is doubled where the form allows that (SQLite's `[...]`
+    /// allows no `]` inside), its only undoubled closing delimiter is its last
+    /// character, and it contains no NUL. The name inside may be empty only on
+    /// SQLite, which accepts `""`, `[]` and two backticks as a name;
+    /// PostgreSQL and SQL Server refuse an empty delimited identifier.
     ///
     /// This is the only input [`SqlDialect::quote_identifier`] returns
     /// unchanged. Text that merely starts and ends with delimiter characters,
     /// such as `"a"b"` or `[a] , [b]`, is not one identifier (#782).
     fn is_one_delimited_identifier(self, identifier: &str) -> bool {
+        if identifier.contains('\0') {
+            return false;
+        }
         let mut characters = identifier.chars();
         let Some(open) = characters.next() else {
             return false;
@@ -1172,7 +1186,7 @@ impl DatabaseBackend {
                 empty = false;
                 continue;
             }
-            return !empty && characters.next().is_none();
+            return (!empty || self == Self::Sqlite) && characters.next().is_none();
         }
         false
     }
@@ -1187,6 +1201,19 @@ impl DatabaseBackend {
             Self::Mssql => format!("[{}]", name.replace(']', "]]")),
             Self::Postgres | Self::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
             Self::Mysql => name.to_string(),
+        }
+    }
+
+    /// A raw catalogue name as generated SQL would render it: bare when
+    /// [`Self::render_identifier`] would write it bare, and otherwise
+    /// delimited literally with [`Self::delimit_raw_identifier`], even when it
+    /// already looks delimited, so it is never read as a different name.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn render_raw_identifier(self, name: &str) -> String {
+        if self.is_one_delimited_identifier(name) {
+            self.delimit_raw_identifier(name)
+        } else {
+            self.render_identifier(name).into_owned()
         }
     }
 
@@ -1274,13 +1301,13 @@ impl DatabaseBackend {
     ///
     /// Dots inside quoted identifiers and doubled closing delimiters are preserved.
     pub fn render_identifier_path(self, identifier: &str) -> std::borrow::Cow<'_, str> {
-        if !identifier_path_parts(identifier)
+        if !identifier_path_parts(self, identifier)
             .any(|part| !part.is_empty() && self.identifier_needs_quoting(part))
         {
             return std::borrow::Cow::Borrowed(identifier);
         }
         std::borrow::Cow::Owned(
-            identifier_path_parts(identifier)
+            identifier_path_parts(self, identifier)
                 .filter(|part| !part.is_empty())
                 .map(|part| self.render_identifier(part))
                 .collect::<Vec<_>>()
@@ -1299,7 +1326,7 @@ impl DatabaseBackend {
         if self != Self::Postgres {
             return self.quote_identifier_path(identifier);
         }
-        identifier_path_parts(identifier)
+        identifier_path_parts(self, identifier)
             .filter(|part| !part.is_empty())
             .map(|part| {
                 if !part.starts_with('"') && !self.identifier_needs_quoting(part) {
@@ -1571,9 +1598,9 @@ pub trait SqlDialect {
     fn backend(&self) -> DatabaseBackend;
     /// One identifier, always written as exactly one delimited identifier.
     ///
-    /// Input that is already exactly one well-formed, non-empty delimited
-    /// identifier for the dialect is returned unchanged, so quoting is
-    /// idempotent. Any other input, including text that only starts and ends
+    /// Input that is already exactly one well-formed delimited identifier for
+    /// the dialect is returned unchanged, so quoting is idempotent. It may not
+    /// contain NUL, and its name may be empty only on SQLite. Any other input, including text that only starts and ends
     /// with delimiter characters such as `"a"b"` or `[a] , [b]`, is delimited
     /// as a literal name with the closing delimiter doubled, so the result
     /// always reads back as one name. SQL Server uses `[...]`; SQLite and
@@ -1589,7 +1616,9 @@ pub trait SqlDialect {
     /// ```
     fn quote_identifier(&self, identifier: &str) -> String;
     /// [`Self::quote_identifier`] for each part of a qualified name, split at
-    /// dots outside delimited parts.
+    /// dots outside delimited parts as the dialect reads them: `"..."` on
+    /// PostgreSQL; `"..."`, backticks and `[...]` (closed at the first `]`) on
+    /// SQLite; `[...]` and `"..."` on SQL Server.
     fn quote_identifier_path(&self, identifier: &str) -> String;
     fn placeholder(&self, index: usize) -> String;
     /// Rebase fragment placeholders by occurrence, starting at `start_index`.
@@ -1648,7 +1677,7 @@ impl SqlDialect for DatabaseBackend {
             return identifier.to_string();
         }
 
-        identifier_path_parts(identifier)
+        identifier_path_parts(*self, identifier)
             .filter(|part| !part.is_empty())
             .map(|part| self.quote_identifier(part))
             .collect::<Vec<_>>()
