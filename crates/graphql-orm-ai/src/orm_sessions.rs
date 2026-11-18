@@ -377,13 +377,13 @@ impl AiSessionService for OrmAiSessionService {
                 "invalid conversation bootstrap limits".to_owned(),
             ));
         }
-        // Client windows follow the host's page maximum. The tool-call
-        // look-ahead row is added after clamping, so truncation is reported.
+        // The terminal-run window follows the host's page maximum. The
+        // tool-call window is read whole, up to the validated request size, in
+        // pages no larger than that maximum, so `reset_required` reports only
+        // more tool calls than the client asked for, never the page size.
         let pagination = self.database.pagination_config();
         let terminal_run_limit =
             crate::orm_read_bounds::client_page_limit(pagination, terminal_run_limit);
-        let tool_call_limit =
-            crate::orm_read_bounds::client_page_limit(pagination, tool_call_limit);
         for _ in 0..3 {
             let first = self
                 .visible_session(principal, session_id, AiSessionAction::Read)
@@ -520,33 +520,71 @@ impl AiSessionService for OrmAiSessionService {
                 .chain(terminal_runs.iter())
                 .map(|run| run.id)
                 .collect::<BTreeSet<_>>();
-            let mut tool_rows = if selected_run_ids.is_empty() {
-                Vec::new()
+            let tool_rows = if selected_run_ids.is_empty() {
+                Some(Vec::new())
             } else {
                 let selected_run_ids = selected_run_ids.into_iter().collect::<Vec<_>>();
-                let query_limit = tool_call_limit.checked_add(1).ok_or(AiError::InvalidInput(
+                let page_maximum = pagination.max_limit.map(|maximum| maximum.max(1));
+                // One look-ahead row past the window shows a real truncation.
+                let window = tool_call_limit.checked_add(1).ok_or(AiError::InvalidInput(
                     "invalid conversation bootstrap limits".to_owned(),
                 ))?;
                 self.database
                     .transaction(TransactionMode::Default, move |tx| {
                         Box::pin(async move {
-                            tx.query::<AiToolCallRecord>()
-                                .filter(AiToolCallRecordWhereInput {
-                                    run_id: Some(UuidFilter {
-                                        in_list: Some(selected_run_ids),
-                                        ..Default::default()
-                                    }),
+                            let filter = AiToolCallRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    in_list: Some(selected_run_ids),
                                     ..Default::default()
-                                })
-                                .default_order()
-                                .internal_limit(query_limit)
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)
+                                }),
+                                ..Default::default()
+                            };
+                            // Read the whole window in pages no larger than the
+                            // host's maximum. The order (`created_at`, then the
+                            // primary key) is total, so consecutive offsets
+                            // never skip a row. A row seen twice means a
+                            // concurrent insert shifted the pages; the snapshot
+                            // is retried instead of returned.
+                            let mut rows = Vec::new();
+                            let mut seen = BTreeSet::new();
+                            loop {
+                                let read = i64::try_from(rows.len()).map_err(|_| {
+                                    OrmPublicError::new(OrmErrorCode::InternalError)
+                                })?;
+                                let remaining = window - read;
+                                if remaining <= 0 {
+                                    break;
+                                }
+                                let size = page_maximum
+                                    .map_or(remaining, |maximum| maximum.min(remaining));
+                                let page = tx
+                                    .query::<AiToolCallRecord>()
+                                    .filter(filter.clone())
+                                    .default_order()
+                                    .offset(read)
+                                    .limit(size)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                let page_rows = page.len();
+                                for row in page {
+                                    if !seen.insert(row.id) {
+                                        return Ok(None);
+                                    }
+                                    rows.push(row);
+                                }
+                                if i64::try_from(page_rows).unwrap_or(i64::MAX) < size {
+                                    break;
+                                }
+                            }
+                            Ok(Some(rows))
                         })
                     })
                     .await
                     .map_err(map_transaction)?
+            };
+            let Some(mut tool_rows) = tool_rows else {
+                continue;
             };
             let tool_calls_truncated = tool_rows.len() > tool_call_limit as usize;
             tool_rows.truncate(tool_call_limit as usize);
@@ -2670,5 +2708,240 @@ mod bootstrap_snapshot_tests {
                 "an unstable {field} must reject the assembled snapshot"
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod bootstrap_window_tests {
+    use super::*;
+    use agql_auth::{AccessTokenMetadata, AuthUser, SessionContext};
+    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule, PaginationConfig};
+
+    /// A host maximum far below both the stored tool calls and the window.
+    const HOST_MAXIMUM: i64 = 10;
+    const TOOL_CALLS: i64 = 130;
+
+    struct AllowAll;
+
+    #[async_trait]
+    impl AiAccessPolicy for AllowAll {
+        async fn can_access_scope(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _action: AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::allow("bootstrap-test", "v1")
+        }
+
+        async fn can_access_session(
+            &self,
+            _principal: &AuthPrincipal,
+            _session_id: AiSessionId,
+            _action: AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::allow("bootstrap-test", "v1")
+        }
+    }
+
+    struct ProtectionPolicy;
+
+    #[async_trait]
+    impl AiContentProtectionPolicyResolver for ProtectionPolicy {
+        async fn resolve(
+            &self,
+            _principal: &AuthPrincipal,
+            scope: &AiScope,
+        ) -> Result<AiContentProtectionPolicy, AiError> {
+            Ok(AiContentProtectionPolicy {
+                scope: scope.clone(),
+                mode: crate::AiContentProtectionMode::DatabaseManaged,
+                key_policy_reference: None,
+                version: 1,
+                ready: true,
+            })
+        }
+    }
+
+    fn principal() -> AuthPrincipal {
+        AuthPrincipal::User(AuthUser {
+            user_id: "bootstrap-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec![],
+            scopes: vec![],
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("bootstrap".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        })
+    }
+
+    /// One terminal run holding `TOOL_CALLS` tool calls, on a database whose
+    /// page maximum is `HOST_MAXIMUM`.
+    async fn fixture() -> (OrmAiSessionService, AiSessionId) {
+        let database = Database::<DefaultWriteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open")
+            .with_pagination_config(PaginationConfig::default().with_max_limit(Some(HOST_MAXIMUM)));
+        let plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-bootstrap-window-test-v1",
+                "AI bootstrap window test",
+                crate::AiSchemaModule.entities(),
+            )
+            .await
+            .expect("schema should plan");
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .expect("schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
+        let session_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.insert::<AiSessionRecord>(CreateAiSessionRecordInput {
+                        execution_selection: None,
+                        id: session_id,
+                        owner_principal_kind: "user".to_owned(),
+                        owner_subject: "bootstrap-user".to_owned(),
+                        tenant_id: Some("bootstrap".to_owned()),
+                        scope_kind: "tenant".to_owned(),
+                        scope_id: "bootstrap".to_owned(),
+                        title: "Bootstrap window".to_owned(),
+                        title_revision: 0,
+                        title_source: "default".to_owned(),
+                        state: "active".to_owned(),
+                        stream_head: 0,
+                        message_head: 0,
+                        last_activity_at: 1_700_000_000,
+                        archived_at: None,
+                        deleted_at: None,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
+                        recovery_epoch_id: None,
+                        execution_selection: None,
+                        id: run_id,
+                        session_id,
+                        input_message_id: Uuid::new_v4(),
+                        principal_reference: json!({"test": true}),
+                        state: "completed".to_owned(),
+                        attempt_id: None,
+                        lease_owner: None,
+                        lease_generation: 0,
+                        lease_expires_at: None,
+                        lease_heartbeat_at: None,
+                        retry_count: 0,
+                        next_attempt_at: None,
+                        error_code: None,
+                        latest_checkpoint_id: None,
+                        cancellation_request_id: None,
+                        cancellation_requested_at: None,
+                        recovery_examined_at: 0,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    for index in 0..TOOL_CALLS {
+                        let id = Uuid::new_v4();
+                        tx.insert::<AiToolCallRecord>(CreateAiToolCallRecordInput {
+                            id,
+                            run_id,
+                            provider_call_key: format!("bootstrap:{id}"),
+                            provider_call_id: format!("provider-{index}"),
+                            provider_kind: Some("mock".to_owned()),
+                            provider_model: Some("bootstrap-test".to_owned()),
+                            provider_response_id: Some(format!("response-{index}")),
+                            budget_reservation_id: None,
+                            provider_turn_index: index,
+                            tool_call_index: 0,
+                            tool_id: "test.read".to_owned(),
+                            tool_fingerprint: "tool-fingerprint".to_owned(),
+                            execution_provenance: None,
+                            protected_arguments: None,
+                            argument_hash: "argument-hash".to_owned(),
+                            protected_result: None,
+                            protected_result_source: None,
+                            payload_purged_at: None,
+                            risk: "read_only".to_owned(),
+                            authorization_code: Some("allowed".to_owned()),
+                            authorization_policy_version: Some("policy-v1".to_owned()),
+                            authorization_state_digest: Some("auth-state".to_owned()),
+                            disclosure_schema_fingerprint: Some("disclosure".to_owned()),
+                            result_classification: Some("internal".to_owned()),
+                            result_egress_decision_id: None,
+                            result_egress_manifest_hash: None,
+                            application_audit_ref: None,
+                            approval_id: None,
+                            idempotency_key: Some(id.to_string()),
+                            correlation_id: None,
+                            causation_id: None,
+                            delegation_reference: None,
+                            lease_generation: 0,
+                            state: "completed".to_owned(),
+                            completed_at: Some(1_700_000_000 + index),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("bootstrap fixture should seed");
+        let service = OrmAiSessionService::new(
+            database,
+            Arc::new(AllowAll),
+            Arc::new(ProtectionPolicy),
+            Arc::new(crate::DatabaseManagedContentProtector),
+        );
+        (service, AiSessionId(session_id))
+    }
+
+    /// #754: a conversation with more tool calls than the host's page maximum
+    /// returns the whole validated window, and `reset_required` reports only
+    /// a window that really is larger than the request.
+    #[tokio::test]
+    async fn tool_calls_above_the_host_maximum_fill_the_window_without_a_reset() {
+        let (service, session_id) = fixture().await;
+        let principal = principal();
+
+        let whole = service
+            .conversation_bootstrap(&principal, session_id, 10, 10, 500)
+            .await
+            .expect("bootstrap should succeed");
+        assert_eq!(whole.tool_calls.len(), TOOL_CALLS as usize);
+        assert!(
+            !whole.reset_required,
+            "nothing changed and every tool call fits the window"
+        );
+        // Every stored call is returned once, with no duplicate across pages.
+        let indices = whole
+            .tool_calls
+            .iter()
+            .map(|call| call.provider_turn_index)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(indices, (0..TOOL_CALLS).collect::<BTreeSet<_>>());
+
+        // Exactly the stored count also fits.
+        let exact = service
+            .conversation_bootstrap(&principal, session_id, 10, 10, TOOL_CALLS)
+            .await
+            .expect("bootstrap should succeed");
+        assert_eq!(exact.tool_calls.len(), TOOL_CALLS as usize);
+        assert!(!exact.reset_required);
+
+        // A window smaller than the stored calls is a real truncation.
+        let short = service
+            .conversation_bootstrap(&principal, session_id, 10, 10, TOOL_CALLS - 1)
+            .await
+            .expect("bootstrap should succeed");
+        assert_eq!(short.tool_calls.len(), TOOL_CALLS as usize - 1);
+        assert!(short.reset_required);
     }
 }
