@@ -97,7 +97,14 @@ impl EntityPolicy for AllowEntityPolicy {
 /// `insert`, the first write callback has another session run that batch.
 #[derive(Default)]
 struct OwnerRows {
-    insert: Option<(String, &'static str, Arc<Mutex<Option<bool>>>)>,
+    insert: Option<InsertOnce>,
+}
+
+/// A batch another session runs once, and whether it committed.
+struct InsertOnce {
+    connection: String,
+    batch: &'static str,
+    committed: Arc<Mutex<Option<bool>>>,
 }
 fn owns(row: &(dyn std::any::Any + Send + Sync)) -> bool {
     row.downcast_ref::<StringKey>()
@@ -162,7 +169,12 @@ impl RowPolicy for OwnerRows {
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            if let Some((connection, batch, committed)) = &self.insert {
+            if let Some(InsertOnce {
+                connection,
+                batch,
+                committed,
+            }) = &self.insert
+            {
                 let first = committed.lock().unwrap().is_none();
                 if first {
                     let result = owned_mssql::execute_batch(connection, batch).await.is_ok();
@@ -579,11 +591,11 @@ async fn the_validation_read_keeps_the_scan_budget() {
     .await;
     let committed = Arc::new(Mutex::new(None));
     db.set_row_policy(OwnerRows {
-        insert: Some((
-            owner.connection_string.clone(),
-            "SET LOCK_TIMEOUT 1000; INSERT INTO int_keys VALUES (5, 'key', 'mine', 'before')",
-            committed.clone(),
-        )),
+        insert: Some(InsertOnce {
+            connection: owner.connection_string.clone(),
+            batch: "SET LOCK_TIMEOUT 1000; INSERT INTO int_keys VALUES (5, 'key', 'mine', 'before')",
+            committed: committed.clone(),
+        }),
     });
     let db = db.with_pagination_config(PaginationConfig::default().with_max_scanned_rows(Some(3)));
     let payload = mutate(
