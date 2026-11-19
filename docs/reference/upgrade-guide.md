@@ -70,7 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.183.0, `graphql-orm-macros` 0.183.0; `graphql-orm-operation-catalog` 0.9.1; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.27.2; `graphql-orm-ai-tool-profiles` 0.26.1; `graphql-orm-ai` 0.150.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.16.7.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.185.0, `graphql-orm-macros` 0.185.0**; `graphql-orm-operation-catalog` 0.9.1; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.27.2; `graphql-orm-ai-tool-profiles` 0.26.1; `graphql-orm-ai` 0.150.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.16.7.
+
+- **Action needed** — ORM/macros 0.185.0: if you compare generated SQL Server filtered-index DDL, update expected string literals to include the `N` prefix, even for ASCII values. [Migration](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
 
 ### workspace-2026.11.19.2
 

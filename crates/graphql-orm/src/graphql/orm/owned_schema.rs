@@ -9,9 +9,11 @@ use std::fmt;
 /// Owned closed-set partial-index predicate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexPredicateModel {
-    /// Physical column.
+    /// Physical column. SQL Server introspection uses an empty column to mark
+    /// an opaque catalog filter that cannot be expressed as a closed set.
     pub column: String,
-    /// Literal values, quoted by the database dialect.
+    /// Literal values, quoted by the database dialect. For an opaque SQL Server
+    /// filter this contains one entry, the verbatim catalog predicate.
     pub values: Vec<String>,
 }
 

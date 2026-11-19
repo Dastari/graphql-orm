@@ -1712,8 +1712,8 @@ async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
             .iter()
             .map(|statement| {
                 statement
-                    .replace("IN ('open', 'closed')", "IN (FILTER)")
-                    .replace("IN ('closed', 'open')", "IN (FILTER)")
+                    .replace("IN (N'open', N'closed')", "IN (FILTER)")
+                    .replace("IN (N'closed', N'open')", "IN (FILTER)")
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -1759,4 +1759,116 @@ async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
     .await;
     server.cleanup()?;
     result
+}
+
+/// A unique filtered index exposes exactly which rows the recreated predicate
+/// admits. The owned server's database code page cannot represent the value.
+#[cfg(feature = "mssql")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_server_filtered_index_preserves_unicode_through_recreation()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
+    use graphql_orm::graphql::orm::{
+        IndexDef, MigrationStep, introspect_mssql_schema, try_render_migration_step,
+    };
+    use std::time::Duration;
+
+    let mut server = owned_mssql::OwnedSqlServer::start().await?;
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let connection = &server.connection_string;
+        let pool = MssqlPool::connect_ado_with(
+            connection,
+            MssqlPoolOptions::default().query_timeout(Some(Duration::from_secs(10))),
+        )
+        .await?;
+        owned_mssql::execute_batch(
+            connection,
+            "IF CONVERT(varbinary(40), CONVERT(nvarchar(20), '状態')) = \
+                 CONVERT(varbinary(40), N'状態') \
+                 THROW 50000, 'Fixture needs a value outside the database code page', 1; \
+             CREATE TABLE dbo.filter_items (id int NOT NULL PRIMARY KEY, state nvarchar(20)); \
+             CREATE UNIQUE INDEX ux_filter_items_state ON dbo.filter_items (state) \
+                 WHERE [state] IN (N'状態'); \
+             CREATE INDEX ix_filter_items_opaque ON dbo.filter_items (state) \
+                 WHERE [state] <> N';--/*';",
+        )
+        .await?;
+        let multiline = MigrationStep::CreateIndex {
+            table_name: "[dbo].[filter_items]".to_owned(),
+            index: IndexDef::new("ix_filter_items_multiline", &["state"])
+                .where_in("state", &["left\\\nright"]),
+        };
+        for statement in try_render_migration_step(BACKEND, &multiline)? {
+            owned_mssql::execute_batch(connection, &statement).await?;
+        }
+        let schema = introspect_mssql_schema(&pool).await?;
+        let table = schema
+            .tables
+            .iter()
+            .find(|table| table.table_name == "[dbo].[filter_items]")
+            .ok_or("filter_items table missing")?;
+        assert_eq!(table.indexes.len(), 3);
+        for index in &table.indexes {
+            let predicate = index
+                .predicate
+                .as_ref()
+                .ok_or("filtered index lost predicate")?;
+            if index.name == "ix_filter_items_multiline" {
+                assert_eq!(predicate.column, "state");
+                assert_eq!(predicate.values, ["left\\\nright"]);
+            }
+            let statements = try_render_migration_step(
+                BACKEND,
+                &MigrationStep::CreateIndex {
+                    table_name: table.table_name.clone(),
+                    index: index.clone(),
+                },
+            )?;
+            if index.name == "ix_filter_items_opaque" {
+                assert_eq!(predicate.column, "");
+                assert!(statements[0].ends_with(predicate.values[0]));
+            }
+            let drop = MigrationStep::DropIndex {
+                table_name: table.table_name.clone(),
+                index_name: index.name.to_string(),
+            };
+            for statement in try_render_migration_step(BACKEND, &drop)?
+                .into_iter()
+                .chain(statements)
+            {
+                owned_mssql::execute_batch(connection, &statement).await?;
+            }
+        }
+
+        let rows = pool
+            .fetch_rows(
+                "SELECT filter_definition FROM sys.indexes \
+                 WHERE object_id = OBJECT_ID(N'dbo.filter_items') \
+                   AND name = N'ux_filter_items_state'",
+                &[],
+            )
+            .await?;
+        assert_eq!(rows.len(), 1);
+        let filter = rows[0].try_get::<String, _>("filter_definition")?;
+        assert_eq!(filter, "([state]=N'状態')");
+
+        owned_mssql::execute_batch(
+            connection,
+            "INSERT INTO dbo.filter_items (id, state) VALUES \
+                 (1, N'状態'), (2, N'other'), (3, N'other'), \
+                 (4, CONVERT(nvarchar(20), '状態')), (5, CONVERT(nvarchar(20), '状態')); \
+             BEGIN TRY \
+                 INSERT INTO dbo.filter_items (id, state) VALUES (6, N'状態'); \
+                 THROW 50001, 'Duplicate matching value was admitted', 1; \
+             END TRY \
+             BEGIN CATCH \
+                 IF ERROR_NUMBER() <> 2601 THROW; \
+             END CATCH;",
+        )
+        .await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await;
+    server.cleanup()?;
+    result?
 }
