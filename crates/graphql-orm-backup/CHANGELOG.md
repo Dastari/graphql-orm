@@ -12,7 +12,11 @@ supersedes: []
 
 ## Unreleased - 0.27.1
 
-- Install from a reviewed Git revision using the package inventory and release manifest.
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- The PostgreSQL conformance harness starts its disposable container with a hard
+  `--memory 4g --memory-swap 4g` limit. Library code, manifests, restore
+  behavior and the public API are unchanged.
 
 ## Unreleased - 0.27.0
 

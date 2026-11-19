@@ -1649,6 +1649,12 @@ fn generate_graphql_operations_unfiltered(
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
     let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
+    crate::backend::validate_declared_identifier_path(
+        backend,
+        table_name,
+        struct_name.span(),
+        "table",
+    )?;
     // Generated DML names the table with the backend's rendered identifier;
     // `table_name` itself stays the raw identity used by hooks and descriptors.
     let sql_table_name = backend_render_identifier_path(backend, table_name);
@@ -6009,8 +6015,11 @@ fn generate_graphql_operations_unfiltered(
     // any list/count/scan SQL, using the same public identities as field reads.
     let filter_read_authorization = quote! {
         let mut where_input = where_input;
+        // One budget per statement: where-input nodes, and the relation
+        // policy SQL that relation filters and count orderings add.
+        let mut __gom_statement_budget = ::graphql_orm::graphql::orm::RelationFilterBudget::new();
         if let Some(filter) = where_input.as_mut() {
-            filter.__gom_prepare_read(ctx, 0, &mut 128).await?;
+            filter.__gom_prepare_read(ctx, 0, &mut __gom_statement_budget).await?;
         }
 
         if let Some(filter) = where_input.as_ref() {
@@ -6026,8 +6035,12 @@ fn generate_graphql_operations_unfiltered(
     let order_read_authorization = quote! {
         let mut order_by = order_by;
         if let Some(orders) = order_by.as_mut() {
+            if orders.len() > ::graphql_orm::graphql::orm::MAX_ORDER_BY_TERMS {
+                return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
+            }
             for order in orders.iter_mut() {
-                order.__gom_prepare_read(ctx).await?;
+                order.__gom_prepare_read(ctx, &mut __gom_statement_budget).await?;
             }
             ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
                 db,
@@ -11150,6 +11163,7 @@ fn generate_graphql_operations_unfiltered(
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
+                    |entity: &Self| #pk_bind_value_for_entity,
                 ))
                 .await?;
 
@@ -11603,6 +11617,7 @@ fn generate_graphql_operations_unfiltered(
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
+                    |entity: &Self| #pk_bind_value_for_entity,
                 ))
                 .await?;
 

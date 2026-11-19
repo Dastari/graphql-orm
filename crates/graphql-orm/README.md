@@ -3,12 +3,42 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
+is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
+writes a name bare only under its regular-identifier rule (#783).
+See the [migration guide](../../MIGRATION.md#01810-to-01820-sql-identifier-quoting).
+
+Version 0.181.0 supports the transitive-closure read predicates on SQL Server, as an unrolled
+breadth-first search with the same semantics as the recursive CTE on SQLite and PostgreSQL;
+SQL Server accepts bounds up to `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64). Read predicates
+are budgeted at build: two nested closures, 1 MiB of rendered SQL, 256 expression levels, 10 nested
+`CASE` expressions, and 32 nested and 128 total relations (a closure counting as 16), plus 75
+subqueries, 9 nested and 9 total relations (a closure counting as 1) and 900 weighted levels on SQL
+Server. Each statement's relation filters and count orderings may add 64 relations more (5 on SQL
+Server), and a generated `orderBy` list holds at most 16 terms. `and`/`or` folds are flattened, and
+lists render as balanced pairs.
+See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+Version 0.180.0 adds the opt-in `DatabaseBuilder::mssql_snapshot_bulk_write_targets`, off by
+default and separate from `narrow_bulk_writes_to_read_visibility`. With both on and
+`READ_COMMITTED_SNAPSHOT` on, narrowed SQL Server bulk writes select their targets from
+snapshots and lock only those keys, so they no longer lock or wait on hidden rows (#752). The
+target set equals the rows matching at the validation snapshot, but the bulk write's transaction
+is then not serializable. See the
+[migration guide](../../MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
+
+Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
+read as whitespace, and adds seeded property suites for identifier quoting on every backend
+and for canonical JSON defaults ([#725](https://github.com/Dastari/graphql-orm/issues/725)).
 
 Version 0.177.0 adds the opt-in
 `DatabaseBuilder::narrow_bulk_writes_to_read_visibility`, which narrows the
@@ -182,7 +212,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -727,7 +756,6 @@ PostgreSQL migration default alterations are corrected in the paired 0.48.2
 runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
-
 
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD

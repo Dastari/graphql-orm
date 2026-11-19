@@ -4,6 +4,7 @@
 //! by `graphql-orm-ai-tool-profiles`. This module binds those compiled values
 //! to deployment-registered replay sources; registration is never authority.
 
+use crate::sha256::valid_sha256;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -509,13 +510,6 @@ fn valid_safe_reference(value: &str, maximum: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'))
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]

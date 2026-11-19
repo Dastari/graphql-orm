@@ -9,10 +9,7 @@ use arc_swap::ArcSwap;
 use futures::lock::Mutex;
 use graphql_orm_router_protocol::{RootOperationType, SubgraphDescriptor};
 use hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions;
-use reqwest::{
-    Client,
-    header::{ETAG, IF_NONE_MATCH},
-};
+use reqwest::{Client, StatusCode, header::IF_NONE_MATCH};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -22,7 +19,7 @@ use crate::{
     federation::{
         ActiveGraph, CandidateSubgraph, FederationError, build_active_graph_with_options,
     },
-    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
+    http_body::{FetchError, USER_AGENT, fetch_bounded},
     metrics::{RouterMetrics, RouterMetricsSnapshot},
     node_lookup::NodeLookupConfig,
     server::ActiveGraphIdentity,
@@ -994,7 +991,7 @@ async fn fetch_pair(
     previous: Option<&FetchedSubgraph>,
     max_sdl_bytes: usize,
 ) -> Result<FetchedSubgraph, RouterError> {
-    let sdl_response = fetch_bounded(
+    let sdl_response = fetch_conditional(
         client,
         &subgraph.sdl_url,
         &subgraph.schema_headers,
@@ -1041,7 +1038,7 @@ async fn fetch_pair(
 
     let (descriptor, descriptor_etag) = match &subgraph.protocol_url {
         Some(url) => {
-            let response = fetch_bounded(
+            let response = fetch_conditional(
                 client,
                 url,
                 &subgraph.schema_headers,
@@ -1140,7 +1137,7 @@ enum ConditionalBody {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn fetch_bounded(
+async fn fetch_conditional(
     client: &Client,
     url: &str,
     headers: &BTreeMap<String, String>,
@@ -1161,45 +1158,37 @@ async fn fetch_bounded(
     if let Some(etag) = etag {
         request = request.header(IF_NONE_MATCH, etag);
     }
-    let response = request.send().await.map_err(|_| {
-        RouterError::new(
-            kind,
-            format!("failed to fetch {resource} for subgraph `{subgraph}`"),
-        )
-    })?;
-    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+    let response = fetch_bounded(
+        request,
+        max_bytes,
+        true,
+        |_| Ok(()),
+        |error| {
+            let detail = match error {
+                FetchError::Send => format!("failed to fetch {resource} for subgraph `{subgraph}`"),
+                FetchError::Status(status) => {
+                    format!("{resource} endpoint for subgraph `{subgraph}` returned HTTP {status}")
+                }
+                FetchError::TooLarge => {
+                    format!(
+                        "{resource} for subgraph `{subgraph}` exceeds its configured size limit"
+                    )
+                }
+                FetchError::Read => {
+                    format!("failed while reading {resource} for subgraph `{subgraph}`")
+                }
+            };
+            RouterError::new(kind, detail)
+        },
+    )
+    .await?;
+    if response.status == StatusCode::NOT_MODIFIED {
         return Ok(ConditionalBody::NotModified);
     }
-    if !response.status().is_success() {
-        return Err(RouterError::new(
-            kind,
-            format!(
-                "{resource} endpoint for subgraph `{subgraph}` returned HTTP {}",
-                response.status()
-            ),
-        ));
-    }
-    let etag = response
-        .headers()
-        .get(ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let bytes = read_bounded_body(response, max_bytes)
-        .await
-        .map_err(|error| {
-            RouterError::new(
-                kind,
-                match error {
-                    BoundedBodyError::TooLarge => format!(
-                        "{resource} for subgraph `{subgraph}` exceeds its configured size limit"
-                    ),
-                    BoundedBodyError::Read => {
-                        format!("failed while reading {resource} for subgraph `{subgraph}`")
-                    }
-                },
-            )
-        })?;
-    Ok(ConditionalBody::Modified { bytes, etag })
+    Ok(ConditionalBody::Modified {
+        bytes: response.bytes,
+        etag: response.etag,
+    })
 }
 
 fn canonical_input_fingerprint(
@@ -1768,6 +1757,7 @@ mod tests {
         let (tx, rx) = futures::channel::oneshot::channel();
         let first = handle.clone();
         hive_router::ntex::rt::spawn(async move {
+            // A cancelled fixture receiver no longer observes the refresh.
             let _ = tx.send(first.refresh().await);
         });
         endpoint.wait_for_requests(request_target).await;
@@ -1804,6 +1794,7 @@ mod tests {
         let (tx, rx) = futures::channel::oneshot::channel();
         let refreshing = handle.clone();
         hive_router::ntex::rt::spawn(async move {
+            // A cancelled fixture receiver no longer observes the refresh.
             let _ = tx.send(refreshing.refresh().await);
         });
         reviews.wait_for_requests(request_target).await;
@@ -1912,6 +1903,7 @@ mod tests {
                             let requests = thread_requests.clone();
                             let conditional = thread_conditional.clone();
                             thread::spawn(move || {
+                                // The client may leave before the fixture can write its response.
                                 let _ = serve_endpoint(stream, state, requests, conditional);
                             });
                         }
@@ -1968,6 +1960,7 @@ mod tests {
         fn drop(&mut self) {
             self.stopping.store(true, Ordering::Release);
             if let Some(thread) = self.thread.take() {
+                // Join the fixture worker during best-effort teardown.
                 let _ = thread.join();
             }
         }

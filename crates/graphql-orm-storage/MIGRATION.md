@@ -3,17 +3,24 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## 0.17.0 to 0.17.1: install documentation
+## 0.18.1 to 0.18.2
 
-**No action.** The README now shows how to select a reviewed Git revision.
-No data migration is needed.
+**No action.** Only tests change; key validation, providers and APIs are
+unchanged.
+
+## 0.17.0 to 0.18.1
+
+**Action needed** if a caller relies on listings succeeding after a failure to
+read a directory's identity. Handle the returned `StorageError::Io` and resolve
+the underlying filesystem error before retrying the listing. No stored data
+or configuration migration is required.
 
 ## 0.17.0
 

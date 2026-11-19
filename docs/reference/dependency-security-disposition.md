@@ -3,7 +3,7 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-19
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -53,6 +53,15 @@ Later exceptions carry their own accepted date.
 | 2026-11-17 | `RUSTSEC-2026-0543:chrono:0.4.45` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability. Re-check when upstream adopts a maintained successor or a security advisory appears. |
 | 2026-11-17 | `RUSTSEC-2026-0555:chrono-tz:0.10.4` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability. Re-check when upstream adopts a maintained successor or a security advisory appears. |
 | 2026-11-17 | `RUSTSEC-2026-0542:humantime:2.4.0` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability; humantime wraps chrono. Re-check when upstream adopts a maintained successor or a security advisory appears. |
+| 2026-11-19 | `RUSTSEC-2026-0574:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `FindMutView::pop`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0575:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound spsc queue `peek` ordering, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0576:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `IndexMap::truncate`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0577:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound panicking element `Drop` (including `vec::IntoIter::drop`), not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0578:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `SortedLinkedList::zeroize`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0579:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `Deque` `TryFrom` (affected only from 0.9.2), not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0580:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound treiber-stack pools, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0581:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `Deque::make_contiguous`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
+| 2026-11-19 | `RUSTSEC-2026-0582:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `IndexMap::insert` at `u16::MAX`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
 
 ## Owner-accepted crypto-bigint 0.5.5 disposition
 
@@ -294,6 +303,7 @@ locks receive the same compatible rustix patch where present.
 | quick-xml 0.39.4 / RUSTSEC-2026-0194, RUSTSEC-2026-0195 | hive-router → object_store 0.13. Fixed object_store owner crosses Hive's range. Router XML initialization conditions above apply. |
 | rsa 0.9.10 / RUSTSEC-2023-0071 | JWT RustCrypto and optional SMB crypto owners; no compatible fixed release. RSA operations and credentials conditions above apply. |
 | lru 0.16.3 and fixture 0.16.4 / RUSTSEC-2026-0253 | async-graphql DataLoader and Hive/libdd owners; neither range accepts fixed 0.18.2. NoCache/exporter/key conditions above apply; generic host caches remain exposed. |
+| heapless 0.6.1, 0.7.17, 0.8.0 / RUSTSEC-2026-0574 to RUSTSEC-2026-0582 | geo 0.33.1 → rstar 0.12.2 → heapless 0.8.0 is the only built path; geo-types 0.7.19 weak `rstar_0_8?/serde`-style features lock rstar 0.8.4–0.11.0 (heapless 0.6.1/0.7.17) without building them. rstar calls only `BinaryHeap` new/push/pop/len/capacity/into_vec in its nearest-neighbour heap, whose spilled `vec::IntoIter` holds elements without drop glue; the ORM calls only geo `Relate`. Update when geo/geo-types accept rstar 0.14 (heapless 0.9). |
 | atomic-polyfill 1.0.3 / RUSTSEC-2023-0089 | heapless/rstar spatial compatibility resolution. Unmaintained; optional graph presence does not establish runtime use. Seek an owning cleanup. |
 | pin-utils 0.1.0 / RUSTSEC-2026-0441 | S3 aws-smithy-runtime, optional SMB sspi → async-dnssd, and Hive reqwest-retry → wasmtimer. Unmaintained; replacing these owners needs upstream/API review. No exploit or unreachability inference. |
 | unsafe-libyaml 0.2.11 / RUSTSEC-2024-0449 | Hive/VRL → serde_yaml and serde_yaml_ng. Unmaintained parser; migrate owning dependencies with YAML compatibility review. |

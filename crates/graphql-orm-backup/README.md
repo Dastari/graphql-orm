@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.27.1 memory-caps the test-owned PostgreSQL container used by its conformance tests; there is no runtime change.
+
 Version 0.27.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 

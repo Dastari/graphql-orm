@@ -35,7 +35,7 @@ use url::Url;
 use crate::{
     AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, RouterError,
     RouterErrorKind,
-    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
+    http_body::{FetchError, USER_AGENT, fetch_bounded},
 };
 
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -571,16 +571,14 @@ impl JwksAuthenticationProvider {
         // the key set committed last is always the one fetched last.
         let _round = self.key_refresh_round.lock().await;
         let body = self
-            .fetch_bounded(
+            .fetch_document(
                 self.config.jwks_url.clone(),
                 self.config.max_jwks_bytes,
                 "JWKS",
                 None,
             )
             .await?;
-        let document = serde_json::from_slice::<RawJwkSet>(&body)
-            .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
-        let keys = validate_jwks(document)?;
+        let keys = parse_jwks(&body)?;
         let loaded_at = self.config.clock.now();
         let mut cache = self
             .cache
@@ -590,7 +588,7 @@ impl JwksAuthenticationProvider {
         Ok(())
     }
 
-    async fn fetch_bounded(
+    async fn fetch_document(
         &self,
         url: Url,
         maximum_bytes: usize,
@@ -601,24 +599,27 @@ impl JwksAuthenticationProvider {
         if let Some(headers) = request_headers {
             request = request.headers(headers.clone());
         }
-        let response = request.send().await.map_err(|_| {
-            AuthenticationError::unavailable(format!("{resource} retrieval failed"))
-        })?;
-        if !response.status().is_success() {
-            return Err(AuthenticationError::unavailable(format!(
-                "{resource} endpoint returned an unsuccessful status"
-            )));
-        }
-        read_bounded_body(response, maximum_bytes)
-            .await
-            .map_err(|error| match error {
-                BoundedBodyError::TooLarge => AuthenticationError::unavailable(format!(
-                    "{resource} response exceeded its configured body limit"
-                )),
-                BoundedBodyError::Read => {
-                    AuthenticationError::unavailable(format!("{resource} response read failed"))
-                }
-            })
+        let response = fetch_bounded(
+            request,
+            maximum_bytes,
+            false,
+            |_| Ok(()),
+            |error| {
+                let detail = match error {
+                    FetchError::Send => format!("{resource} retrieval failed"),
+                    FetchError::Status(_) => {
+                        format!("{resource} endpoint returned an unsuccessful status")
+                    }
+                    FetchError::TooLarge => {
+                        format!("{resource} response exceeded its configured body limit")
+                    }
+                    FetchError::Read => format!("{resource} response read failed"),
+                };
+                AuthenticationError::unavailable(detail)
+            },
+        )
+        .await?;
+        Ok(response.bytes)
     }
 
     #[cfg(feature = "auth-agql")]
@@ -627,7 +628,7 @@ impl JwksAuthenticationProvider {
             return Ok(());
         };
         let body = self
-            .fetch_bounded(
+            .fetch_document(
                 config.url.clone(),
                 config.max_body_bytes,
                 "role-scope catalogue",
@@ -640,6 +641,12 @@ impl JwksAuthenticationProvider {
         envelope.validate_structure().map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue document is invalid")
         })?;
+        // Bounded, with no critical extension, before the library decodes it.
+        if refuse_protected_header(&envelope.signature) {
+            return Err(AuthenticationError::unavailable(
+                "role-scope catalogue signature header is invalid",
+            ));
+        }
         let header = decode_header(&envelope.signature).map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue signature is malformed")
         })?;
@@ -695,6 +702,7 @@ impl JwksAuthenticationProvider {
             AuthenticationError::unavailable("role-scope catalogue expansion is invalid")
         })?;
         let expires_at = u64::try_from(claims.exp)
+            // Negative expiry is handled by the same error as timestamp overflow.
             .ok()
             .and_then(|value| UNIX_EPOCH.checked_add(Duration::from_secs(value)))
             .ok_or_else(|| {
@@ -740,6 +748,9 @@ impl JwksAuthenticationProvider {
             let retry_after = self
                 .role_scope_retry_after
                 .read()
+                .inspect_err(|_| {
+                    tracing::warn!("could not read the role-scope catalogue refresh backoff")
+                })
                 .ok()
                 .and_then(|retry_after| *retry_after);
             if retry_after.is_some_and(|retry_after| self.config.clock.now() < retry_after) {
@@ -849,6 +860,9 @@ impl JwksAuthenticationProvider {
         let due = self
             .last_unknown_key_refresh
             .write()
+            .inspect_err(|_| {
+                tracing::warn!("could not update the unknown-key JWKS refresh cooldown")
+            })
             .ok()
             .is_some_and(|mut last| {
                 let due = last.is_none_or(|previous| {
@@ -991,6 +1005,7 @@ impl fmt::Debug for JwksAuthenticationProvider {
         let key_count = self
             .cache
             .read()
+            // Debug output omits the count if the cache cannot be read.
             .ok()
             .and_then(|cache| cache.as_ref().map(|cache| cache.keys.len()));
         formatter
@@ -1010,6 +1025,11 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        // Refuse an oversized header, or one that names `crit` at all (RFC
+        // 7515 4.1.11), before the library decodes it or any key lookup.
+        if refuse_protected_header(token) {
+            return Err(invalid_token());
+        }
         let header = decode_header(token).map_err(|_| invalid_token())?;
         if header.alg != Algorithm::RS256 {
             return Err(invalid_token());
@@ -1029,6 +1049,11 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         let claims = decode::<JwtClaims>(token, &key, &validation)
             .map_err(|_| invalid_token())?
             .claims;
+        // `iss` is one string (RFC 7519 4.1.1). The library also accepts an
+        // array that contains the issuer; the typed claim refuses one.
+        if claims.iss != self.config.issuer {
+            return Err(invalid_token());
+        }
         validate_time_claims(&claims, self.config.clock.as_ref(), self.config.leeway)?;
         let scopes = parse_scope_claims(&claims.additional, self.config.legacy_scope_claims)?;
         #[cfg(feature = "auth-agql")]
@@ -1125,6 +1150,7 @@ struct RoleScopeCache {
 
 #[derive(Deserialize)]
 struct JwtClaims {
+    iss: String,
     sub: String,
     exp: u64,
     #[serde(default)]
@@ -1158,6 +1184,72 @@ where
     roles.sort();
     roles.dedup();
     Ok(roles)
+}
+
+/// Largest encoded protected header the router decodes: 8 KiB of base64url,
+/// about 6 KiB of JSON.
+///
+/// The router reads only `alg`, `kid` and `crit` from a header, and the
+/// headers its issuers write are well under 1 KiB. HTTP, WebSocket and
+/// catalogue-fetch limits bound their own inputs, but a provider can also be
+/// called directly, so the header is bounded here before it is decoded.
+pub(crate) const MAX_PROTECTED_HEADER_BYTES: usize = 8 * 1024;
+
+/// Whether a compact JWS's protected header must be refused before any
+/// signature or key work: it is longer than [`MAX_PROTECTED_HEADER_BYTES`]
+/// encoded, it is not base64url JSON object text, or it has a `crit` member
+/// with any value.
+///
+/// The JWT library reads `"crit": null` as an absent member, so the header is
+/// decoded here: any `crit` member, including `null` or an empty list, counts
+/// (RFC 7515 4.1.11; the router understands no critical extension). The end
+/// of the header is found without reading past the cap.
+pub(crate) fn refuse_protected_header(token: &str) -> bool {
+    use base64::Engine as _;
+    let Some(end) = token
+        .bytes()
+        .take(MAX_PROTECTED_HEADER_BYTES + 1)
+        .position(|byte| byte == b'.')
+    else {
+        return true;
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&token[..end])
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, JsonValue>>(&bytes).ok())
+        .is_none_or(|members| members.contains_key("crit"))
+}
+
+fn parse_jwks(body: &[u8]) -> Result<BTreeMap<String, DecodingKey>, AuthenticationError> {
+    let document = serde_json::from_slice::<RawJwkSet>(body)
+        .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
+    validate_jwks(document)
+}
+
+#[cfg(any(test, graphql_orm_router_fuzzing))]
+impl JwksAuthenticationProvider {
+    /// Installs a key set as a successful JWKS fetch would, without one.
+    pub(crate) fn install_key_set_for_harness(
+        &self,
+        document: &str,
+    ) -> Result<(), AuthenticationError> {
+        let keys = parse_jwks(document.as_bytes())?;
+        let loaded_at = self.config.clock.now();
+        *self
+            .cache
+            .write()
+            .map_err(|_| AuthenticationError::unavailable("JWKS cache is unavailable"))? =
+            Some(JwksCache { loaded_at, keys });
+        Ok(())
+    }
+}
+
+/// How many keys the refresh path keeps from one JWKS document.
+#[cfg(any(test, graphql_orm_router_fuzzing))]
+pub(crate) fn key_set_from_document_for_harness(
+    document: &[u8],
+) -> Result<usize, AuthenticationError> {
+    parse_jwks(document).map(|keys| keys.len())
 }
 
 /// Keeps every RS256 verification key with an ID and skips every other key.

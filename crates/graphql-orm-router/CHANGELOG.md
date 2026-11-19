@@ -3,16 +3,61 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
 
-## Unreleased - 0.16.3
+## 0.16.6 (unreleased)
 
-- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+- Schema polling, dynamic registration, JWKS and role-scope catalogue retrieval
+  share request execution, status handling and bounded response reads. Each
+  path keeps its existing diagnostics, and registration still verifies the
+  connected peer before handling the status.
+- WebSocket subscription forwarding reuses the encoded message when its
+  authorization-variable projection fits. If it must trim the projection, it
+  computes the trim point from exact JSON entry sizes before encoding again.
+- Scope the pending Hive plugin runtime to initialization so it is cleaned up
+  if the startup future is dropped before Hive claims it.
+
+## 0.16.5 (unreleased)
+
+- Fix (authentication, fail closed): both bearer providers,
+  `JwksAuthenticationProvider` and the `auth-agql` `AgqlAuthenticationProvider`,
+  refuse a token whose JOSE header has a `crit` member with any value: a list,
+  an empty list or `null`. The router understands no critical extension, and
+  RFC 7515 requires such a token to be refused; before, the header was
+  ignored, so `"b64": false` was accepted without its meaning. The check reads
+  the raw protected header before any key lookup, because the JWT library
+  reads `"crit": null` as absent, and the pinned `agql-auth` validator does
+  not check `crit` at all. A signed role-scope catalogue with any `crit`
+  member is refused the same way.
+- Fix (authentication, bounded input): both bearer providers and the signed
+  role-scope catalogue refuse a protected header longer than 8 KiB encoded
+  (`MAX_PROTECTED_HEADER_BYTES`, about 6 KiB of JSON) before decoding it.
+  HTTP, WebSocket and catalogue-fetch limits already bounded their own inputs;
+  this bounds direct provider calls too.
+- Fix (authentication, fail closed): a bearer token's `iss` must be exactly
+  the configured issuer string. The JWT library also accepted an array that
+  contained the issuer, such as `["https://issuer", "https://other"]`.
+- Tests: cargo-fuzz targets `bearer_structured`, `bearer_raw` and
+  `jwks_document` in `fuzz/`, with an independent acceptance oracle and
+  synthetic keys. The retained corpus and minimized regressions replay in the
+  ordinary test run, followed by a seeded property run of each target. A
+  weekly workflow fuzzes each target for 20 minutes. Seeded property tests
+  check that scope-template values can never broaden a grant under exact or
+  wildcard matching, and the `auth-agql` adapter's syntax check and expiry
+  conversion. ([#725](https://github.com/Dastari/graphql-orm/issues/725),
+  [#726](https://github.com/Dastari/graphql-orm/issues/726))
+
+## Unreleased - 0.16.4
+
+- Count failed scheduled authentication refreshes in process-local metrics and
+  include the static task identity in their redacted warnings.
+- Surface previously discarded refresh scheduler errors and malformed messages
+  from the private subscription endpoint without logging their contents.
 
 ## Unreleased - 0.16.2
 

@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{map_transaction, pricing_scope as record_scope};
 use std::sync::Arc;
 
 use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
@@ -10,7 +11,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
-use graphql_orm::graphql::orm::{DefaultWriteBackend, TransactionError, TransactionMode};
+use graphql_orm::graphql::orm::{DefaultWriteBackend, TransactionMode};
 use uuid::Uuid;
 
 use crate::persistence::*;
@@ -760,14 +761,6 @@ fn is_provider_kind(kind: &str) -> bool {
     )
 }
 
-fn record_scope(record: &AiPricingPolicyRecord) -> AiScope {
-    AiScope {
-        kind: record.scope_kind.clone(),
-        id: record.scope_id.clone(),
-        tenant_id: record.tenant_id.clone(),
-    }
-}
-
 fn pricing_view(record: &AiPricingPolicyRecord) -> AiPricingPolicyView {
     AiPricingPolicyView {
         id: record.id,
@@ -793,27 +786,6 @@ fn principal_kind(principal: &AuthPrincipal) -> String {
         AuthPrincipal::ApiToken(token) => {
             format!("api_token:{}", token.principal_kind.as_str())
         }
-    }
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 

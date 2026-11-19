@@ -7,8 +7,8 @@
 //! write, and cap the candidates it scans.
 
 use super::{
-    DatabaseEntity, Entity, EntityAccessSurface, EntityQuery, FromSqlRow, MutationContext,
-    ReadVisibility, WriteBackend,
+    DatabaseBackend, DatabaseEntity, Entity, EntityAccessSurface, EntityQuery, FromSqlRow,
+    MutationContext, OrmBackend, ReadVisibility, SqlValue, WriteBackend,
 };
 use crate::db::Database;
 use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -51,36 +51,55 @@ where
 /// a SQL predicate from the policy's `GraphqlMutation`-surface
 /// [`read_visibility`](super::RowPolicy::read_visibility) (`Prefilter` or
 /// `Complete`) narrows the read, so rows outside the caller's read visibility
-/// are never passed to a row callback, and on PostgreSQL never locked. On SQL
-/// Server a scan may still lock rows outside the predicate. The predicate only
-/// narrows: every selected row is still classified by the row callbacks.
-/// `CallbackOnly` and `Unrestricted` leave the read unchanged, and so does a
-/// database without a row policy.
+/// are never passed to a row callback. The predicate only narrows: every
+/// selected row is still classified by the row callbacks. `CallbackOnly` and
+/// `Unrestricted` leave the read unchanged, and so does a database without a
+/// row policy.
+///
+/// Also returns whether the host opted in and a SQL predicate narrows the
+/// read. Only then, and only with
+/// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets)
+/// as well, does [`bulk_write_targets`] select its targets from snapshots on
+/// SQL Server.
 async fn with_bulk_target_visibility<T, B>(
     db: &Database<B>,
     ctx: Option<&async_graphql::Context<'_>>,
     query: EntityQuery<T, B>,
-) -> async_graphql::Result<EntityQuery<T, B>>
+) -> async_graphql::Result<(EntityQuery<T, B>, bool)>
 where
     B: WriteBackend,
     T: Entity + DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     if ctx.is_none() || db.row_policy().is_none() {
-        return Ok(query);
+        return Ok((query, false));
     }
+    let opted_in = db.narrow_bulk_writes_to_read_visibility_enabled();
     let surface = EntityAccessSurface::GraphqlMutation;
     if let Some(predicate) = db.write_target_prefilter::<T>(ctx, surface).await? {
-        return query.with_read_visibility(&ReadVisibility::Prefilter(predicate));
+        let query = query.with_read_visibility(&ReadVisibility::Prefilter(predicate))?;
+        return Ok((query, opted_in));
     }
-    if !db.narrow_bulk_writes_to_read_visibility_enabled() {
-        return Ok(query);
+    if !opted_in {
+        return Ok((query, false));
     }
     match db.read_visibility::<T>(ctx, surface).await? {
-        ReadVisibility::Prefilter(predicate) | ReadVisibility::Complete(predicate) => {
-            query.with_read_visibility(&ReadVisibility::Prefilter(predicate))
-        }
-        ReadVisibility::CallbackOnly | ReadVisibility::Unrestricted => Ok(query),
+        ReadVisibility::Prefilter(predicate) | ReadVisibility::Complete(predicate) => Ok((
+            query.with_read_visibility(&ReadVisibility::Prefilter(predicate))?,
+            true,
+        )),
+        ReadVisibility::CallbackOnly | ReadVisibility::Unrestricted => Ok((query, false)),
     }
+}
+
+/// The rows a SQL Server bulk write's filter selects changed between its
+/// candidate read and its validation. Retrying the whole write is safe.
+fn targets_changed() -> sqlx::Error {
+    let mut error = OrmPublicError::with_message(
+        OrmErrorCode::ServiceUnavailable,
+        "the bulk write's target rows changed concurrently; retry the write",
+    );
+    error.retryable = true;
+    crate::graphql::errors::sqlx_error_from_public(error)
 }
 
 fn bulk_limit_exceeded() -> sqlx::Error {
@@ -104,9 +123,25 @@ fn bulk_limit_exceeded() -> sqlx::Error {
 /// in with
 /// [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
 /// narrows it with the SQL predicate of the policy's `GraphqlMutation`-surface
-/// read visibility, so rows outside it are not classified (and, on PostgreSQL,
-/// not locked); a row the caller may write but not read is then a target only
-/// when a write-target prefilter selects it. It also applies
+/// read visibility, so rows outside it are not classified; a row the caller
+/// may write but not read is then a target only when a write-target prefilter
+/// selects it.
+///
+/// With the opt-in and a SQL predicate, rows outside the predicate are not
+/// locked either on PostgreSQL, whose `FOR UPDATE` locks only the rows the
+/// predicate returns. SQL Server's single `UPDLOCK, HOLDLOCK` read locks every
+/// row a scan reads. With the separate opt-in
+/// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets),
+/// where [`EntityQuery::snapshot_write_candidates_key_index`] finds a unique
+/// key index, SQL Server instead reads the candidates in one snapshot without
+/// a lock, locks them exclusively by a forced seek on that index, checks them
+/// again, and reads them again in a new snapshot: a candidate set that changed
+/// meanwhile refuses the write as a retryable conflict. The target set then
+/// equals the rows that match at that validation snapshot, but no range is
+/// locked, so the transaction is no longer serializable. `key_value` gives a
+/// row's key.
+///
+/// It also applies
 /// [`PaginationConfig::max_bulk_write_rows`](super::PaginationConfig::max_bulk_write_rows),
 /// which counts targets only, so rows the caller cannot see never decide
 /// whether the bound is reached. When no row policy is installed and the
@@ -122,6 +157,7 @@ pub async fn bulk_write_targets<T, B>(
     ctx: Option<&async_graphql::Context<'_>>,
     tx: &mut MutationContext<'_, B>,
     query: EntityQuery<T, B>,
+    key_value: fn(&T) -> SqlValue,
 ) -> crate::Result<Vec<T>>
 where
     B: WriteBackend,
@@ -153,9 +189,21 @@ where
         }
         return Ok(targets);
     }
-    let query = with_bulk_target_visibility(db, ctx, query)
+    let (query, narrowed) = with_bulk_target_visibility(db, ctx, query)
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+    // Generated bulk writes exist only for entities with a single-column key.
+    // The snapshot path is a separate opt-in: it does not keep the bulk
+    // write's transaction serializable.
+    let key_index = if narrowed
+        && db.mssql_snapshot_bulk_write_targets_enabled()
+        && <B as OrmBackend>::DIALECT == DatabaseBackend::Mssql
+        && T::PRIMARY_KEYS.len() == 1
+    {
+        EntityQuery::<T, B>::snapshot_write_candidates_key_index(tx).await?
+    } else {
+        None
+    };
     let config = db.pagination_config();
     let bound = config.max_bulk_write_rows.map(|bound| bound.max(0));
     let over_bound = |targets: usize| {
@@ -188,6 +236,59 @@ where
     // of candidates, counting only targets against the bound.
     let budget = config.max_scanned_rows.map(|budget| budget.max(0));
     let mut scanned = 0_i64;
+    if let Some(key_index) = key_index {
+        // One consistent read of every candidate, bounded by the budget.
+        let limit = budget.map(|budget| budget.saturating_add(1));
+        let candidates = query
+            .fetch_write_candidate_keys_in_transaction(tx, limit, key_value)
+            .await?;
+        // Refused before any candidate is locked.
+        if budget.is_some_and(|budget| candidates.read > budget) {
+            return Err(super::query::scan_budget_exhausted());
+        }
+        let mut locked = std::collections::BTreeSet::new();
+        for (row, matches) in query
+            .lock_write_candidates_by_key_in_transaction(
+                tx,
+                &candidates.keys,
+                &key_index,
+                key_value,
+            )
+            .await?
+        {
+            // A row that left the filter or the predicate before it was
+            // locked is not a candidate.
+            if !matches {
+                continue;
+            }
+            locked.insert(super::composite_key_id(&[key_value(&row)]));
+            targets.extend(classify(row).await?);
+            if over_bound(targets.len()) {
+                return Err(bulk_limit_exceeded());
+            }
+        }
+        // Every candidate is now locked and checked. Read the candidates
+        // again, in one snapshot: if they are exactly the locked rows, the
+        // targets are the rows the filter selects at that instant, and none
+        // of them can change before the write commits. Otherwise another
+        // transaction changed which rows match since the first read.
+        let current = query
+            .fetch_write_candidate_keys_in_transaction(tx, limit, key_value)
+            .await?;
+        // A read cut off at the budget may have missed a candidate.
+        if budget.is_some_and(|budget| current.read > budget) {
+            return Err(super::query::scan_budget_exhausted());
+        }
+        let current = current
+            .keys
+            .iter()
+            .map(|key| super::composite_key_id(std::slice::from_ref(key)))
+            .collect::<std::collections::BTreeSet<_>>();
+        if current != locked {
+            return Err(targets_changed());
+        }
+        return Ok(targets);
+    }
     loop {
         // One row past the budget tells an exhausted scan from a complete one.
         let page = match budget {

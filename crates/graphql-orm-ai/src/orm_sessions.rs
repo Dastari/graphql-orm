@@ -2,7 +2,12 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::AiRunState;
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, page_input, principal_identity, record_scope,
+};
+use crate::persisted_state::{AttachmentQuarantineState, AttachmentScanState};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -12,12 +17,9 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionError,
-    TransactionMode,
+    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionMode,
 };
-use graphql_orm::graphql::pagination::{
-    KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
-};
+use graphql_orm::graphql::pagination::{KeysetConnectionInput, ValidatedKeysetConnection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -397,15 +399,15 @@ impl AiSessionService for OrmAiSessionService {
             .map_err(|_| AiError::InvalidInput("invalid message bootstrap window".to_owned()))?;
             let messages = self.messages(principal, session_id, page).await?;
             let active_states = vec![
-                "queued".to_owned(),
-                "leased".to_owned(),
-                "running".to_owned(),
-                "waiting_approval".to_owned(),
-                "waiting_tool".to_owned(),
-                "waiting_reauth".to_owned(),
-                "waiting_provider".to_owned(),
-                "waiting_subscription".to_owned(),
-                "retry_scheduled".to_owned(),
+                AiRunState::Queued.as_str().to_owned(),
+                AiRunState::Leased.as_str().to_owned(),
+                AiRunState::Running.as_str().to_owned(),
+                AiRunState::WaitingApproval.as_str().to_owned(),
+                AiRunState::WaitingTool.as_str().to_owned(),
+                AiRunState::WaitingReauth.as_str().to_owned(),
+                AiRunState::WaitingProvider.as_str().to_owned(),
+                AiRunState::WaitingSubscription.as_str().to_owned(),
+                AiRunState::RetryScheduled.as_str().to_owned(),
             ];
             let active_runs = self
                 .database
@@ -1896,8 +1898,10 @@ impl AiSessionService for OrmAiSessionService {
                             || attachment.owner_subject != principal_subject
                             || attachment.session_id != session_id
                             || attachment.deleted_at.is_some()
-                            || attachment.quarantine_state != "released"
-                            || attachment.scan_state != "clean"
+                            || attachment.quarantine_state
+                                != AttachmentQuarantineState::Released.as_str()
+                            || AttachmentScanState::from_persisted(&attachment.scan_state)
+                                != Some(AttachmentScanState::Clean)
                         {
                             return Err(OrmPublicError::not_found());
                         }
@@ -2323,27 +2327,9 @@ impl OrmAiSessionService {
     }
 }
 
-pub(crate) fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
-    let kind = match principal {
-        AuthPrincipal::User(_) => "user".to_owned(),
-        AuthPrincipal::ApiToken(token) => {
-            format!("api_token:{}", token.principal_kind.as_str())
-        }
-    };
-    (kind, principal.subject())
-}
-
 fn is_owner(principal: &AuthPrincipal, session: &AiSessionRecord) -> bool {
     let (kind, subject) = principal_identity(principal);
     session.owner_principal_kind == kind && session.owner_subject == subject
-}
-
-pub(crate) fn record_scope(session: &AiSessionRecord) -> AiScope {
-    AiScope {
-        kind: session.scope_kind.clone(),
-        id: session.scope_id.clone(),
-        tenant_id: session.tenant_id.clone(),
-    }
 }
 
 fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
@@ -2468,40 +2454,6 @@ fn tool_call_summary(record: &AiToolCallRecord) -> AiConversationToolCallSummary
     }
 }
 
-fn page_input(
-    page: &ValidatedKeysetConnection,
-    include_total_count: bool,
-) -> KeysetConnectionInput {
-    match page.direction {
-        KeysetWindowDirection::Forward => KeysetConnectionInput {
-            after: page.cursor.clone(),
-            first: Some(page.limit),
-            include_total_count,
-            ..Default::default()
-        },
-        KeysetWindowDirection::Backward => KeysetConnectionInput {
-            before: page.cursor.clone(),
-            last: Some(page.limit),
-            include_total_count,
-            ..Default::default()
-        },
-    }
-}
-
-pub(crate) fn content_context(
-    entity: &str,
-    row_id: Uuid,
-    field: &str,
-    scope: &AiScope,
-) -> ContentProtectionContext {
-    ContentProtectionContext {
-        entity: entity.to_owned(),
-        row_id: row_id.to_string(),
-        field: field.to_owned(),
-        scope: scope.clone(),
-    }
-}
-
 fn bounded_prefix(value: &str, maximum_bytes: usize) -> &str {
     if value.len() <= maximum_bytes {
         return value;
@@ -2548,27 +2500,6 @@ pub(crate) fn map_protection(error: crate::ContentProtectionError) -> AiError {
     match error {
         crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
         _ => AiError::PersistenceFailed,
-    }
-}
-
-pub(crate) fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-pub(crate) fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 

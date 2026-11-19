@@ -10,9 +10,21 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.149.1
+## Unreleased - 0.150.1
 
-- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- The PostgreSQL parity test starts its disposable container with a hard
+  `--memory 4g --memory-swap 4g` limit. Library code, API, approval digests,
+  stored state and the schema are unchanged.
+
+## Unreleased - 0.150.0
+
+- Reuse compiled registered-tool argument validators and share ORM conversion
+  helpers, lifecycle state handling and SSE framing. Approval digests, stored
+  state strings, API errors and the database schema are unchanged.
+- Emit a content-free ORM error code at debug level when a shared mapper returns
+  a persistence failure.
 
 ## Unreleased - 0.149.0
 

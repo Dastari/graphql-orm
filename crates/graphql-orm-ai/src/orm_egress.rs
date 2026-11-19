@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::map_transaction;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -207,24 +208,6 @@ const fn reason_value(value: AiEgressReason) -> &'static str {
         AiEgressReason::SecretDataDenied => "secret_data_denied",
         AiEgressReason::ConsentRequired => "consent_required",
         AiEgressReason::LimitExceeded => "limit_exceeded",
-    }
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
-        return AiError::RuntimeNotReady;
-    }
-    let public = error.public_error();
-    match public.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(public.message.clone()),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 

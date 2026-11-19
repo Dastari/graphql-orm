@@ -42,6 +42,34 @@ struct History {
     units: i64,
 }
 
+/// A table-qualified physical column: grouping, metrics and the blank
+/// exclusion must all name the same column through the path renderer.
+#[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    repository_entity(
+        backend = "sqlite",
+        table = "qualified_history",
+        plural = "QualifiedHistory"
+    )
+)]
+#[cfg_attr(
+    all(feature = "postgres", not(feature = "sqlite")),
+    repository_entity(
+        backend = "postgres",
+        table = "qualified_history",
+        plural = "QualifiedHistory"
+    )
+)]
+struct QualifiedHistory {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    #[filterable(type = "string")]
+    #[graphql_orm(db_column = "\"qualified_history\".\"event\"")]
+    event: Option<String>,
+}
+
 struct Owned {
     db: Database<Backend>,
     #[cfg(feature = "postgres")]
@@ -872,4 +900,121 @@ async fn postgres_db_auth_context_filters_before_pages_and_ordinary_aggregation(
     db.pool().close().await;
     drop(db);
     owned.finish().await
+}
+
+/// Round 2 of #782: `exclude_blank` renders the group column inside `TRIM`
+/// with the same path renderer as the grouping expression, so a
+/// table-qualified column excludes its blank values. Group pages are
+/// SQLite and PostgreSQL only; SQL Server refuses them before rendering
+/// (`complete_group_pages_unsupported`).
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "owns disposable loopback PostgreSQL 17"
+)]
+async fn blank_exclusion_names_a_table_qualified_group_column()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = Owned::start().await?;
+    sqlx::query("CREATE TABLE qualified_history (id TEXT PRIMARY KEY, event TEXT)")
+        .execute(owned.db.pool())
+        .await?;
+    for (id, event) in [
+        ("a", Some("A")),
+        ("b", Some("A")),
+        ("c", Some("  ")),
+        ("d", Some("")),
+    ] {
+        sqlx::query(&format!(
+            "INSERT INTO qualified_history (id, event) VALUES ('{id}', {})",
+            event.map_or("NULL".to_owned(), |value| format!("'{value}'"))
+        ))
+        .execute(owned.db.pool())
+        .await?;
+    }
+    for exclude_blank in [true, false] {
+        let page = QualifiedHistory::aggregate(&owned.db)
+            .group_by(QualifiedHistoryAggregateField::Event)?
+            .count_rows()?
+            .fetch_group_page(options(exclude_blank), None)
+            .await?;
+        let groups = page
+            .rows
+            .iter()
+            .map(|row| row.groups[0].value.clone())
+            .collect::<Vec<_>>();
+        if exclude_blank {
+            assert_eq!(groups, vec![AggregateValue::Text("A".into())]);
+        } else {
+            assert_eq!(groups.len(), 3, "{groups:?}");
+        }
+    }
+    // A read predicate on the same column renders it with the path renderer
+    // too. On SQLite a literal-quoted unknown name would read as a string
+    // constant, and `<> 'A'` would admit every row.
+    owned.db.set_row_policy(QualifiedVisibility);
+    let page = QualifiedHistory::aggregate(&owned.db)
+        .group_by(QualifiedHistoryAggregateField::Event)?
+        .count_rows()?
+        .fetch_group_page(options(false), None)
+        .await?;
+    let groups = page
+        .rows
+        .iter()
+        .map(|row| row.groups[0].value.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        groups,
+        vec![
+            AggregateValue::Text("".into()),
+            AggregateValue::Text("  ".into())
+        ]
+    );
+    owned.finish().await
+}
+
+/// Admits rows whose table-qualified `event` column is not `A`.
+#[derive(Clone)]
+struct QualifiedVisibility;
+impl RowPolicy<Backend> for QualifiedVisibility {
+    fn read_visibility<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async move {
+            Ok(ReadVisibility::Complete(ReadPredicate::column::<
+                Backend,
+                QualifiedHistory,
+            >(
+                "\"qualified_history\".\"event\"",
+                ReadPredicateOp::Ne,
+                SqlValue::String("A".into()),
+            )?))
+        })
+    }
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { panic!("residual evaluation must never run after aggregation") })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
 }

@@ -10,9 +10,13 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.25.1
+## Unreleased - 0.26.0
 
-- Install from a reviewed Git revision using the package inventory and release manifest.
+- Reuse compiled validators for query, mutation and subscription plans and
+  their GraphQL arguments. Plan schemas, validation and fingerprints are
+  unchanged.
+- Classify compact query plan corrections at the validation site so editing
+  diagnostics cannot change the model-facing correction code.
 
 ## Unreleased - 0.25.0
 

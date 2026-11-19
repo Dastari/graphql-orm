@@ -910,7 +910,7 @@ pub(crate) fn generate_graphql_relations(
                     // against its own target's access and SQL visibility.
                     let mut order_by = order_by;
                     if let Some(order) = order_by.as_mut() {
-                        order.__gom_prepare_read(ctx).await?;
+                        order.__gom_prepare_read(ctx, &mut ::graphql_orm::graphql::orm::RelationFilterBudget::new()).await?;
                     }
                     // Filtering and ordering reveal the target fields they
                     // name: each needs the target's field read authority.

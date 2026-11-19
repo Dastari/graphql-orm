@@ -23,6 +23,7 @@ mod execution;
 mod lease;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
+mod mssql_identifier_tables;
 mod operation_metadata;
 mod owned_foreign_keys;
 mod owned_schema;

@@ -332,7 +332,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Execute portable security regressions on an owned backend
-        run: bash scripts/run-security-test-targets.sh "${{ matrix.backend }}" subscription_portable_authorization bounded_protected_scans authorized_page_context_binding
+        run: bash scripts/run-security-test-targets.sh "${{ matrix.backend }}" subscription_portable_authorization bounded_protected_scans authorized_page_context_binding identifier_quoting_properties qualified_read_predicates
       - name: Compile and lint current-authority policy on the selected backend
         run: cargo clippy -p graphql-orm --locked --no-default-features --features "${{ matrix.backend }},auth-agql" --lib -- -D warnings
 

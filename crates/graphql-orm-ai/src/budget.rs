@@ -59,6 +59,31 @@ pub enum AiBudgetReservationState {
     Expired,
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl AiBudgetReservationState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Committed => "committed",
+            Self::Released => "released",
+            Self::Uncertain => "uncertain",
+            Self::Expired => "expired",
+        }
+    }
+
+    pub(crate) fn from_persisted(value: &str) -> Option<Self> {
+        [
+            Self::Reserved,
+            Self::Committed,
+            Self::Released,
+            Self::Uncertain,
+            Self::Expired,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == value)
+    }
+}
+
 /// Request passed to the transactional budget service before provider egress.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiBudgetReservationRequest {

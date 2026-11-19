@@ -10,10 +10,16 @@ supersedes: []
 
 # Migration Guide
 
-## 0.149.0 to 0.149.1: install documentation
+## 0.150.0 to 0.150.1
 
-**No action.** The README now shows how to select a reviewed Git revision.
-No data migration is needed.
+**No action.** Test-owned PostgreSQL containers are memory-capped. The library,
+durable state, schema and approvals are unchanged.
+
+## 0.149.0 to 0.150.0
+
+**No action**. Registered tools reuse their compiled argument validators.
+Durable state values, the schema module, and existing fingerprints and
+approvals are unchanged. No data migration is needed.
 
 ## 0.148.0 to 0.149.0: output-limit stops and the bootstrap tool-call window
 

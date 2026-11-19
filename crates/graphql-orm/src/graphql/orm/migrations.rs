@@ -4140,7 +4140,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
         let pragma_table_info = format!(
             "PRAGMA main.table_info({})",
-            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+            DatabaseBackend::Sqlite.delimit_raw_identifier(&table_name)
         );
         let column_rows = sqlx::query(&pragma_table_info)
             .fetch_all(&mut *connection)
@@ -4189,7 +4189,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
         let pragma_index_list = format!(
             "PRAGMA main.index_list({})",
-            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+            DatabaseBackend::Sqlite.delimit_raw_identifier(&table_name)
         );
         let index_rows = sqlx::query(&pragma_index_list)
             .fetch_all(&mut *connection)
@@ -4207,7 +4207,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
             let pragma_index_info = format!(
                 "PRAGMA main.index_xinfo({})",
-                DatabaseBackend::Sqlite.quote_identifier(&index_name)
+                DatabaseBackend::Sqlite.delimit_raw_identifier(&index_name)
             );
             let index_info_rows = sqlx::query(&pragma_index_info)
                 .fetch_all(&mut *connection)
@@ -4296,7 +4296,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
 
         let pragma_fk_list = format!(
             "PRAGMA main.foreign_key_list({})",
-            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+            DatabaseBackend::Sqlite.delimit_raw_identifier(&table_name)
         );
         let foreign_key_rows = sqlx::query(&pragma_fk_list)
             .fetch_all(&mut *connection)
@@ -4619,11 +4619,9 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         let table_name: String = row.try_get("table_name")?;
         // A catalog name is already physical: do not render a case-sensitive
         // catalog spelling as a bare name that would reach another table.
-        let reported = if super::dialect::postgres_resolved_identifier(&table_name) != table_name {
-            format!("\"{}\"", table_name.replace('"', "\"\""))
-        } else {
-            table_name.clone()
-        };
+        // A name that bare SQL would fold, split at a dot or read as a
+        // delimited identifier is reported delimited (#782).
+        let reported = super::dialect::postgres_reported_relation_name(&table_name);
         relations.push((reported, schema_name.clone(), table_name));
     }
     let mut reported_relations = std::collections::BTreeSet::new();
@@ -4950,11 +4948,15 @@ pub(super) async fn introspect_owned_postgres_connection_including(
                         // of the current schema with the same name.
                         match reported_names.get(&(target_schema.clone(), target_table.clone())) {
                             Some(reported) => reported.clone(),
-                            None if target_schema == schema_name => target_table,
+                            None if target_schema == schema_name => {
+                                super::dialect::postgres_reported_relation_name(&target_table)
+                            }
                             None => format!(
                                 "{}.{}",
-                                DatabaseBackend::Postgres.render_identifier(&target_schema),
-                                DatabaseBackend::Postgres.render_identifier(&target_table)
+                                // The schema is always delimited, so no raw schema
+                                // name can move the separator into a component.
+                                DatabaseBackend::Postgres.delimit_raw_identifier(&target_schema),
+                                super::dialect::postgres_reported_relation_name(&target_table)
                             ),
                         }
                     },
@@ -5091,7 +5093,7 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         // resolves the bare name to first.
         let rows = sqlx::query(&format!(
             "SELECT config_json::pg_catalog.text AS config_json FROM {}.{} ORDER BY entity_name",
-            DatabaseBackend::Postgres.quote_identifier(&schema_name),
+            DatabaseBackend::Postgres.delimit_raw_identifier(&schema_name),
             DatabaseBackend::Postgres.quote_identifier(super::search_metadata_table_name()),
         ))
         .fetch_all(&mut *connection)
@@ -5998,12 +6000,14 @@ pub async fn introspect_mssql_schema(
     for row in table_rows {
         let schema_name = super::MssqlBackend::try_get_string(&row, "table_schema")?;
         let raw_table_name = super::MssqlBackend::try_get_string(&row, "table_name")?;
-        // Quote each part on its own: a `.` inside a table name is not a
-        // schema separator.
+        // Quote each raw catalogue part on its own and always literally: a
+        // `.` inside a table name is not a schema separator, and a table
+        // literally named `[ledger]` must not resolve to `ledger` in the
+        // `OBJECT_ID` lookups below or collide with it in the model.
         let table_path = format!(
             "{}.{}",
-            DatabaseBackend::Mssql.quote_identifier(&schema_name),
-            DatabaseBackend::Mssql.quote_identifier(&raw_table_name)
+            DatabaseBackend::Mssql.delimit_raw_identifier(&schema_name),
+            DatabaseBackend::Mssql.delimit_raw_identifier(&raw_table_name)
         );
         if is_internal_graphql_orm_table(&raw_table_name) {
             continue;
@@ -6053,7 +6057,7 @@ pub async fn introspect_mssql_schema(
             .into_iter()
             .map(|row| {
                 super::MssqlBackend::try_get_string(&row, "column_name")
-                    .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
+                    .map(|column| DatabaseBackend::Mssql.delimit_raw_identifier(&column))
             })
             .collect::<Result<Vec<_>, _>>()?;
         // A table without a primary key reports none, not an invented `[id]`.
@@ -6083,10 +6087,9 @@ pub async fn introspect_mssql_schema(
             .map(|row| {
                 Ok((
                     super::MssqlBackend::try_get_string(&row, "constraint_name")?,
-                    DatabaseBackend::Mssql.quote_identifier(&super::MssqlBackend::try_get_string(
-                        &row,
-                        "column_name",
-                    )?),
+                    DatabaseBackend::Mssql.delimit_raw_identifier(
+                        &super::MssqlBackend::try_get_string(&row, "column_name")?,
+                    ),
                     row.try_get::<i64, _>("key_ordinal")?,
                 ))
             })
@@ -6118,12 +6121,18 @@ pub async fn introspect_mssql_schema(
         .await?;
         let mut foreign_keys: Vec<super::core::ForeignKeyModel> = Vec::new();
         for row in foreign_key_rows {
-            let constraint_name = super::MssqlBackend::try_get_string(&row, "constraint_name")?;
+            // Names are kept in the declared-name convention the renderers
+            // read, so a constraint literally named `[fk]` drops as itself.
+            let constraint_name = DatabaseBackend::Mssql.raw_name_in_declared_form(
+                &super::MssqlBackend::try_get_string(&row, "constraint_name")?,
+            );
             let pair = super::core::ForeignKeyColumnPairModel {
-                source_column: DatabaseBackend::Mssql
-                    .quote_identifier(&super::MssqlBackend::try_get_string(&row, "source_column")?),
-                target_column: DatabaseBackend::Mssql
-                    .quote_identifier(&super::MssqlBackend::try_get_string(&row, "target_column")?),
+                source_column: DatabaseBackend::Mssql.delimit_raw_identifier(
+                    &super::MssqlBackend::try_get_string(&row, "source_column")?,
+                ),
+                target_column: DatabaseBackend::Mssql.delimit_raw_identifier(
+                    &super::MssqlBackend::try_get_string(&row, "target_column")?,
+                ),
             };
             match foreign_keys.last_mut() {
                 Some(last) if last.constraint_name.as_deref() == Some(&constraint_name) => {
@@ -6134,10 +6143,10 @@ pub async fn introspect_mssql_schema(
                     column_pairs: vec![pair],
                     target_table: format!(
                         "{}.{}",
-                        DatabaseBackend::Mssql.quote_identifier(
+                        DatabaseBackend::Mssql.delimit_raw_identifier(
                             &super::MssqlBackend::try_get_string(&row, "target_schema")?
                         ),
-                        DatabaseBackend::Mssql.quote_identifier(
+                        DatabaseBackend::Mssql.delimit_raw_identifier(
                             &super::MssqlBackend::try_get_string(&row, "target_table")?
                         )
                     ),
@@ -6156,7 +6165,7 @@ pub async fn introspect_mssql_schema(
             .into_iter()
             .map(|row| {
                 let raw_name = super::MssqlBackend::try_get_string(&row, "column_name")?;
-                let name = DatabaseBackend::Mssql.quote_identifier(&raw_name);
+                let name = DatabaseBackend::Mssql.delimit_raw_identifier(&raw_name);
                 Ok(ColumnModel {
                     is_primary_key: primary_keys.iter().any(|column| column == &name),
                     is_unique: unique_columns.contains(&name),
@@ -6227,8 +6236,12 @@ async fn introspect_mssql_indexes(
     .await?;
     let mut indexes: Vec<(super::owned_schema::IndexModel, bool)> = Vec::new();
     for row in rows {
-        let name = super::MssqlBackend::try_get_string(&row, "index_name")?;
-        let column = super::MssqlBackend::try_get_string(&row, "column_name")?;
+        // Declared-name convention, as for constraint names: an index or
+        // column literally named `[x]` (or `a.b`) re-renders as itself.
+        let name = DatabaseBackend::Mssql
+            .raw_name_in_declared_form(&super::MssqlBackend::try_get_string(&row, "index_name")?);
+        let column = DatabaseBackend::Mssql
+            .raw_name_in_declared_form(&super::MssqlBackend::try_get_string(&row, "column_name")?);
         let descending = row.try_get::<i64, _>("is_descending")? != 0;
         if indexes.last().is_none_or(|(index, _)| index.name != name) {
             let mut index = super::owned_schema::IndexModel::new(name, Vec::new());
@@ -6270,10 +6283,15 @@ async fn introspect_mssql_indexes(
 /// as unfiltered.
 #[cfg(feature = "mssql")]
 fn mssql_index_predicate(filter: &str) -> super::owned_schema::IndexPredicateModel {
-    parse_mssql_in_filter(filter).unwrap_or_else(|| super::owned_schema::IndexPredicateModel {
-        column: String::new(),
-        values: vec![filter.to_string()],
-    })
+    parse_mssql_in_filter(filter)
+        .map(|mut predicate| {
+            predicate.column = DatabaseBackend::Mssql.raw_name_in_declared_form(&predicate.column);
+            predicate
+        })
+        .unwrap_or_else(|| super::owned_schema::IndexPredicateModel {
+            column: String::new(),
+            values: vec![filter.to_string()],
+        })
 }
 
 #[cfg(feature = "mssql")]
@@ -6286,13 +6304,18 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
                 return text;
             };
             // `(a) OR (b)` starts and ends with parentheses that are not a pair.
+            // Parentheses inside literals and bracketed names do not count.
+            let Some(positions) = mssql_filter_positions(inner) else {
+                return text;
+            };
             let mut depth = 0usize;
-            let mut quoted = false;
-            for character in inner.chars() {
-                match character {
-                    '\'' => quoted = !quoted,
-                    '(' if !quoted => depth += 1,
-                    ')' if !quoted => match depth.checked_sub(1) {
+            for (index, outside) in positions {
+                if !outside {
+                    continue;
+                }
+                match inner[index..].chars().next() {
+                    Some('(') => depth += 1,
+                    Some(')') => match depth.checked_sub(1) {
                         Some(next) => depth = next,
                         None => return text,
                     },
@@ -6337,7 +6360,9 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
     let mut column: Option<String> = None;
     let mut values = Vec::new();
     for term in split_outside_quotes(filter, " OR ")? {
-        let (name, value) = unwrap(term).split_once('=')?;
+        let [name, value] = split_outside_quotes(unwrap(term), "=")?[..] else {
+            return None;
+        };
         let name = bracketed(name)?;
         match &column {
             Some(existing) if *existing != name => return None,
@@ -6357,25 +6382,57 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
 fn split_outside_quotes<'a>(text: &'a str, separator: &str) -> Option<Vec<&'a str>> {
     let mut parts = Vec::new();
     let mut start = 0;
-    let mut quoted = false;
-    let mut index = 0;
-    let bytes = text.as_bytes();
-    while index < bytes.len() {
-        if bytes[index] == b'\'' {
-            quoted = !quoted;
-        } else if !quoted && text[index..].starts_with(separator) {
-            parts.push(&text[start..index]);
-            index += separator.len();
-            start = index;
+    let mut skip_to = 0;
+    for (index, outside) in mssql_filter_positions(text)? {
+        if index < skip_to || !outside {
             continue;
         }
-        index += 1;
-    }
-    if quoted {
-        return None;
+        if text[index..].starts_with(separator) {
+            parts.push(&text[start..index]);
+            skip_to = index + separator.len();
+            start = skip_to;
+        }
     }
     parts.push(&text[start..]);
     Some(parts)
+}
+
+/// Each character's byte offset in a SQL Server filter, and whether it is
+/// outside every string literal (`'...'`, `''` doubled) and bracketed
+/// identifier (`[...]`, `]]` doubled). The opening quote or bracket counts
+/// as outside; everything up to and including its closing one does not.
+/// Offsets are always character boundaries, so a filter on a non-ASCII
+/// column such as `[列]` never slices inside a character. `None` for an
+/// unterminated literal or identifier.
+#[cfg(feature = "mssql")]
+fn mssql_filter_positions(text: &str) -> Option<Vec<(usize, bool)>> {
+    let mut positions = Vec::new();
+    let mut closing: Option<char> = None;
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        match closing {
+            Some(close) => {
+                positions.push((index, false));
+                if character == close {
+                    if characters.peek().map(|(_, next)| *next) == Some(close) {
+                        let (next, _) = characters.next()?;
+                        positions.push((next, false));
+                    } else {
+                        closing = None;
+                    }
+                }
+            }
+            None => {
+                positions.push((index, true));
+                closing = match character {
+                    '\'' => Some('\''),
+                    '[' => Some(']'),
+                    _ => None,
+                };
+            }
+        }
+    }
+    closing.is_none().then_some(positions)
 }
 
 #[cfg(all(test, feature = "mssql"))]
@@ -6399,6 +6456,16 @@ mod mssql_index_predicate_tests {
                 vec!["new", "it's open"],
             ),
             ("([State] IN (N'a,b',N'c'))", "State", vec!["a,b", "c"]),
+            // Non-ASCII and punctuation inside a bracketed column name (#782).
+            ("([列]=N'新')", "列", vec!["新"]),
+            ("([列] IN (N'新', N'旧'))", "列", vec!["新", "旧"]),
+            ("([a=b]='x')", "a=b", vec!["x"]),
+            (
+                "([it's (odd) IN or OR]='y')",
+                "it's (odd) IN or OR",
+                vec!["y"],
+            ),
+            ("([雪.b] IN ('z'))", "[雪.b]", vec!["z"]),
         ] {
             let predicate = mssql_index_predicate(filter);
             assert_eq!(predicate.column, column, "{filter}");
@@ -6416,6 +6483,10 @@ mod mssql_index_predicate_tests {
             "([A]='unterminated)",
             "([A] IN ('x', [B]))",
             "([A] NOT IN ('x'))",
+            // Unterminated identifiers and multi-byte text never panic.
+            "([列='x')",
+            "([列]] IN ('x'))",
+            "(列 IN ('x'))",
         ] {
             let predicate = mssql_index_predicate(filter);
             assert_eq!(predicate.column, "", "{filter}");

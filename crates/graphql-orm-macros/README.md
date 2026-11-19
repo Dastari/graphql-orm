@@ -3,12 +3,32 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
+well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
+delimited or contains NUL, and splits declared paths with each backend's own delimiters (#782).
+Generated code is otherwise unchanged.
+
+Version 0.181.0 pairs with the runtime's SQL Server closure read predicates. Generated where inputs
+render their nested `and`, `or` and `not` lists as balanced parenthesised pairs, which keeps long
+lists shallow for the SQL parser with the same meaning and bind order. Generated where-input and
+ordering preparation share one per-statement relation-policy budget.
+
+Version 0.180.0 passes the runtime a key accessor from generated `updateMany` and `deleteMany`,
+which the opt-in SQL Server snapshot bulk-write target selection uses to lock its targets by key (#752).
+Upgrade ORM and macros together; see the
+[migration guide](../../MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
+
+Version 0.179.1 changes no macro output; it keeps the version line aligned with the ORM, whose test-owned PostgreSQL containers are now memory-capped.
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
+the runtime renderer; every other name is generated as before.
 
 Version 0.177.0 gives the root delete of a `dependent_deletes` entity the
 same `errorCode` as a direct delete under `mutation_error_codes` (#763), and
@@ -158,7 +178,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -645,7 +664,6 @@ to use the same tag and resolve one Auth source in the lockfile. The
 [0.53 migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks)
 describes validated current-session proofs.
 
-
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
 preserve compiler-native hashes and have separate admission; format 1, default-off
@@ -917,7 +935,6 @@ arguments and propagation path authorization. See the workspace
 Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
-
 
 Version 0.91.1 keeps this crate aligned with `graphql-orm` 0.91.1. Generated code matches 0.91.0.
 
