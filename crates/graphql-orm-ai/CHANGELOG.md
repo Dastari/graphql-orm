@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.150.2
+
+- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+
 ## Unreleased - 0.150.1
 
 Test-owned PostgreSQL containers are memory-capped; no runtime change.

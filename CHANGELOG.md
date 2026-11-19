@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.183.0 and operation catalog 0.9.1
+
+- The workspace dependency check compares documented direct edges with
+  Cargo metadata, including optional and dev-only dependencies (#503).
+- Install examples use a reviewed Git revision and point to the package
+  inventory and release manifest. Direct Auth guidance follows the selected
+  revision's workspace manifest (#509).
+
 ## Unreleased - ORM/macros 0.182.0
 
 SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issues/782), [#783](https://github.com/Dastari/graphql-orm/issues/783)), found by the identifier-quoting property suite. See the [migration guide](MIGRATION.md#01810-to-01820-sql-identifier-quoting).

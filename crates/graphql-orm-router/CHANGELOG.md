@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.16.7
+
+- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+
 ## 0.16.6 (unreleased)
 
 - Schema polling, dynamic registration, JWKS and role-scope catalogue retrieval

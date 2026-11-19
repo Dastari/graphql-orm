@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.182.0 to 0.183.0: install documentation
+
+**No action.** Upgrade ORM and macros together. The README and workspace
+documentation now describe how to select a reviewed Git revision; the
+dependency-direction guide in `AGENTS.md` matches Cargo metadata. No data
+migration is needed. The operation catalog's 0.9.0 to 0.9.1 update refreshes
+install documentation and requires no migration.
+
 ## 0.181.0 to 0.182.0: SQL identifier quoting
 
 Upgrade ORM and macros together. Generated code and statement text are

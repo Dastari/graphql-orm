@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.18.3
+
+- Install from a reviewed Git revision using the package inventory and release manifest.
+
 ## Unreleased - 0.18.2
 
 - Tests: seeded property tests compare `validate_blob_key`,
