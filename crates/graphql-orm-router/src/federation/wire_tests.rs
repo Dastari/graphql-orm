@@ -1307,26 +1307,29 @@ fn persisted_documents_wire_case(case: &str) {
         }
         "refusal_outcome" => {
             let opens = products.opens() + reviews.opens();
-            for (payload, code) in [
+            for (status, payload, code) in [
                 (
+                    200,
                     json!({"documentId": hash("unknown")}),
                     "PERSISTED_DOCUMENT_NOT_FOUND",
                 ),
                 (
+                    200,
                     json!({"query": protected}),
                     "PERSISTED_DOCUMENT_ID_REQUIRED",
                 ),
                 (
+                    400,
                     json!([{"documentId": hash(query)}, {"query": query}]),
                     "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
                 ),
             ] {
-                let result = graphql(payload);
+                let result = graphql(status, payload);
                 assert_eq!(result["errors"][0]["extensions"]["code"], code, "{result}");
                 assert_refused(code, &result);
                 assert_eq!(products.opens() + reviews.opens(), opens, "{code}");
             }
-            let allowed = graphql(json!({"documentId": hash(query)}));
+            let allowed = graphql(200, json!({"documentId": hash(query)}));
             assert_eq!(allowed["data"]["__typename"], "Query", "{allowed}");
             assert!(allowed.get("errors").is_none(), "{allowed}");
             let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
