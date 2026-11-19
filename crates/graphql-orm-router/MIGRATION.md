@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.7 to 0.16.8: operations documentation
+
+**No action.** The operations runbook records the startup hand-off and
+ownership rationale, and a few source comments are clearer. No behaviour,
+configuration or public API changes.
+
 ## 0.16.6 to 0.16.7: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.
