@@ -4953,7 +4953,9 @@ pub(super) async fn introspect_owned_postgres_connection_including(
                             }
                             None => format!(
                                 "{}.{}",
-                                super::dialect::postgres_reported_relation_name(&target_schema),
+                                // The schema is always delimited, so no raw schema
+                                // name can move the separator into a component.
+                                DatabaseBackend::Postgres.delimit_raw_identifier(&target_schema),
                                 super::dialect::postgres_reported_relation_name(&target_table)
                             ),
                         }
@@ -6302,13 +6304,18 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
                 return text;
             };
             // `(a) OR (b)` starts and ends with parentheses that are not a pair.
+            // Parentheses inside literals and bracketed names do not count.
+            let Some(positions) = mssql_filter_positions(inner) else {
+                return text;
+            };
             let mut depth = 0usize;
-            let mut quoted = false;
-            for character in inner.chars() {
-                match character {
-                    '\'' => quoted = !quoted,
-                    '(' if !quoted => depth += 1,
-                    ')' if !quoted => match depth.checked_sub(1) {
+            for (index, outside) in positions {
+                if !outside {
+                    continue;
+                }
+                match inner[index..].chars().next() {
+                    Some('(') => depth += 1,
+                    Some(')') => match depth.checked_sub(1) {
                         Some(next) => depth = next,
                         None => return text,
                     },
@@ -6353,7 +6360,9 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
     let mut column: Option<String> = None;
     let mut values = Vec::new();
     for term in split_outside_quotes(filter, " OR ")? {
-        let (name, value) = unwrap(term).split_once('=')?;
+        let [name, value] = split_outside_quotes(unwrap(term), "=")?[..] else {
+            return None;
+        };
         let name = bracketed(name)?;
         match &column {
             Some(existing) if *existing != name => return None,
@@ -6373,25 +6382,57 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
 fn split_outside_quotes<'a>(text: &'a str, separator: &str) -> Option<Vec<&'a str>> {
     let mut parts = Vec::new();
     let mut start = 0;
-    let mut quoted = false;
-    let mut index = 0;
-    let bytes = text.as_bytes();
-    while index < bytes.len() {
-        if bytes[index] == b'\'' {
-            quoted = !quoted;
-        } else if !quoted && text[index..].starts_with(separator) {
-            parts.push(&text[start..index]);
-            index += separator.len();
-            start = index;
+    let mut skip_to = 0;
+    for (index, outside) in mssql_filter_positions(text)? {
+        if index < skip_to || !outside {
             continue;
         }
-        index += 1;
-    }
-    if quoted {
-        return None;
+        if text[index..].starts_with(separator) {
+            parts.push(&text[start..index]);
+            skip_to = index + separator.len();
+            start = skip_to;
+        }
     }
     parts.push(&text[start..]);
     Some(parts)
+}
+
+/// Each character's byte offset in a SQL Server filter, and whether it is
+/// outside every string literal (`'...'`, `''` doubled) and bracketed
+/// identifier (`[...]`, `]]` doubled). The opening quote or bracket counts
+/// as outside; everything up to and including its closing one does not.
+/// Offsets are always character boundaries, so a filter on a non-ASCII
+/// column such as `[列]` never slices inside a character. `None` for an
+/// unterminated literal or identifier.
+#[cfg(feature = "mssql")]
+fn mssql_filter_positions(text: &str) -> Option<Vec<(usize, bool)>> {
+    let mut positions = Vec::new();
+    let mut closing: Option<char> = None;
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        match closing {
+            Some(close) => {
+                positions.push((index, false));
+                if character == close {
+                    if characters.peek().map(|(_, next)| *next) == Some(close) {
+                        let (next, _) = characters.next()?;
+                        positions.push((next, false));
+                    } else {
+                        closing = None;
+                    }
+                }
+            }
+            None => {
+                positions.push((index, true));
+                closing = match character {
+                    '\'' => Some('\''),
+                    '[' => Some(']'),
+                    _ => None,
+                };
+            }
+        }
+    }
+    closing.is_none().then_some(positions)
 }
 
 #[cfg(all(test, feature = "mssql"))]
@@ -6415,6 +6456,16 @@ mod mssql_index_predicate_tests {
                 vec!["new", "it's open"],
             ),
             ("([State] IN (N'a,b',N'c'))", "State", vec!["a,b", "c"]),
+            // Non-ASCII and punctuation inside a bracketed column name (#782).
+            ("([列]=N'新')", "列", vec!["新"]),
+            ("([列] IN (N'新', N'旧'))", "列", vec!["新", "旧"]),
+            ("([a=b]='x')", "a=b", vec!["x"]),
+            (
+                "([it's (odd) IN or OR]='y')",
+                "it's (odd) IN or OR",
+                vec!["y"],
+            ),
+            ("([雪.b] IN ('z'))", "[雪.b]", vec!["z"]),
         ] {
             let predicate = mssql_index_predicate(filter);
             assert_eq!(predicate.column, column, "{filter}");
@@ -6432,6 +6483,10 @@ mod mssql_index_predicate_tests {
             "([A]='unterminated)",
             "([A] IN ('x', [B]))",
             "([A] NOT IN ('x'))",
+            // Unterminated identifiers and multi-byte text never panic.
+            "([列='x')",
+            "([列]] IN ('x'))",
+            "(列 IN ('x'))",
         ] {
             let predicate = mssql_index_predicate(filter);
             assert_eq!(predicate.column, "", "{filter}");

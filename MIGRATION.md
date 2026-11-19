@@ -25,12 +25,25 @@ except for the per-backend path splitting below.
   table-qualified column to the new `DatabaseBackend::quote_column_identifier`,
   which keeps its column part. Inside the workspace, read predicates
   (`ReadPredicate::column`, `is_null`, `is_not_null` and the relation,
-  `not_related` and closure joins), the `exclude_blank` group-page filter and
-  generated dependent-delete selection did this with a table-qualified
-  `db_column` such as `"t"."c"`; they now render its column part (the group
-  filter, its path). Input that is exactly one well-formed delimited
-  identifier, such as `"Mixed Case"` or `[order]`, is still returned
-  unchanged.
+  `not_related` and closure joins) and the `exclude_blank` group-page filter
+  did this with a table-qualified `db_column` such as `"t"."c"`; they now
+  render its column part (the group filter, its path). Generated
+  dependent-delete selection now receives its column already rendered: the
+  root's declared key as its column part, and each dependent's foreign-key
+  column, which is read from the catalogue, as one name, so a column
+  literally named `parent.ref` is never shortened to `ref`. Input that is
+  exactly one well-formed delimited identifier, such as `"Mixed Case"` or
+  `[order]`, is still returned unchanged.
+- **Read predicates refuse a column qualified by another table (#782).
+  Action needed** only if a `db_column` used in `ReadPredicate::column`,
+  `is_null`, `is_not_null`, or as a relation or closure key, has a qualifier
+  that does not name the declaring entity's own table (its table name, or
+  its schema and table name). Such a predicate is now refused with
+  `AUTHORIZATION_MISCONFIGURED` when the policy is built, because the
+  qualifier could bind the column to a different row in a correlated
+  subquery. Previously the relation and closure forms failed with a database
+  error, and the scalar forms referenced the other table. Qualify the column
+  with its own table, or leave it unqualified.
 - **Declared names that only look delimited are refused (#782). Action
   needed** only if a `table` or `db_column` attribute has a path part that
   starts and ends with a delimiter but is not one well-formed delimited
@@ -70,14 +83,18 @@ except for the per-backend path splitting below.
   catalogue name needs delimiting. Ordinary names are reported exactly as
   before, so plans for them are unchanged. These change:
   - SQL Server quotes every raw schema, table and column name, and reports an
-    index, index column or foreign-key constraint name that is itself
-    bracketed or contains a dot delimited (`[[ix]]]`, `[a.b]`), so a table
+    index, index column, filtered-index predicate column or foreign-key
+    constraint name that is itself bracketed or contains a dot delimited
+    (`[[ix]]]`, `[a.b]`), and reads a filtered index's predicate on a
+    non-ASCII or bracketed column name instead of panicking or treating it
+    as unfiltered, so a table
     literally named `[ledger]` is no longer read as `ledger`, and dropping or
     recreating an introspected index or constraint names the same object.
-  - PostgreSQL reports a table name with a dot (`"local.parent"`) delimited,
-    as it already did for names bare SQL would fold (`"Local"`), and reports
-    foreign-key targets the same way: in the current schema, and for both
-    parts of a target in another schema (`"Archive"."Parent"`). Such a target previously came back as
+  - PostgreSQL reports a table name with a dot (`"local.parent"`) or a
+    leading `"` delimited, as it already did for names bare SQL would fold
+    (`"Local"`), and reports foreign-key targets the same way: in the current
+    schema, and in another schema with the schema always delimited
+    (`"Archive"."Parent"`, `"plain_other".target`). Such a target previously came back as
     `Local`, `local.parent` or `Archive.Parent`, which resolved to a different
     table or none, so a plan could see a spurious foreign-key change.
   - SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read

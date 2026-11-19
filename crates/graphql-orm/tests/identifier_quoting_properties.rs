@@ -1527,11 +1527,17 @@ async fn postgres_foreign_key_targets_resolve_to_the_referenced_table()
             CREATE TABLE "Archive"."Parent" (id integer PRIMARY KEY);
             CREATE TABLE "local.parent" (id integer PRIMARY KEY);
             CREATE TABLE "Local" (id integer PRIMARY KEY);
+            CREATE SCHEMA """odd.schema";
+            CREATE TABLE """odd.schema".target (id integer PRIMARY KEY);
+            CREATE SCHEMA plain_other;
+            CREATE TABLE plain_other.target (id integer PRIMARY KEY);
             CREATE TABLE local_child (
                 id integer PRIMARY KEY,
                 parent integer CONSTRAINT fk_dotted REFERENCES "local.parent"(id),
                 upper integer CONSTRAINT fk_upper REFERENCES "Local"(id),
-                external_parent integer CONSTRAINT fk_archive REFERENCES "Archive"."Parent"(id)
+                external_parent integer CONSTRAINT fk_archive REFERENCES "Archive"."Parent"(id),
+                odd integer CONSTRAINT fk_quote REFERENCES """odd.schema".target(id),
+                other integer CONSTRAINT fk_other REFERENCES plain_other.target(id)
             );
             "#,
         )
@@ -1552,6 +1558,10 @@ async fn postgres_foreign_key_targets_resolve_to_the_referenced_table()
                 Some("fk_dotted") => "public.\"local.parent\"",
                 Some("fk_upper") => "public.\"Local\"",
                 Some("fk_archive") => "\"Archive\".\"Parent\"",
+                // A raw schema name that starts with an unmatched `"` and
+                // contains a dot stays one delimited component.
+                Some("fk_quote") => "\"\"\"odd.schema\".target",
+                Some("fk_other") => "plain_other.target",
                 other => return Err(format!("unexpected constraint {other:?}").into()),
             };
             let same: Option<bool> = sqlx::query_scalar(
@@ -1567,7 +1577,13 @@ async fn postgres_foreign_key_targets_resolve_to_the_referenced_table()
         targets.sort();
         assert_eq!(
             targets,
-            ["\"Archive\".\"Parent\"", "\"Local\"", "\"local.parent\""]
+            [
+                "\"\"\"odd.schema\".target",
+                "\"Archive\".\"Parent\"",
+                "\"Local\"",
+                "\"local.parent\"",
+                "\"plain_other\".target",
+            ]
         );
         // The referenced tables of the current schema are reported under the
         // same names, so a foreign key and its target table still match.
@@ -1615,10 +1631,13 @@ async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
                  id int NOT NULL PRIMARY KEY, \
                  [列]].parent] int CONSTRAINT [[制約]]] REFERENCES [雪]].schema].[台]].parent] ([列]].id]), \
                  [[値]]] int, \
-                 [値.b] int \
+                 [値.b] int, \
+                 [状態] nvarchar(20) NULL \
              ); \
              CREATE INDEX [[索引]]] ON [雪]].schema].[台]].child] ([[値]]]); \
-             CREATE INDEX [ix.dot] ON [雪]].schema].[台]].child] ([値.b]);",
+             CREATE INDEX [ix.dot] ON [雪]].schema].[台]].child] ([値.b]); \
+             CREATE INDEX [[絞込]]] ON [雪]].schema].[台]].child] ([状態]) \
+                 WHERE [状態] IN (N'open', N'closed');",
         )
         .await?;
         let pool = MssqlPool::connect_ado(&connection).await?;
@@ -1650,9 +1669,22 @@ async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
         assert_eq!(bracketed.columns, ["[[値]]]"]);
         let dotted = index("[ix.dot]")?;
         assert_eq!(dotted.columns, ["[値.b]"]);
+        // A filtered index on a non-ASCII column: its predicate is read back
+        // from SQL Server's filter text without slicing inside a character.
+        let filtered = index("[[絞込]]]")?;
+        assert_eq!(filtered.columns, ["状態"]);
+        let predicate = |index: &graphql_orm::graphql::orm::IndexMetadata| {
+            index.predicate.as_ref().map(|predicate| {
+                let mut values = predicate.values.to_vec();
+                values.sort();
+                (predicate.column.to_owned(), values)
+            })
+        };
+        let expected_predicate = Some(("状態".to_owned(), vec!["closed", "open"]));
+        assert_eq!(predicate(&filtered), expected_predicate);
 
         let mut statements = Vec::new();
-        for index in [bracketed, dotted] {
+        for index in [bracketed, dotted, filtered] {
             statements.extend(render_migration_step(
                 BACKEND,
                 &MigrationStep::DropIndex {
@@ -1675,13 +1707,24 @@ async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
                 foreign_key: foreign_key.clone(),
             },
         ));
+        // SQL Server decides the order of the filter's values.
+        let normalized = statements
+            .iter()
+            .map(|statement| {
+                statement
+                    .replace("IN ('open', 'closed')", "IN (FILTER)")
+                    .replace("IN ('closed', 'open')", "IN (FILTER)")
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            statements,
+            normalized,
             [
                 "DROP INDEX [[索引]]] ON [雪]].schema].[台]].child]",
                 "CREATE INDEX [[索引]]] ON [雪]].schema].[台]].child] ([[値]]])",
                 "DROP INDEX [ix.dot] ON [雪]].schema].[台]].child]",
                 "CREATE INDEX [ix.dot] ON [雪]].schema].[台]].child] ([値.b])",
+                "DROP INDEX [[絞込]]] ON [雪]].schema].[台]].child]",
+                "CREATE INDEX [[絞込]]] ON [雪]].schema].[台]].child] ([状態]) WHERE [状態] IN (FILTER)",
                 "ALTER TABLE [雪]].schema].[台]].child] DROP CONSTRAINT [[制約]]]",
             ]
         );
@@ -1699,14 +1742,15 @@ async fn sql_server_catalogue_names_round_trip_through_migration_rendering()
         let mut indexes = child
             .indexes
             .iter()
-            .map(|index| (index.name.to_string(), index.columns.to_vec()))
+            .map(|index| (index.name.to_string(), index.columns.to_vec(), predicate(index)))
             .collect::<Vec<_>>();
         indexes.sort();
         assert_eq!(
             indexes,
             [
-                ("[[索引]]]".to_owned(), vec!["[[値]]]"]),
-                ("[ix.dot]".to_owned(), vec!["[値.b]"]),
+                ("[[索引]]]".to_owned(), vec!["[[値]]]"], None),
+                ("[[絞込]]]".to_owned(), vec!["状態"], expected_predicate),
+                ("[ix.dot]".to_owned(), vec!["[値.b]"], None),
             ]
         );
         assert!(child.foreign_keys.is_empty(), "{:?}", child.foreign_keys);

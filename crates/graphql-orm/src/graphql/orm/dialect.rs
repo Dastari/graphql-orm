@@ -1119,12 +1119,14 @@ fn mssql_identifier_character(character: char, table: &[(u16, u16)]) -> bool {
 /// A raw PostgreSQL catalogue relation name in the declared-name form
 /// introspection reports: unchanged when the ORM's renderers resolve that
 /// text back to the same relation, and otherwise delimited literally. A name
-/// that bare SQL folds (`Archive`), that reads as a delimited identifier, or
-/// that the path splitter would split at a dot (`local.parent`) is delimited;
-/// an ordinary or reserved name keeps its text.
+/// that bare SQL folds (`Archive`), that starts with `"` (delimited or not,
+/// such as an unmatched `"archive`), or that the path splitter would split at
+/// a dot (`local.parent`) is delimited; an ordinary or reserved name keeps its
+/// text.
 #[cfg(feature = "postgres")]
 pub(crate) fn postgres_reported_relation_name(name: &str) -> String {
     if postgres_resolved_identifier(name) != name
+        || name.starts_with('"')
         || identifier_path_parts(DatabaseBackend::Postgres, name)
             .nth(1)
             .is_some()
@@ -1239,6 +1241,70 @@ impl DatabaseBackend {
             self.delimit_raw_identifier(name)
         } else {
             name.to_owned()
+        }
+    }
+
+    /// Whether a declared column path's qualifier, if any, names `table`, the
+    /// declaring entity's own table path. An unqualified column always
+    /// does. A qualified column (`"t"."c"`, `main.t.c`) does only when its
+    /// qualifier equals the trailing parts of `table`, compared as the
+    /// backend compares identifiers: PostgreSQL by resolved name, SQLite
+    /// without ASCII case, SQL Server and others exactly. Read predicates
+    /// refuse any other qualifier, because it could bind the column to
+    /// another table in a correlated subquery (#782).
+    pub(crate) fn column_qualifier_names_table(self, column: &str, table: &str) -> bool {
+        let parts = identifier_path_parts(self, column)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        let Some((_, qualifier)) = parts.split_last() else {
+            return false;
+        };
+        let table = identifier_path_parts(self, table)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        qualifier.len() <= table.len()
+            && qualifier
+                .iter()
+                .rev()
+                .zip(table.iter().rev())
+                .all(|(left, right)| self.same_identifier_part(left, right))
+    }
+
+    /// Whether two path parts name the same identifier on this backend.
+    fn same_identifier_part(self, left: &str, right: &str) -> bool {
+        match self {
+            Self::Postgres => {
+                postgres_resolved_identifier(left) == postgres_resolved_identifier(right)
+            }
+            Self::Sqlite => self
+                .identifier_part_name(left)
+                .eq_ignore_ascii_case(&self.identifier_part_name(right)),
+            Self::Mssql | Self::Mysql => {
+                self.identifier_part_name(left) == self.identifier_part_name(right)
+            }
+        }
+    }
+
+    /// The name one path part denotes: the inside of a well-formed delimited
+    /// identifier, or the part itself.
+    fn identifier_part_name(self, part: &str) -> String {
+        if !self.is_one_delimited_identifier(part) {
+            return part.to_owned();
+        }
+        let mut characters = part.chars();
+        let open = characters.next().unwrap_or_default();
+        let (_, close, doubled) = self
+            .identifier_delimiters()
+            .iter()
+            .copied()
+            .find(|(candidate, _, _)| *candidate == open)
+            .unwrap_or((open, open, false));
+        let inner: String = characters.collect();
+        let inner = inner.strip_suffix(close).unwrap_or(&inner);
+        if doubled {
+            inner.replace(&format!("{close}{close}"), &close.to_string())
+        } else {
+            inner.to_owned()
         }
     }
 
@@ -1558,6 +1624,43 @@ mod identifier_rendering_tests {
         assert_eq!(sqlite.render_identifier("\"a\"b\""), "\"\"\"a\"\"b\"\"\"");
         assert_eq!(mssql.render_identifier("[a] , [b]"), "[[a]] , [b]]]");
         assert_eq!(DatabaseBackend::Mysql.render_identifier("order"), "order");
+    }
+
+    #[test]
+    fn column_qualifiers_must_name_the_entitys_own_table() {
+        use DatabaseBackend::{Mssql, Postgres, Sqlite};
+        for (backend, column, table, names) in [
+            (Sqlite, "owner", "main.parents", true),
+            (Sqlite, "\"parents\".\"owner\"", "main.parents", true),
+            (Sqlite, "PARENTS.owner", "main.parents", true),
+            (Sqlite, "main.parents.owner", "main.parents", true),
+            (Sqlite, "[main].\"parents\".owner", "main.parents", true),
+            (Sqlite, "\"children\".\"owner\"", "main.parents", false),
+            (Sqlite, "other.parents.owner", "main.parents", false),
+            (Sqlite, "main.parents.owner", "parents", false),
+            (Postgres, "\"parents\".owner", "public.parents", true),
+            (Postgres, "PARENTS.owner", "public.parents", true),
+            (Postgres, "\"PARENTS\".owner", "public.parents", false),
+            (Postgres, "\"Parents\".owner", "\"Parents\"", true),
+            (Postgres, "parents.owner", "\"Parents\"", false),
+            (
+                Postgres,
+                "\"other\".\"parents\".owner",
+                "public.parents",
+                false,
+            ),
+            (Mssql, "[parents].[owner]", "dbo.parents", true),
+            (Mssql, "\"parents\".owner", "[dbo].[parents]", true),
+            (Mssql, "[Parents].[owner]", "dbo.parents", false),
+            (Mssql, "[a]].b].[owner]", "dbo.[a]].b]", true),
+            (Mssql, "[children].[owner]", "dbo.parents", false),
+        ] {
+            assert_eq!(
+                backend.column_qualifier_names_table(column, table),
+                names,
+                "{backend:?} {column} {table}"
+            );
+        }
     }
 
     #[test]

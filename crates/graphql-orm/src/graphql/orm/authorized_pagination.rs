@@ -53,10 +53,15 @@ pub struct ReadPredicate {
     backend: DatabaseBackend,
     expression: FilterExpression,
 }
-fn validate_column<T: Entity>(column: &str) -> async_graphql::Result<()> {
+/// A persisted physical column of `T`. A table-qualified column is accepted
+/// only when its qualifier names `T`'s own table: the predicate binds the
+/// column to `T`'s row, so any other qualifier is refused rather than
+/// stripped (#782).
+fn validate_column<B: OrmBackend, T: Entity>(column: &str) -> async_graphql::Result<()> {
     if T::columns()
         .iter()
         .any(|definition| definition.name == column)
+        && B::DIALECT.column_qualifier_names_table(column, T::TABLE_NAME)
     {
         Ok(())
     } else {
@@ -164,8 +169,8 @@ impl Relation {
         }
         let mut joins = Vec::new();
         for (source, destination) in keys {
-            if !S::columns().iter().any(|c| c.name == *source)
-                || !T::columns().iter().any(|c| c.name == *destination)
+            if validate_column::<B, S>(source).is_err()
+                || validate_column::<B, T>(destination).is_err()
             {
                 return Err(invalid());
             }
@@ -209,7 +214,7 @@ impl ReadPredicate {
         op: ReadPredicateOp,
         value: SqlValue,
     ) -> async_graphql::Result<Self> {
-        validate_column::<T>(column)?;
+        validate_column::<B, T>(column)?;
         let operator = match op {
             ReadPredicateOp::Eq => "=",
             ReadPredicateOp::Ne => "<>",
@@ -257,7 +262,7 @@ impl ReadPredicate {
         column: &str,
         test: &str,
     ) -> async_graphql::Result<Self> {
-        validate_column::<T>(column)?;
+        validate_column::<B, T>(column)?;
         Ok(Self {
             entity: TypeId::of::<T>(),
             backend: B::DIALECT,
