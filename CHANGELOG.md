@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.184.0
 
-Opt-in SQL Server bulk writes no longer lock or wait on hidden rows where SQL Server can keep target selection serializable without them ([#752](https://github.com/Dastari/graphql-orm/issues/752)). See the [migration guide](MIGRATION.md#01790-to-01840-sql-server-bulk-writes-lock-only-their-candidates).
+Opt-in SQL Server bulk writes no longer lock or wait on hidden rows where SQL Server can keep target selection serializable without them ([#752](https://github.com/Dastari/graphql-orm/issues/752)). See the [migration guide](MIGRATION.md#01791-to-01840-sql-server-bulk-writes-lock-only-their-candidates).
 
 - **SQL Server: a narrowed bulk write locks only its candidates.** With `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` and a SQL predicate (read visibility or a `write_target_prefilter`), generated GraphQL `updateMany` and `deleteMany` on SQL Server no longer use one `UPDLOCK, HOLDLOCK` read, which locked every row a scan read before testing the predicate, when the database has `READ_COMMITTED_SNAPSHOT` on, every index of the table allows row locks, and the key is `uniqueidentifier`, `nvarchar`/`nchar` or an integer. Instead they:
   - read every candidate in one snapshot without a lock (at most `max_scanned_rows` + 1);
@@ -35,6 +35,15 @@ Opt-in SQL Server bulk writes no longer lock or wait on hidden rows where SQL Se
   - Key paths per key type: `nvarchar` under two collations and integer keys lock by key; `varchar` and `char` keys keep the single read; an index with `ALLOW_ROW_LOCKS = OFF` keeps the single read.
   - A column named `__gom_still_matches` no longer breaks the write.
 - **New tests (every backend):** a narrowed bulk write over three pages of visible rows interleaved with hidden ones writes each visible row once, and the scan budget counts only the narrowed candidates.
+
+## Unreleased - ORM/macros 0.179.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- Every PostgreSQL container started by the ORM, backup and AI test harnesses now
+  runs with a hard `--memory 4g --memory-swap 4g` limit, matching the SQL Server
+  harness, so a runaway test backend cannot exhaust the build host. Library code,
+  public API, generated SQL and stored data are unchanged.
 
 ## Unreleased - ORM/macros 0.179.0
 

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.0 to 0.184.0: SQL Server bulk writes lock only their candidates
+## 0.179.1 to 0.184.0: SQL Server bulk writes lock only their candidates
 
 Upgrade ORM and macros together and recompile entities: generated bulk writes
 pass the runtime a key accessor. No data migration is needed.
@@ -43,6 +43,12 @@ pass the runtime a key accessor. No data migration is needed.
   table lock still covers hidden rows; `LOCK_ESCALATION = DISABLE` on the
   table prevents it. See
   [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+
+## 0.179.0 to 0.179.1: test-owned PostgreSQL memory cap
+
+**No action.** Upgrade ORM and macros together. Test-owned PostgreSQL containers
+are memory-capped (`--memory 4g --memory-swap 4g`); the library, generated code,
+stored data and configuration are unchanged.
 
 ## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
 

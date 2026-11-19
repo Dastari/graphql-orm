@@ -16,7 +16,9 @@ snapshot without a lock, lock only those keys by a forced key seek and validate 
 in a second snapshot. They no longer lock or wait on rows outside the caller's read visibility,
 and target selection stays serializable; a concurrent change to the candidates refuses the write
 with a retryable `SERVICE_UNAVAILABLE` (#752). Elsewhere SQL Server keeps the single locking read.
-See the [migration guide](../../MIGRATION.md#01790-to-01840-sql-server-bulk-writes-lock-only-their-candidates).
+See the [migration guide](../../MIGRATION.md#01791-to-01840-sql-server-bulk-writes-lock-only-their-candidates).
+
+Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
 
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
 read as whitespace, and adds seeded property suites for identifier quoting on every backend
