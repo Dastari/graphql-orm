@@ -10,17 +10,26 @@ supersedes: []
 
 # Migration Guide
 
-## 0.25.0 to 0.26.0: entity capabilities and compact signatures
+## Breaking release (unreleased)
 
-**Action needed.** Part of the single breaking release; upgrade together with
-AI 0.149.0. No SDL or data migration.
+AI tool profiles 0.26.1 to 0.27.0. **Action needed.** Part of the single
+breaking release; upgrade together with operation catalogue 0.10.0,
+ORM/macros 0.190.0 and AI 0.151.0. Host steps for the whole workspace are in
+the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). No
+SDL or data migration.
 
+- **Operation fingerprint algorithm v2. Action needed.** Generated-operation
+  fingerprints no longer include the Rust module path, so every operation and
+  catalogue fingerprint changes once. Regenerate tool manifests and operation
+  contracts from the upgraded catalogue; ones bound under
+  `graphql-orm-sha256-len-v1` are refused as stale. No Rust API change.
 - **Index fingerprints change once.** `AI_CAPABILITY_INDEX_VERSION` is 3 and
   the generated query roots of each entity become one `GeneratedEntity`
   entry, so every index and index-set fingerprint that holds generated
   queries changes. Recompile indexes; do not compare them with stored
-  version 2 fingerprints. Generated query capability fingerprints are
-  unchanged.
+  version 2 fingerprints. The index version does not change generated
+  query capability fingerprints again; they change once with the operation
+  fingerprint algorithm above.
 - **Code.** Handle `AiCapabilityKind::GeneratedEntity` and
   `AiCapabilityOperationShape::Entity` in exhaustive matches. Struct literals
   of `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` need
@@ -35,23 +44,12 @@ AI 0.149.0. No SDL or data migration.
   descriptions. **No action.**
 - **Signatures.** `AiCapabilitySignature` and
   `AiSharedTypePlanSchema::compile_named` are additions. **No action.**
+- **Runtime live keys. No action.** Runtime collections with live
+  subscriptions and a node identity compile under both ORM identity modes:
+  the default `RuntimeInt64` strings and the opt-in
+  `with_legacy_int_identities()`. Capability sets and fingerprints are
+  unchanged for schemas that already compiled.
 
-## 0.24.0 to 0.25.0: runtime live keys under default identities
-
-**No action.** Runtime collections with live subscriptions and a node identity
-compile under both ORM identity modes: the default `RuntimeInt64` strings and
-the opt-in `with_legacy_int_identities()`. Capability sets and fingerprints are
-unchanged for schemas that already compiled. No SDL or data migration is needed.
-
-## 0.23.0 to 0.24.0: operation fingerprint algorithm v2
-
-**Action needed.** Upgrade together with operation catalogue 0.9.0 and
-ORM/macros 0.160.0. Generated-operation fingerprints no longer include the
-Rust module path, so every operation and catalogue fingerprint changes once.
-Regenerate tool manifests and operation contracts from the upgraded catalogue;
-ones bound under `graphql-orm-sha256-len-v1` are refused as stale. No Rust API
-or data change. Host steps are in the root
-[migration guide](../../MIGRATION.md#breaking-release-unreleased).
 ## 0.26.0 to 0.26.1: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

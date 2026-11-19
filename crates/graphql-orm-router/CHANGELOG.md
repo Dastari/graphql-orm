@@ -11,7 +11,10 @@ supersedes: []
 
 # Changelog
 
-## 0.19.0 (unreleased, breaking batch)
+## Unreleased - 0.17.0 (breaking release)
+
+The router part of the single breaking release. See the
+[migration guide](MIGRATION.md#breaking-release-unreleased).
 
 - **Added (opt-in): the router says when it refused an operation before
   execution.** With `RouterConfig::with_refusal_outcome(true)` (file
@@ -29,19 +32,6 @@ supersedes: []
   a subgraph's own `outcome` passes through unchanged. Off by default; codes,
   messages, paths and HTTP status are unchanged either way.
   ([#764](https://github.com/Dastari/graphql-orm/issues/764))
-
-## 0.18.0 (unreleased, breaking batch)
-
-- **Docs (code comment):** the comparison of the composed scope sets with
-  the per-subgraph declarations is documented as a secondary defence.
-  Composition deduplicates alternatives, so a declaration that repeats
-  another's scope sets leaves the composed union unchanged; the name-based
-  refusal of any authorization directive application that does not resolve to
-  a recorded site is the primary defence. No behavior, configuration or
-  public API change. Version 0.17.0 on the integration branch only carried
-  0.15.5's wire-test change above 0.16.0.
-
-## 0.16.0 (unreleased, breaking batch)
 
 - **Breaking: composed `@authenticated` and `@requiresScopes` are enforced on
   every selected field.** An authenticated router used to evaluate only its
@@ -87,10 +77,18 @@ supersedes: []
   on an argument, input field, enum value, union, input object, directive
   argument or the schema, in a subgraph or the composed supergraph; or when
   the composed directives do not match the subgraph declarations they came
-  from.
+  from. The comparison of the composed scope sets with the per-subgraph
+  declarations is a secondary defence: composition deduplicates
+  alternatives, so a declaration that repeats another's scope sets leaves the
+  composed union unchanged. The name-based refusal of any authorization
+  directive application that does not resolve to a recorded site is the
+  primary defence.
 - Each distinct rule is evaluated once per operation, and selection sets that
   cannot reach a rule are not walked. A graph with no composed directives
   skips the walk.
+- **Tests:** a dedicated assertion pins that Hive's inbound request
+  deduplication stays disabled, which the refusal outcome relies on (#764).
+
 ## Unreleased - 0.16.7
 
 - Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.

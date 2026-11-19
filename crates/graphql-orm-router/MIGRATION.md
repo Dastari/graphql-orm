@@ -11,21 +11,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
-## 0.18.0 to 0.19.0
+## Breaking release (unreleased)
 
-**No action.** The new `refusalOutcome` setting
-(`RouterConfig::with_refusal_outcome`) is off by default, so responses are
-unchanged. A host whose clients need to tell that a refused operation never
-ran may enable it; each error of an operation refused before any subgraph
-request then also carries `extensions.outcome: "refused"`. See
-[refusal outcome](docs/configuration.md#refusal-outcome).
+Router 0.16.7 to 0.17.0. It ships in the workspace's single breaking release;
+see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
-## 0.16.0 to 0.18.0
-
-**No action.** A code comment and the integration-branch renumbering only;
-router behavior, configuration and public APIs are unchanged from 0.16.0.
-
-## 0.15.4 to 0.16.0
+### Nested `@authenticated` and `@requiresScopes` are enforced (#729)
 
 **Action needed** for authenticated routers whose subgraph SDL carries
 `@authenticated` or `@requiresScopes` below the root, on a field or on a type,
@@ -61,6 +52,16 @@ operation returns no `data`, only errors with `UNAUTHENTICATED` or
 
 Anonymous development mode is unchanged. No configuration or public API
 changes.
+
+### Opt-in refusal outcome (#764)
+
+**No action.** The new `refusalOutcome` setting
+(`RouterConfig::with_refusal_outcome`) is off by default, so responses are
+unchanged. A host whose clients need to tell that a refused operation never
+ran may enable it; each error of an operation refused before any subgraph
+request then also carries `extensions.outcome: "refused"`. See
+[refusal outcome](docs/configuration.md#refusal-outcome).
+
 ## 0.16.6 to 0.16.7: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

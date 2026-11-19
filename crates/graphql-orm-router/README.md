@@ -10,23 +10,19 @@ supersedes: []
 
 # graphql-orm-router
 
-Version 0.19.0 (breaking batch) adds the opt-in `refusalOutcome` setting
+Version 0.17.0 (**breaking release**) enforces the composed `@authenticated`
+and `@requiresScopes` directives on every selected field, not only root
+fields, before any downstream request: nested object fields, interface and
+union members, fragments and aliases. A refused selection refuses the whole
+operation with `UNAUTHENTICATED` or `FORBIDDEN` and its response path. It also
+adds the opt-in `refusalOutcome` setting
 (`RouterConfig::with_refusal_outcome`): each error of an operation the router
 refused before any subgraph request carries `extensions.outcome: "refused"`,
 in the vocabulary generated ORM services use. See
-[refusal outcome](docs/configuration.md#refusal-outcome).
+[MIGRATION.md](MIGRATION.md#breaking-release-unreleased),
+[nested directive authorization](docs/configuration.md#nested-directive-authorization)
+and [refusal outcome](docs/configuration.md#refusal-outcome).
 
-Version 0.18.0 (breaking batch) changes a code comment only: the composed
-scope-set cross-check is a secondary defence behind the name-based refusal.
-Router behavior is unchanged from 0.16.0.
-
-Version 0.16.0 (breaking batch) enforces the composed `@authenticated` and
-`@requiresScopes` directives on every selected field, not only root fields,
-before any downstream request: nested object fields, interface and union
-members, fragments and aliases. A refused selection refuses the whole
-operation with `UNAUTHENTICATED` or `FORBIDDEN` and its response path. See
-[MIGRATION.md](MIGRATION.md#0154-to-0160) and
-[nested directive authorization](docs/configuration.md#nested-directive-authorization).
 Version 0.16.6 consolidates outbound HTTP retrieval, reduces redundant
 WebSocket frame encoding and scopes the Hive plugin handoff to startup.
 

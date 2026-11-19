@@ -10,66 +10,83 @@ supersedes: []
 
 # Migration Guide
 
-## 0.150.0 to 0.151.0: naming by environment variable
+## Breaking release (unreleased)
 
-**Action needed** only if you enabled `graphql-case-pascal`. Remove the
-feature and set `GRAPHQL_ORM_AI_CASE=PascalCase` together with
-`GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
-`GRAPHQL_ORM_FIELD_CASE` set to `PascalCase`, usually in the host workspace's
-`.cargo/config.toml` `[env]`. The names are unchanged. See the root
-[migration guide](../../MIGRATION.md#graphql-naming-is-selected-by-environment-variables-not-features-508).
+AI 0.150.2 to 0.151.0. **Action needed.** This is the AI part of the single
+breaking release. Upgrade it together with ORM/macros 0.190.0, operation
+catalogue 0.10.0 and AI tool profiles 0.27.0; the ORM, catalogue and router
+steps are in the root
+[migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL
+SDL change. Do the steps in this order.
 
-## 0.149.0 to 0.150.0: schema module 0.83.0, stored-response candidate paging and index-replacement documentation
+### 1. Migrate: AI schema module `0.83.0`
 
-**Action needed:** apply AI schema module `0.83.0`.
+**Action needed.** Apply AI schema module `0.83.0` before starting workers.
 
-- Main's AI 0.147.0 (below) introduced schema module `0.82.0` with the
-  `graphql_orm_ai_stored_provider_responses` table. This batch had already
-  used `0.82.0` for the three #532 unique indexes. The breaking release
-  carries both as `0.83.0`, since a module version is never reused. Apply it
-  like any module upgrade; from a store at main's `0.82.0` it adds the three
-  unique indexes (refused with `UniqueIndexDuplicates` before any DDL if
-  existing rows repeat a key; see the 0.145.0 to 0.146.0 entry), and from a
-  store at `0.81.0` or earlier it adds the table and the indexes together. No
-  data backfill.
-- **No action:** the stored-response cleanup pass now reads its candidate
-  batch in pages within the database's maximum page limit
-  (`keyset_window`), so a batch larger than the maximum is read completely
-  and never refused or shortened.
-- **No action:** `AiSchemaModule::admit_index_replacements` matches a dropped
-  legacy webhook-receipt index by table and name, without checking that the
-  live index is non-unique. If your host created its own index under one of
-  those names, review the upgrade plan before applying it.
+- It adds three unique indexes to module `0.82.0` (AI 0.147.0, the
+  `graphql_orm_ai_stored_provider_responses` table): approvals `tool_call_id`,
+  run attempts `(run_id, lease_generation)` and context checkpoints
+  `(session_id, through_sequence)`. From a store at `0.81.0` or earlier it
+  adds the table and the indexes together. No data backfill.
+- If existing rows repeat one of those keys, the apply returns
+  `UniqueIndexDuplicates` before any DDL and changes nothing. Remove the
+  repeated rows and apply the same plan again; see the root guide for how to
+  find them.
+- **Action needed** for hosts upgrading an AI store whose webhook-receipt
+  table still has a legacy index: the single-column `provider_kind` index from
+  before `provider_kind` joined the receipt primary key, or module 0.72.0's
+  composite index under its full name or the 63-byte name PostgreSQL stored.
+  The upgrade plan drops that index and creates the current composite index.
+  The ORM now classifies every index drop as `Destructive`, so
+  `apply_migration(&plan, ApplyOptions::default())` refuses it. Apply the plan
+  with the options the module returns:
 
-## 0.148.0 to 0.149.0: capability broker version 2
+  ```rust,ignore
+  let options = AiSchemaModule.admit_index_replacements(&plan, ApplyOptions::default());
+  database.schema().apply_migration(&plan, options).await?;
+  ```
 
-**Action needed.** Part of the single breaking release; upgrade together with
-AI tool profiles 0.26.0. The workspace-wide steps are in the root
-[migration guide](../../MIGRATION.md#breaking-release-unreleased). No SDL,
-persistent schema or data migration; `AI_SCHEMA_MODULE_VERSION` stays
-`0.82.0`.
+  The returned options admit destructive steps only when every one is such a
+  known index replacement and the plan creates the replacement. If your
+  composed plan also contains host-owned destructive steps, the options are
+  unchanged and the plan stays refused: review those steps and apply with
+  `allow_destructive: true` yourself.
+  `admit_index_replacements` matches a dropped index by table and name only,
+  without checking that the live index is non-unique. If your host created
+  its own index under one of those names, review the plan before applying it.
+  Stores created on a current module see no index replacement.
 
-Fingerprint, binding and session effects:
+### 2. Build and code
 
-| What | Effect |
-| --- | --- |
-| Fixed broker definitions | Four instead of three; every fingerprint changes once (broker version 2). |
-| `FixedBroker` session binding | Changes once (it hashes the broker version). Nothing else is added to it: catalogue and schema changes still keep the session. |
-| `EagerExact`, `ProviderDeferred`, `ClientDeferred` bindings | They hash the index-set fingerprint, which the tool-profiles index version 3 changes. This is the same single rebind the batch's fingerprint v2 already causes. |
-| Generated query capability fingerprints | Unchanged by this version. |
-| Loaded references, discovery cache | Process-local; a selection from before the upgrade is `selection_stale`. |
-| Approvals | Unaffected: mutations do not join the broker. |
+- **Naming. Action needed** only if you enabled `graphql-case-pascal`. Remove
+  the feature and set `GRAPHQL_ORM_AI_CASE=PascalCase` together with
+  `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+  `GRAPHQL_ORM_FIELD_CASE` set to `PascalCase`, usually in the host
+  workspace's `.cargo/config.toml` `[env]`. The names are unchanged.
+- **Session binding accessors. Action needed.**
+  `capability_index_fingerprint()` and `capability_index_set_fingerprint()`
+  on `AiProviderCapabilitySessionBinding` return `Option<&str>` (`None` for a
+  fixed broker). `capability_broker_definitions()` takes no argument and is
+  infallible.
+- **Broker version 2 types. Action needed.** Match
+  `AiCapabilityBrokerOperation::DescribeType` and
+  `AiCapabilityKind::GeneratedEntity` (and
+  `AiCapabilityOperationShape::Entity`) in exhaustive matches. Struct
+  literals of `AiCapabilityBrokerAmplification` need `describe_type_calls`.
+  A host that renders describe itself replaces `with_plan_schema` or
+  `with_shared_type_plan_schema` with `with_operation_signatures`, one
+  summary per `AiCapabilityDescription::operations()` entry, and dispatches
+  `describe_type` through `dispatch_describe_type` and
+  `AiCapabilityTypeRequest::render`. `OrmAiApplicationToolCallService` does
+  both.
+- **Approval limits. Action needed** if you construct
+  `AiApprovalServiceLimits` with a lifetime above 7 days
+  (`AI_APPROVAL_LIFETIME_CEILING`): construction now fails with
+  `AiError::InvalidConfiguration`. The default stays 24 hours.
 
-Steps:
+### 3. Defaults and policy
 
-1. **Rebind once.** Deploy, and let each retained fixed-broker session go
-   through cleanup-and-rebind. Admit the four new broker definition
-   fingerprints wherever you list them by value (hierarchical rule policy).
-   A session stored under a version 1 binding fingerprint matches no
-   version 2 binding, so the provider-session fence refuses to resume it; the
-   Grok registration check also refuses a tool set that carries the three
-   version 1 definitions.
-2. **Host policy.** `AiCapabilityAuthorityPolicy` now decides
+1. **Host policy. Action needed.** `AiCapabilityAuthorityPolicy` now decides
    `AiCapabilityKind::GeneratedEntity` entries as well as each root's
    `GeneratedQuery` entry, in every mode:
    - fixed-broker discover sends each matching entity followed by its grouped
@@ -89,101 +106,60 @@ Steps:
    for the mixed batch, one decision per entry in order. A root the policy
    denies is never listed, never affects ranking, and cannot be described or
    executed.
-3. **Delivery default.** Above the eager limits, a provider that supports
-   both `ProviderDeferred` and `FixedBroker` now gets `FixedBroker`. To keep
-   native deferred loading, set
+2. **Delivery default. Action needed** to keep native deferred loading.
+   Above the eager limits, a provider that supports both `ProviderDeferred`
+   and `FixedBroker` now gets `FixedBroker`. Set
    `prefer_fixed_broker_for_large_surfaces: false` or call
-   `AiCapabilityDeliveryLimits::with_provider_deferred_for_large_surfaces()`;
-   that keeps your previous mode and binding. A stored configuration without
-   the field now reads as `true`.
-4. **Code.** Match `AiCapabilityBrokerOperation::DescribeType` and
-   `AiCapabilityKind::GeneratedEntity` (and
-   `AiCapabilityOperationShape::Entity`) in exhaustive matches. Struct
-   literals of `AiCapabilityBrokerAmplification` need `describe_type_calls`.
-   A host that renders describe itself replaces `with_plan_schema` or
-   `with_shared_type_plan_schema` with `with_operation_signatures`, one
-   summary per `AiCapabilityDescription::operations()` entry, and dispatches
-   `describe_type` through `dispatch_describe_type` and
-   `AiCapabilityTypeRequest::render`. `OrmAiApplicationToolCallService` does
-   both.
-5. **Prompts and tests.** Describe results no longer carry `planSchema`
-   unless `with_inline_describe_schema` is set. Model guidance that names
-   `planSchema` should name signatures and `describe_type`. Handle the new
+   `AiCapabilityDeliveryLimits::with_provider_deferred_for_large_surfaces()`
+   to keep your previous mode and binding. A stored configuration without
+   the field now reads as `true`. Changing the mode rebinds retained
+   sessions, so decide before the upgrade's single rebind.
+3. **Approvals. Action needed.** An approval of a `HighImpact` tool call
+   always requires recent MFA, including approvals already pending; make sure
+   every approver can satisfy your `RecentMfaPolicy`.
+
+**No action:** keyset windows the runtime reads for itself (message and list
+windows, bootstraps, retention and cleanup scans, the stored-response cleanup
+batch) are read completely, in pages within the database's maximum page
+limit, now that the ORM refuses oversized host keyset pages. Runtime live key
+inputs compile under the ORM's default string identities and the opt-in
+legacy `Int` identities.
+
+### 4. Rebind, re-approve and handle the new codes
+
+| What | Effect |
+| --- | --- |
+| Fixed broker definitions | Four instead of three; every fingerprint changes once (broker version 2). |
+| `FixedBroker` session binding | Changes once (it hashes the broker version). Nothing else is added to it: catalogue and schema changes still keep the session. |
+| `EagerExact`, `ProviderDeferred`, `ClientDeferred` bindings | They hash the index-set fingerprint, which the tool-profiles index version 3 changes. This is the same single rebind the fingerprint change (#683) already causes. |
+| Generated query capability fingerprints | Change once with the operation fingerprint algorithm (#683); broker version 2 does not change them again. |
+| Loaded references, discovery cache | Process-local; a selection from before the upgrade is `selection_stale`. |
+| Approvals | Unaffected: mutations do not join the broker. |
+
+
+1. **Rebind once. Action needed.** Regenerate tool manifests and capability
+   indexes; every generated-operation fingerprint changed. Deploy, and let
+   each retained provider session go through cleanup-and-rebind. Admit the
+   four new broker definition fingerprints wherever you list them by value
+   (hierarchical rule policy). A session stored under a version 1 binding
+   fingerprint matches no version 2 binding, so the provider-session fence
+   refuses to resume it; the Grok registration check also refuses a tool set
+   that carries the three version 1 definitions. After the rebind, a
+   fixed-broker session keeps its binding across schema and catalogue
+   changes.
+2. **Re-approve. Action needed.** Approvals bound to an old tool fingerprint
+   cannot be consumed; request them again.
+3. **Codes. Action needed** if you read tool failure codes. Treat
+   `selection_stale` like `capability_stale` (retry after discovering and
+   describing again), and expect `capability_stale` where a drifted broker
+   execute used to report `authorization_denied`. Handle the new
    `invalid_arguments` corrections for an unknown operation
-   (`AI_CAPABILITY_OPERATION_INVALID`) or type
-   (`AI_CAPABILITY_TYPE_UNKNOWN`).
+   (`AI_CAPABILITY_OPERATION_INVALID`) or type (`AI_CAPABILITY_TYPE_UNKNOWN`).
+4. **Prompts and tests. Action needed** if model guidance names
+   `planSchema`. Describe results no longer carry it unless
+   `with_inline_describe_schema` is set; name signatures and `describe_type`
+   instead.
 
-## 0.147.0 to 0.148.0: runtime live keys under default identities
-
-**No action.** Tool profiles 0.25.0 accept the runtime live key inputs of the
-ORM's default string identities and of the opt-in legacy `Int` identities.
-Keyset windows the runtime reads for itself (message and list windows,
-bootstraps, retention and cleanup scans) are now read completely, in pages
-within the database's maximum page limit, now that the ORM refuses oversized
-host keyset pages. A window larger than a host's maximum returns every row it
-asks for instead of being shortened to the maximum. No AI schema module
-change, no SDL change and no data migration.
-
-## 0.146.0 to 0.147.0: webhook-receipt index replacement admission
-
-Requires `graphql-orm` 0.164.0. No schema-module, SDL or data change.
-
-- **Action needed** for hosts upgrading an AI store whose webhook-receipt
-  table still has a legacy index: the single-column `provider_kind` index from
-  before `provider_kind` joined the receipt primary key, or module 0.72.0's
-  composite index under its full name or the 63-byte name PostgreSQL stored.
-  The upgrade plan drops that index and creates the current composite index.
-  ORM 0.164.0 classifies the drop as `Destructive`, so
-  `apply_migration(&plan, ApplyOptions::default())` refuses it. Apply the plan
-  with the options the module returns:
-
-  ```rust,ignore
-  let options = AiSchemaModule.admit_index_replacements(&plan, ApplyOptions::default());
-  database.schema().apply_migration(&plan, options).await?;
-  ```
-
-  The returned options admit destructive steps only when every one is such a
-  known index replacement and the plan creates the replacement. If your
-  composed plan also contains host-owned destructive steps, the options are
-  unchanged and the plan stays refused: review those steps and apply with
-  `allow_destructive: true` yourself.
-- Stores created on a current module see no index replacement and need no
-  action.
-
-## 0.145.0 to 0.146.0: fingerprints, fixed-broker sessions, approvals and unique indexes
-
-**Action needed.** This is the AI part of the single breaking release. The
-complete host steps, including the ORM and catalogue changes, are in the root
-[migration guide](../../MIGRATION.md#breaking-release-unreleased). Upgrade
-ORM/macros 0.160.0, operation catalogue 0.9.0, AI tool profiles 0.24.0 and AI
-0.146.0 together.
-
-In order:
-
-1. **Migrate.** Apply AI schema module `0.82.0` before starting workers. It
-   adds three unique indexes: approvals `tool_call_id`, run attempts
-   `(run_id, lease_generation)` and context checkpoints
-   `(session_id, through_sequence)`. If existing rows repeat a key, the apply
-   returns `UniqueIndexDuplicates` before any DDL and changes nothing; remove
-   the repeated rows and apply the same plan again. No data backfill.
-2. **Update code.** `capability_index_fingerprint()` and
-   `capability_index_set_fingerprint()` on
-   `AiProviderCapabilitySessionBinding` return `Option<&str>`.
-   `capability_broker_definitions()` takes no argument and is infallible.
-   `AiApprovalServiceLimits::new` refuses an approval lifetime above 7 days.
-3. **Rebind.** Regenerate tool manifests and capability indexes; every
-   generated-operation fingerprint changed. Retained provider sessions rebind
-   once through the existing cleanup-and-rebind lifecycle. After that, a
-   fixed-broker session keeps its binding across schema and catalogue changes.
-4. **Re-approve.** Approvals bound to an old tool fingerprint cannot be
-   consumed; request them again. `HighImpact` approvals now need recent MFA
-   for every decision, including ones already pending.
-5. **Handle the codes.** Treat `selection_stale` like `capability_stale`
-   (retry after discovering and describing again), and expect
-   `capability_stale` where a drifted broker execute used to report
-   `authorization_denied`.
-
-No GraphQL SDL change.
 ## 0.150.1 to 0.150.2: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

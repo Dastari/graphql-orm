@@ -10,12 +10,13 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
-Version `0.9.0` (**breaking fingerprints**) removes the Rust module path from
+Version `0.10.0` (**breaking fingerprints**) removes the Rust module path from
 generated-operation fingerprints and from the catalogue order.
 `GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` is `graphql-orm-sha256-len-v2`.
 Moving or re-exporting an entity no longer changes any fingerprint; every
 operation, catalogue and router-export fingerprint changes once at this
 upgrade. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 Version 0.9.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 

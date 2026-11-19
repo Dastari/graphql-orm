@@ -10,45 +10,48 @@ supersedes: []
 
 # `graphql-orm`
 
-SQL Server binds chrono values natively. Pools can opt in to native binds
-for annotated temporal text and date filters with
-`MssqlPoolOptions::typed_temporal_parameters(true)`. See the [migration guide](../../MIGRATION.md#sql-server-native-temporal-parameters-521)
-for legacy `datetime` conversion and the `SqlValue` match update.
+Version 0.190.0 is the **breaking release**: every change that breaks hosts or
+invalidates stored fingerprints ships in it, and the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the
+steps in upgrade order. In short:
 
-The unreleased breaking release fixes each schema's
-maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
-when omitted) and refuses a `Database` configured differently; host-side
-keyset pages and host `paginate(PageInput)` reads
-refuse a limit above the maximum instead of returning fewer rows; runtime
-GraphQL serves `RecordVersion` and integer live keys as `RuntimeInt64`
-strings; an uncoded host callback error reads as `INTERNAL_ERROR` unless the
-schema's `Database` opts in; and the policy-free relation preload API and
-direct relation data-loader use are removed. A `Database` refuses a client
-page offset above 10,000 by default (`max_page_offset(None)` opts out).
-`#[graphql_entity(key_only_deletes)]`
-adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
-items need action.
+- **Schema and storage.** Migration plans no longer drop tables the target
+  does not declare; lossy column type changes and integrity-removing steps
+  need `allow_destructive`; applying a plan refuses, before any statement
+  runs, a new unique index whose key existing rows repeat
+  (`UniqueIndexDuplicates`); the PostgreSQL change journal refuses `TRUNCATE`
+  and unjournaled cascades.
+- **Build and API.** GraphQL naming is selected by the
+  `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+  `GRAPHQL_ORM_FIELD_CASE` build variables instead of Cargo features; a schema
+  built by hand from generated roots installs `GeneratedInputValidation`;
+  each schema's maximum page limit is fixed at compile time
+  (`schema_roots!(max_page_limit: N)`, 100 when omitted); host-side keyset
+  pages and `paginate(PageInput)` reads refuse a limit above the maximum
+  instead of returning fewer rows; `SqlValue` is non-exhaustive and gains
+  `Temporal`; the policy-free relation preload API and direct relation
+  data-loader use are removed.
+- **Defaults.** Generated GraphQL bulk writes are narrowed to the caller's
+  read visibility (`narrow_bulk_writes_to_read_visibility(false)` opts out;
+  `mssql_snapshot_bulk_write_targets` stays a separate opt-in); a `Database`
+  refuses a client page offset above 10,000 (`max_page_offset(None)` opts
+  out); an uncoded host callback error reads as `INTERNAL_ERROR` unless the
+  schema's `Database` opts in; `ReadPredicate::related` is three-valued, so
+  its negation never admits a NULL key or an UNKNOWN-only relation, and
+  `not_related` is `related(..).not()`; runtime GraphQL serves `RecordVersion`
+  and integer live keys as `RuntimeInt64` strings.
+- **Fingerprints.** With operation catalogue 0.10.0, generated-operation
+  fingerprints no longer include the Rust module path: moving an entity keeps
+  them, and every fingerprint changes once at this upgrade. `stable_type_id`
+  is still accepted and no longer affects fingerprints.
+- **Opt-in additions.** SQL Server binds chrono values natively, and pools can
+  opt in to native binds for annotated temporal text and date filters with
+  `MssqlPoolOptions::typed_temporal_parameters(true)`;
+  `#[graphql_entity(key_only_deletes)]` adds a key-only delete signal for
+  `Key`/`Keys` subscribers.
 
-The unreleased breaking release also makes migration planning safer by default:
-plans no longer drop tables the target does not declare, lossy column type
-changes and integrity-removing steps need `allow_destructive`, and the
-PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+Upgrade ORM and macros together.
 
-The unreleased breaking release (**breaking fingerprints**) uses operation
-catalogue 0.9.0: generated-operation fingerprints no longer include the Rust
-module path, so moving an entity keeps them and every fingerprint changes once
-at this upgrade. `stable_type_id` is still accepted and no longer affects
-fingerprints. Applying a planned migration now refuses, before any statement
-runs, a new unique index whose key existing rows repeat
-(`UniqueIndexDuplicates`). For conditional indexes, the check applies the
-structured closed-set predicate and examines only included rows. If the plan
-adds either a key column or the predicate column, the database enforces
-uniqueness when creating the index instead of running the preflight. Predicate
-dependencies come from metadata, not SQL text; predicates that cannot be
-analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased).
 Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
 is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
 writes a name bare only under its regular-identifier rule (#783).

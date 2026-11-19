@@ -10,12 +10,14 @@ supersedes: []
 
 # graphql-orm-backup
 
-Version 0.27.0 (breaking batch) reports deleted snapshot ids in `PruneResult`
-and `DeleteSnapshotResult`, refuses an unadmitted snapshot with the dedicated
-`BackupError::SnapshotNotAdmitted`, and marks those three types
+Version 0.28.0 (**breaking release**) reports deleted snapshot ids in
+`PruneResult` and `DeleteSnapshotResult`, refuses an unadmitted snapshot with
+the dedicated `BackupError::SnapshotNotAdmitted`, and marks those three types
 `#[non_exhaustive]`. `OrmBackupAdapter::clear_restore_target` keeps working on
 PostgreSQL databases whose change journal refuses `TRUNCATE`. Requires ORM
-0.166.0 for the optional ORM adapter. See [MIGRATION.md](MIGRATION.md).
+0.190.0 for the optional ORM adapter. See
+[MIGRATION.md](MIGRATION.md#breaking-release-unreleased).
+
 Version 0.27.1 memory-caps the test-owned PostgreSQL container used by its conformance tests; there is no runtime change.
 
 Version 0.27.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies

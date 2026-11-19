@@ -10,41 +10,29 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Generated writes carry temporal types for chrono dates and timestamps and
-for text fields marked `#[date_field]` or `#[filterable(type = "date")]`.
-SQL Server binds chrono values natively and can opt in to native binding
-for temporal text per pool. See the
-[migration guide](../../MIGRATION.md#sql-server-native-temporal-parameters-521).
+Version 0.190.0 is the **breaking release**; see the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
+in upgrade order. For the macros:
 
-The unreleased breaking release fixes each schema's
-maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
-when omitted) and refuses a `Database` configured differently; host-side
-keyset pages and host `paginate(PageInput)` reads
-refuse a limit above the maximum instead of returning fewer rows; runtime
-GraphQL serves `RecordVersion` and integer live keys as `RuntimeInt64`
-strings; an uncoded host callback error reads as `INTERNAL_ERROR` unless the
-schema's `Database` opts in; and the policy-free relation preload API and
-direct relation data-loader use are removed. A `Database` refuses a client
-page offset above 10,000 by default (`max_page_offset(None)` opts out).
-`#[graphql_entity(key_only_deletes)]`
-adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
-items need action.
+- The 15 `resolver-case-*`, `argument-case-*` and `field-case-*` features are
+  removed; the build script reads `GRAPHQL_ORM_RESOLVER_CASE`,
+  `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` instead. The unused
+  `mysql` feature is removed.
+- Every `schema_roots!` schema has a compile-time maximum page limit
+  (`max_page_limit: N`, 100 when omitted), and generated resolvers that take
+  an input object require `GeneratedInputValidation`, which generated schema
+  builders install.
+- Generated-operation fingerprints no longer include the Rust module path
+  (operation catalogue 0.10.0), so every fingerprint changes once.
+  `stable_type_id` is still accepted and no longer affects fingerprints.
+- The generated `load_relations`/`bulk_load_relations` preloads are removed.
+- Generated writes carry temporal types for chrono dates and timestamps and
+  for text fields marked `#[date_field]` or `#[filterable(type = "date")]`.
+- `#[graphql_entity(key_only_deletes)]` adds an opt-in key-only delete signal
+  for `Key`/`Keys` subscribers.
 
-The unreleased breaking release also makes migration planning safer by default:
-plans no longer drop tables the target does not declare, lossy column type
-changes and integrity-removing steps need `allow_destructive`, and the
-PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+Upgrade ORM and macros together.
 
-The unreleased breaking release (**breaking fingerprints**) uses operation
-catalogue 0.9.0: generated-operation fingerprints no longer include the Rust
-module path, so moving an entity keeps them and every fingerprint changes once
-at this upgrade. `stable_type_id` is still accepted and no longer affects
-fingerprints. Applying a planned migration now refuses, before any statement
-runs, a new unique index whose key existing rows repeat
-(`UniqueIndexDuplicates`). Upgrade ORM/macros together; see the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased).
 Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
 well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
 delimited or contains NUL, and splits declared paths with each backend's own delimiters (#782).
