@@ -3022,31 +3022,103 @@ pub fn render_filter_expression(
             bind_values.extend(values.iter().cloned());
             rendered
         }
-        FilterExpression::And(filters) => filters
-            .iter()
-            .map(|filter| render_filter_expression(dialect, filter, next_index, bind_values))
-            .filter(|sql| !sql.is_empty())
-            .map(|sql| format!("({sql})"))
-            .collect::<Vec<_>>()
-            .join(" AND "),
+        FilterExpression::And(filters) => join_balanced(
+            filters
+                .iter()
+                .map(|filter| render_filter_expression(dialect, filter, next_index, bind_values))
+                .filter(|sql| !sql.is_empty())
+                .map(|sql| format!("({sql})"))
+                .collect(),
+            " AND ",
+        ),
         FilterExpression::Or(filters) => {
             if filters.is_empty() {
                 return "1 = 0".to_owned();
             }
-            filters
-                .iter()
-                .map(|filter| {
-                    let sql = render_filter_expression(dialect, filter, next_index, bind_values);
-                    if sql.is_empty() {
-                        "(1 = 1)".to_owned()
-                    } else {
-                        format!("({sql})")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ")
+            join_balanced(
+                filters
+                    .iter()
+                    .map(|filter| {
+                        let sql =
+                            render_filter_expression(dialect, filter, next_index, bind_values);
+                        if sql.is_empty() {
+                            "(1 = 1)".to_owned()
+                        } else {
+                            format!("({sql})")
+                        }
+                    })
+                    .collect(),
+                " OR ",
+            )
         }
     }
+}
+
+/// Grouping levels [`join_balanced`] adds above each operand's own
+/// parentheses when it joins `operands` terms: none for one or two, and one
+/// more each time the larger half needs its own pair.
+pub(crate) fn filter_chain_levels(operands: usize) -> u32 {
+    if operands <= 2 {
+        0
+    } else {
+        1 + filter_chain_levels(operands.div_ceil(2))
+    }
+}
+
+/// Join already-parenthesised `parts` with `separator` (` AND ` or ` OR `) as
+/// a balanced binary tree: `(a) OR ((b) OR (c))`. SQL parsers build a chain
+/// `a OR b OR c` left-deep, as deep as it is long (SQLite refuses
+/// expressions over 1,000 deep), so a long list is split in halves instead.
+/// Its parse depth is then about `log2` of its length, and every level is a
+/// counted parenthesis. Operand order, and therefore bind order, is
+/// unchanged.
+fn join_balanced(parts: Vec<String>, separator: &str) -> String {
+    fn join(parts: &[String], separator: &str, out: &mut String) {
+        match parts {
+            [] => {}
+            [only] => out.push_str(only),
+            [left, right] => {
+                out.push_str(left);
+                out.push_str(separator);
+                out.push_str(right);
+            }
+            _ => {
+                let (left, right) = parts.split_at(parts.len() / 2);
+                for (index, half) in [left, right].into_iter().enumerate() {
+                    if index == 1 {
+                        out.push_str(separator);
+                    }
+                    if half.len() == 1 {
+                        out.push_str(&half[0]);
+                    } else {
+                        out.push('(');
+                        join(half, separator, out);
+                        out.push(')');
+                    }
+                }
+            }
+        }
+    }
+    let mut out = String::with_capacity(
+        parts.iter().map(String::len).sum::<usize>() + parts.len() * (separator.len() + 2),
+    );
+    join(&parts, separator, &mut out);
+    out
+}
+
+/// Join SQL `conditions` with `separator` (` AND ` or ` OR `) as
+/// [`render_filter_expression`] does: each condition in parentheses, in a
+/// balanced binary tree, in order. Generated filters use this for their
+/// nested `and`, `or` and `not` lists, so a long list stays shallow.
+#[doc(hidden)]
+pub fn join_conditions_balanced(conditions: &[String], separator: &str) -> String {
+    join_balanced(
+        conditions
+            .iter()
+            .map(|condition| format!("({condition})"))
+            .collect(),
+        separator,
+    )
 }
 
 /// How a rendered `SELECT` locks the rows of its table.

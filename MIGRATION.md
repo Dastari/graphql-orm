@@ -10,6 +10,77 @@ supersedes: []
 
 # Migration Guide
 
+## 0.180.0 to 0.181.0: closure read predicates on SQL Server
+
+Upgrade ORM and macros together and recompile entities: generated where
+inputs render their nested lists as balanced pairs and share a
+per-statement relation budget. No data migration is needed. See
+[read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+- **`related_closure`, `related_closure_all` and `related_closure_within` on
+  SQL Server (#779). No action.** They were refused on SQL Server with
+  `AUTHORIZATION_MISCONFIGURED` and are now supported there, with the same
+  semantics as on SQLite and PostgreSQL. A SQL Server policy that collects a
+  closure in memory can switch to them. `related_closure_within` accepts at
+  most `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) hops on SQL Server; the
+  default bound (64) is the same on every backend. Index the key columns,
+  normally the primary key. SQLite and PostgreSQL are unchanged.
+- **Read-predicate composition budget (#779). Action needed** only if a
+  policy would exceed a limit:
+  - closures nested more than two deep (`READ_PREDICATE_CLOSURE_MAX_NESTING`);
+  - over 1 MiB of rendered SQL (`READ_PREDICATE_MAX_RENDERED_BYTES`), which in
+    practice means deeply nested `not_related` or a very wide `or` of
+    closures;
+  - over 256 levels of expression nesting
+    (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`), such as a long `not()` chain or
+    deeply alternating `and(or(and(...)))`. Folds of one kind are flattened
+    and do not count;
+  - over 10 nested `CASE` expressions (`READ_PREDICATE_MAX_CASE_NESTING`),
+    such as more than five nested `not_related`;
+  - over 32 nested relations or 128 relations in total on SQLite and
+    PostgreSQL (`READ_PREDICATE_MAX_RELATION_NESTING`,
+    `READ_PREDICATE_MAX_RELATIONS`), or over 9 of either on SQL Server
+    (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`,
+    `READ_PREDICATE_MSSQL_MAX_RELATIONS`). Each closure counts as 16
+    relations, or 1 on SQL Server;
+  - on SQL Server, over 75 nested subquery levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING`) or over 900 weighted levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than four
+    `related` around a 64-hop closure;
+  - more than 1 MiB of policy SQL, or more than 64 relations (5 on SQL
+    Server), from the generated relation filters and relation-count
+    orderings of one statement (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`,
+    `READ_PREDICATE_MAX_STATEMENT_RELATIONS`,
+    `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`). Each count ordering
+    counts at least one. A client request with more relation filters or count
+    orderings than that is refused. **On SQL Server in particular**, a target
+    that clients filter by (a generated relation filter) or count-order by
+    must keep its own policy to **4 relations or fewer**, closures counting
+    1 each: a relation filter or a count ordering costs its target's policy
+    plus one, against a statement budget of 5. Otherwise every such filter or
+    ordering is refused with `AUTHORIZATION_MISCONFIGURED`, and several in
+    one request share the same 5;
+  - more than 16 terms in a generated `orderBy` list (`MAX_ORDER_BY_TERMS`),
+    refused as `INVALID_INPUT`.
+
+  Such a policy is now refused with `AUTHORIZATION_MISCONFIGURED` when it is
+  built or, for relation filters, when the request is prepared. Before, it
+  rendered an oversized statement, ran for minutes, overflowed the stack,
+  exhausted PostgreSQL memory, or on SQL Server failed every read or
+  exhausted the server's resources. Also set PostgreSQL `statement_timeout`
+  (and on SQL Server a query timeout): the limits are measured on tested
+  shapes, not a proof for every plan and data volume. Flatten the
+  composition, use a shorter `related_closure_within` bound, or split the
+  policy. Policies within the limits are unchanged.
+- **`and`/`or` folds no longer overflow the stack (#779). No action.** A
+  `p = p.or(q)?` fold over a few thousand terms used to build a predicate
+  whose render overflowed a 2 MiB stack and aborted the process. Folds are
+  now flattened, and every `and`/`or` list of three or more operands,
+  including in generated where inputs, renders as balanced parenthesised
+  pairs. The rendered SQL groups operands differently but means the same, and
+  bind order is unchanged. Long generated `or` lists that SQLite refused past
+  its 1,000-deep expression limit now run.
+
 ## 0.179.1 to 0.180.0: opt-in SQL Server snapshot bulk-write targets
 
 Upgrade ORM and macros together and recompile entities: generated bulk writes

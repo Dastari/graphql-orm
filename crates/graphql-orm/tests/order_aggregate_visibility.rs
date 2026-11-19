@@ -599,7 +599,12 @@ impl ProjectionProbe {
             visible_child_count: Some(OrderDirection::Desc),
             ..Default::default()
         };
-        order.__gom_prepare_read(ctx).await?;
+        order
+            .__gom_prepare_read(
+                ctx,
+                &mut graphql_orm::graphql::orm::RelationFilterBudget::new(),
+            )
+            .await?;
         let rows = CountParentIdProjection::query(db)
             .filter(CountParentWhereInput {
                 group_id: Some(StringFilter {

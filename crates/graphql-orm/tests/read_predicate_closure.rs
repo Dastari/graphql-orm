@@ -62,6 +62,10 @@ struct ClosureNode {
     key_b: Option<i64>,
     ptr_a: Option<i64>,
     ptr_b: Option<i64>,
+    /// A column named like the SQL Server closure's summary columns, so a
+    /// target over it must still bind to the row being authorized.
+    #[graphql_orm(db_column = "__gom_max")]
+    shadow: Option<i64>,
 }
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
@@ -112,29 +116,45 @@ fn misconfigured(result: async_graphql::Result<ReadPredicate>) {
     );
 }
 
+/// The largest hop bound this backend accepts.
+fn max_depth() -> u32 {
+    if B::DIALECT == DatabaseBackend::Mssql {
+        READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH
+    } else {
+        READ_PREDICATE_CLOSURE_MAX_DEPTH
+    }
+}
+
 #[cfg(feature = "mssql")]
 #[test]
-fn closures_are_refused_on_sql_server_when_the_policy_is_built() {
-    // SQL Server cannot nest a CTE in a correlated subquery; the closure is
-    // refused rather than evaluated in memory.
+fn sql_server_bounds_the_unrolled_walk() {
+    // SQL Server unrolls the walk into one nested level per hop, so its bound
+    // is lower; a larger one is refused rather than evaluated in memory.
     let target =
         ReadPredicate::column::<B, ClosureNode>("score", ReadPredicateOp::Gte, SqlValue::Int(5))
             .unwrap();
-    misconfigured(ReadPredicate::related_closure::<B, ClosureNode>(
-        PARENT,
-        target.clone(),
-    ));
-    misconfigured(ReadPredicate::related_closure_all::<B, ClosureNode>(
-        PARENT,
-        target.clone(),
-    ));
+    const { assert!(READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH >= READ_PREDICATE_CLOSURE_DEFAULT_DEPTH) };
+    ReadPredicate::related_closure::<B, ClosureNode>(PARENT, target.clone()).unwrap();
+    ReadPredicate::related_closure_all::<B, ClosureNode>(PARENT, target.clone()).unwrap();
     for quantifier in [ReadPredicateQuantifier::Any, ReadPredicateQuantifier::All] {
-        misconfigured(ReadPredicate::related_closure_within::<B, ClosureNode>(
+        ReadPredicate::related_closure_within::<B, ClosureNode>(
             quantifier,
             PARENT,
             target.clone(),
-            4,
-        ));
+            READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH,
+        )
+        .unwrap();
+        for depth in [
+            READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH + 1,
+            READ_PREDICATE_CLOSURE_MAX_DEPTH,
+        ] {
+            misconfigured(ReadPredicate::related_closure_within::<B, ClosureNode>(
+                quantifier,
+                PARENT,
+                target.clone(),
+                depth,
+            ));
+        }
     }
 }
 
@@ -142,8 +162,8 @@ fn closures_are_refused_on_sql_server_when_the_policy_is_built() {
 #[tokio::test]
 #[ignore = "owned database lane"]
 async fn sql_server_rejects_a_common_table_expression_inside_a_subquery() {
-    // The reason for the refusal above: if SQL Server ever accepts this, the
-    // closure can be enabled there.
+    // The reason SQL Server unrolls the walk instead of using the recursive
+    // CTE the other backends render.
     let mut owner = owned_mssql::OwnedSqlServer::start().await.unwrap();
     let pool =
         graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(&owner.connection_string)
@@ -159,7 +179,6 @@ async fn sql_server_rejects_a_common_table_expression_inside_a_subquery() {
     owner.cleanup().unwrap();
 }
 
-#[cfg(not(feature = "mssql"))]
 mod portable {
     use super::*;
 
@@ -214,6 +233,25 @@ mod portable {
     }
     #[cfg(feature = "postgres")]
     pub(super) type FixtureOwner = owned_postgres::OwnedPostgres;
+    #[cfg(feature = "mssql")]
+    pub(super) type FixtureOwner = owned_mssql::OwnedSqlServer;
+
+    #[cfg(feature = "mssql")]
+    struct AllowEntityPolicy;
+    #[cfg(feature = "mssql")]
+    impl EntityPolicy for AllowEntityPolicy {
+        fn can_access_entity<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessKind,
+            _: EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
 
     async fn empty_fixture() -> (Database, FixtureOwner) {
         #[cfg(feature = "sqlite")]
@@ -233,7 +271,21 @@ mod portable {
                 .unwrap();
             (Database::new(pool), owner)
         };
-        execute(&db, "CREATE TABLE closure_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, score BIGINT NULL, key_a BIGINT NULL, key_b BIGINT NULL, ptr_a BIGINT NULL, ptr_b BIGINT NULL)").await;
+        #[cfg(feature = "mssql")]
+        let (db, owner) = {
+            let owner = FixtureOwner::start().await.unwrap();
+            let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
+                &owner.connection_string,
+            )
+            .await
+            .unwrap();
+            let mut db = Database::builder(pool)
+                .schema_policy(SchemaPolicy::ExternalWritable)
+                .build();
+            db.set_entity_policy(AllowEntityPolicy);
+            (db, owner)
+        };
+        execute(&db, "CREATE TABLE closure_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, score BIGINT NULL, key_a BIGINT NULL, key_b BIGINT NULL, ptr_a BIGINT NULL, ptr_b BIGINT NULL, __gom_max BIGINT NULL)").await;
         execute(&db, "CREATE TABLE closure_marks (id BIGINT PRIMARY KEY, node_id BIGINT NOT NULL, flag BIGINT NULL)").await;
         (db, owner)
     }
@@ -293,7 +345,10 @@ mod portable {
     }
 
     #[tokio::test]
-    #[cfg_attr(feature = "postgres", ignore = "owned database lane")]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
     async fn closure_truth_tables_with_nulls_unknowns_and_cycles() {
         let (db, mut owner) = fixture().await;
         let mark = |flag: i64| {
@@ -447,8 +502,405 @@ mod portable {
         owner.cleanup().unwrap();
     }
 
+    /// The deepest `(SELECT ...)` nesting in `sql`, skipping quoted names.
+    fn subquery_nesting(sql: &str) -> u32 {
+        let b = sql.as_bytes();
+        let (mut open, mut d, mut m, mut i) = (Vec::new(), 0u32, 0u32, 0);
+        while i < b.len() {
+            match b[i] {
+                q @ (b'\'' | b'"' | b'[') => {
+                    let c = if q == b'[' { b']' } else { q };
+                    i += 1;
+                    while i < b.len() && b[i] != c {
+                        i += 1;
+                    }
+                }
+                b'(' => {
+                    let r = sql[i + 1..].trim_start().as_bytes();
+                    let sub = r.len() >= 6 && r[..6].eq_ignore_ascii_case(b"SELECT");
+                    if sub {
+                        d += 1;
+                        m = m.max(d);
+                    }
+                    open.push(sub);
+                }
+                b')' if open.pop() == Some(true) => d -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        m
+    }
+
+    fn related_to_itself(target: ReadPredicate) -> ReadPredicate {
+        ReadPredicate::related::<B, ClosureNode, ClosureNode>(&[("id", "id")], target).unwrap()
+    }
+    fn rendered(predicate: &ReadPredicate) -> String {
+        EntityQuery::<ClosureNode>::new()
+            .with_read_visibility(&ReadVisibility::Complete(predicate.clone()))
+            .unwrap()
+            .build_delete_sql()
+            .0
+    }
+
+    #[test]
+    fn closures_nest_at_most_two_levels_on_every_backend() {
+        assert_eq!(READ_PREDICATE_CLOSURE_MAX_NESTING, 2);
+        // Two levels build, directly or through relations, negations and or.
+        let two = any(PARENT, all(PARENT, passes()));
+        let through = any(
+            PARENT,
+            related_to_itself(all(PARENT, passes()).not().unwrap())
+                .or(passes())
+                .unwrap(),
+        );
+        // A third level is refused however it is reached.
+        for target in [two.clone(), through.clone(), related_to_itself(two.clone())] {
+            for quantifier in [ReadPredicateQuantifier::Any, ReadPredicateQuantifier::All] {
+                misconfigured(ReadPredicate::related_closure_within::<B, ClosureNode>(
+                    quantifier,
+                    PARENT,
+                    target.clone(),
+                    2,
+                ));
+            }
+        }
+        // Combining closures side by side is not nesting; each counts towards
+        // the relation total, so two two-level closures together exceed it.
+        two.clone().or(any(PARENT, passes())).unwrap();
+        misconfigured(two.or(through));
+    }
+
+    #[test]
+    fn rendered_size_is_budgeted_before_rendering_on_every_backend() {
+        // Each not_related inlines its target twice: the doubling stops at
+        // the budget, and no predicate that built renders past it.
+        let mut predicate = passes();
+        let mut built = 0;
+        loop {
+            match ReadPredicate::not_related::<B, ClosureNode, ClosureNode>(
+                &[("id", "id")],
+                predicate.clone(),
+            ) {
+                Ok(next) => {
+                    predicate = next;
+                    built += 1;
+                    assert!(rendered(&predicate).len() <= READ_PREDICATE_MAX_RENDERED_BYTES + 1024);
+                    assert!(built < 32, "the budget never refused");
+                }
+                Err(error) => {
+                    misconfigured(Err(error));
+                    break;
+                }
+            }
+        }
+        // Each level adds two nested CASE expressions: the CASE limit stops
+        // the chain at five levels, before its doubled target grows large.
+        // SQL Server's nine-relation total stops it at two.
+        assert_eq!(READ_PREDICATE_MAX_CASE_NESTING, 10);
+        assert_eq!(
+            built,
+            if B::DIALECT == DatabaseBackend::Mssql {
+                2
+            } else {
+                5
+            }
+        );
+        // A fold of one kind is refused at the byte budget, and the last
+        // fold that builds renders within it.
+        let term = || ReadPredicate::is_not_null::<B, ClosureNode>("id").unwrap();
+        let mut fold = term();
+        // About 25 bytes a term: grow without copying well short of the
+        // budget, then step to the refusal.
+        for _ in 0..40_000 {
+            fold = fold.and(term()).unwrap();
+        }
+        loop {
+            match fold.clone().and(term()) {
+                Ok(next) => fold = next,
+                Err(error) => {
+                    misconfigured(Err(error));
+                    break;
+                }
+            }
+        }
+        let clause = rendered(&fold);
+        assert!(
+            clause.len() <= READ_PREDICATE_MAX_RENDERED_BYTES + 1024,
+            "{}",
+            clause.len()
+        );
+        assert!(
+            clause.len() > READ_PREDICATE_MAX_RENDERED_BYTES * 9 / 10,
+            "{}",
+            clause.len()
+        );
+        // Breadth counts too: `or` of large closures stops at the budget.
+        let large = any(PARENT, related_to_itself(all(PARENT, passes())));
+        let mut wide = large.clone();
+        let refused = (0..200).find_map(|_| match wide.clone().or(large.clone()) {
+            Ok(next) => {
+                wide = next;
+                None
+            }
+            Err(error) => Some(error),
+        });
+        misconfigured(Err(refused.expect("the budget never refused a wide policy")));
+        assert!(rendered(&wide).len() <= READ_PREDICATE_MAX_RENDERED_BYTES + 1024);
+    }
+
+    /// A 64-hop closure inside as many relations as SQL Server's nesting
+    /// budget allows, and the one more that is refused there.
+    fn deepest_wrapped_closure(target: ReadPredicate) -> (ReadPredicate, usize) {
+        let mut predicate = target;
+        for wrappers in 0..40 {
+            match ReadPredicate::related::<B, ClosureNode, ClosureNode>(
+                &[("id", "id")],
+                predicate.clone(),
+            ) {
+                Ok(next) => predicate = next,
+                Err(error) => {
+                    misconfigured(Err(error));
+                    return (predicate, wrappers);
+                }
+            }
+        }
+        (predicate, 40)
+    }
+
+    #[test]
+    fn statement_nesting_is_budgeted_on_sql_server() {
+        let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
+        // A closure at the default bound uses 67 subquery levels, a closure
+        // inside a closure 73, and each relation around them two more. On SQL
+        // Server the second shape (five closures and four inlined relations)
+        // already holds the nine relations a predicate may have.
+        for (target, room) in [(all(PARENT, passes()), 4), (two_levels, 0)] {
+            let (deepest, wrappers) = deepest_wrapped_closure(target);
+            let nesting = subquery_nesting(&rendered(&deepest));
+            if B::DIALECT == DatabaseBackend::Mssql {
+                // SQL Server refuses about 96 subquery levels at run time;
+                // the budget refuses past 75, or past its weighted units,
+                // when the policy is built.
+                assert_eq!(READ_PREDICATE_MSSQL_MAX_NESTING, 75);
+                assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
+                assert_eq!(wrappers, room);
+            } else {
+                // No subquery budget off SQL Server: the relation nesting
+                // limit stops it, counting the closure's own relations.
+                assert!((28..=32).contains(&wrappers), "{wrappers}");
+                assert_eq!(READ_PREDICATE_MAX_RELATION_NESTING, 32);
+            }
+        }
+    }
+
+    /// Apply `step` until it is refused; the last predicate that built and
+    /// how many steps it took.
+    fn grow(
+        mut predicate: ReadPredicate,
+        step: impl Fn(ReadPredicate, usize) -> async_graphql::Result<ReadPredicate>,
+    ) -> (ReadPredicate, usize) {
+        for steps in 0..100_000 {
+            match step(predicate.clone(), steps) {
+                Ok(next) => predicate = next,
+                Err(error) => {
+                    misconfigured(Err(error));
+                    return (predicate, steps);
+                }
+            }
+        }
+        panic!("the expression budget never refused");
+    }
+    fn negations(predicate: ReadPredicate) -> (ReadPredicate, usize) {
+        grow(predicate, |predicate, _| predicate.not())
+    }
+    fn alternations(predicate: ReadPredicate) -> (ReadPredicate, usize) {
+        grow(predicate, |predicate, steps| {
+            if steps % 2 == 0 {
+                predicate.and(score(ReadPredicateOp::Lt, 9))
+            } else {
+                predicate.or(id_below(3))
+            }
+        })
+    }
+
+    #[test]
+    fn expression_depth_is_budgeted_on_every_backend() {
+        assert_eq!(READ_PREDICATE_MAX_EXPRESSION_DEPTH, 256);
+        // Each not() and each alternation of and/or adds one level.
+        assert_eq!(negations(passes()).1, 256);
+        assert_eq!(alternations(passes()).1, 256);
+        // A fold of one kind stays one level deep, however long.
+        let mut fold = passes();
+        for _ in 0..20_000 {
+            fold = fold
+                .or(ReadPredicate::is_null::<B, ClosureNode>("id").unwrap())
+                .unwrap();
+        }
+        fold.not().unwrap();
+        // On SQL Server a negation weighs more next to subqueries: around a
+        // closure inside four relations, only a few fit.
+        let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
+        let (_, around) = negations(wrapped);
+        if B::DIALECT == DatabaseBackend::Mssql {
+            assert!(around < 50, "{around}");
+        } else {
+            assert!(around > 100, "{around}");
+        }
+    }
+
     #[tokio::test]
-    #[cfg_attr(feature = "postgres", ignore = "owned database lane")]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
+    async fn a_fifty_thousand_term_or_fold_builds_flat_and_runs() {
+        let (mut db, mut owner) = fixture().await;
+        let mut wide = ReadPredicate::is_not_null::<B, ClosureNode>("score").unwrap();
+        for _ in 0..50_000 {
+            wide = wide
+                .or(ReadPredicate::is_null::<B, ClosureNode>("id").unwrap())
+                .unwrap();
+        }
+        let expected = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14, 200, 201, 202, 203, 204, 205,
+        ];
+        assert_eq!(visible(&db, wide.clone()).await, expected);
+        db.set_row_policy(PredicatePolicy(wide));
+        let page = EntityQuery::<ClosureNode>::new()
+            .fetch_authorized_keyset(
+                &db,
+                None,
+                None,
+                KeysetPageInput {
+                    after: None,
+                    limit: Some(2),
+                    include_total_count: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.page_info.total_count, Some(expected.len() as i64));
+        owner.cleanup().unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
+    async fn the_largest_policies_that_build_run_on_every_read_path() {
+        let (mut db, mut owner) = fixture().await;
+        let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
+        let mut shapes = vec![
+            (all(PARENT, passes()), vec![1, 2, 5, 6, 7]),
+            (two_levels.clone(), vec![1, 2, 3, 4, 5, 6, 7, 9, 10, 11]),
+        ];
+        if B::DIALECT == DatabaseBackend::Mssql {
+            // The deepest nesting the SQL Server budget admits.
+            for (target, expected) in shapes.clone() {
+                shapes.push((deepest_wrapped_closure(target).0, expected));
+            }
+        }
+        let mut shapes = shapes
+            .into_iter()
+            .map(|(policy, expected)| (chains(policy), Some(expected)))
+            .collect::<Vec<_>>();
+        // The deepest expressions that build, alone and around the deepest
+        // closure nesting: an even number of negations is the identity.
+        let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
+        for (base, expected) in [
+            (
+                passes(),
+                vec![1, 2, 4, 5, 6, 7, 8, 10, 200, 201, 202, 203, 205],
+            ),
+            (chains(wrapped), vec![1, 2, 5, 6, 7]),
+        ] {
+            let (negated, count) = negations(base.clone());
+            shapes.push((negated, (count % 2 == 0).then_some(expected)));
+            shapes.push((alternations(base).0, None));
+        }
+        for (policy, expected) in shapes {
+            let ids = visible(&db, policy.clone()).await;
+            if let Some(expected) = &expected {
+                assert_eq!(&ids, expected);
+            }
+            let expected = ids;
+            db.set_row_policy(PredicatePolicy(policy));
+            let page = EntityQuery::<ClosureNode>::new()
+                .fetch_authorized_keyset(
+                    &db,
+                    None,
+                    None,
+                    KeysetPageInput {
+                        after: None,
+                        limit: Some(2),
+                        include_total_count: true,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.page_info.total_count, Some(expected.len() as i64));
+            let connection = EntityQuery::<ClosureNode>::new()
+                .fetch_authorized_keyset_connection(
+                    &db,
+                    None,
+                    None,
+                    KeysetConnectionInput {
+                        first: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                connection.edges.first().map(|edge| edge.node.id),
+                expected.first().copied()
+            );
+            let groups = ClosureNode::aggregate(&db)
+                .count_rows()
+                .unwrap()
+                .fetch()
+                .await
+                .unwrap();
+            assert_eq!(
+                groups[0].metrics[0].value,
+                AggregateValue::Count(expected.len() as i64)
+            );
+        }
+        owner.cleanup().unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
+    async fn a_target_column_named_like_internal_columns_binds_to_the_row() {
+        // `__gom_max` is also a summary column of the SQL Server closure.
+        let (db, mut owner) = fixture().await;
+        execute(&db, "UPDATE closure_nodes SET __gom_max = score").await;
+        let shadow = || {
+            ReadPredicate::column::<B, ClosureNode>(
+                "__gom_max",
+                ReadPredicateOp::Gte,
+                SqlValue::Int(5),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            visible(&db, chains(all(PARENT, shadow()))).await,
+            [1, 2, 5, 6, 7]
+        );
+        assert_eq!(visible(&db, chains(not(any(PARENT, shadow())))).await, [14]);
+        owner.cleanup().unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
     async fn the_depth_bound_fails_closed() {
         let (db, mut owner) = empty_fixture().await;
         // 100 [1] is the root of 101..=110 [5]; 120 [5] <-> 121 [5].
@@ -534,7 +986,7 @@ mod portable {
                 .await
                 .is_empty()
         );
-        for depth in [2, 3, READ_PREDICATE_CLOSURE_MAX_DEPTH] {
+        for depth in [2, 3, max_depth()] {
             assert_eq!(
                 visible(&db, only(120, within(All, passes(), depth))).await,
                 vec![120],
@@ -545,7 +997,10 @@ mod portable {
     }
 
     #[tokio::test]
-    #[cfg_attr(feature = "postgres", ignore = "owned database lane")]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
     async fn keyset_and_connection_pages_follow_closure_policies() {
         let (mut db, mut owner) = fixture().await;
         for (predicate, expected) in [
@@ -627,7 +1082,10 @@ mod portable {
     }
 
     #[tokio::test]
-    #[cfg_attr(feature = "postgres", ignore = "owned database lane")]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
     async fn a_long_chain_over_thousands_of_rows_stays_bounded() {
         let (db, mut owner) = empty_fixture().await;
         // One chain of 1,000 rows (1 is the root) and 2,000 rows in chains
@@ -654,17 +1112,17 @@ mod portable {
             .await;
         }
         let started = std::time::Instant::now();
-        let policy = within(
-            ReadPredicateQuantifier::All,
-            passes(),
-            READ_PREDICATE_CLOSURE_MAX_DEPTH,
-        );
+        // The backend's largest bound: 1,024 hops, or 64 on SQL Server. The
+        // long chain's rows within the bound of its root are admitted.
+        let depth = max_depth();
+        let long_chain = 1000.min(depth as usize + 1);
+        let policy = within(ReadPredicateQuantifier::All, passes(), depth);
         let query = EntityQuery::<ClosureNode>::new()
             .with_read_visibility(&ReadVisibility::Complete(policy))
             .unwrap();
         // Every row of the long chain passes; in the short chains a row fails
         // when it or an ancestor has id % 97 == 0.
-        let expected = 1000
+        let expected = long_chain
             + (1001..=3000_i64)
                 .filter(|id| {
                     let root = id - (id - 1001) % 5;
@@ -672,21 +1130,18 @@ mod portable {
                 })
                 .count();
         assert_eq!(query.count(&db).await.unwrap() as usize, expected);
-        // The deepest rows of the long chain walk 999 hops each.
+        // The deepest rows of the long chain walk to the bound (999 hops when
+        // it is 1,024).
         let page = EntityQuery::<ClosureNode>::new()
             .with_read_visibility(&ReadVisibility::Complete(and(
-                within(
-                    ReadPredicateQuantifier::All,
-                    passes(),
-                    READ_PREDICATE_CLOSURE_MAX_DEPTH,
-                ),
+                within(ReadPredicateQuantifier::All, passes(), depth),
                 id_below(1001),
             )))
             .unwrap()
             .fetch_all(&db)
             .await
             .unwrap();
-        assert_eq!(page.len(), 1000);
+        assert_eq!(page.len(), long_chain);
         // The default bound cuts the long chain short: its deep rows are not
         // admitted by the universal form.
         assert_eq!(
@@ -694,11 +1149,80 @@ mod portable {
             (1..=65).collect::<Vec<_>>()
         );
         let elapsed = started.elapsed();
+        eprintln!("closure reads over 3,000 rows took {elapsed:?}");
         assert!(
             elapsed < std::time::Duration::from_secs(60),
             "closure reads took {elapsed:?}"
         );
+        // The SQL Server plan for the default bound: the table is scanned once
+        // for the rows being authorized, and every hop and the target lookup
+        // is a correlated nested-loops seek on the key; nothing walks or joins
+        // the whole table per hop.
+        #[cfg(feature = "mssql")]
+        {
+            let (sql, binds) = EntityQuery::<ClosureNode>::new()
+                .with_read_visibility(&ReadVisibility::Complete(all(PARENT, passes())))
+                .unwrap()
+                .build_delete_sql();
+            let sql = sql.replacen("DELETE FROM", "SELECT COUNT_BIG(*) AS c FROM", 1);
+            let plan = actual_plan(&owner.connection_string, &sql, &binds).await;
+            let operators = |name: &str| plan.matches(&format!("PhysicalOp=\"{name}\"")).count();
+            assert_eq!(
+                operators("Clustered Index Scan") + operators("Table Scan"),
+                1
+            );
+            assert!(
+                operators("Clustered Index Seek") > READ_PREDICATE_CLOSURE_DEFAULT_DEPTH as usize
+            );
+            assert_eq!(operators("Hash Match") + operators("Merge Join"), 0);
+        }
         owner.cleanup().unwrap();
+    }
+
+    /// The actual plan SQL Server runs `sql` with.
+    #[cfg(feature = "mssql")]
+    async fn actual_plan(connection_string: &str, sql: &str, binds: &[SqlValue]) -> String {
+        use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
+        let config = graphql_orm::tiberius::Config::from_ado_string(connection_string).unwrap();
+        let tcp = tokio::net::TcpStream::connect(config.get_addr())
+            .await
+            .unwrap();
+        tcp.set_nodelay(true).unwrap();
+        let mut client = graphql_orm::tiberius::Client::connect(config, tcp.compat_write())
+            .await
+            .unwrap();
+        client
+            .simple_query("SET STATISTICS XML ON")
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
+        let values = binds
+            .iter()
+            .map(|value| match value {
+                SqlValue::Int(value) => *value,
+                other => panic!("unexpected bind {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        let params = values
+            .iter()
+            .map(|value| value as &dyn graphql_orm::tiberius::ToSql)
+            .collect::<Vec<_>>();
+        let results = client
+            .query(sql, &params)
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
+        results
+            .iter()
+            .flatten()
+            .filter_map(|row| row.try_get::<&str, _>(0).ok().flatten())
+            .find(|text| text.contains("ShowPlanXML"))
+            .unwrap_or_else(|| panic!("no plan: {} result sets", results.len()))
+            .to_owned()
     }
 
     struct PredicatePolicy(ReadPredicate);
@@ -742,8 +1266,12 @@ mod portable {
     fn placeholder_positions(sql: &str) -> Vec<usize> {
         match B::DIALECT {
             DatabaseBackend::Sqlite => (1..=sql.matches('?').count()).collect(),
-            DatabaseBackend::Postgres => sql
-                .split('$')
+            DatabaseBackend::Postgres | DatabaseBackend::Mssql => sql
+                .split(if B::DIALECT == DatabaseBackend::Mssql {
+                    "@P"
+                } else {
+                    "$"
+                })
                 .skip(1)
                 .map(|rest| {
                     rest.chars()
@@ -788,7 +1316,16 @@ mod portable {
             "{sql}"
         );
         assert_eq!(placeholder_positions(&sql), (1..=10).collect::<Vec<_>>());
-        assert!(sql.contains("(WITH RECURSIVE __gom_closure_1 ("), "{sql}");
+        if B::DIALECT == DatabaseBackend::Mssql {
+            // One nested level and OUTER APPLY per hop, and no CTE.
+            assert!(!sql.contains("WITH"), "{sql}");
+            assert_eq!(sql.matches("OUTER APPLY (SELECT DISTINCT").count(), 64);
+            assert!(sql.contains(") AS __gom_closure_1_l63 "), "{sql}");
+            assert!(sql.contains(") AS __gom_closure_1_g "), "{sql}");
+            assert!(!sql.contains("__gom_closure_1_l64"), "{sql}");
+        } else {
+            assert!(sql.contains("(WITH RECURSIVE __gom_closure_1 ("), "{sql}");
+        }
         assert!(sql.contains("__gom_depth < 64"), "{sql}");
         // A nested closure gets its own CTE name.
         let (sql, binds) = EntityQuery::<ClosureNode>::new()
@@ -823,7 +1360,10 @@ mod portable {
     }
 
     #[tokio::test]
-    #[cfg_attr(feature = "postgres", ignore = "owned database lane")]
+    #[cfg_attr(
+        any(feature = "postgres", feature = "mssql"),
+        ignore = "owned database lane"
+    )]
     async fn closure_refusals() {
         use ReadPredicateQuantifier::{All, Any};
         let closure = |quantifier, keys: &[(&str, &str)], target, depth| {
@@ -831,12 +1371,7 @@ mod portable {
         };
         for quantifier in [Any, All] {
             misconfigured(closure(quantifier, PARENT, passes(), 0));
-            misconfigured(closure(
-                quantifier,
-                PARENT,
-                passes(),
-                READ_PREDICATE_CLOSURE_MAX_DEPTH + 1,
-            ));
+            misconfigured(closure(quantifier, PARENT, passes(), max_depth() + 1));
             misconfigured(closure(quantifier, &[], passes(), 4));
             misconfigured(closure(quantifier, &[("missing", "id")], passes(), 4));
             misconfigured(closure(
