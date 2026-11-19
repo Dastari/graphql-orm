@@ -1,0 +1,5 @@
+error: db_column `"parents"."owner"` is qualified by a table other than this entity's table `main.children`; qualify it with this entity's table or leave it unqualified
+  --> tests/ui/db_column_qualified_by_other_table.rs:10:5
+   |
+10 |     #[graphql_orm(db_column = "\"parents\".\"owner\"")]
+   |     ^

@@ -548,11 +548,20 @@ pub(crate) fn declared_column_sql(backend: super::DatabaseBackend, column: &str)
 }
 
 /// A foreign-key column read from the pinned physical catalogue model, as
-/// SQL. The name is the catalogue's own, so it is quoted as one identifier
-/// and never split: a column literally named `parent.ref` stays
-/// `"parent.ref"`, not `"ref"` (#782).
+/// SQL that names exactly that column (#782). Each backend's model has its
+/// own contract:
+///
+/// - SQLite and PostgreSQL report the catalogue's raw name, so it is always
+///   escaped and delimited as one literal name, never split or passed
+///   through: `parent.ref` is `"parent.ref"`, and a column literally named
+///   `"x"` is `"""x"""`, not `x`.
+/// - SQL Server introspection already reports each name as one delimited
+///   identifier (`[x]`, `[[x]]]`), which is passed through unchanged.
 pub(crate) fn physical_column_sql(backend: super::DatabaseBackend, column: &str) -> String {
-    super::SqlDialect::quote_identifier(&backend, column)
+    match backend {
+        super::DatabaseBackend::Mssql => super::SqlDialect::quote_identifier(&backend, column),
+        _ => backend.delimit_raw_identifier(column),
+    }
 }
 
 /// Generated capability, available only on opted-in single-key writable entities.
@@ -1169,11 +1178,34 @@ mod column_sql_tests {
             );
             assert_eq!(declared_column_sql(backend, "id"), column, "{backend:?}");
         }
-        // SQL Server's pinned model reports catalogue names bracketed; they
-        // pass through as the same column.
+        // SQLite and PostgreSQL report raw names: a name that looks
+        // delimited is still one literal name.
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            assert_eq!(
+                physical_column_sql(backend, "\"x\""),
+                "\"\"\"x\"\"\"",
+                "{backend:?}"
+            );
+            assert_eq!(
+                physical_column_sql(backend, "[x]"),
+                "\"[x]\"",
+                "{backend:?}"
+            );
+            assert_eq!(
+                physical_column_sql(backend, "`x`"),
+                "\"`x`\"",
+                "{backend:?}"
+            );
+        }
+        // SQL Server's pinned model reports catalogue names already
+        // delimited; they pass through as the same column.
         assert_eq!(
             physical_column_sql(DatabaseBackend::Mssql, "[parent.ref]"),
             "[parent.ref]"
+        );
+        assert_eq!(
+            physical_column_sql(DatabaseBackend::Mssql, "[[x]]]"),
+            "[[x]]]"
         );
     }
 }

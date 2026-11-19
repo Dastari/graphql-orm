@@ -4285,6 +4285,12 @@ fn generate_entity_tokens(
                 syn::spanned::Spanned::span(&parsed.field),
                 "db_column",
             )?;
+            crate::backend::validate_declared_column_qualifier(
+                backend,
+                entity_meta.table_name.as_deref().unwrap_or("unknown"),
+                column,
+                syn::spanned::Spanned::span(&parsed.field),
+            )?;
         }
     }
     let relation_readability_columns = parsed_fields

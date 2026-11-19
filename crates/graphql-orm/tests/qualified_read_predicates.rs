@@ -55,9 +55,6 @@ struct QualParent {
     id: i64,
     #[graphql_orm(db_column = "\"qual_parents\".\"owner\"")]
     owner: Option<String>,
-    /// Declared with another table's qualifier: never usable in a predicate.
-    #[graphql_orm(db_column = "\"qual_children\".\"id\"")]
-    stray: Option<i64>,
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -89,9 +86,6 @@ struct QualChild {
     id: i64,
     #[graphql_orm(db_column = "\"qual_children\".\"parent_ref\"")]
     parent_ref: Option<i64>,
-    /// Declared with another table's qualifier: never usable in a predicate.
-    #[graphql_orm(db_column = "\"qual_parents\".\"owner\"")]
-    stray: Option<String>,
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -276,70 +270,6 @@ fn owned_by_alice() -> ReadPredicate {
         SqlValue::String("alice".into()),
     )
     .unwrap()
-}
-
-const CHILD_STRAY: &str = "\"qual_parents\".\"owner\"";
-const PARENT_STRAY: &str = "\"qual_children\".\"id\"";
-
-fn misconfigured(result: async_graphql::Result<ReadPredicate>) {
-    let error = result.expect_err("the predicate must be refused");
-    assert_eq!(
-        error
-            .extensions
-            .as_ref()
-            .and_then(|extensions| extensions.get("code"))
-            .map(ToString::to_string)
-            .as_deref(),
-        Some("\"AUTHORIZATION_MISCONFIGURED\""),
-        "{error:?}"
-    );
-}
-
-/// A declared column whose qualifier names another table is refused in
-/// every predicate position, rather than having the qualifier stripped: in a
-/// correlated subquery it could otherwise bind to a different row.
-#[test]
-fn qualifiers_naming_another_table_are_refused() {
-    let text = || SqlValue::String("alice".into());
-    misconfigured(ReadPredicate::column::<B, QualChild>(
-        CHILD_STRAY,
-        ReadPredicateOp::Eq,
-        text(),
-    ));
-    misconfigured(ReadPredicate::is_null::<B, QualChild>(CHILD_STRAY));
-    misconfigured(ReadPredicate::is_not_null::<B, QualChild>(CHILD_STRAY));
-    // Relation source and destination keys.
-    misconfigured(ReadPredicate::related::<B, QualChild, QualParent>(
-        &[(CHILD_STRAY, "id")],
-        owned_by_alice(),
-    ));
-    misconfigured(ReadPredicate::related::<B, QualChild, QualParent>(
-        &[(PARENT_REF, PARENT_STRAY)],
-        owned_by_alice(),
-    ));
-    misconfigured(ReadPredicate::not_related::<B, QualChild, QualParent>(
-        &[(CHILD_STRAY, "id")],
-        owned_by_alice(),
-    ));
-    misconfigured(ReadPredicate::not_related::<B, QualChild, QualParent>(
-        &[(PARENT_REF, PARENT_STRAY)],
-        owned_by_alice(),
-    ));
-    // Closure keys (SQL Server refuses every closure with the same code).
-    let any_child =
-        ReadPredicate::column::<B, QualChild>("id", ReadPredicateOp::Gte, SqlValue::Int(0))
-            .unwrap();
-    misconfigured(ReadPredicate::related_closure::<B, QualChild>(
-        &[(CHILD_STRAY, "id")],
-        any_child.clone(),
-    ));
-    misconfigured(ReadPredicate::related_closure_all::<B, QualChild>(
-        &[(PARENT_REF, CHILD_STRAY)],
-        any_child,
-    ));
-    // The matching qualifier on the same entities is accepted.
-    ReadPredicate::related::<B, QualChild, QualParent>(&[(PARENT_REF, "id")], owned_by_alice())
-        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

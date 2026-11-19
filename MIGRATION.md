@@ -34,16 +34,21 @@ except for the per-backend path splitting below.
   literally named `parent.ref` is never shortened to `ref`. Input that is
   exactly one well-formed delimited identifier, such as `"Mixed Case"` or
   `[order]`, is still returned unchanged.
-- **Read predicates refuse a column qualified by another table (#782).
-  Action needed** only if a `db_column` used in `ReadPredicate::column`,
-  `is_null`, `is_not_null`, or as a relation or closure key, has a qualifier
-  that does not name the declaring entity's own table (its table name, or
-  its schema and table name). Such a predicate is now refused with
-  `AUTHORIZATION_MISCONFIGURED` when the policy is built, because the
-  qualifier could bind the column to a different row in a correlated
-  subquery. Previously the relation and closure forms failed with a database
-  error, and the scalar forms referenced the other table. Qualify the column
-  with its own table, or leave it unqualified.
+- **A table-qualified `db_column` must name its own entity's table (#782).
+  Action needed** only if a `db_column` has a qualifier that does not name
+  the declaring entity's table (its table name, or its schema and table
+  name), such as `db_column = "\"parents\".\"owner\""` on a `children`
+  entity. The derives now refuse it at compile time, because generated
+  filters, sorts and projections render the declared path as written and
+  would reference the other table, including from inside a correlated
+  subquery. Read predicates (`ReadPredicate::column`, `is_null`,
+  `is_not_null`, relation and closure keys) also refuse such a column with
+  `AUTHORIZATION_MISCONFIGURED` when the policy is built. The qualifier is
+  compared as each backend compares identifiers: PostgreSQL by resolved name
+  and SQLite without ASCII case. SQL Server compares the exact text even
+  under a case-insensitive collation, so a qualifier such as `[Children]` on
+  a table declared `children` is refused there: write the qualifier in the
+  table's declared case, or leave the column unqualified.
 - **Declared names that only look delimited are refused (#782). Action
   needed** only if a `table` or `db_column` attribute has a path part that
   starts and ends with a delimiter but is not one well-formed delimited
@@ -80,8 +85,9 @@ except for the per-backend path splitting below.
   (#782). Action needed** only if code stores or compares introspected model
   names (`TableModel::table_name`, `ForeignKeyModel::target_table` and
   `constraint_name`, index names and columns) by text for objects whose
-  catalogue name needs delimiting. Ordinary names are reported exactly as
-  before, so plans for them are unchanged. These change:
+  catalogue name needs delimiting, or a PostgreSQL foreign-key target in
+  another schema. Other ordinary names are reported exactly as before, so
+  plans for them are unchanged. These change:
   - SQL Server quotes every raw schema, table and column name, and reports an
     index, index column, filtered-index predicate column or foreign-key
     constraint name that is itself bracketed or contains a dot delimited
@@ -94,9 +100,13 @@ except for the per-backend path splitting below.
     leading `"` delimited, as it already did for names bare SQL would fold
     (`"Local"`), and reports foreign-key targets the same way: in the current
     schema, and in another schema with the schema always delimited
-    (`"Archive"."Parent"`, `"plain_other".target`). Such a target previously came back as
-    `Local`, `local.parent` or `Archive.Parent`, which resolved to a different
-    table or none, so a plan could see a spurious foreign-key change.
+    (`"Archive"."Parent"`, `"plain_other".target`). A target such as
+    `Local`, `local.parent` or `Archive.Parent` previously resolved to a
+    different table or none, so a plan could see a spurious foreign-key
+    change. An ordinary cross-schema target such as `plain_other.target`
+    already resolved correctly and is now reported as
+    `"plain_other".target`; code that compares that text must accept the
+    delimited schema.
   - SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read
     delimit the raw names they address.
 
