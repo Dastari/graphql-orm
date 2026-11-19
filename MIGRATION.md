@@ -650,6 +650,13 @@ UNKNOWN when none does but one has `target` UNKNOWN, and FALSE otherwise.
   `AUTHORIZATION_MISCONFIGURED`: a predicate that renders the deny fallback
   `1 = 0` anywhere (an empty `in_list`), also inside a relation target, and a
   negation over the composition budget.
+- A negated relation nests one `CASE` for each relation level it negates,
+  and `READ_PREDICATE_MAX_CASE_NESTING` is 10 on every backend (SQL Server's
+  own limit). A chain of more than ten nested `related` calls still builds
+  and admits the same rows, but `not()` over it is now refused with
+  `AUTHORIZATION_MISCONFIGURED`. Before, a chain up to the relation limit (32
+  nested, 9 on SQL Server) could be negated. A `not_related` chain now stops
+  at twenty levels instead of five (nine instead of two on SQL Server).
 
 Review each negated relation policy, and add the explicit NULL alternative
 where rows without a relation key should stay visible.

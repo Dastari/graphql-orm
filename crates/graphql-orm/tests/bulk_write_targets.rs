@@ -495,6 +495,12 @@ fn keys(keys: &[&str]) -> Vec<String> {
 /// `Database::with_narrow_bulk_writes_to_read_visibility(on)` explicitly.
 const MODES: [Option<bool>; 3] = [None, Some(false), Some(true)];
 
+/// Whether `mode` narrows: the breaking release turned the default on, so
+/// only an explicit `false` selects every matching row.
+fn narrows(mode: Option<bool>) -> bool {
+    mode != Some(false)
+}
+
 fn in_mode(db: Database, mode: Option<bool>) -> Database {
     match mode {
         None => db,
@@ -502,13 +508,13 @@ fn in_mode(db: Database, mode: Option<bool>) -> Database {
     }
 }
 
-/// #752: with `narrow_bulk_writes_to_read_visibility` on, a SQL predicate from
-/// the row policy's read visibility narrows the locking read of `updateMany`
-/// and `deleteMany`, so a hidden row is never passed to a row callback. By
-/// default (and with the setting off) every matching row is still asked about,
-/// as before. Payloads and stored rows are the same in every mode.
+/// #752: with `narrow_bulk_writes_to_read_visibility` on, which is the
+/// default, a SQL predicate from the row policy's read visibility narrows the
+/// locking read of `updateMany` and `deleteMany`, so a hidden row is never
+/// passed to a row callback. With the setting off every matching row is
+/// asked about. Payloads and stored rows are the same in every mode.
 #[tokio::test]
-async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks_when_opted_in() {
+async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks_by_default() {
     let mut outcomes = Vec::new();
     for mode in MODES {
         for visibility in [
@@ -516,15 +522,21 @@ async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks_when_opted_
             Visibility::Prefilter,
             Visibility::Complete,
         ] {
-            let narrowed = mode == Some(true) && visibility != Visibility::CallbackOnly;
+            let narrowed = narrows(mode) && visibility != Visibility::CallbackOnly;
             let mut outcome = Vec::new();
             for mutation in [UPDATE_ALL, DELETE_ALL] {
                 let (mut db, mut owner) = setup().await;
-                // Off unless the host opts in, on the handle and the builder.
-                assert!(!db.narrow_bulk_writes_to_read_visibility_enabled());
+                // On unless the host opts out, on the handle and the builder.
+                // The default never turns on the separate SQL Server
+                // snapshot target selection.
+                assert!(db.narrow_bulk_writes_to_read_visibility_enabled());
+                assert!(!db.mssql_snapshot_bulk_write_targets_enabled());
+                let built = Database::builder(db.pool().clone()).build();
+                assert!(built.narrow_bulk_writes_to_read_visibility_enabled());
+                assert!(!built.mssql_snapshot_bulk_write_targets_enabled());
                 assert!(
-                    Database::builder(db.pool().clone())
-                        .narrow_bulk_writes_to_read_visibility(true)
+                    !Database::builder(db.pool().clone())
+                        .narrow_bulk_writes_to_read_visibility(false)
                         .build()
                         .narrow_bulk_writes_to_read_visibility_enabled()
                 );
@@ -571,12 +583,13 @@ async fn read_visibility_keeps_hidden_rows_from_bulk_write_callbacks_when_opted_
     assert_eq!(rows.len(), 2);
 }
 
-/// A row the caller may write but not read stays a bulk-write target by
-/// default, whatever the read visibility. With the setting on, a bulk write
-/// narrowed by read visibility leaves it out, and a write-target prefilter
-/// that selects it takes precedence and keeps it a target.
+/// A row the caller may write but not read stays a bulk-write target with
+/// the setting off, whatever the read visibility. With the setting on, which
+/// is the default, a bulk write narrowed by read visibility leaves it out,
+/// and a write-target prefilter that selects it takes precedence and keeps it
+/// a target.
 #[tokio::test]
-async fn write_only_rows_stay_bulk_targets_unless_narrowing_is_opted_in() {
+async fn write_only_rows_stay_bulk_targets_only_without_narrowing() {
     for mode in MODES {
         for (visibility, prefilter) in [
             (Visibility::CallbackOnly, false),
@@ -586,7 +599,7 @@ async fn write_only_rows_stay_bulk_targets_unless_narrowing_is_opted_in() {
             (Visibility::Complete, true),
         ] {
             let expected =
-                if mode == Some(true) && visibility != Visibility::CallbackOnly && !prefilter {
+                if narrows(mode) && visibility != Visibility::CallbackOnly && !prefilter {
                     2
                 } else {
                     4
@@ -607,18 +620,18 @@ async fn write_only_rows_stay_bulk_targets_unless_narrowing_is_opted_in() {
     }
 }
 
-/// With the setting on, a `read_visibility` error on the mutation surface
-/// refuses a bulk write before any row changes. By default the bulk write
-/// does not ask, and proceeds as before.
+/// With the setting on, which is the default, a `read_visibility` error on
+/// the mutation surface refuses a bulk write before any row changes. With
+/// the setting off the bulk write does not ask, and proceeds.
 #[tokio::test]
-async fn a_read_visibility_error_refuses_only_an_opted_in_bulk_write() {
+async fn a_read_visibility_error_refuses_a_narrowed_bulk_write() {
     for mode in MODES {
         let (mut db, mut owner) = setup().await;
         db.set_row_policy(
             OwnerRows::new(false, Default::default()).with_visibility(Visibility::Error),
         );
         let payload = mutate(&in_mode(db.clone(), mode), UPDATE_ALL).await;
-        if mode == Some(true) {
+        if narrows(mode) {
             assert_eq!(payload["success"], false, "{payload}");
             assert!(all_before(&stored(&db).await), "nothing was written");
         } else {
