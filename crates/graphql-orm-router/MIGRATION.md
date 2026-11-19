@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.6 to 0.16.7: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.16.5 to 0.16.6
 
 **No action.** Bounded HTTP retrieval, WebSocket frame encoding and the Hive

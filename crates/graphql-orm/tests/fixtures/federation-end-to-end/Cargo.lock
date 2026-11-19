@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",
@@ -2558,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.16.6"
+version = "0.16.7"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

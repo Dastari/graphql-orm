@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.182.0 to 0.184.0: read-predicate columns bound to their row
+## 0.183.0 to 0.184.0: read-predicate columns bound to their row
 
 Upgrade ORM and macros together. Read predicates now write every column with
 the entity's table path, such as `"records"."owner_id" = ?` (#796). Generated
@@ -35,6 +35,14 @@ SQL text changes, but ordinary policies admit exactly the same rows.
   `to_row_bound_filter_expression` defaults to `to_filter_expression`, so a
   hand-written filter renders as before, with its columns unqualified.
   Override it to bind them. Generated where inputs override it.
+
+## 0.182.0 to 0.183.0: install documentation
+
+**No action.** Upgrade ORM and macros together. The README and workspace
+documentation now describe how to select a reviewed Git revision; the
+dependency-direction guide in `AGENTS.md` matches Cargo metadata. No data
+migration is needed. The operation catalog's 0.9.0 to 0.9.1 update refreshes
+install documentation and requires no migration.
 
 ## 0.181.0 to 0.182.0: SQL identifier quoting
 

@@ -24,11 +24,16 @@ advertisements; a router owns SSRF, DNS, credential, and network policy.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.2.1" }
+graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
 
 ## Minimal descriptor route

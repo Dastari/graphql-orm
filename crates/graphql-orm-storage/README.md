@@ -134,6 +134,11 @@ and [migration guide](MIGRATION.md) before updating a consuming lockfile.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 Packages are Git-only. Pin the full reviewed monorepo revision, and use that
 same revision for every GraphQL ORM companion crate in one application:
 
@@ -143,13 +148,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.27.2
+
+- Install from a reviewed Git revision using the package inventory and release manifest.
+
 ## Unreleased - 0.27.1
 
 Test-owned PostgreSQL containers are memory-capped; no runtime change.

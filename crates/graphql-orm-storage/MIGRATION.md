@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.18.2 to 0.18.3: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.18.1 to 0.18.2
 
 **No action.** Only tests change; key validation, providers and APIs are

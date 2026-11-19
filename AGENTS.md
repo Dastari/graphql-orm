@@ -36,19 +36,27 @@ under a crate add package-local invariants.
   Do not modify its repository unless the task explicitly includes it.
 - Keep the packages independently consumable. Do not turn AI, backup, or
   storage into features or optional dependencies of the core ORM crate.
-- Preserve this acyclic dependency direction:
-  `graphql-orm-ai -> graphql-orm-ai-tool-profiles -> graphql-orm-operation-catalog`,
-  `graphql-orm-ai -> graphql-orm`,
-  `graphql-orm-ai -> graphql-orm-operation-catalog`,
-  `graphql-orm-ai -> graphql-orm-storage`,
-  `graphql-orm-backup -> graphql-orm-storage`, optional
-  `graphql-orm-backup -> graphql-orm`, and
-  `graphql-orm -> graphql-orm-macros`,
-  `graphql-orm -> graphql-orm-operation-catalog`, plus
-  `graphql-orm-router -> graphql-orm-router-protocol`, optional
-  `graphql-orm-operation-catalog -> graphql-orm-router-protocol` (its
-  `router-protocol` feature, which the ORM's `router-protocol` feature
-  enables), and optional `graphql-orm -> graphql-orm-router-protocol`.
+- Preserve this acyclic dependency direction. The list includes optional and
+  dev-only declarations, including the duplicate dev dependency on the ORM:
+
+  - `graphql-orm-ai -> graphql-orm`
+  - `graphql-orm-ai -> graphql-orm` (dev-only)
+  - `graphql-orm-ai -> graphql-orm-ai-tool-profiles`
+  - `graphql-orm-ai -> graphql-orm-operation-catalog`
+  - `graphql-orm-ai -> graphql-orm-storage`
+  - `graphql-orm-ai-tool-profiles -> graphql-orm-operation-catalog`
+  - `graphql-orm-ai-tool-profiles -> graphql-orm-router-protocol` (dev-only)
+  - `graphql-orm-backup -> graphql-orm` (optional)
+  - `graphql-orm-backup -> graphql-orm-storage`
+  - `graphql-orm -> graphql-orm-ai-tool-profiles` (dev-only)
+  - `graphql-orm -> graphql-orm-macros`
+  - `graphql-orm -> graphql-orm-operation-catalog`
+  - `graphql-orm -> graphql-orm-router-protocol` (dev-only)
+  - `graphql-orm-operation-catalog -> graphql-orm-router-protocol` (optional)
+  - `graphql-orm-router -> graphql-orm-router-protocol`
+
+  The ORM's `router-protocol` feature enables the operation catalog's
+  `router-protocol` feature. The ORM's direct protocol dependency is for examples.
 - Keep Federation runtime and server dependencies inside
   `graphql-orm-router`. The protocol crate contains project-neutral data only,
   and neither router package depends on the ORM or companion packages.

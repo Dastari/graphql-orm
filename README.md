@@ -40,22 +40,26 @@ schema changes explicitly.
 
 ## Install
 
-Packages are distributed from this repository, not crates.io. Pin the reviewed
-release revision, not a moving branch or tag. The current coordinated
-`graphql-orm` version is 0.143.0. Replace the placeholder below with the final
-reviewed full SHA for the release:
+Packages are distributed through Git. Use the
+[workspace package inventory](docs/reference/workspace-packages.md) to find
+package manifests and the [workspace release manifest](docs/operations/release/process.md#release-identities)
+for the released versions and source revision. Replace the placeholder below
+with the reviewed full commit SHA.
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.143.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
 ```
+
+If your application depends directly on `agql-auth`, use the same Git URL and
+tag as the selected workspace revision's [Cargo.toml](Cargo.toml) and verify
+that the lockfile resolves one Auth source.
 
 Choose exactly the backend support needed by each service. Cargo can unify
 features in a shared dependency graph; when more than one backend is enabled,
 declare the backend explicitly on each entity and `schema_roots!` block.
-The [quickstart](docs/learn/sqlite-quickstart.md) separately pins its
-repository snapshot because the checked-in example was added after this package
-release.
+The [quickstart](docs/learn/sqlite-quickstart.md) pins its own repository
+snapshot.
 
 ## Backend and schema capability
 

@@ -89,14 +89,8 @@ producer metadata and finished SDL; see [MIGRATION.md](MIGRATION.md). No AI
 schema-module, persistence, provider or authorization behavior changes. The
 spatial/JSON scalar-codec gate remains outstanding.
 
-The current workspace selects published Auth `v0.26.0`, peeled to
-`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
-that same tag and refresh their locks to one source; matching the commit alone
-does not unify revision and tag selectors. See the
-[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
-
 Version `0.117.0` disables incidental async-graphql defaults and adopts the
-canonical reviewed Auth 0.24 source above. UUID and base GraphQL APIs remain;
+reviewed Auth 0.24 source for that release. UUID and base GraphQL APIs remain;
 provider, attachment, TLS and schema behavior are unchanged. See the
 [feature contract](../../docs/reference/graphql-features.md) and
 [migration guide](MIGRATION.md).
@@ -165,9 +159,9 @@ workspace dependency guidance. The Rust implementation is unchanged; consuming
 applications must still review and qualify the coordinated companion revision.
 
 Version `0.107.2` selects published Auth `v0.21.3` at the same reviewed commit.
-Align direct Auth dependencies to that tag, refresh the lockfile and verify one
-Auth source. No runtime or schema migration is added; schema module stays
-`0.72.0`. See [MIGRATION.md](MIGRATION.md).
+That release required direct Auth dependencies to use the same tag and resolve
+one Auth source in the lockfile. No runtime or schema migration was added.
+The schema module stayed at `0.72.0`. See [MIGRATION.md](MIGRATION.md).
 
 Version `0.107.1` adds read-only continuation task-context classification.
 Hosts preserve ordinary broker continuations, attach context only to verified
@@ -234,8 +228,8 @@ The coordinator counts already completed reads and automatic writes once, valida
 their ordered durable results and egress, and then persists the final provider output.
 These checkpoints cannot be adopted as pending execution; stale leases, changed
 rows or uncertain effects remain closed without replay. These completed-native
-semantics were introduced with schema module `0.68.0` in `0.102.1`; the current
-module is `0.69.0`. See [MIGRATION.md](MIGRATION.md).
+semantics were introduced with schema module `0.68.0` in `0.102.1`. Version
+`0.103.0` advanced the module to `0.69.0`. See [MIGRATION.md](MIGRATION.md).
 Version `0.102.2` makes restore-ordering test fixtures independent of wall-clock
 boundaries without changing runtime or schema behavior.
 
@@ -321,13 +315,23 @@ where required, and ordinary resolver authorization.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 This active pre-release is Git-only. Pin one reviewed full monorepo revision
 for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.120.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
 ```
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
 or `mssql`. MSSQL currently has schema/compile support only where ORM write
