@@ -118,9 +118,12 @@ fn emitted_sql_and_bind_order_are_pinned() {
 
     // The row-bound form, which read predicates and related-row filters
     // render (#796), differs only by the table qualifier on each column.
-    // As the snapshot's `Debug` output escapes it.
-    let table = format!("{:?}.", backend.render_table_identifier_path("sql_filter_rows"));
-    let table = table[1..].replacen("\".", ".", 1);
+    // The qualifier as the snapshot's `Debug` output escapes it.
+    let escaped = format!(
+        "{:?}",
+        backend.render_table_identifier_path("sql_filter_rows")
+    );
+    let table = format!("{}.", &escaped[1..escaped.len() - 1]);
     assert!(row_bound.contains(&table), "{row_bound}");
     let unqualified = actual
         .lines()

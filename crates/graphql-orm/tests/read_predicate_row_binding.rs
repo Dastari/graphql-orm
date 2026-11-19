@@ -166,7 +166,11 @@ fn shapes() -> Vec<(&'static str, ReadPredicate, &'static [&'static str])> {
             related(ReadPredicate::is_not_null::<B, BindTarget>("flag").unwrap()),
             &["s1", "s2"],
         ),
-        ("not exists", related(eq()).not().unwrap(), &["s1", "s3", "s4"]),
+        (
+            "not exists",
+            related(eq()).not().unwrap(),
+            &["s1", "s3", "s4"],
+        ),
         (
             "not_related",
             ReadPredicate::not_related::<B, BindSource, BindTarget>(KEYS, eq()).unwrap(),
