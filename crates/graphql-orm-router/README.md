@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.16.8 changes documentation and source comments only. The
+[operations runbook](docs/operations.md#startup-hand-off-and-ownership)
+now records the scoped startup hand-off into the Hive plugin and why the
+process-wide runtime registry stays until Hive supports state injection.
+
 Version 0.16.6 consolidates outbound HTTP retrieval, reduces redundant
 WebSocket frame encoding and scopes the Hive plugin handoff to startup.
 
