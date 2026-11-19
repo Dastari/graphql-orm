@@ -1445,6 +1445,11 @@ pub(super) fn validate_migration_step_capabilities<'a>(
             return Err(sqlx::Error::Protocol(overlong.to_string()));
         }
     }
+    if backend == DatabaseBackend::Mssql {
+        for step in &steps {
+            validate_mssql_step_predicates(step)?;
+        }
+    }
     Ok(())
 }
 
@@ -2445,6 +2450,96 @@ fn sqlite_constant_default(default: &str) -> bool {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')))
 }
 
+const INVALID_MSSQL_FILTER_SQL: &str =
+    "THROW 50000, 'Invalid SQL Server filtered index predicate', 1";
+
+/// A SQL Server index predicate that cannot be rendered safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidMssqlIndexPredicate {
+    /// The catalog filter marker contains unsafe or unclosed SQL text.
+    OpaqueFilter,
+    /// A value requiring binary conversion exceeds the supported literal length.
+    LineContinuationTooLong,
+}
+
+impl std::fmt::Display for InvalidMssqlIndexPredicate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OpaqueFilter => "invalid SQL Server opaque filtered index predicate",
+            Self::LineContinuationTooLong => {
+                "SQL Server filtered index value with a line continuation exceeds nvarchar(4000)"
+            }
+        })
+    }
+}
+
+impl std::error::Error for InvalidMssqlIndexPredicate {}
+
+fn validate_mssql_step_predicates(step: &StepRef<'_>) -> crate::Result<()> {
+    let indexes = match step {
+        StepRef::CreateTable(table) => table.indexes.as_slice(),
+        StepRef::CreateIndex { index, .. } => std::slice::from_ref(index),
+        _ => &[],
+    };
+    for index in indexes {
+        let Some(predicate) = &index.predicate else {
+            continue;
+        };
+        if predicate.column.is_empty() {
+            if matches!(predicate.values.as_slice(), [filter] if mssql_closed_opaque_filter(filter))
+            {
+                continue;
+            }
+            return Err(sqlx::Error::Configuration(Box::new(
+                InvalidMssqlIndexPredicate::OpaqueFilter,
+            )));
+        }
+        if predicate
+            .values
+            .iter()
+            .any(|value| mssql_has_line_continuation(value) && value.encode_utf16().count() > 4000)
+        {
+            return Err(sqlx::Error::Configuration(Box::new(
+                InvalidMssqlIndexPredicate::LineContinuationTooLong,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn mssql_closed_opaque_filter(filter: &str) -> bool {
+    let filter = filter.trim();
+    if !filter.starts_with('(') || !filter.ends_with(')') || filter.contains('\0') {
+        return false;
+    }
+    let Some(positions) = mssql_filter_positions(filter) else {
+        return false;
+    };
+    let mut depth = 0;
+    for (offset, outside) in positions {
+        if !outside {
+            continue;
+        }
+        let rest = &filter[offset..];
+        match rest.as_bytes()[0] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 && rest.len() != 1 {
+                    return false;
+                }
+            }
+            // Catalog output brackets identifiers. Refuse other lexical forms
+            // that could change which characters SQL Server considers quoted.
+            b';' | b'"' | b'\\' => return false,
+            b'-' if rest.starts_with("--") => return false,
+            b'/' if rest.starts_with("/*") => return false,
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
 fn render_create_index_statement(
     backend: DatabaseBackend,
     table_name: &str,
@@ -2480,15 +2575,16 @@ fn render_create_index_statement(
                 // Introspection retained the catalog's opaque filter verbatim.
                 return format!(" WHERE {filter}");
             }
-            let literal_prefix = if backend == DatabaseBackend::Mssql {
-                "N"
-            } else {
-                ""
-            };
             let values = predicate
                 .values
                 .iter()
-                .map(|value| format!("{literal_prefix}{}", sql_string_literal(value)))
+                .map(|value| {
+                    if backend == DatabaseBackend::Mssql {
+                        render_mssql_index_literal(value)
+                    } else {
+                        sql_string_literal(value)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -2601,6 +2697,32 @@ fn render_composite_unique_changes(
 
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn render_mssql_index_literal(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let literal = DatabaseBackend::Mssql
+        .render_string_literal(value)
+        .expect("SQL Server renders string literals");
+    if !literal.starts_with('(') {
+        return literal;
+    }
+
+    // The dialect splits line continuations with concatenation, which SQL
+    // Server rejects in filtered indexes. Convert a binary constant instead.
+    let units = value.encode_utf16();
+    let count = units.clone().count();
+    let mut sql = format!("CONVERT(nvarchar({count}), 0x");
+    for byte in units.flat_map(u16::to_le_bytes) {
+        write!(sql, "{byte:02X}").expect("writing to a string");
+    }
+    sql.push(')');
+    sql
+}
+
+fn mssql_has_line_continuation(value: &str) -> bool {
+    value.contains("\\\n") || value.contains("\\\r\n")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3387,8 +3509,24 @@ fn render_sqlite_table_rebuild_statements(
 /// expression) cannot be rebuilt from a single step. They render a
 /// `-- sqlite requires table rebuild …` marker instead of executable DDL. Use a migration
 /// plan, which renders the controlled rebuild.
+///
+/// Invalid SQL Server index predicates render a statement that raises
+/// an error. Use [`try_render_migration_step`] to receive the error in Rust.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
-    render_migration_step_view(backend, &StepRef::from(step))
+    try_render_migration_step(backend, step)
+        .unwrap_or_else(|_| vec![INVALID_MSSQL_FILTER_SQL.to_owned()])
+}
+
+/// Render one step and reject invalid SQL Server index predicates.
+pub fn try_render_migration_step(
+    backend: DatabaseBackend,
+    step: &MigrationStep,
+) -> crate::Result<Vec<String>> {
+    let step = StepRef::from(step);
+    if backend == DatabaseBackend::Mssql {
+        validate_mssql_step_predicates(&step)?;
+    }
+    Ok(render_migration_step_view(backend, &step))
 }
 pub(super) fn render_migration_step_view(
     backend: DatabaseBackend,
@@ -3878,6 +4016,8 @@ pub fn classify_migration_steps(steps: &[MigrationStep]) -> Vec<PlannedMigration
     steps.iter().map(classify_migration_step).collect()
 }
 
+/// Build a migration plan. A plan containing an invalid SQL Server index
+/// predicate renders only a statement that raises an error.
 pub fn build_migration_plan(
     backend: DatabaseBackend,
     current: &SchemaModel,
@@ -3932,6 +4072,13 @@ pub(super) fn render_owned_plan_steps(
     steps: &[OwnedMigrationStep],
 ) -> Vec<String> {
     match backend {
+        DatabaseBackend::Mssql
+            if steps
+                .iter()
+                .any(|step| validate_mssql_step_predicates(&StepRef::from(step)).is_err()) =>
+        {
+            vec![INVALID_MSSQL_FILTER_SQL.to_owned()]
+        }
         DatabaseBackend::Sqlite => {
             let current_tables = current
                 .tables
@@ -6292,7 +6439,8 @@ async fn introspect_mssql_indexes(
 ///
 /// A filter of any other form cannot be expressed in the model. It is kept as
 /// a predicate without a column, holding the filter text, which never equals
-/// a declared predicate. Rendering an introspected index reuses that text.
+/// a declared predicate, so a plan replaces the index rather than treating it
+/// as unfiltered. Rendering an introspected index reuses that text.
 #[cfg(feature = "mssql")]
 fn mssql_index_predicate(filter: &str) -> super::owned_schema::IndexPredicateModel {
     parse_mssql_in_filter(filter)
@@ -6337,9 +6485,30 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
             text = inner;
         }
     }
-    /// The text of one string literal, `'it''s'` or `N'it''s'`.
+    /// Decode a quoted string or the catalog form of a converted binary literal.
     fn literal(text: &str) -> Option<String> {
         let text = text.trim();
+        if let Some(convert) = text.strip_prefix("CONVERT([nvarchar](") {
+            // Catalog spelling of render_mssql_index_literal's binary fallback.
+            let (size, hex) = convert.strip_suffix(')')?.split_once("),0x")?;
+            let size: usize = size.parse().ok()?;
+            if !(1..=4000).contains(&size)
+                || hex.len() != size * 4
+                || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
+            let units = (0..hex.len())
+                .step_by(4)
+                .map(|i| {
+                    u16::from_str_radix(&hex[i..i + 4], 16)
+                        .ok()
+                        .map(u16::swap_bytes)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let value = String::from_utf16(&units).ok()?;
+            return mssql_has_line_continuation(&value).then_some(value);
+        }
         let text = text.strip_prefix('N').unwrap_or(text);
         let value = text.strip_prefix('\'')?.strip_suffix('\'')?;
         if value.replace("''", "").contains('\'') {
@@ -6389,21 +6558,30 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
     })
 }
 
-/// Split `text` on `separator` where it is outside string literals.
+/// Split `text` on top-level separators outside quoted tokens.
 #[cfg(feature = "mssql")]
 fn split_outside_quotes<'a>(text: &'a str, separator: &str) -> Option<Vec<&'a str>> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut skip_to = 0;
+    let mut depth = 0usize;
     for (index, outside) in mssql_filter_positions(text)? {
         if index < skip_to || !outside {
             continue;
         }
-        if text[index..].starts_with(separator) {
+        match text.as_bytes()[index] {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+        if depth == 0 && text[index..].starts_with(separator) {
             parts.push(&text[start..index]);
             skip_to = index + separator.len();
             start = skip_to;
         }
+    }
+    if depth != 0 {
+        return None;
     }
     parts.push(&text[start..]);
     Some(parts)
@@ -6416,7 +6594,6 @@ fn split_outside_quotes<'a>(text: &'a str, separator: &str) -> Option<Vec<&'a st
 /// Offsets are always character boundaries, so a filter on a non-ASCII
 /// column such as `[列]` never slices inside a character. `None` for an
 /// unterminated literal or identifier.
-#[cfg(feature = "mssql")]
 fn mssql_filter_positions(text: &str) -> Option<Vec<(usize, bool)>> {
     let mut positions = Vec::new();
     let mut closing: Option<char> = None;
@@ -6450,7 +6627,11 @@ fn mssql_filter_positions(text: &str) -> Option<Vec<(usize, bool)>> {
 #[cfg(all(test, feature = "mssql"))]
 mod mssql_index_predicate_tests {
     use super::super::owned_schema::IndexModel;
-    use super::{DatabaseBackend, mssql_index_predicate, render_create_index_statement};
+    use super::{
+        DatabaseBackend, INVALID_MSSQL_FILTER_SQL, InvalidMssqlIndexPredicate, MigrationStep,
+        mssql_index_predicate, render_migration_step, try_render_migration_step,
+    };
+    use crate::graphql::orm::IndexDef;
 
     #[test]
     fn closed_set_filters_read_back_as_predicates() {
@@ -6479,6 +6660,11 @@ mod mssql_index_predicate_tests {
                 vec!["y"],
             ),
             ("([雪.b] IN ('z'))", "[雪.b]", vec!["z"]),
+            (
+                "([State] IN (CONVERT([nvarchar](3),0x5C000A007800),N'y'))",
+                "State",
+                vec!["\\\nx", "y"],
+            ),
         ] {
             let predicate = mssql_index_predicate(filter);
             assert_eq!(predicate.column, column, "{filter}");
@@ -6510,13 +6696,68 @@ mod mssql_index_predicate_tests {
 
     #[test]
     fn opaque_filter_is_rendered_verbatim() {
-        let filter = " ([列] <> N'状態''s') ";
+        let filter = " ([列;--/*] <> N'状態''s;--/*') ";
         let mut index = IndexModel::new("ix", vec!["列".to_owned()]);
         index.predicate = Some(mssql_index_predicate(filter));
 
         assert_eq!(
-            render_create_index_statement(DatabaseBackend::Mssql, "items", &index.borrowed()),
-            format!("CREATE INDEX [ix] ON [items] ([列]) WHERE {filter}"),
+            try_render_migration_step(
+                DatabaseBackend::Mssql,
+                &MigrationStep::CreateIndex {
+                    table_name: "items".to_owned(),
+                    index: index.into_legacy(),
+                },
+            )
+            .unwrap(),
+            [format!(
+                "CREATE INDEX [ix] ON [items] ([列]) WHERE {filter}"
+            )],
+        );
+    }
+
+    #[test]
+    fn opaque_filters_must_be_closed_and_contain_no_batch_tokens() {
+        for values in [
+            &["([A] > (1);)"][..],
+            &["([A] > (1) -- note)"][..],
+            &["([A] > (1) /* note */)"][..],
+            &["([A] > (1)"][..],
+            &["([A] > (1)))"][..],
+            &["([A] > (1)) ([B] > (2))"][..],
+            &["([A] <> N'unclosed)"][..],
+            &["([unclosed > (1))"][..],
+            &["(\"A\" > (1))"][..],
+            &["([A] > \\\n(1))"][..],
+            &["([A] > (1))", "([B] > (2))"][..],
+        ] {
+            let step = MigrationStep::CreateIndex {
+                table_name: "items".to_owned(),
+                index: IndexDef::new("ix", &["A"]).where_in("", values),
+            };
+            let result = try_render_migration_step(DatabaseBackend::Mssql, &step);
+            assert!(
+                matches!(result, Err(sqlx::Error::Configuration(error))
+                    if error.downcast_ref() == Some(&InvalidMssqlIndexPredicate::OpaqueFilter)),
+                "{values:?}",
+            );
+            assert_eq!(
+                render_migration_step(DatabaseBackend::Mssql, &step),
+                [INVALID_MSSQL_FILTER_SQL],
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_values_use_a_conversion_without_line_continuations() {
+        let step = MigrationStep::CreateIndex {
+            table_name: "items".to_owned(),
+            index: IndexDef::new("ix", &["A"]).where_in("A", &["\\\nx"]),
+        };
+        assert_eq!(
+            try_render_migration_step(DatabaseBackend::Mssql, &step).unwrap(),
+            [
+                "CREATE INDEX [ix] ON [items] ([A]) WHERE [A] IN (CONVERT(nvarchar(3), 0x5C000A007800))"
+            ],
         );
     }
 }

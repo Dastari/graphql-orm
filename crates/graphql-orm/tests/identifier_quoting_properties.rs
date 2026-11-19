@@ -1769,7 +1769,7 @@ async fn sql_server_filtered_index_preserves_unicode_through_recreation()
 -> Result<(), Box<dyn std::error::Error>> {
     use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
     use graphql_orm::graphql::orm::{
-        MigrationStep, introspect_mssql_schema, render_migration_step,
+        IndexDef, MigrationStep, introspect_mssql_schema, try_render_migration_step,
     };
     use std::time::Duration;
 
@@ -1788,32 +1788,54 @@ async fn sql_server_filtered_index_preserves_unicode_through_recreation()
                  THROW 50000, 'Fixture needs a value outside the database code page', 1; \
              CREATE TABLE dbo.filter_items (id int NOT NULL PRIMARY KEY, state nvarchar(20)); \
              CREATE UNIQUE INDEX ux_filter_items_state ON dbo.filter_items (state) \
-                 WHERE [state] IN (N'状態');",
+                 WHERE [state] IN (N'状態'); \
+             CREATE INDEX ix_filter_items_opaque ON dbo.filter_items (state) \
+                 WHERE [state] <> N';--/*';",
         )
         .await?;
+        let multiline = MigrationStep::CreateIndex {
+            table_name: "[dbo].[filter_items]".to_owned(),
+            index: IndexDef::new("ix_filter_items_multiline", &["state"])
+                .where_in("state", &["left\\\nright"]),
+        };
+        for statement in try_render_migration_step(BACKEND, &multiline)? {
+            owned_mssql::execute_batch(connection, &statement).await?;
+        }
         let schema = introspect_mssql_schema(&pool).await?;
         let table = schema
             .tables
             .iter()
             .find(|table| table.table_name == "[dbo].[filter_items]")
             .ok_or("filter_items table missing")?;
-        let index = table
-            .indexes
-            .iter()
-            .find(|index| index.name == "ux_filter_items_state")
-            .ok_or("filtered index missing")?;
-        let steps = [
-            MigrationStep::DropIndex {
+        assert_eq!(table.indexes.len(), 3);
+        for index in &table.indexes {
+            let predicate = index
+                .predicate
+                .as_ref()
+                .ok_or("filtered index lost predicate")?;
+            if index.name == "ix_filter_items_multiline" {
+                assert_eq!(predicate.column, "state");
+                assert_eq!(predicate.values, ["left\\\nright"]);
+            }
+            let statements = try_render_migration_step(
+                BACKEND,
+                &MigrationStep::CreateIndex {
+                    table_name: table.table_name.clone(),
+                    index: index.clone(),
+                },
+            )?;
+            if index.name == "ix_filter_items_opaque" {
+                assert_eq!(predicate.column, "");
+                assert!(statements[0].ends_with(predicate.values[0]));
+            }
+            let drop = MigrationStep::DropIndex {
                 table_name: table.table_name.clone(),
                 index_name: index.name.to_string(),
-            },
-            MigrationStep::CreateIndex {
-                table_name: table.table_name.clone(),
-                index: index.clone(),
-            },
-        ];
-        for step in steps {
-            for statement in render_migration_step(BACKEND, &step) {
+            };
+            for statement in try_render_migration_step(BACKEND, &drop)?
+                .into_iter()
+                .chain(statements)
+            {
                 owned_mssql::execute_batch(connection, &statement).await?;
             }
         }
