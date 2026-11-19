@@ -2558,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.16.7"
+version = "0.16.8"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",

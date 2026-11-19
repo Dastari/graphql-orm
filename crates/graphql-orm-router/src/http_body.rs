@@ -17,6 +17,11 @@ pub(crate) enum FetchError {
     Read,
 }
 
+/// A bounded response.
+///
+/// A `304 Not Modified` result has no body and `etag: None`. That means the
+/// source is unchanged, not that its ETag was cleared: callers keep the ETag
+/// they already hold and send it again on the next poll.
 pub(crate) struct BoundedResponse {
     pub(crate) status: StatusCode,
     pub(crate) bytes: Vec<u8>,
