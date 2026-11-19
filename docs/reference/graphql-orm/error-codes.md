@@ -67,7 +67,6 @@ mapping between the two:
 | `SUBSCRIPTION_CONTINUITY_LOST` | ORM, router | The stream ended and missed events. Subscribe again and refetch |
 | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT_VIOLATION`, `CURSOR_INVALID`, `PAGE_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `AUTHORIZATION_MISCONFIGURED`, `STEP_UP_REQUIRED` | ORM | See [codes](#codes) |
 | `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED`, `INPUT_VALIDATION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
-| `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
 | `SUBSCRIPTION_SELECTION_UNSUPPORTED` | ORM, opt-in | The `Changed` selection can never be streamed (a relation, a computed field or an unavailable key). Subscribe with a smaller selection, for example keys only |
 | `SUBSCRIPTIONS_NOT_SUPPORTED` | router | A subscription was sent over HTTP, or the router has no subscription gateway. Subscribe over the router's `graphql-transport-ws` endpoint |
 | `MUTATION_NOT_ALLOWED_OVER_HTTP_GET` | router | A mutation was sent with HTTP `GET`. Send it with `POST` |
@@ -76,7 +75,6 @@ mapping between the two:
 The router's wire tests show a subgraph error's `extensions.code` and
 `extensions.outcome` reaching the client unchanged, over HTTP and the
 WebSocket gateway.
-`extensions.outcome` reaching the client unchanged over HTTP.
 
 ## Unsupported subscription selection
 
@@ -124,7 +122,7 @@ delete plan; an error raised once that plan runs reports `unknown`.
 ## Router refusal outcome
 
 With `RouterConfig::with_refusal_outcome(true)` (`refusalOutcome: true` in the
-file configuration), `graphql-orm-router` 0.19.0 adds `outcome: "refused"` to
+file configuration), `graphql-orm-router` adds `outcome: "refused"` to
 each error of an operation it refused before it sent any subgraph request, so
 a client handles a router refusal and a service refusal the same way. It
 covers the router's own refusals (bearer and authority checks, root and
@@ -165,8 +163,6 @@ reports every failure as a top-level error, so its result has no `errorCode`.
 Without the attribute the single-row result types, the SDL and the bulk codes
 are unchanged. Rust code that builds a single-row result with a struct literal
 must add `error_code: None` once the attribute is set; the constructors `ok`
-and `err` are unaffected. A root delete refused by an entity's dependent
-delete plan returns its message without a code.
 and `err` are unaffected. On an entity with `dependent_deletes`, the root
 delete reports the same `error` and `errorCode` as a direct delete, including
 for a root row the plan refuses once its transaction holds the row.

@@ -371,7 +371,15 @@ fn shapes(fragment_headroom: bool) -> Vec<(&'static str, ReadPredicate)> {
             )
             .is_ok()
     };
-    let not_step = |p: ReadPredicate, _| p.not();
+    // `not` swaps a predicate with its negation (double negation is the
+    // identity), so a `not` chain never deepens: negate once.
+    let not_step = |p: ReadPredicate, n| {
+        if n == 0 {
+            p.not()
+        } else {
+            Err(async_graphql::Error::new("stop"))
+        }
+    };
     let wrap_step = |p: ReadPredicate, _| wrap(p);
     let mut out = Vec::new();
     // A: subqueries, then negations.
@@ -557,6 +565,7 @@ fn near_limit_shapes_execute_on_every_path() {
                 MutationRoot::default(),
                 SubscriptionRoot::default(),
             )
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .data(db)
             .data(AuthSubject::builder("reader").build())
             .finish();
@@ -810,7 +819,15 @@ fn sql_server_caps_refuse_what_the_server_cannot_run() {
         block_on(async {
             let (db, owned) = database().await;
             let wrap_step = |p: ReadPredicate, _| wrap(p);
-            let not_step = |p: ReadPredicate, _| p.not();
+            // `not` swaps a predicate with its negation (double negation is the
+            // identity), so a `not` chain never deepens: negate once.
+            let not_step = |p: ReadPredicate, n| {
+                if n == 0 {
+                    p.not()
+                } else {
+                    Err(async_graphql::Error::new("stop"))
+                }
+            };
             // Forty nested relations exhausted the optimizer (error 8623), as
             // did 39 with nine negations: both are refused when built.
             assert!(build(&[(&wrap_step, 40)]).is_none());
@@ -1007,6 +1024,7 @@ fn relation_subqueries_are_budgeted_per_statement() {
                 MutationRoot::default(),
                 SubscriptionRoot::default(),
             )
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .data(db)
             .data(AuthSubject::builder("reader").build())
             .finish();
@@ -1043,9 +1061,10 @@ fn not_related_chains_stop_at_the_case_and_relation_limits() {
                 &|p, _| ReadPredicate::not_related::<B, ZrKid, ZrKid>(&[("id", "id")], p),
                 &|_| true,
             );
-            // Two CASE levels each: at most five within the CASE limit of 10.
-            // SQL Server's nine-relation total stops it at two.
-            assert_eq!(levels, if cfg!(feature = "mssql") { 2 } else { 5 });
+            // `not_related` is `related(..).not()`: one CASE level for every
+            // two levels of the chain, so at most twenty within the CASE
+            // limit of 10. SQL Server's nine-relation total stops it at nine.
+            assert_eq!(levels, if cfg!(feature = "mssql") { 9 } else { 20 });
             let failures = run_statement_paths(&db, "deepest not_related chain", &deepest).await;
             let _keep = owned;
             assert!(failures.is_empty(), "{failures:#?}");
@@ -1082,6 +1101,7 @@ fn closures_and_count_orderings_are_charged_per_statement() {
                 MutationRoot::default(),
                 SubscriptionRoot::default(),
             )
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .data(db)
             .data(AuthSubject::builder("reader").build())
             .finish();

@@ -245,8 +245,9 @@ async fn negation_preserves_null_and_relation_truth_tables() {
     let rows = query.fetch_all(&db).await.unwrap();
     assert_eq!(rows.iter().map(|r| r.rank).collect::<Vec<_>>(), vec![3]);
     assert_eq!(query.count(&db).await.unwrap(), 1);
-    // A relation from secret to rank: NULL has no related row, 1 is matching,
-    // 2 exists but does not match. Absent OR matching must admit only 1 and 2.
+    // A relation from secret to rank: NULL is UNKNOWN (#770), 1 is matching,
+    // 2 exists but does not match. Absent OR matching admits only 2: the NULL
+    // key stays UNKNOWN on both sides of the OR.
     let exists = || {
         ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
             &[("secret", "rank")],
@@ -271,8 +272,8 @@ async fn negation_preserves_null_and_relation_truth_tables() {
         .map(|r| r.rank)
         .collect::<Vec<_>>();
     ids.sort();
-    assert_eq!(ids, vec![1, 2]);
-    assert_eq!(query.count(&db).await.unwrap(), 2);
+    assert_eq!(ids, vec![2]);
+    assert_eq!(query.count(&db).await.unwrap(), 1);
     // The related row for source 2 has a NULL secret: it must not match.
     let nullable_match =
         ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
@@ -291,7 +292,7 @@ async fn negation_preserves_null_and_relation_truth_tables() {
         .map(|r| r.rank)
         .collect::<Vec<_>>();
     ids.sort();
-    assert_eq!(ids, vec![1, 3]);
+    assert_eq!(ids, vec![3]);
     db.set_row_policy(PredicatePolicy(allowed));
     let page = EntityQuery::<PredicateRecord>::new()
         .fetch_authorized_keyset(
@@ -306,16 +307,16 @@ async fn negation_preserves_null_and_relation_truth_tables() {
         )
         .await
         .unwrap();
-    assert_eq!(page.edges[0].node.rank, 1);
-    assert_eq!(page.page_info.total_count, Some(2));
-    assert!(page.page_info.has_next_page);
+    assert_eq!(page.edges[0].node.rank, 2);
+    assert_eq!(page.page_info.total_count, Some(1));
+    assert!(!page.page_info.has_next_page);
     let groups = PredicateRecord::aggregate(&db)
         .count_rows()
         .unwrap()
         .fetch()
         .await
         .unwrap();
-    assert_eq!(groups[0].metrics[0].value, AggregateValue::Count(2));
+    assert_eq!(groups[0].metrics[0].value, AggregateValue::Count(1));
     owner.cleanup().unwrap();
 }
 
@@ -347,6 +348,10 @@ fn not_related(key: &str, target: ReadPredicate) -> ReadPredicate {
         target,
     )
     .unwrap()
+}
+fn closure_any(target: ReadPredicate) -> ReadPredicate {
+    ReadPredicate::related_closure::<DefaultBackend, PredicateRecord>(&[("secret", "rank")], target)
+        .unwrap()
 }
 fn secret_is_null() -> ReadPredicate {
     ReadPredicate::is_null::<DefaultBackend, PredicateRecord>("secret").unwrap()
@@ -427,21 +432,32 @@ fn nested_negation_renders_parenthesized_trees_in_bind_order() {
         .with_read_visibility(&ReadVisibility::Complete(tree))
         .unwrap()
         .build_delete_sql();
-    assert_eq!(
-        binds,
-        [11, 12, 13, 14, 13, 14].map(SqlValue::Int).to_vec(),
-        "{sql}"
-    );
-    assert_eq!(placeholder_positions(&sql), vec![1, 2, 3, 4, 5, 6], "{sql}");
+    // De Morgan pushes the outer `not` down: the first term becomes
+    // `secret = 11 OR NOT (rank = 12)` and the negated `not_related` is the
+    // relation itself, so the target binds once.
+    assert_eq!(binds, [11, 12, 13, 14].map(SqlValue::Int).to_vec(), "{sql}");
+    assert_eq!(placeholder_positions(&sql), vec![1, 2, 3, 4], "{sql}");
     let q = |name: &str| DefaultBackend::DIALECT.quote_identifier(name);
-    assert!(sql.contains("NOT (((NOT ("), "{sql}");
+    assert!(sql.contains(") OR (NOT ("), "{sql}");
+    assert!(sql.contains(") AND (EXISTS (SELECT 1 FROM"), "{sql}");
+    assert!(!sql.contains("CASE"), "{sql}");
+    // `not_related` itself renders the relation's FALSE rows: every key
+    // present and no related row with the target TRUE or UNKNOWN.
+    let (sql, binds) = EntityQuery::<PredicateRecord>::new()
+        .with_read_visibility(&ReadVisibility::Complete(not_related(
+            "rank",
+            flag(13).and(flag(14)).unwrap(),
+        )))
+        .unwrap()
+        .build_delete_sql();
+    assert_eq!(binds, [13, 14].map(SqlValue::Int).to_vec(), "{sql}");
     assert!(
-        sql.contains(&format!("{} IS NULL THEN NULL WHEN EXISTS", q("rank"))),
+        sql.contains(&format!("{} IS NOT NULL AND NOT EXISTS (", q("rank"))),
         "{sql}"
     );
     assert!(sql.contains("THEN 0 ELSE 1 END = 1"), "{sql}");
-    assert!(sql.contains("THEN NULL ELSE 1 END) = 1"), "{sql}");
-    // Double negation keeps both NOTs and their parentheses.
+    assert!(!sql.contains("THEN NULL"), "{sql}");
+    // Double negation is the identity.
     let (sql, binds) = EntityQuery::<PredicateRecord>::new()
         .with_read_visibility(&ReadVisibility::Complete(not(not(compare(
             "rank",
@@ -451,10 +467,8 @@ fn nested_negation_renders_parenthesized_trees_in_bind_order() {
         .unwrap()
         .build_delete_sql();
     assert_eq!(binds, vec![SqlValue::Int(7)]);
-    assert!(
-        sql.contains(&format!("NOT (NOT ({} = ", q("rank"))),
-        "{sql}"
-    );
+    assert!(sql.contains(&format!("{} = ", q("rank"))), "{sql}");
+    assert!(!sql.contains("NOT ("), "{sql}");
 }
 
 #[test]
@@ -635,11 +649,12 @@ async fn negation_truth_tables_with_nulls() {
             not(not(not_related("rank", flag(1)))),
             vec![2, 4],
         ),
-        // Two-valued NOT EXISTS: the UNKNOWN child of rank 3 does not block.
+        // The relation is three-valued (#770): the UNKNOWN child of rank 3
+        // keeps its negation UNKNOWN, exactly as for `not_related`.
         (
             "not(related(flag = 1))",
             not(related("rank", flag(1))),
-            vec![2, 3, 4],
+            vec![2, 4],
         ),
         (
             "not_related(flag = 0)",
@@ -691,10 +706,33 @@ async fn negation_truth_tables_with_nulls() {
             not_related("secret", flag(1)).or(secret_is_null()).unwrap(),
             vec![1, 3],
         ),
+        // A NULL key (rank 1) and an UNKNOWN-only relation (rank 4) stay
+        // UNKNOWN under negation.
         (
             "not(related(secret; flag = 1))",
             not(related("secret", flag(1))),
-            vec![1, 3, 4],
+            vec![3],
+        ),
+        // A closure over a three-valued relation target classifies each
+        // reached row with the relation's own FALSE rows, not SQL `NOT`.
+        // No child has flag 5: ranks 1, 2 and 4 are FALSE, rank 3 (a NULL
+        // child) is UNKNOWN. Rank 4 reaches rank 3, so both stay UNKNOWN
+        // under negation; only ranks 1 and 2, whose closures are all FALSE,
+        // are admitted.
+        (
+            "closure_any(secret -> rank; related(flag = 5))",
+            closure_any(related("rank", flag(5))),
+            vec![],
+        ),
+        (
+            "not(closure_any(secret -> rank; related(flag = 5)))",
+            not(closure_any(related("rank", flag(5)))),
+            vec![1, 2],
+        ),
+        (
+            "not(not(closure_any(secret -> rank; related(flag = 1))))",
+            not(not(closure_any(related("rank", flag(1))))),
+            vec![1, 2, 3, 4],
         ),
     ];
     for (name, predicate, expected) in cases {

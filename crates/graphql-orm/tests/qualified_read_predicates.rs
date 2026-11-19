@@ -303,14 +303,15 @@ async fn qualified_columns_admit_exactly_the_right_rows() {
         admitted::<QualChild>(&db, &children, related.clone()).await,
         [10]
     );
-    // Its two-valued negation (`NOT EXISTS`).
+    // Its negation is three-valued (#770): a NULL key (13) and a parent whose
+    // owner is NULL (12) are UNKNOWN and not admitted; a parent owned by bob
+    // (11) and a key that names no parent (14) are FALSE, so the negation
+    // admits them.
     assert_eq!(
         admitted::<QualChild>(&db, &children, related.not().unwrap()).await,
-        [11, 12, 13, 14]
+        [11, 14]
     );
-    // `not_related` is three-valued: a NULL key (13) and a parent whose owner
-    // is NULL (12) are UNKNOWN and not admitted; a parent owned by bob (11)
-    // and a key that names no parent (14) are TRUE.
+    // `not_related` is exactly that negation.
     let not_related =
         ReadPredicate::not_related::<B, QualChild, QualParent>(keys, owned_by_alice()).unwrap();
     assert_eq!(

@@ -383,9 +383,12 @@ const MSSQL_CLOSURE_RELATION_WEIGHT: u32 = 1;
 
 /// The deepest nesting of `CASE` expressions one [`ReadPredicate`] may
 /// render, on every backend. SQL Server refuses `CASE` nested deeper than
-/// ten (error 125). [`ReadPredicate::not_related`] adds two levels and a
-/// closure one, so this also bounds `not_related` chains, whose target is
-/// inlined twice per level, to five levels.
+/// ten (error 125). A closure adds one level, and the negation of a relation
+/// ([`ReadPredicate::related`] under [`ReadPredicate::not`], or
+/// [`ReadPredicate::not_related`]) adds one around its target's own
+/// negation. So this also bounds negation: a chain of more than ten nested
+/// relations builds but cannot be negated, and a `not_related` chain stops at
+/// twenty levels.
 pub const READ_PREDICATE_MAX_CASE_NESTING: u32 = MAX_CASE_NESTING;
 const MAX_CASE_NESTING: u32 = 10;
 
@@ -1366,8 +1369,7 @@ impl ReadPredicate {
         let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
         let predicate = &relation.predicate;
         // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
-        let truth =
-            format!("CASE WHEN ({predicate}) THEN 2 WHEN {false_rows} THEN 0 ELSE 1 END");
+        let truth = format!("CASE WHEN ({predicate}) THEN 2 WHEN {false_rows} THEN 0 ELSE 1 END");
         // The anchor has no FROM, so `table` is the row being authorized.
         // In the step, the unaliased join makes `table` the reached row, so
         // the target (including any nested relation) is evaluated on it.
@@ -2917,6 +2919,7 @@ mod predicate_tests {
             backend: DatabaseBackend::Sqlite,
             expression: FilterExpression::trusted_fragment(clause, values),
             cost: Cost::of(clause),
+            negation: Negation::Sql,
         }
     }
 
@@ -2952,34 +2955,43 @@ mod predicate_tests {
                 let copy = wide.clone();
                 assert!(copy.expression == wide.expression);
                 drop((copy, wide));
-                // Alternating `and`/`or` and `not` chains are refused at the
-                // depth limit; the deepest that builds is measured exactly.
-                for alternate in [true, false] {
-                    let (mut deepest, mut levels) = (leaf(), 0);
-                    loop {
-                        let next = if !alternate {
-                            deepest.clone().not()
-                        } else if levels % 2 == 0 {
-                            deepest.clone().and(leaf())
-                        } else {
-                            deepest.clone().or(leaf())
-                        };
-                        match next {
-                            Ok(next) => {
-                                deepest = next;
-                                levels += 1;
-                            }
-                            Err(_) => break,
+                // An alternating `and`/`or` chain is refused at the depth
+                // limit; the deepest that builds is measured exactly.
+                let (mut deepest, mut levels) = (leaf(), 0);
+                loop {
+                    let next = if levels % 2 == 0 {
+                        deepest.clone().and(leaf())
+                    } else {
+                        deepest.clone().or(leaf())
+                    };
+                    match next {
+                        Ok(next) => {
+                            deepest = next;
+                            levels += 1;
                         }
+                        Err(_) => break,
                     }
-                    assert_eq!(levels, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
-                    let clause = render(&deepest);
-                    assert_eq!(Cost::of(&clause).depth, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
-                    assert_eq!(deepest.cost.depth, Cost::of(&clause).depth);
-                    assert!(!format!("{deepest:?}").is_empty());
-                    let copy = deepest.clone();
-                    assert!(copy.expression == deepest.expression);
-                    drop((copy, deepest));
+                }
+                assert_eq!(levels, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
+                let clause = render(&deepest);
+                assert_eq!(Cost::of(&clause).depth, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
+                assert_eq!(deepest.cost.depth, Cost::of(&clause).depth);
+                assert!(!format!("{deepest:?}").is_empty());
+                let copy = deepest.clone();
+                assert!(copy.expression == deepest.expression);
+                drop((copy, deepest));
+                // `not` swaps a predicate with its negation, so a `not` chain
+                // of any length alternates between two renderings and never
+                // deepens.
+                let mut negated = leaf();
+                for step in 1..=1_000 {
+                    negated = negated.not().unwrap();
+                    let clause = render(&negated);
+                    assert_eq!(
+                        clause,
+                        if step % 2 == 0 { "x = ?" } else { "NOT (x = ?)" }
+                    );
+                    assert_eq!(negated.cost.depth, Cost::of(&clause).depth);
                 }
             })
             .unwrap()

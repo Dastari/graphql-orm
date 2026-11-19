@@ -10,23 +10,28 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.151.0
+## Unreleased - 0.151.0 (breaking release)
 
-GraphQL naming is selected by environment variables (#508). Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#graphql-naming-is-selected-by-environment-variables-not-features-508).
+The AI part of the single breaking release, with ORM/macros 0.190.0, operation
+catalogue 0.10.0 and AI tool profiles 0.27.0. Host steps are in the root
+[migration guide](../../MIGRATION.md#breaking-release-unreleased) and the
+[AI migration guide](MIGRATION.md#breaking-release-unreleased). The entries
+below were written on the integration branch as separate steps; they ship
+together, and the release has one AI schema module version, `0.83.0`.
+
+### Naming by environment variable (#508)
 
 - **Breaking (build configuration):** the `graphql-case-pascal` feature is removed. The new build script gives the AI types the coherent PascalCase contract when `GRAPHQL_ORM_AI_CASE=PascalCase`, and refuses the build unless `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` are `PascalCase` too, which the feature used to force. Unset or `camelCase` keeps camelCase AI names, as before without the feature. No GraphQL SDL, persistent schema or data migration change.
 
-## Unreleased - 0.150.0
+### Schema module `0.83.0` and stored-response cleanup paging
 
-Merges AI 0.147.0 from main (lease grace, provider stops, stored-response ledger) into the breaking batch. See the [migration guide](MIGRATION.md#01490-to-01500-schema-module-0830-stored-response-candidate-paging-and-index-replacement-documentation).
-
-- **Persistence:** apply AI schema module `0.83.0`. It combines main's `0.82.0` (the `graphql_orm_ai_stored_provider_responses` table) with this batch's earlier `0.82.0` placeholder (the three #532 unique indexes); the two were assigned the same number independently, and a module version is never reused. A store at either `0.82.0` upgrades to `0.83.0`; a store at `0.81.0` or earlier takes both changes in one step.
+- **Persistence (#532):** apply AI schema module `0.83.0`. It adds unique indexes on approvals `tool_call_id`, run attempts `(run_id, lease_generation)` and context checkpoints `(session_id, through_sequence)` to module `0.82.0` (AI 0.147.0, the `graphql_orm_ai_stored_provider_responses` table). A store at `0.81.0` or earlier takes both changes in one step. The ORM refuses the migration with `UniqueIndexDuplicates` before any DDL if existing rows repeat one of these keys; duplicates are not merged for you. Tool-call `idempotency_key` gets no separate index: every non-null value is derived from the already-unique `provider_call_key`.
 - **Fixed (read bounds):** the stored-response cleanup pass reads its candidate batch (`AiStoredResponseCleanupLimits::maximum_batch_size`, up to 200) completely through `keyset_window`, in canonical `created_at, id` pages no larger than the database's maximum page limit. It used to read the batch in one query that raised the read maximum for itself. Release and the session-shell check already read within the maximum.
 - **Docs:** `AiSchemaModule::admit_index_replacements` states that it matches a dropped index by table and name only. Earlier module versions created those names as non-unique indexes, but the check does not verify that the live index with that name is non-unique, so a host that created its own index under one of the names must review the plan itself.
 
-## Unreleased - 0.149.0
+### Capability broker version 2 (#551)
 
-Capability broker version 2 (#551, asks 2B, 5B and 3B, and the 1A default). Part of the single breaking release, with AI tool profiles 0.26.0; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`.
+Compact signatures, entity capabilities, the inverted discovery index and the fixed-broker default. No GraphQL SDL, persistent schema or data migration change of its own.
 
 - **Breaking (broker protocol, sessions):** `AI_CAPABILITY_BROKER_VERSION` is `2`. The fixed broker offers four definitions: discover, describe, the new `graphql.capabilities.describe_type` (`AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID`) and execute. Every broker definition fingerprint and every `FixedBroker` session binding fingerprint changes once, so each retained fixed-broker session rebinds once at the upgrade. No other binding input changed.
 - **Breaking (describe, 2B):** describe returns one compact typed signature per operation (for example `Records(where?: RecordWhereInput|null, page?: PageInput) -> select`), the top level of the selection tree, the root result bound and the input types it names, instead of the plan schema. `describe_type` expands one input type, `select` or `select.<path>`, in pages of up to 128 fields or values. Plans are still validated against the unchanged closed schema. `AiCapabilityDescription::with_operation_signatures` attaches the signatures; `AiCapabilityBrokerSession::with_inline_describe_schema` now adds each operation's inline `planSchema` beside its signature when it fits the describe bound.
@@ -37,29 +42,25 @@ Capability broker version 2 (#551, asks 2B, 5B and 3B, and the 1A default). Part
 - **Performance (3B, in tool profiles):** discovery scores only the posting lists of the query's terms. Scores remain fixed per-entry field weights, with no catalogue-wide statistic.
 - **Changed:** query-plan correction texts refer to signatures and expanded types instead of `planSchema`; their disclosure contracts are versioned up.
 
-## Unreleased - 0.148.0
+### Runtime live keys and complete keyset windows
 
-- **Fixed:** adopts tool profiles 0.25.0, so runtime-composed collections with live subscriptions, a node identity and a UUID or integer key compile as query, mutation and subscription capability catalogues under the ORM's default `RuntimeInt64` identities and under `with_legacy_int_identities()`. A regression test covers each key shape in both modes. No AI schema module change and no data migration.
-- **Fixed:** every keyset window the runtime reads for itself is read completely, in pages no larger than the database's maximum page limit. Under the ORM breaking batch a host keyset page above that maximum is refused instead of being shortened, so any window larger than a host's maximum failed: conversation bootstraps and message windows (up to 200 messages against the default maximum of 100), session, attachment, approval, proposal and usage lists, the session-retention candidate scan (`maximum_sessions`), attachment and artifact cleanup batches, and pending secret cleanups. Each now returns exactly the window it asked for, with the same cursors and has-page flags; before the batch these windows were shortened to the maximum without notice. No AI schema module change and no data migration.
+- **Fixed:** with tool profiles 0.27.0, runtime-composed collections with live subscriptions, a node identity and a UUID or integer key compile as query, mutation and subscription capability catalogues under the ORM's default `RuntimeInt64` identities and under `with_legacy_int_identities()`. A regression test covers each key shape in both modes.
+- **Fixed:** every keyset window the runtime reads for itself is read completely, in pages no larger than the database's maximum page limit. In this release a host keyset page above that maximum is refused instead of being shortened, so any window larger than a host's maximum failed: conversation bootstraps and message windows (up to 200 messages against the default maximum of 100), session, attachment, approval, proposal and usage lists, the session-retention candidate scan (`maximum_sessions`), attachment and artifact cleanup batches, and pending secret cleanups. Each now returns exactly the window it asked for, with the same cursors and has-page flags; before this release these windows were shortened to the maximum without notice.
 
-## Unreleased - 0.147.0 (breaking batch)
+### Webhook-receipt index replacement admission
 
-- **Added:** `AiSchemaModule::admit_index_replacements(&plan, options)` admits an upgrade that only replaces an AI-owned webhook-receipt index. ORM 0.164.0 classifies every index drop as `Destructive`, so `ApplyOptions::default()` now refuses the upgrade from a store created before `provider_kind` joined the receipt primary key, or before module 0.72.0's composite index was renamed (including the 63-byte name PostgreSQL stored). The method sets `allow_destructive` only when every destructive step in the plan drops one of those known, non-unique legacy index names and the same plan creates the current composite index; any other destructive step leaves the options unchanged, and the gate refuses the plan.
+- **Added:** `AiSchemaModule::admit_index_replacements(&plan, options)` admits an upgrade that only replaces an AI-owned webhook-receipt index. This release of the ORM classifies every index drop as `Destructive`, so `ApplyOptions::default()` now refuses the upgrade from a store created before `provider_kind` joined the receipt primary key, or before module 0.72.0's composite index was renamed (including the 63-byte name PostgreSQL stored). The method sets `allow_destructive` only when every destructive step in the plan drops one of those known, non-unique legacy index names and the same plan creates the current composite index; any other destructive step leaves the options unchanged, and the gate refuses the plan.
 
-No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`. See the migration guide.
+### Fixed-broker sessions, stale codes, fingerprints and approvals (#551, #683, #465, #532)
 
-## Unreleased - 0.146.0
-
-Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). Requires ORM/macros 0.160.0, operation catalogue 0.9.0 and AI tool profiles 0.24.0.
-
-- **Breaking (sessions, #551):** a `FixedBroker` `AiProviderCapabilitySessionBinding` no longer includes the capability index fingerprint, and the three fixed broker definitions no longer hash it. They depend on `AI_CAPABILITY_BROKER_VERSION`, the static bootstrap tools, the delivery mode and the provider identity. A schema or catalogue change therefore keeps retained fixed-broker sessions. Each such session rebinds once at this upgrade. `EagerExact`, `ProviderDeferred` and `ClientDeferred` bindings are unchanged and still rotate with the catalogue.
+- **Breaking (sessions, #551):** a `FixedBroker` `AiProviderCapabilitySessionBinding` no longer includes the capability index fingerprint, and the fixed broker definitions no longer hash it. They depend on `AI_CAPABILITY_BROKER_VERSION`, the static bootstrap tools, the delivery mode and the provider identity. A schema or catalogue change therefore keeps retained fixed-broker sessions. Each such session rebinds once at this upgrade. `EagerExact`, `ProviderDeferred` and `ClientDeferred` bindings are unchanged and still rotate with the catalogue.
 - **Breaking (API):** `AiProviderCapabilitySessionBinding::capability_index_fingerprint` and `capability_index_set_fingerprint` return `Option<&str>` (`None` for a fixed broker). `capability_broker_definitions()` takes no argument and returns `Vec<ModelToolDefinition>`.
 - **Breaking (model-facing codes, #551):** broker describe and execute report catalogue drift as `capability_stale` (`AI_CAPABILITY_STALE`). Execute used to report drift as `authorization_denied`, which is not retryable. A selection the run does not hold (never returned by discovery, or an unknown or expired `loadedReference`) now reports the new `selection_stale` (`AiApplicationToolFailureCode::SelectionStale`, `AI_CAPABILITY_SELECTION_STALE`); it used to share `capability_stale`. Both are retryable and carry a fixed `correction` (envelope version 2). `AiCapabilityDiscoveryBroker::authorize_execution` returns `AiError::InvalidInput(AI_CAPABILITY_STALE)` for drift and still returns `Forbidden` for denial, expiry and substitution.
-- **Breaking (fingerprints, #683):** generated-operation and catalogue fingerprints change once because catalogue 0.9.0 drops the Rust module path. Tool, capability and index fingerprints derived from them change with them.
+- **Breaking (fingerprints, #683):** generated-operation and catalogue fingerprints change once because operation catalogue 0.10.0 drops the Rust module path. Tool, capability and index fingerprints derived from them change with them.
 - **Security (approvals, #465):** an approval of a `HighImpact` tool call always requires recent MFA; the `recent_mfa_required` argument can no longer waive it. Pending `HighImpact` approvals staged without the flag are gated at every decision, and `AiApprovalView.recent_mfa_required` reports the requirement that will be enforced.
 - **Breaking (approvals, #465):** `AiApprovalServiceLimits::new` refuses a `maximum_approval_lifetime` above `AI_APPROVAL_LIFETIME_CEILING` (7 days). The default is the new constant `AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME` (24 hours, unchanged). `AiApprovalServiceLimits::maximum_approval_lifetime()` reads the configured cap.
-- **Persistence (#532):** apply AI schema module `0.82.0`. It adds unique indexes on approvals `tool_call_id`, run attempts `(run_id, lease_generation)` and context checkpoints `(session_id, through_sequence)`. The ORM refuses the migration with `UniqueIndexDuplicates` before any DDL if existing rows repeat one of these keys; duplicates are not merged for you. Tool-call `idempotency_key` gets no separate index: every non-null value is derived from the already-unique `provider_call_key`.
 - **Documentation (#532):** the [security guide](docs/security.md#database-trust-boundary) states the database trust boundary: integrity hashes are unkeyed and lifecycle columns are not authenticated, so the AI tables must be a trusted store.
+
 ## Unreleased - 0.150.2
 
 - Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.

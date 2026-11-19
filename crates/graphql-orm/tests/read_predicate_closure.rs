@@ -573,8 +573,8 @@ mod portable {
 
     #[test]
     fn rendered_size_is_budgeted_before_rendering_on_every_backend() {
-        // Each not_related inlines its target twice: the doubling stops at
-        // the budget, and no predicate that built renders past it.
+        // A not_related chain is refused by the composition budget, and no
+        // predicate that built renders past the size budget.
         let mut predicate = passes();
         let mut built = 0;
         loop {
@@ -594,16 +594,17 @@ mod portable {
                 }
             }
         }
-        // Each level adds two nested CASE expressions: the CASE limit stops
-        // the chain at five levels, before its doubled target grows large.
-        // SQL Server's nine-relation total stops it at two.
+        // `not_related` is `related(..).not()`, which inlines its target
+        // once and nests one CASE for every two levels: the CASE limit stops
+        // the chain at twenty levels. SQL Server's nine-relation total stops
+        // it at nine.
         assert_eq!(READ_PREDICATE_MAX_CASE_NESTING, 10);
         assert_eq!(
             built,
             if B::DIALECT == DatabaseBackend::Mssql {
-                2
+                9
             } else {
-                5
+                20
             }
         );
         // A fold of one kind is refused at the byte budget, and the last
@@ -711,9 +712,6 @@ mod portable {
         }
         panic!("the expression budget never refused");
     }
-    fn negations(predicate: ReadPredicate) -> (ReadPredicate, usize) {
-        grow(predicate, |predicate, _| predicate.not())
-    }
     fn alternations(predicate: ReadPredicate) -> (ReadPredicate, usize) {
         grow(predicate, |predicate, steps| {
             if steps % 2 == 0 {
@@ -727,9 +725,13 @@ mod portable {
     #[test]
     fn expression_depth_is_budgeted_on_every_backend() {
         assert_eq!(READ_PREDICATE_MAX_EXPRESSION_DEPTH, 256);
-        // Each not() and each alternation of and/or adds one level.
-        assert_eq!(negations(passes()).1, 256);
+        // Each alternation of and/or adds one level. `not` swaps a predicate
+        // with its negation, so a `not` chain of any length never deepens.
         assert_eq!(alternations(passes()).1, 256);
+        let mut negated = passes();
+        for _ in 0..1_000 {
+            negated = negated.not().unwrap();
+        }
         // A fold of one kind stays one level deep, however long.
         let mut fold = passes();
         for _ in 0..20_000 {
@@ -738,15 +740,30 @@ mod portable {
                 .unwrap();
         }
         fold.not().unwrap();
-        // On SQL Server a negation weighs more next to subqueries: around a
-        // closure inside four relations, only a few fit.
-        let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
-        let (_, around) = negations(wrapped);
-        if B::DIALECT == DatabaseBackend::Mssql {
-            assert!(around < 50, "{around}");
-        } else {
-            assert!(around > 100, "{around}");
+        // Negating a relation nests one CASE per relation level, so the
+        // deepest closure-in-relations shape cannot be negated on SQLite and
+        // PostgreSQL, where it is deeper than the CASE limit; a refused
+        // negation is a misconfiguration, never a grant. A shape that can
+        // be negated negates back.
+        let (wrapped, wrappers) = deepest_wrapped_closure(all(PARENT, passes()));
+        match wrapped.not() {
+            Ok(negated) => {
+                negated.not().unwrap();
+            }
+            Err(error) => {
+                assert!(
+                    wrappers as u32 > READ_PREDICATE_MAX_CASE_NESTING / 2,
+                    "{wrappers}"
+                );
+                misconfigured(Err(error));
+            }
         }
+        let one = ReadPredicate::related::<B, ClosureNode, ClosureNode>(
+            &[("id", "id")],
+            all(PARENT, passes()),
+        )
+        .unwrap();
+        one.not().unwrap().not().unwrap();
     }
 
     #[tokio::test]
@@ -807,7 +824,8 @@ mod portable {
             .map(|(policy, expected)| (chains(policy), Some(expected)))
             .collect::<Vec<_>>();
         // The deepest expressions that build, alone and around the deepest
-        // closure nesting: an even number of negations is the identity.
+        // closure nesting. A negation runs on every read path, and negating
+        // it again is the identity.
         let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
         for (base, expected) in [
             (
@@ -816,8 +834,11 @@ mod portable {
             ),
             (chains(wrapped), vec![1, 2, 5, 6, 7]),
         ] {
-            let (negated, count) = negations(base.clone());
-            shapes.push((negated, (count % 2 == 0).then_some(expected)));
+            // A relation chain deeper than the CASE limit refuses negation.
+            if let Ok(negated) = base.clone().not() {
+                shapes.push((negated.clone(), None));
+                shapes.push((negated.not().unwrap(), Some(expected)));
+            }
             shapes.push((alternations(base).0, None));
         }
         for (policy, expected) in shapes {

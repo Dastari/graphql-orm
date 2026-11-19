@@ -105,7 +105,8 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     subscription_selection_unsupported_code: bool,
     /// Opt-in `extensions.outcome` on generated mutation root errors.
     mutation_error_outcome: bool,
-    /// Opt-in narrowing of GraphQL bulk-write targets by read visibility.
+    /// Narrowing of GraphQL bulk-write targets by read visibility. On by
+    /// default; it never turns on the SQL Server snapshot target selection.
     narrow_bulk_writes_to_read_visibility: bool,
     /// Opt-in SQL Server snapshot target selection for narrowed bulk writes.
     mssql_snapshot_bulk_write_targets: bool,
@@ -221,7 +222,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -259,7 +260,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -294,7 +295,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -329,7 +330,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -364,7 +365,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -402,7 +403,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -447,7 +448,7 @@ impl<B: OrmBackend> Database<B> {
             expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
@@ -2408,8 +2409,10 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// relation pages and search pages, to custom resolvers that resolve
     /// their page through
     /// [`ClientPaginationConfig::resolve_client_page`](crate::graphql::orm::ClientPaginationConfig::resolve_client_page),
-    /// and to Rust reads that take a `PageInput` (`EntityQuery::paginate`,
-    /// `EntitySearchQuery::paginate`). An offset set with a builder's own
+    /// and to Rust reads that take a `PageInput`: `EntityQuery::paginate`
+    /// followed by `fetch_connection*` (its `fetch_all` and `fetch_one` reads
+    /// do not check the offset), and `EntitySearchQuery::paginate` followed
+    /// by any fetch. An offset set with a builder's own
     /// `offset(n)`, including the search builders', is trusted code and is
     /// not bounded.
     pub fn max_page_offset(mut self, max_offset: Option<i64>) -> Self {
@@ -2472,8 +2475,11 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     }
 
     /// Narrow the target rows of generated GraphQL `updateMany` and
-    /// `deleteMany` to the caller's read visibility. Off by default, so bulk
-    /// writes select the same rows as before.
+    /// `deleteMany` to the caller's read visibility. On by default since the
+    /// breaking release; pass `false` to select targets as releases before it
+    /// did. The default does not enable
+    /// [`mssql_snapshot_bulk_write_targets`](Self::mssql_snapshot_bulk_write_targets),
+    /// which stays a separate opt-in.
     ///
     /// When on and the row policy declares no
     /// [`write_target_prefilter`](crate::graphql::orm::RowPolicy::write_target_prefilter),
@@ -2497,6 +2503,10 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// write, so a policy that returns `Err` for some callers (for example
     /// write-only ones) must return `CallbackOnly` instead to keep their bulk
     /// writes working. Single-row and repository writes are unaffected.
+    ///
+    /// When off, a bulk write selects every row its filter matches and the
+    /// row callbacks classify each one, so rows outside the caller's read
+    /// visibility are locked and passed to the callbacks.
     pub fn narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
         self.database.narrow_bulk_writes_to_read_visibility = enabled;
         self

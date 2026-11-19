@@ -1979,7 +1979,7 @@ fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> 
             }
         }
         TemporalKind::Unparsed => Err(sqlx::Error::Encode(
-            "SQL Server native temporal parameters require an ISO date or timestamp".into(),
+            "SQL Server native temporal parameters require an ISO date or an ISO timestamp with seconds".into(),
         )),
         _ => Err(sqlx::Error::Encode(
             "value is outside the SQL Server date or datetime2 range".into(),

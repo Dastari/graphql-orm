@@ -921,8 +921,13 @@ where
     }
 
     /// Apply runtime pagination defaults and caps to connection-style search execution.
+    ///
+    /// The client page-offset maximum already set on this search (from the
+    /// `Database` it was built on) is kept, because a `PaginationConfig`
+    /// carries none; replace it with [`Self::client_pagination_config`].
     pub fn pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
-        self.pagination_config = pagination_config.into();
+        self.pagination_config = super::ClientPaginationConfig::from(pagination_config)
+            .with_max_offset(self.pagination_config.max_offset());
         self
     }
 

@@ -675,6 +675,38 @@ async fn sqlite_host_search_pages_are_exact_or_refused() -> Result<(), Box<dyn s
     );
     assert_eq!(search(3).fetch_connection().await?.edges.len(), 3);
     assert_eq!(search(3).fetch_all().await?.len(), 3);
+
+    // Replacing the page limits keeps the client page-offset maximum the
+    // search already had: `pagination_config` used to drop it.
+    let bounded = |offset: i64| {
+        SearchArticle::search(
+            db.pool(),
+            SearchInput {
+                query: "melbourne".to_string(),
+                mode: Some(SearchMode::Plain),
+                min_score: None,
+            },
+        )
+        .client_pagination_config(
+            graphql_orm::graphql::orm::ClientPaginationConfig::from(PaginationConfig::secure())
+                .with_max_offset(Some(1)),
+        )
+        .pagination_config(PaginationConfig::secure().with_max_limit(Some(3)))
+        .paginate(PageInput {
+            limit: Some(3),
+            offset: Some(offset),
+        })
+    };
+    assert_eq!(bounded(1).fetch_connection().await?.edges.len(), 2);
+    assert_eq!(
+        code(
+            bounded(2)
+                .fetch_connection()
+                .await
+                .expect_err("offset above the kept maximum")
+        ),
+        OrmErrorCode::PageLimitExceeded
+    );
     Ok(())
 }
 

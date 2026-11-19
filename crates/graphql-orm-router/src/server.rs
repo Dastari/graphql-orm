@@ -1311,6 +1311,15 @@ impl RouterPlugin for StaticGraphPlugin {
         // inbound request deduplication staying disabled (see
         // `build_hive_config`), so no request can receive another request's
         // execution error.
+        //
+        // Hive's subscription branch runs neither the execute hook nor the
+        // subgraph request hook, so `ExecutionStarted` is never set for a
+        // subscription and its absence proves nothing there. The only
+        // subscriptions Hive serves arrive on the private gateway endpoint
+        // (`TrustedInternalSubscription`); they are never marked here. Their
+        // `error` frames are classified by code instead, in
+        // `outcome::mark_hive_websocket_refusal`, whose unit test pins that
+        // execution codes stay unmarked.
         if self.runtime.refusal_outcome
             && payload.context.get_ref::<ExecutionStarted>().is_none()
             && payload
@@ -2113,5 +2122,31 @@ mod tests {
             serialized["traffic_shaping"]["router"]["dedupe"]["enabled"],
             false
         );
+    }
+
+    /// The refusal outcome (#764) marks an HTTP error `refused` when the
+    /// request never reached the execute stage. With Hive's inbound request
+    /// deduplication on, a request could receive another request's execution
+    /// error without having executed itself, and that error would be marked
+    /// `refused` after a write ran. Deduplication therefore stays disabled in
+    /// every configuration, with and without the refusal outcome.
+    #[test]
+    fn inbound_deduplication_stays_disabled_for_the_refusal_outcome() {
+        for refusal_outcome in [false, true] {
+            let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .allow_plaintext_http(true)
+                .with_subgraph(StaticSubgraph::new(
+                    "status",
+                    "http://status.test/graphql",
+                    "http://status.test/sdl",
+                ))
+                .with_refusal_outcome(refusal_outcome);
+            let hive = build_hive_config(&config, 7, None).unwrap();
+            let serialized = serde_json::to_value(hive).unwrap();
+            assert_eq!(
+                serialized["traffic_shaping"]["router"]["dedupe"]["enabled"], false,
+                "refusal outcome {refusal_outcome}: inbound deduplication must stay disabled (#764)"
+            );
+        }
     }
 }
