@@ -102,52 +102,38 @@ fn emitted_sql_and_bind_order_are_pinned() {
     let backend = graphql_orm::graphql::orm::current_backend();
     let mut actual = String::new();
     let mut row_bound = String::new();
+    // The row a read predicate renders the filter for: a table path or a
+    // row alias. The filter writes it before each column; it is never
+    // searched for in the SQL.
+    let row = "the_row";
     for filter in [scalar, empty, nested] {
+        let unqualified = filter.to_sql_conditions();
         actual.push_str(&format!(
             "{:?}\n{:?}\n",
-            filter.to_sql_conditions(),
+            unqualified,
             filter.to_sql_prefilter_conditions(backend)
         ));
-        row_bound.push_str(&format!(
-            "{:?}\n",
-            conditions(filter.to_row_bound_filter_expression())
-        ));
+        let bound = filter.row_bound_filter().unwrap().conditions(row);
+        row_bound.push_str(&format!("{bound:?}\n"));
+        // The row-bound form, which read predicates and related-row
+        // filters render (#796), differs only by naming the row and
+        // delimiting each column.
+        let plain = |conditions: &[String]| {
+            conditions
+                .iter()
+                .map(|condition| {
+                    condition
+                        .replace(&format!("{row}."), "")
+                        .replace(['"', '[', ']'], "")
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(bound.0.iter().any(|condition| condition.contains(row)));
+        assert_eq!(plain(&bound.0), plain(&unqualified.0));
+        assert_eq!(bound.1, unqualified.1);
     }
     pin("filter_sql", backend, &actual);
     pin("filter_sql_row_bound", backend, &row_bound);
-
-    // The row-bound form, which read predicates and related-row filters
-    // render (#796), differs only by the row qualifier on each column, which
-    // the predicate binds to a row alias or, at the root, the table.
-    let table = format!("{}.", graphql_orm::graphql::orm::READ_PREDICATE_ROW);
-    assert!(row_bound.contains(&table), "{row_bound}");
-    let unqualified = actual
-        .lines()
-        .step_by(2)
-        .map(|line| format!("{line}\n"))
-        .collect::<String>();
-    assert_eq!(row_bound.replace(&table, ""), unqualified);
-}
-
-/// The conditions and bind values of a generated filter expression, in the
-/// shape `to_sql_conditions` returns.
-fn conditions(expression: Option<FilterExpression>) -> (Vec<String>, Vec<SqlValue>) {
-    let raw = |expression: FilterExpression| match expression {
-        FilterExpression::Raw { clause, values } => (clause, values),
-        other => panic!("generated filters render raw conditions: {other:?}"),
-    };
-    let parts = match expression {
-        None => Vec::new(),
-        Some(FilterExpression::And(children)) => children.into_iter().map(raw).collect(),
-        Some(expression) => vec![raw(expression)],
-    };
-    let mut conditions = Vec::new();
-    let mut values = Vec::new();
-    for (clause, clause_values) in parts {
-        conditions.push(clause);
-        values.extend(clause_values);
-    }
-    (conditions, values)
 }
 
 fn pin(name: &str, backend: graphql_orm::graphql::orm::DatabaseBackend, actual: &str) {

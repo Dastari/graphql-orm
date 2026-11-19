@@ -1,0 +1,17 @@
+error: table `__gom_row_1` is not allowed: table names starting with `__gom_` are reserved for the row aliases and common table expressions that generated read-policy SQL renders
+ --> tests/ui/table_reserved_prefix.rs:9:8
+  |
+9 | struct AliasRow {
+  |        ^^^^^^^^
+
+error: table `main."__GOM_Closure_1"` is not allowed: table names starting with `__gom_` are reserved for the row aliases and common table expressions that generated read-policy SQL renders
+  --> tests/ui/table_reserved_prefix.rs:17:8
+   |
+17 | struct ClosureRow {
+   |        ^^^^^^^^^^
+
+error: table `__gom_orders` is not allowed: table names starting with `__gom_` are reserved for the row aliases and common table expressions that generated read-policy SQL renders
+  --> tests/ui/table_reserved_prefix.rs:25:8
+   |
+25 | struct OrderRow {
+   |        ^^^^^^^^

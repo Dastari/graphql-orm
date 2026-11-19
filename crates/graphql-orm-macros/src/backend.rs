@@ -621,6 +621,22 @@ pub(crate) fn backend_render_identifier_path(backend: BackendKind, identifier: &
         .join(".")
 }
 
+/// Whether a declared table path's own name starts with `__gom_`, compared
+/// without ASCII case and with or without delimiters. Read-policy SQL
+/// renders row aliases and common table expressions with that prefix, and a
+/// table of the same name could take an alias's place or be shadowed by an
+/// expression (#796).
+pub(crate) fn backend_table_name_is_reserved(backend: BackendKind, table: &str) -> bool {
+    identifier_path_parts(backend, table)
+        .filter(|part| !part.is_empty())
+        .last()
+        .is_some_and(|part| {
+            part.trim_start_matches(['"', '[', '`'])
+                .to_ascii_lowercase()
+                .starts_with("__gom_")
+        })
+}
+
 /// The runtime `DatabaseBackend` value for generated code that renders a
 /// name only known at runtime, such as another entity's table.
 pub(crate) fn backend_dialect_tokens(backend: BackendKind) -> proc_macro2::TokenStream {

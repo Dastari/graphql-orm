@@ -18,10 +18,13 @@ the row it describes (#796):
 - at the root of a statement, through the entity's table path, such as
   `"records"."owner_id" = ?`;
 - inside relation, `not_related`, closure and count subqueries, through an
-  alias no other scope uses, such as `__gom_row_1."owner_id"`.
+  alias that no table or alias in scope has, such as
+  `__gom_row_1."owner_id"`.
 
-Generated SQL text changes, but ordinary policies admit exactly the same
-rows.
+The governed row is a value inside the predicate, not text: the ORM's own
+predicates and generated filters never have a row name substituted into
+their SQL. Generated SQL text changes, but ordinary policies admit exactly
+the same rows.
 
 - **Missing physical columns fail the read. Action needed** only if a
   table lacks a column that a read policy names, for example after schema
@@ -32,20 +35,52 @@ rows.
   column of that name, so the policy was evaluated against the wrong row.
   The read now fails instead. Apply the pending migration.
 - **Hand-written `ReadVisibilityFilter`. Action needed** if you implement
-  `ReadVisibilityFilter` yourself and pass the filter to
-  `ReadPredicate::from_filter` for a relation, `not_related` or closure
-  target. Its conditions keep the original hazard, because the ORM cannot
-  rewrite them: an unqualified column the table lacks still resolves against
-  an outer row. Either:
+  `ReadVisibilityFilter` yourself and build a policy from it with
+  `ReadPredicate::from_filter`. By default its conditions stay unqualified
+  and keep the original hazard, because the ORM cannot rewrite them: a
+  column the table lacks still resolves against an outer row wherever the
+  policy is evaluated inside a correlated subquery. That happens in two
+  ways:
+  - you pass the predicate as a relation, `not_related` or closure target;
+  - the predicate is an entity's own read policy
+    (`RowPolicy::read_visibility`), and a request uses a generated
+    related-row filter (`where: { relation: [...] }`) or a relation-count
+    ordering (`orderBy: [{ <Relation>Count: DESC }]`) whose target is that
+    entity. Both embed the target's policy in a subquery of the source
+    statement, without any call in your code.
+
+  A filter used only as the policy of an entity that no relation filter or
+  count ordering targets, and never as a relation or closure target, is
+  unaffected. Otherwise either:
   - use the generated where input for the entity, which binds every column;
     or
-  - override `to_row_bound_filter_expression` to write each column as
-    `READ_PREDICATE_ROW.column` (`format!("{READ_PREDICATE_ROW}.{column}")`,
-    with the column quoted), and override `table_name` to return the
-    entity's table. `from_filter` refuses a filter that writes the
-    qualifier without naming its table.
+  - write each column as `__gom_self.<column>` (`READ_PREDICATE_ROW`, as
+    a bare word followed by a dot) and override `table_name` to return the
+    entity's table. The default `to_row_bound_filter_expression` returns
+    `to_filter_expression`, so writing the qualifier there is enough;
+    override it only to keep another form for other uses.
+- **Hand-written policy SQL is read with the backend's lexical rules.
+  Action needed** only for a hand-written `ReadVisibilityFilter` whose SQL
+  one of these refusals matches. `from_filter`, related-row filters and
+  count orderings now read that SQL once, with the backend's own rules for
+  comments, strings, PostgreSQL `E'...'` and dollar-quoted strings, and
+  delimited identifiers (`[...]` is an identifier on SQL Server and SQLite
+  and an array subscript on PostgreSQL). The qualifier is recognised only
+  as a bare word followed by a dot, never inside quoted text or a comment,
+  and never after a dot, where it is a column of that name. A filter is
+  refused with `AUTHORIZATION_MISCONFIGURED` when:
+  - it writes the qualifier but `table_name` returns `None`;
+  - it writes the bare word `__gom_self` with no dot after it;
+  - a string, delimited identifier, block comment or dollar-quoted string
+    is not closed, or a line comment runs to the end of a clause (end it
+    with a newline, or use a block comment).
 
-  Filters used only at the root of a statement are unaffected.
+  An ordinary PostgreSQL string is read with `standard_conforming_strings`
+  on, the server default, which generated SQL such as `ESCAPE '\'` already
+  requires.
+
+  An apostrophe inside a comment no longer hides a qualifier written after
+  it, and text inside a dollar-quoted string is no longer rewritten.
 - **Large policies. Action needed** only for a policy near the 1 MiB
   rendered-size budget (`READ_PREDICATE_MAX_RENDERED_BYTES`) or the
   per-statement relation budget. Each column term is longer by its
@@ -54,13 +89,26 @@ rows.
   `AUTHORIZATION_MISCONFIGURED` when it is built. Express a long list of
   values on one column as `from_filter` with an `in_list`, which writes the
   qualifier once.
-- **Tables named like internal aliases. Action needed** only if an entity's
-  table is named like a read-predicate row alias: `__gom_row_N`,
-  `__gom_visibility_N`, or `__gom_closure_N_t`, `_k` or `_hN`. Relations,
-  closures and count orderings over it are now refused with
-  `AUTHORIZATION_MISCONFIGURED`; rename the table. A quoted name that only
-  contains such text, such as `"__gom_closure_3"`, is accepted and no
-  longer affects closure limits.
+- **Table names starting with `__gom_` are reserved. Action needed** only
+  if an entity's table name starts with `__gom_`, in any case, quoted or
+  not, with or without a schema. Read-policy SQL renders row aliases and
+  closure expressions with that prefix (`__gom_row_N`,
+  `__gom_visibility_N`, `__gom_closure_N` and names derived from them); a
+  table of such a name could take an alias's place or be shadowed by a
+  closure's common table expression. The entity derive now refuses the
+  table with a compile error. A hand-built `Entity` over such a table is
+  refused with `AUTHORIZATION_MISCONFIGURED` by every read-predicate
+  constructor, related-row filter and count ordering. Rename the table. A
+  relation-count ordering is also refused when the source or target table
+  is named `__graphql_orm_order_relation`, the alias of the counted rows.
+  Other tables that hand-written policy SQL reads by such a name are
+  allowed: the ORM picks aliases and closure names that differ from every
+  name the policy mentions.
+- **SQLite bracketed names in trusted SQL. Action needed** only if a
+  trusted SQL fragment for SQLite holds `]]` inside a bracketed name.
+  Placeholder counting now closes a SQLite `[...]` name at its first `]`,
+  as SQLite does; it used to read `]]` as an escaped bracket, which only
+  SQL Server has. Fragments without `]]` count the same.
 
 ## 0.182.0 to 0.183.0: install documentation
 

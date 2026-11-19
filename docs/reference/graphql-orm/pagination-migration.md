@@ -158,8 +158,8 @@ from a generated filter, and relation keys and closure pointers:
   `"records"."owner_id" > ?`.
 - Relation, `not_related` and closure predicates, generated related-row
   filters and relation-count orderings evaluate a target's predicate inside
-  a correlated subquery. There the target row has an alias that no
-  enclosing scope uses, such as `__gom_row_1`, and its columns are written
+  a correlated subquery. There the target row has an alias that no table
+  or alias in scope has, such as `__gom_row_1`, and its columns are written
   through it.
 
 So a column that the target table does not physically have, after schema
@@ -169,12 +169,25 @@ would not be enough on SQLite, which keeps searching outer scopes for
 another table exposing the same name (#796). The metadata check only covers
 `Entity::columns()`, so keep the physical schema migrated.
 
-A hand-written `ReadVisibilityFilter` renders unqualified columns, which
-keep that hazard inside a relation or closure target. Use the generated
-where input, or override `to_row_bound_filter_expression` to qualify each
-column with `READ_PREDICATE_ROW` and `table_name` to return the table.
-Relations and closures over a table named like a row alias (`__gom_row_N`)
-are refused.
+The governed row is a value inside the predicate, not text. Generated where
+inputs render `row.<column>` for the row they are given, with the column
+delimited as generated DDL and DML address it, so a column may have any
+name. Aliases and closure names differ from every name the policy mentions.
+Table names starting with `__gom_` are reserved for them: the entity derive
+refuses such a table, and read predicates refuse a hand-built entity over
+one.
+
+A hand-written `ReadVisibilityFilter` renders unqualified columns by
+default, which keep that hazard wherever its predicate is evaluated in a
+subquery: as a relation, `not_related` or closure target, or as a target
+entity's own policy under a generated related-row filter or relation-count
+ordering. Use the generated where input, or write each column as
+`__gom_self.<column>` (`READ_PREDICATE_ROW`) and return the table from
+`table_name`. Hand-written SQL is read with the backend's lexical rules:
+the qualifier is a bare word followed by a dot, outside strings, delimited
+identifiers and comments. SQL that cannot be read with certainty, such as
+an unclosed string or a line comment that runs to the end of a clause, is
+refused with `AUTHORIZATION_MISCONFIGURED`.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
 

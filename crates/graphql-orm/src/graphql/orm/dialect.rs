@@ -213,40 +213,106 @@ mod default_canonicalization_tests {
     }
 }
 
-/// Byte ranges of the bind placeholders in a SQL fragment, in order.
+/// One lexical token of a SQL fragment: see [`scan_sql`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SqlTokenKind {
+    /// A bare word: an identifier, keyword, number, or (on SQL Server and
+    /// SQLite) a `@name`, `#name`, `:name` variable or parameter.
+    Word,
+    /// A delimited identifier: `"..."`, and per dialect `` `...` `` or
+    /// `[...]`.
+    QuotedIdentifier,
+    /// A string constant: `'...'`, PostgreSQL `E'...'` or `$tag$...$tag$`.
+    StringLiteral,
+    /// A line or block comment.
+    Comment,
+    /// A bind placeholder: `?`, `?<digits>`, `$<digits>` or `@p<digits>`.
+    Placeholder,
+    /// Any other single byte outside whitespace.
+    Symbol,
+}
+
+/// A token's kind and byte range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SqlToken {
+    pub(crate) kind: SqlTokenKind,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+/// A construct [`scan_sql`] could not read with certainty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SqlLexError {
+    /// A string constant with no closing quote.
+    UnterminatedString,
+    /// A delimited identifier with no closing delimiter.
+    UnterminatedIdentifier,
+    /// A block comment with no closing `*/`.
+    UnterminatedComment,
+    /// A line comment that runs to the end of the fragment, so it would
+    /// comment out whatever SQL follows the fragment.
+    OpenLineComment,
+    /// A PostgreSQL dollar-quoted string with no closing delimiter.
+    UnterminatedDollarQuote,
+}
+
+/// The one dialect-aware lexical pass over a SQL fragment. Placeholder
+/// counting and rebasing, and the read-predicate row binder, qualifier
+/// check, alias allocator and nesting measure, all read SQL through it, so
+/// they agree on what is code and what is quoted text.
 ///
-/// This is the one lexical pass every placeholder consumer shares: counting a
-/// fragment's binds and rebasing them must agree, or values are attached to
-/// the wrong clause.
+/// `visit` is called with each token in order; whitespace is skipped. Per
+/// dialect it reads:
 ///
-/// A placeholder is `?` (with optional trailing digits), `$<digits>` or
-/// `@p<digits>` (either case). None is recognised inside a string literal, a
-/// quoted identifier, a line or block comment, or a PostgreSQL dollar-quoted
-/// string, and `$`/`@p` followed by no digits, or attached to an identifier
-/// (`col$1`, `@page`, `@@p1`), is ordinary text. `[...]` quotes an identifier
-/// on SQL Server and SQLite and is an array subscript on PostgreSQL.
-pub(crate) fn placeholder_spans(backend: DatabaseBackend, sql: &str) -> Vec<(usize, usize)> {
+/// - line comments (`-- ...`) and block comments, nested on PostgreSQL and
+///   SQL Server and ending at the first `*/` on SQLite;
+/// - `'...'` strings with doubled quotes, PostgreSQL `E'...'` escape strings
+///   (backslash escapes) and `$tag$...$tag$` dollar-quoted strings. An
+///   ordinary PostgreSQL string is read with `standard_conforming_strings`
+///   on, the server default, which generated SQL such as `ESCAPE '\'`
+///   already requires: a backslash in it is an ordinary character;
+/// - `"..."` identifiers with doubled quotes, SQL Server `[...]` identifiers
+///   (`]]` escapes), SQLite `[...]` identifiers (closed by the first `]`) and
+///   SQLite backticks. On PostgreSQL `[` is an array subscript, a symbol;
+/// - placeholders: `?` (with optional trailing digits), `$<digits>` or
+///   `@p<digits>` (either case). `$`/`@p` followed by no digits, or attached
+///   to an identifier (`col$1`, `@page`, `@@p1`), is ordinary text.
+///
+/// A construct that cannot be read with certainty is still consumed, to the
+/// end of the fragment when it is unterminated, and the first such construct
+/// is returned as the error. Placeholder consumers ignore it; read
+/// predicates refuse the fragment.
+pub(crate) fn scan_sql(
+    backend: DatabaseBackend,
+    sql: &str,
+    mut visit: impl FnMut(SqlToken),
+) -> Result<(), SqlLexError> {
     let bytes = sql.as_bytes();
     let postgres = backend == DatabaseBackend::Postgres;
-    let mut spans = Vec::new();
-    let mut i = 0usize;
-    // Skip to just after the closing delimiter; a doubled one is an escape.
-    let skip_quoted = |mut i: usize, close: u8, backslash_escapes: bool| {
+    let mssql = backend == DatabaseBackend::Mssql;
+    let sqlite = backend == DatabaseBackend::Sqlite;
+    let mut uncertain: Option<SqlLexError> = None;
+    let mut flag = |error: SqlLexError| {
+        uncertain.get_or_insert(error);
+    };
+    // Skip to just after the closing delimiter; a doubled one is an escape
+    // when `doubled`. The second value is false when no delimiter closed it.
+    let skip_quoted = |mut i: usize, close: u8, doubled: bool, backslash_escapes: bool| {
         while i < bytes.len() {
             if backslash_escapes && bytes[i] == b'\\' {
                 i = (i + 2).min(bytes.len());
             } else if bytes[i] == close {
                 i += 1;
-                if bytes.get(i) == Some(&close) {
+                if doubled && bytes.get(i) == Some(&close) {
                     i += 1;
                 } else {
-                    break;
+                    return (i, true);
                 }
             } else {
                 i += 1;
             }
         }
-        i
+        (i, false)
     };
     let digits_end = |mut i: usize| {
         while bytes.get(i).is_some_and(u8::is_ascii_digit) {
@@ -254,33 +320,75 @@ pub(crate) fn placeholder_spans(backend: DatabaseBackend, sql: &str) -> Vec<(usi
         }
         i
     };
+    // SQL Server reads `@` and `#` inside identifiers and variables.
+    let word_byte =
+        |byte: u8| postgres_identifier_byte(byte) || (mssql && matches!(byte, b'@' | b'#'));
+    let word_end = |mut i: usize| {
+        while bytes.get(i).is_some_and(|byte| word_byte(*byte)) {
+            i += 1;
+        }
+        i
+    };
+    let mut i = 0usize;
     while i < bytes.len() {
+        let start = i;
         let attached = i > 0 && postgres_identifier_byte(bytes[i - 1]);
-        match bytes[i] {
+        let kind = match bytes[i] {
+            byte if byte.is_ascii_whitespace() => {
+                i += 1;
+                continue;
+            }
             b'\'' => {
                 let escaped = postgres
                     && i > 0
                     && matches!(bytes[i - 1], b'e' | b'E')
                     && (i == 1 || !postgres_identifier_byte(bytes[i - 2]));
-                i = skip_quoted(i + 1, b'\'', escaped);
+                let (end, closed) = skip_quoted(i + 1, b'\'', true, escaped);
+                if !closed {
+                    flag(SqlLexError::UnterminatedString);
+                }
+                i = end;
+                SqlTokenKind::StringLiteral
             }
-            b'"' => i = skip_quoted(i + 1, b'"', false),
+            b'"' => {
+                let (end, closed) = skip_quoted(i + 1, b'"', true, false);
+                if !closed {
+                    flag(SqlLexError::UnterminatedIdentifier);
+                }
+                i = end;
+                SqlTokenKind::QuotedIdentifier
+            }
             b'`' if matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Mysql) => {
-                i = skip_quoted(i + 1, b'`', false);
+                let (end, closed) = skip_quoted(i + 1, b'`', true, false);
+                if !closed {
+                    flag(SqlLexError::UnterminatedIdentifier);
+                }
+                i = end;
+                SqlTokenKind::QuotedIdentifier
             }
-            b'[' if matches!(backend, DatabaseBackend::Mssql | DatabaseBackend::Sqlite) => {
-                i = skip_quoted(i + 1, b']', false);
+            b'[' if mssql || sqlite => {
+                // SQL Server escapes `]` as `]]`; SQLite closes at the first.
+                let (end, closed) = skip_quoted(i + 1, b']', mssql, false);
+                if !closed {
+                    flag(SqlLexError::UnterminatedIdentifier);
+                }
+                i = end;
+                SqlTokenKind::QuotedIdentifier
             }
             b'-' if bytes.get(i + 1) == Some(&b'-') => {
                 i += 2;
                 while i < bytes.len() && !matches!(bytes[i], b'\n' | b'\r') {
                     i += 1;
                 }
+                if i == bytes.len() {
+                    flag(SqlLexError::OpenLineComment);
+                }
+                SqlTokenKind::Comment
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
                 // PostgreSQL and SQL Server nest block comments; SQLite ends
                 // one at the first `*/`.
-                let nests = backend != DatabaseBackend::Sqlite;
+                let nests = !sqlite;
                 i += 2;
                 let mut depth = 1usize;
                 while i < bytes.len() && depth > 0 {
@@ -294,66 +402,121 @@ pub(crate) fn placeholder_spans(backend: DatabaseBackend, sql: &str) -> Vec<(usi
                         i += 1;
                     }
                 }
+                if depth > 0 {
+                    flag(SqlLexError::UnterminatedComment);
+                }
+                SqlTokenKind::Comment
             }
             b'?' => {
-                let end = digits_end(i + 1);
-                spans.push((i, end));
-                i = end;
+                i = digits_end(i + 1);
+                SqlTokenKind::Placeholder
             }
             b'$' if !attached => {
                 let end = digits_end(i + 1);
                 if end > i + 1 {
-                    spans.push((i, end));
                     i = end;
-                    continue;
-                }
-                i += 1;
-                if !postgres {
-                    continue;
-                }
-                // A dollar-quoted string: `$$ ... $$` or `$tag$ ... $tag$`.
-                let mut tag_end = i;
-                if bytes
-                    .get(tag_end)
-                    .is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == b'_' || *ch >= 0x80)
-                {
-                    tag_end += 1;
-                    while bytes
+                    SqlTokenKind::Placeholder
+                } else {
+                    // A dollar-quoted string: `$$ ... $$` or `$tag$ ... $tag$`.
+                    let mut tag_end = i + 1;
+                    if bytes
                         .get(tag_end)
-                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'_' || *ch >= 0x80)
+                        .is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == b'_' || *ch >= 0x80)
                     {
                         tag_end += 1;
+                        while bytes.get(tag_end).is_some_and(|ch| {
+                            ch.is_ascii_alphanumeric() || *ch == b'_' || *ch >= 0x80
+                        }) {
+                            tag_end += 1;
+                        }
                     }
-                }
-                if bytes.get(tag_end) == Some(&b'$') {
-                    let delimiter = &sql[i - 1..=tag_end];
-                    let body = tag_end + 1;
-                    i = sql[body..]
-                        .find(delimiter)
-                        .map_or(bytes.len(), |offset| body + offset + delimiter.len());
+                    if postgres && bytes.get(tag_end) == Some(&b'$') {
+                        let delimiter = &sql[i..=tag_end];
+                        let body = tag_end + 1;
+                        i = match sql[body..].find(delimiter) {
+                            Some(offset) => body + offset + delimiter.len(),
+                            None => {
+                                flag(SqlLexError::UnterminatedDollarQuote);
+                                bytes.len()
+                            }
+                        };
+                        SqlTokenKind::StringLiteral
+                    } else {
+                        // `$name`, a SQLite parameter or SQL Server
+                        // pseudo-column: one word, never a bare identifier.
+                        i = word_end(i + 1);
+                        if i == start + 1 {
+                            SqlTokenKind::Symbol
+                        } else {
+                            SqlTokenKind::Word
+                        }
+                    }
                 }
             }
             b'@' if !attached
                 && (i == 0 || bytes[i - 1] != b'@')
                 && bytes
                     .get(i + 1)
-                    .is_some_and(|ch| ch.eq_ignore_ascii_case(&b'p')) =>
+                    .is_some_and(|ch| ch.eq_ignore_ascii_case(&b'p'))
+                && digits_end(i + 2) > i + 2
+                && !bytes
+                    .get(digits_end(i + 2))
+                    .is_some_and(|ch| postgres_identifier_byte(*ch)) =>
             {
-                let end = digits_end(i + 2);
-                if end > i + 2
-                    && !bytes
-                        .get(end)
-                        .is_some_and(|ch| postgres_identifier_byte(*ch))
-                {
-                    spans.push((i, end));
-                    i = end;
-                } else {
+                i = digits_end(i + 2);
+                SqlTokenKind::Placeholder
+            }
+            // A SQLite `@name` or `:name` parameter is one word, so the
+            // name is never read as a bare identifier.
+            b'@' | b':'
+                if sqlite
+                    && (i == 0 || bytes[i - 1] != bytes[i])
+                    && bytes
+                        .get(i + 1)
+                        .is_some_and(|byte| postgres_identifier_byte(*byte)) =>
+            {
+                i = word_end(i + 1);
+                SqlTokenKind::Word
+            }
+            byte if word_byte(byte) => {
+                i = word_end(i);
+                SqlTokenKind::Word
+            }
+            _ => {
+                // One whole character, so a token never splits UTF-8.
+                i += 1;
+                while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
                     i += 1;
                 }
+                SqlTokenKind::Symbol
             }
-            _ => i += 1,
-        }
+        };
+        visit(SqlToken {
+            kind,
+            start,
+            end: i,
+        });
     }
+    match uncertain {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Byte ranges of the bind placeholders in a SQL fragment, in order.
+///
+/// This is the one lexical pass every placeholder consumer shares: counting a
+/// fragment's binds and rebasing them must agree, or values are attached to
+/// the wrong clause. See [`scan_sql`] for what is read as quoted text.
+pub(crate) fn placeholder_spans(backend: DatabaseBackend, sql: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    // An unterminated construct runs to the end of the fragment; the
+    // placeholders before it are still the fragment's binds.
+    let _ = scan_sql(backend, sql, |token| {
+        if token.kind == SqlTokenKind::Placeholder {
+            spans.push((token.start, token.end));
+        }
+    });
     spans
 }
 
@@ -503,6 +666,242 @@ fn postgres_identifier_byte(byte: u8) -> bool {
 }
 
 #[cfg(test)]
+mod sql_lexer_tests {
+    use super::DatabaseBackend::{self, Mssql, Postgres, Sqlite};
+    use super::{SqlLexError, SqlTokenKind, scan_sql};
+
+    /// The bare words of `sql`, and whether it was read with certainty.
+    fn words(backend: DatabaseBackend, sql: &str) -> (Vec<&str>, Result<(), SqlLexError>) {
+        let mut words = Vec::new();
+        let result = scan_sql(backend, sql, |token| {
+            if token.kind == SqlTokenKind::Word {
+                words.push(&sql[token.start..token.end]);
+            }
+        });
+        (words, result)
+    }
+
+    fn kinds(backend: DatabaseBackend, sql: &str) -> Vec<(SqlTokenKind, &str)> {
+        let mut tokens = Vec::new();
+        scan_sql(backend, sql, |token| {
+            tokens.push((token.kind, &sql[token.start..token.end]));
+        })
+        .unwrap();
+        tokens
+    }
+
+    const ALL: [DatabaseBackend; 3] = [Sqlite, Postgres, Mssql];
+
+    #[test]
+    fn comments_hide_their_text_and_nothing_after_them() {
+        for backend in ALL {
+            // An apostrophe in a comment opens no string.
+            assert_eq!(
+                words(backend, "a -- it's\n AND b"),
+                (vec!["a", "AND", "b"], Ok(())),
+                "{backend:?}"
+            );
+            assert_eq!(
+                words(backend, "a /* it's */ AND b"),
+                (vec!["a", "AND", "b"], Ok(())),
+                "{backend:?}"
+            );
+            assert_eq!(
+                words(backend, "a -- runs to the end"),
+                (vec!["a"], Err(SqlLexError::OpenLineComment)),
+                "{backend:?}"
+            );
+            assert_eq!(
+                words(backend, "a /* never closed"),
+                (vec!["a"], Err(SqlLexError::UnterminatedComment)),
+                "{backend:?}"
+            );
+        }
+        // PostgreSQL and SQL Server nest block comments.
+        for backend in [Postgres, Mssql] {
+            assert_eq!(
+                words(backend, "a /* x /* it's */ y */ b"),
+                (vec!["a", "b"], Ok(())),
+                "{backend:?}"
+            );
+            assert_eq!(
+                words(backend, "a /* x /* y */ b"),
+                (vec!["a"], Err(SqlLexError::UnterminatedComment)),
+                "{backend:?}"
+            );
+        }
+        // SQLite ends one at the first `*/`.
+        assert_eq!(words(Sqlite, "a /* x /* y */ b"), (vec!["a", "b"], Ok(())));
+    }
+
+    #[test]
+    fn strings_end_at_their_own_quote() {
+        for backend in ALL {
+            assert_eq!(
+                words(backend, "a = 'it''s -- b /* c' AND d"),
+                (vec!["a", "AND", "d"], Ok(())),
+                "{backend:?}"
+            );
+            assert_eq!(
+                words(backend, "a = 'open AND d"),
+                (vec!["a"], Err(SqlLexError::UnterminatedString)),
+                "{backend:?}"
+            );
+        }
+        // A PostgreSQL escape string reads `\'` as a quote character.
+        assert_eq!(
+            words(Postgres, r"a = E'x\' b' AND d"),
+            (vec!["a", "E", "AND", "d"], Ok(()))
+        );
+        assert_eq!(
+            words(Postgres, r"a = e'x\\' AND d"),
+            (vec!["a", "e", "AND", "d"], Ok(()))
+        );
+        // Elsewhere a backslash is an ordinary character.
+        for backend in [Sqlite, Mssql] {
+            assert_eq!(
+                words(backend, r"a = E'x\' AND d"),
+                (vec!["a", "E", "AND", "d"], Ok(())),
+                "{backend:?}"
+            );
+        }
+        // An ordinary PostgreSQL string is read as the server reads it by
+        // default, and as generated `ESCAPE '\'` needs: no backslash escape.
+        assert_eq!(
+            words(Postgres, r"a LIKE b ESCAPE '\' AND d"),
+            (vec!["a", "LIKE", "b", "ESCAPE", "AND", "d"], Ok(()))
+        );
+    }
+
+    #[test]
+    fn postgres_dollar_quotes_are_strings() {
+        assert_eq!(
+            words(Postgres, "a = $$ it's b $$ AND c = $q$ d $$ e $q$ AND f"),
+            (vec!["a", "AND", "c", "AND", "f"], Ok(()))
+        );
+        assert_eq!(
+            words(Postgres, "a = $q$ never closed $$"),
+            (vec!["a"], Err(SqlLexError::UnterminatedDollarQuote))
+        );
+        assert_eq!(
+            kinds(Postgres, "$1 $q$x$q$"),
+            vec![
+                (SqlTokenKind::Placeholder, "$1"),
+                (SqlTokenKind::StringLiteral, "$q$x$q$"),
+            ]
+        );
+        // Not a quote on the other backends: `$q$` is one word.
+        for backend in [Sqlite, Mssql] {
+            assert_eq!(
+                words(backend, "a = $q$ b $q$"),
+                (vec!["a", "$q$", "b", "$q$"], Ok(())),
+                "{backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delimited_identifiers_follow_each_dialect() {
+        for backend in ALL {
+            assert_eq!(
+                words(backend, "\"a\"\"b -- c\" = d"),
+                (vec!["d"], Ok(())),
+                "{backend:?}"
+            );
+            assert_eq!(
+                words(backend, "\"open = d"),
+                (vec![], Err(SqlLexError::UnterminatedIdentifier)),
+                "{backend:?}"
+            );
+        }
+        // SQL Server brackets escape `]` as `]]`.
+        assert_eq!(words(Mssql, "[a]]b 'c] = d"), (vec!["d"], Ok(())));
+        assert_eq!(
+            words(Mssql, "[open = d"),
+            (vec![], Err(SqlLexError::UnterminatedIdentifier))
+        );
+        // SQLite brackets close at the first `]`.
+        assert_eq!(words(Sqlite, "[a 'b] = d"), (vec!["d"], Ok(())));
+        assert_eq!(words(Sqlite, "[a]]b = d"), (vec!["b", "d"], Ok(())));
+        // On PostgreSQL `[` subscripts an array.
+        assert_eq!(
+            words(Postgres, "tags[b] = d"),
+            (vec!["tags", "b", "d"], Ok(()))
+        );
+        assert_eq!(
+            kinds(Postgres, "t[1]"),
+            vec![
+                (SqlTokenKind::Word, "t"),
+                (SqlTokenKind::Symbol, "["),
+                (SqlTokenKind::Word, "1"),
+                (SqlTokenKind::Symbol, "]"),
+            ]
+        );
+        // SQLite backticks quote a name; elsewhere a backtick is a symbol.
+        assert_eq!(words(Sqlite, "`a``b 'c` = d"), (vec!["d"], Ok(())));
+        assert_eq!(
+            words(Sqlite, "`open = d"),
+            (vec![], Err(SqlLexError::UnterminatedIdentifier))
+        );
+        for backend in [Postgres, Mssql] {
+            assert_eq!(
+                words(backend, "`a` = d"),
+                (vec!["a", "d"], Ok(())),
+                "{backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn words_keep_their_prefixes_and_placeholders_stay_tokens() {
+        for backend in ALL {
+            assert_eq!(
+                kinds(backend, "a.b = ? AND c$1 = ?2"),
+                vec![
+                    (SqlTokenKind::Word, "a"),
+                    (SqlTokenKind::Symbol, "."),
+                    (SqlTokenKind::Word, "b"),
+                    (SqlTokenKind::Symbol, "="),
+                    (SqlTokenKind::Placeholder, "?"),
+                    (SqlTokenKind::Word, "AND"),
+                    (SqlTokenKind::Word, "c$1"),
+                    (SqlTokenKind::Symbol, "="),
+                    (SqlTokenKind::Placeholder, "?2"),
+                ],
+                "{backend:?}"
+            );
+            assert_eq!(
+                kinds(backend, "@p1 $2"),
+                vec![
+                    (SqlTokenKind::Placeholder, "@p1"),
+                    (SqlTokenKind::Placeholder, "$2"),
+                ],
+                "{backend:?}"
+            );
+        }
+        // A SQL Server variable or temporary table, and a SQLite named
+        // parameter, is one word with its prefix.
+        assert_eq!(
+            words(Mssql, "@name = #temp.x AND @@rowcount > 0").0,
+            vec!["@name", "#temp", "x", "AND", "@@rowcount", "0"]
+        );
+        assert_eq!(
+            words(Sqlite, "@name = :other AND $third").0,
+            vec!["@name", ":other", "AND", "$third"]
+        );
+        // On PostgreSQL `@` is an operator and `::` a cast.
+        assert_eq!(
+            words(Postgres, "@ name = x::text").0,
+            vec!["name", "x", "text"]
+        );
+        assert_eq!(
+            words(Postgres, "ünïcode = 'ü' AND b").0,
+            vec!["ünïcode", "AND", "b"]
+        );
+    }
+}
+
+#[cfg(test)]
 mod postgres_statement_tests {
     use super::{DatabaseBackend, normalize_postgres_statement, normalize_sql_placeholders};
 
@@ -562,7 +961,10 @@ mod postgres_statement_tests {
             ),
             ("col$1 = ? AND col@p1 = ?", &all, 2),
             // Brackets quote a name here ...
-            ("[what?] = ? AND [a]]$1] = ?", &[Sqlite, Mssql], 2),
+            ("[what?] = ? AND [a]]$1] = ?", &[Mssql], 2),
+            // ... and here, where the first `]` closes the name.
+            ("[what?] = ? AND [a$1] = ?", &[Sqlite], 2),
+            ("[what?] = ? AND [a]]$1] = ?", &[Sqlite], 3),
             // ... and subscript an array here.
             ("tags[?] = ? AND tags[$1] = $2", &[Postgres], 4),
             (
@@ -1345,16 +1747,43 @@ impl DatabaseBackend {
         self.quote_identifier(part)
     }
 
-    /// Generated filter support: a rendered filter column qualified by
-    /// `row`, as `row.column`. The column's last path part is kept as
-    /// rendered, so it names the same column as the unqualified form (#796).
+    /// Generated filter support: a rendered filter column of the row
+    /// `row`, as `row.<column>`, the column written with
+    /// [`Self::delimited_column_identifier`] (#796).
     #[doc(hidden)]
     pub fn row_bound_filter_column(self, row: &str, column: &str) -> String {
+        format!("{row}.{}", self.delimited_column_identifier(column))
+    }
+
+    /// The column a declared or rendered column path names, as one
+    /// delimited identifier that addresses exactly the column generated DDL
+    /// and DML address.
+    ///
+    /// Generated SQL writes a plain, non-reserved column bare, which
+    /// PostgreSQL folds to lower case; such a part is folded before it is
+    /// delimited, as [`Self::render_table_identifier_path`] does for
+    /// tables. An explicitly delimited or non-plain part keeps its case.
+    /// SQLite and SQL Server delimit the part as it is.
+    ///
+    /// ```
+    /// use graphql_orm::graphql::orm::DatabaseBackend;
+    ///
+    /// assert_eq!(DatabaseBackend::Sqlite.delimited_column_identifier("OwnerId"), "\"OwnerId\"");
+    /// assert_eq!(DatabaseBackend::Postgres.delimited_column_identifier("OwnerId"), "\"ownerid\"");
+    /// assert_eq!(DatabaseBackend::Postgres.delimited_column_identifier("\"OwnerId\""), "\"OwnerId\"");
+    /// assert_eq!(DatabaseBackend::Mssql.delimited_column_identifier("t.owner"), "[owner]");
+    /// ```
+    pub fn delimited_column_identifier(self, column: &str) -> String {
         let part = identifier_path_parts(self, column)
             .filter(|part| !part.is_empty())
             .last()
             .unwrap_or(column);
-        format!("{row}.{part}")
+        if self == Self::Postgres && !part.starts_with('"') && !self.identifier_needs_quoting(part)
+        {
+            self.quote_identifier(&part.to_ascii_lowercase())
+        } else {
+            self.quote_identifier(part)
+        }
     }
 
     fn identifier_needs_quoting(self, identifier: &str) -> bool {

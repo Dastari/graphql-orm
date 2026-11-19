@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
     graphql_entity(
         table = "bind_sources",
         plural = "BindSources",
+        aggregate = true,
         keyset = "id asc",
         default_sort = "id ASC"
     )
@@ -48,6 +49,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
         backend = "postgres",
         table = "bind_sources",
         plural = "BindSources",
+        aggregate = true,
         keyset = "id asc",
         default_sort = "id ASC"
     )
@@ -59,6 +61,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
         schema_policy = "external_writable",
         table = "bind_sources",
         plural = "BindSources",
+        aggregate = true,
         keyset = "id asc",
         default_sort = "id ASC"
     )
@@ -113,12 +116,58 @@ struct BindTarget {
     flag: Option<i32>,
 }
 
+/// Reads its source through a relation loader, under the source's policy.
+#[derive(
+    GraphQLEntity,
+    GraphQLRelations,
+    GraphQLOperations,
+    async_graphql::SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(table = "bind_owners", plural = "BindOwners", default_sort = "id ASC")
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "bind_owners",
+        plural = "BindOwners",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "bind_owners",
+        plural = "BindOwners",
+        default_sort = "id ASC"
+    )
+)]
+struct BindOwner {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    source_id: String,
+    #[graphql(skip)]
+    #[relation(target = "BindSource", from = "source_id", to = "id", emit_fk = false)]
+    source: Option<BindSource>,
+}
+
 #[cfg(feature = "sqlite")]
-schema_roots! { query_custom_ops: [], entities: [BindSource, BindTarget] }
+schema_roots! { query_custom_ops: [], entities: [BindSource, BindTarget, BindOwner] }
 #[cfg(feature = "postgres")]
-schema_roots! { backend: "postgres", query_custom_ops: [], entities: [BindSource, BindTarget] }
+schema_roots! { backend: "postgres", query_custom_ops: [], entities: [BindSource, BindTarget, BindOwner] }
 #[cfg(feature = "mssql")]
-schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [BindSource, BindTarget] }
+schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [BindSource, BindTarget, BindOwner] }
 
 type B = DefaultBackend;
 
@@ -230,6 +279,7 @@ impl RowPolicy<B> for Policy {
                     None => ReadVisibility::Unrestricted,
                 },
                 "BindTarget" => ReadVisibility::Complete(flag(ReadPredicateOp::Eq, 1)),
+                "BindOwner" => ReadVisibility::Unrestricted,
                 _ => ReadVisibility::CallbackOnly,
             })
         })
@@ -254,7 +304,7 @@ impl RowPolicy<B> for Policy {
         _: EntityAccessSurface,
         _: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async { Ok(true) })
     }
 }
 
@@ -292,7 +342,11 @@ async fn fixture() -> (Database<B>, Owned) {
         )
         .await
         .unwrap();
-        (Database::new(pool), owned)
+        // Writable, for the bulk writes below.
+        let db = Database::builder(pool)
+            .schema_policy(SchemaPolicy::ExternalWritable)
+            .build();
+        (db, owned)
     };
     for statement in [
         format!("CREATE TABLE bind_sources (id {TEXT} NOT NULL PRIMARY KEY, flag INT NULL)"),
@@ -303,15 +357,25 @@ async fn fixture() -> (Database<B>, Owned) {
             .to_owned(),
         "INSERT INTO bind_targets (id, source_id, up) VALUES ('t1', 's1', NULL), ('t2', 's2', 't1'), ('t3', 's3', 't2')"
             .to_owned(),
+        format!("CREATE TABLE bind_owners (id {TEXT} NOT NULL PRIMARY KEY, source_id {TEXT} NOT NULL)"),
+        "INSERT INTO bind_owners (id, source_id) VALUES ('o1', 's1'), ('o2', 's2'), ('o3', 's3'), ('o4', 's4')"
+            .to_owned(),
     ] {
         execute(&db, &statement).await;
     }
     (db, owned)
 }
 
-fn schema(db: &Database<B>) -> async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot> {
-    let mut db = db.clone();
+/// `db` with the row policy installed, and bulk writes narrowed to the rows
+/// the policy lets the caller read.
+fn policed(db: &Database<B>) -> Database<B> {
+    let mut db = db.clone().with_narrow_bulk_writes_to_read_visibility(true);
     db.set_row_policy(Policy);
+    db
+}
+
+fn schema(db: &Database<B>) -> async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot> {
+    let db = policed(db);
     async_graphql::Schema::build(
         QueryRoot::default(),
         MutationRoot::default(),
@@ -411,6 +475,138 @@ async fn repository_count(db: &Database<B>, predicate: &ReadPredicate) -> Result
         .map_err(|error| format!("{error:?}"))
 }
 
+/// Whether `error` is the database refusing `flag` because the row's table
+/// does not have it, rather than any other failure.
+fn missing_flag(error: &str) -> bool {
+    #[cfg(feature = "sqlite")]
+    let refused = error.contains("no such column") && error.contains("flag");
+    #[cfg(feature = "postgres")]
+    let refused = error.contains("42703") && error.contains("flag");
+    #[cfg(feature = "mssql")]
+    let refused = error.contains("Invalid column name") && error.contains("flag");
+    refused
+}
+
+/// Whether a GraphQL read failed as a statement the database refused, which
+/// is reported as the sanitized internal error, and not as a denial or a
+/// policy refusal.
+fn database_refusal(errors: &str) -> bool {
+    errors.contains("INTERNAL_ERROR")
+        && !errors.contains("AUTHORIZATION_MISCONFIGURED")
+        && !errors.contains("FORBIDDEN")
+}
+
+/// How many sources the aggregate root's row count admits under the policy
+/// in force.
+async fn aggregate_count(db: &Database<B>) -> Result<i64, String> {
+    let rows = BindSource::aggregate(&policed(db))
+        .count_rows()
+        .map_err(|error| format!("{error:?}"))?
+        .fetch()
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    match rows.as_slice() {
+        [row] => match row.metrics[0].value {
+            AggregateValue::Count(count) => Ok(count),
+            ref other => Err(format!("unexpected metric {other:?}")),
+        },
+        other => Err(format!("unexpected rows {other:?}")),
+    }
+}
+
+/// The sources the relation loader returns for the four owners, which are
+/// unrestricted themselves, or the errors of their `source` fields.
+async fn loaded_sources(
+    schema: &async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>,
+) -> Result<Vec<String>, String> {
+    let response = schema
+        .execute(format!(
+            "{{ rows: {}({}: {{limit: 10}}) {{ edges {{ node {{ {} source {{ {} }} }} }} }} }}",
+            r("bindOwners"),
+            a("page"),
+            f("id"),
+            f("id")
+        ))
+        .await;
+    let data = response.data.into_json().unwrap();
+    let edges = data["rows"]["edges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let loaded = edges
+        .iter()
+        .filter_map(|edge| edge["node"]["source"][f("id")].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    if response.errors.is_empty() {
+        assert_eq!(edges.len(), SOURCES.len(), "{data}");
+        return Ok(loaded);
+    }
+    // A failed load returns no source at all.
+    assert!(loaded.is_empty(), "{data}");
+    assert_eq!(
+        response.errors.len(),
+        SOURCES.len(),
+        "{:?}",
+        response.errors
+    );
+    Err(format!("{:?}", response.errors))
+}
+
+/// One bulk write of the source `s3` (`flag = 5`), narrowed to the rows the
+/// policy in force admits: an update that keeps its value, or a delete. It
+/// returns how many rows the write selected, or its error code.
+async fn bulk_write(
+    schema: &async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>,
+    delete: bool,
+) -> Result<i64, String> {
+    let (field, arguments, count) = if delete {
+        (
+            r("deleteBindSources"),
+            format!("{}: {{ {}: {{ eq: 5 }} }}", a("where"), f("flag")),
+            "deletedCount",
+        )
+    } else {
+        (
+            r("updateBindSources"),
+            format!(
+                "{}: {{ {}: {{ eq: 5 }} }}, {}: {{ {}: 5 }}",
+                a("where"),
+                f("flag"),
+                a("input"),
+                f("flag")
+            ),
+            "affectedCount",
+        )
+    };
+    let response = schema
+        .execute(format!(
+            "mutation {{ write: {field}({arguments}) {{ success errorCode {count} }} }}"
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    let write = &data["write"];
+    if write["success"] == true {
+        Ok(write[count].as_i64().unwrap())
+    } else {
+        assert_eq!(write[count], 0, "{write}");
+        Err(write["errorCode"].to_string())
+    }
+}
+
+/// The sources as stored, whatever the policy.
+async fn stored_sources(db: &Database<B>) -> Vec<(String, Option<i32>)> {
+    let mut rows = EntityQuery::<BindSource>::new()
+        .fetch_all(db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.id, row.flag))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
 /// Generated reads of the sources that evaluate the target's own policy
 /// (`flag = 1`) in a subquery, with unrestricted sources: a related-row
 /// filter and a relation-count ordering.
@@ -440,30 +636,78 @@ async fn policy_columns_bind_to_their_own_row() {
     let (db, _owned) = fixture().await;
     let schema = schema(&db);
 
-    // Drift: the target table lacks `flag`. Every read fails.
-    let mut admitted = Vec::new();
+    // Drift: the target table lacks `flag`. Every read fails, and fails
+    // because the database refuses the missing column: repository reads
+    // carry its error, GraphQL reads the sanitized internal error.
+    let stored = stored_sources(&db).await;
+    let mut wrong = Vec::new();
+    let mut check =
+        |read: String, outcome: Result<String, String>, refused: fn(&str) -> bool| match outcome {
+            Ok(admitted) => wrong.push(format!("{read} admitted {admitted}")),
+            Err(error) if !refused(&error) => {
+                wrong.push(format!("{read} failed otherwise: {error}"))
+            }
+            Err(_) => {}
+        };
+    let shown = |rows: Vec<String>| format!("{rows:?}");
     for (index, (name, predicate, _)) in shapes().into_iter().enumerate() {
         // Each read path on its own, so one failing cannot hide another.
-        if let Ok(rows) = repository_list(&db, &predicate).await {
-            admitted.push(format!("{name}: repository list admitted {rows:?}"));
-        }
-        if let Ok(count) = repository_count(&db, &predicate).await {
-            admitted.push(format!("{name}: repository count admitted {count}"));
-        }
+        check(
+            format!("{name}: repository list"),
+            repository_list(&db, &predicate).await.map(shown),
+            missing_flag,
+        );
+        check(
+            format!("{name}: repository count"),
+            repository_count(&db, &predicate)
+                .await
+                .map(|count| count.to_string()),
+            missing_flag,
+        );
         SHAPE.store(index, Ordering::SeqCst);
         for query in graphql_reads() {
-            if let Ok(rows) = graphql_admitted(&schema, &query).await {
-                admitted.push(format!("{name}: {query} admitted {rows:?}"));
-            }
+            check(
+                format!("{name}: {query}"),
+                graphql_admitted(&schema, &query).await.map(shown),
+                database_refusal,
+            );
+        }
+        // The aggregate root, a relation loader and the locking read that
+        // selects a bulk write's targets render the same policy.
+        check(
+            format!("{name}: aggregate"),
+            aggregate_count(&db).await.map(|count| count.to_string()),
+            missing_flag,
+        );
+        check(
+            format!("{name}: relation loader"),
+            loaded_sources(&schema).await.map(shown),
+            database_refusal,
+        );
+        for delete in [false, true] {
+            check(
+                format!("{name}: bulk write (delete: {delete})"),
+                bulk_write(&schema, delete)
+                    .await
+                    .map(|count| count.to_string()),
+                |code| {
+                    (code.contains("DATABASE") || code.contains("INTERNAL"))
+                        && !code.contains("FORBIDDEN")
+                },
+            );
         }
     }
     SHAPE.store(usize::MAX, Ordering::SeqCst);
     for query in target_policy_reads() {
-        if let Ok(rows) = graphql_admitted(&schema, &query).await {
-            admitted.push(format!("{query} admitted {rows:?}"));
-        }
+        check(
+            query.clone(),
+            graphql_admitted(&schema, &query).await.map(shown),
+            database_refusal,
+        );
     }
-    assert!(admitted.is_empty(), "{}", admitted.join("\n"));
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // No refused bulk write changed a row.
+    assert_eq!(stored_sources(&db).await, stored);
 
     // Control: with the column in place, each shape admits exactly the rows
     // its target values select, on every read path.
@@ -494,7 +738,38 @@ async fn policy_columns_bind_to_their_own_row() {
             }
         }
         assert_eq!(point, expected, "{name}: point reads");
+        assert_eq!(
+            aggregate_count(&db).await.unwrap(),
+            expected.len() as i64,
+            "{name}: aggregate"
+        );
+        assert_eq!(
+            loaded_sources(&schema).await.unwrap(),
+            expected,
+            "{name}: relation loader"
+        );
+        // The bulk update selects `s3` only where the policy admits it.
+        assert_eq!(
+            bulk_write(&schema, false).await.unwrap(),
+            i64::from(expected.contains(&"s3")),
+            "{name}: bulk update"
+        );
     }
+    // A bulk delete leaves a hidden row in place and removes a visible one.
+    assert_eq!(stored_sources(&db).await, stored);
+    let admits_s3 = |admits: bool| {
+        shapes()
+            .iter()
+            .position(|(_, _, expected)| expected.contains(&"s3") == admits)
+            .unwrap()
+    };
+    SHAPE.store(admits_s3(false), Ordering::SeqCst);
+    assert_eq!(bulk_write(&schema, true).await.unwrap(), 0);
+    assert_eq!(stored_sources(&db).await, stored);
+    SHAPE.store(admits_s3(true), Ordering::SeqCst);
+    assert_eq!(bulk_write(&schema, true).await.unwrap(), 1);
+    assert_eq!(stored_sources(&db).await.len(), stored.len() - 1);
+    execute(&db, "INSERT INTO bind_sources (id, flag) VALUES ('s3', 5)").await;
     SHAPE.store(usize::MAX, Ordering::SeqCst);
     let [filtered, ordered] = target_policy_reads();
     assert_eq!(graphql_admitted(&schema, &filtered).await.unwrap(), ["s2"]);

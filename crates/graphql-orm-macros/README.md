@@ -10,10 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.184.0 generates `ReadVisibilityFilter::to_row_bound_filter_expression` and `table_name`
-for where inputs. The first renders each filter column over the read-predicate row qualifier, which
-read predicates and related-row filters bind to the row they describe (#796). Related-row filter
-keys are bound the same way. Other generated SQL is unchanged.
+Version 0.184.0 generates `ReadVisibilityFilter::row_bound_filter` and `table_name` for where
+inputs. The first renders each filter column as `row.<column>` for the row it is given, the column
+delimited as generated DDL and DML address it, so read predicates and related-row filters bind to
+the row they describe without substituting a row name into SQL (#796). Related-row filter keys are
+bound the same way. The entity derive refuses a table whose name starts with `__gom_`, which is
+reserved for the aliases read-policy SQL renders. Other generated SQL is unchanged.
 
 Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
 well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
