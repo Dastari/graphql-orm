@@ -672,8 +672,10 @@ mod portable {
     fn statement_nesting_is_budgeted_on_sql_server() {
         let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
         // A closure at the default bound uses 67 subquery levels, a closure
-        // inside a closure 73, and each relation around them two more.
-        for (target, room) in [(all(PARENT, passes()), 4), (two_levels, 1)] {
+        // inside a closure 73, and each relation around them two more. On SQL
+        // Server the second shape (five closures and four inlined relations)
+        // already holds the nine relations a predicate may have.
+        for (target, room) in [(all(PARENT, passes()), 4), (two_levels, 0)] {
             let (deepest, wrappers) = deepest_wrapped_closure(target);
             let nesting = subquery_nesting(&rendered(&deepest));
             if B::DIALECT == DatabaseBackend::Mssql {

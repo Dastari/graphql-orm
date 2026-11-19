@@ -39,7 +39,7 @@ per-statement relation budget. No data migration is needed. See
     such as more than five nested `not_related`;
   - over 32 nested relations or 128 relations in total on SQLite and
     PostgreSQL (`READ_PREDICATE_MAX_RELATION_NESTING`,
-    `READ_PREDICATE_MAX_RELATIONS`), or over 6 of either on SQL Server
+    `READ_PREDICATE_MAX_RELATIONS`), or over 9 of either on SQL Server
     (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`,
     `READ_PREDICATE_MSSQL_MAX_RELATIONS`). Each closure counts as 16
     relations, or 1 on SQL Server;
@@ -47,7 +47,7 @@ per-statement relation budget. No data migration is needed. See
     (`READ_PREDICATE_MSSQL_MAX_NESTING`) or over 900 weighted levels
     (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than four
     `related` around a 64-hop closure;
-  - more than 1 MiB of policy SQL, or more than 64 relations (6 on SQL
+  - more than 1 MiB of policy SQL, or more than 64 relations (5 on SQL
     Server), from the generated relation filters and relation-count
     orderings of one statement (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`,
     `READ_PREDICATE_MAX_STATEMENT_RELATIONS`,

@@ -360,20 +360,20 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   | Rendered SQL, with placeholders counted at full width (`READ_PREDICATE_MAX_RENDERED_BYTES`) | one predicate | all | 1 MiB |
   | Expression nesting, counted as nested parentheses (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`) | one predicate | all | 256 |
   | Nested `CASE` expressions (`READ_PREDICATE_MAX_CASE_NESTING`) | one predicate | all | 10 |
-  | Nested relations, `EXISTS (SELECT ...)` (`READ_PREDICATE_MAX_RELATION_NESTING`, `READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`) | one predicate | SQLite, PostgreSQL / SQL Server | 32 / 6 |
-  | Relations in total, closures weighted (`READ_PREDICATE_MAX_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_RELATIONS`) | one predicate | SQLite, PostgreSQL / SQL Server | 128 / 6 |
+  | Nested relations, `EXISTS (SELECT ...)` (`READ_PREDICATE_MAX_RELATION_NESTING`, `READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`) | one predicate | SQLite, PostgreSQL / SQL Server | 32 / 9 |
+  | Relations in total, closures weighted (`READ_PREDICATE_MAX_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_RELATIONS`) | one predicate | SQLite, PostgreSQL / SQL Server | 128 / 9 |
   | What one closure counts as (`READ_PREDICATE_CLOSURE_RELATION_WEIGHT`, `READ_PREDICATE_MSSQL_CLOSURE_RELATION_WEIGHT`) | — | SQLite, PostgreSQL / SQL Server | 16 / 1 |
   | Nested `(SELECT ...)` levels (`READ_PREDICATE_MSSQL_MAX_NESTING`) | one predicate | SQL Server | 75 |
   | Weighted nesting: 11 per subquery, 2 per `NOT (`, 1 per other parenthesis (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`) | one predicate | SQL Server | 900 |
   | Policy SQL that all generated relation filters and relation-count orderings add (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`) | one statement | all | 1 MiB |
-  | Relations that all generated relation filters and relation-count orderings add, each count ordering at least one (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 64 / 6 |
+  | Relations that all generated relation filters and relation-count orderings add, each count ordering at least one (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 64 / 5 |
   | Terms of a generated `orderBy` list (`MAX_ORDER_BY_TERMS`), refused as `INVALID_INPUT` | one request | all | 16 |
 
   Closures are counted as rendered, so a closure inside a closure counts its
   inner closure four times, once per inlined copy. A generated statement
   holds at most its entity's own policy plus its relation filters and count
   orderings: 2 MiB of policy SQL, and 192 weighted relations on SQLite and
-  PostgreSQL or 12 on SQL Server.
+  PostgreSQL or 14 on SQL Server.
 
   What each limit is measured to cover, and what it does not:
   - **Rendering.** A predicate that builds renders, formats, clones and drops
@@ -401,11 +401,11 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     relation limits lifted, statements failed from 29 relations in all (deep
     relation chains on the policy and the filter side), from 32 (relations
     to many children combined with `and`), and from 28 counting each closure
-    as one relation. The limit of 12 per statement leaves more than twice
-    that margin. Every shape probed within the limits (124, on fetch, count,
+    as one relation. The limit of 14 per statement leaves twice that
+    margin. Every shape probed within the limits (145, on fetch, count,
     keyset pages and GraphQL lists) ran or was refused when the request was
-    prepared. The slowest took about 5 s, and the 3 GB-capped server peaked
-    at 1.5 GB.
+    prepared. The slowest took about 2 s, and the 3 GB-capped server peaked
+    at 1.3 GB.
   - **PostgreSQL memory and time.** PostgreSQL plans nested relations
     together, and its memory grows steeply with their depth and total: a
     chain of 128 nested relations peaked at 2.5 GB on a server capped at
@@ -449,7 +449,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     `not_related` around it adds two subquery levels and one relation. That
     leaves room for four relations around it. A closure inside a closure
     counts as five relations, leaving room for one. A relation chain alone
-    may be six deep. On SQLite and PostgreSQL, a relation chain may be 32
+    may be nine deep, and a relation filter or count ordering may add five
+    relations to a statement. On SQLite and PostgreSQL, a relation chain may be 32
     deep, a closure counts as 16 relations plus its own three subqueries, and
     the 256-level expression limit applies around them.
   - **Cost guidance.** Keep closures to one level where you can. Index the key

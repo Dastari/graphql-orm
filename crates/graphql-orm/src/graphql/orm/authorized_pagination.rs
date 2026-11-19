@@ -218,7 +218,7 @@ const MSSQL_MAX_NESTING: u32 = 75;
 /// [`READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`]. A deeper predicate is
 /// refused with `AUTHORIZATION_MISCONFIGURED`.
 pub const READ_PREDICATE_MSSQL_MAX_RELATION_NESTING: u32 = MSSQL_MAX_RELATION_NESTING;
-const MSSQL_MAX_RELATION_NESTING: u32 = 6;
+const MSSQL_MAX_RELATION_NESTING: u32 = 9;
 
 /// The deepest nesting of relation subqueries one [`ReadPredicate`] may
 /// render on SQLite and PostgreSQL. PostgreSQL plans nested relations
@@ -243,7 +243,7 @@ const MAX_RELATIONS: u32 = 128;
 /// [`READ_PREDICATE_MSSQL_CLOSURE_RELATION_WEIGHT`]. See
 /// [`READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`] for the measurements.
 pub const READ_PREDICATE_MSSQL_MAX_RELATIONS: u32 = MSSQL_MAX_RELATIONS;
-const MSSQL_MAX_RELATIONS: u32 = 6;
+const MSSQL_MAX_RELATIONS: u32 = 9;
 
 /// How many relations one closure counts as towards the relation totals on
 /// SQLite and PostgreSQL ([`READ_PREDICATE_MAX_RELATIONS`] and
@@ -1324,14 +1324,14 @@ const MAX_STATEMENT_RELATIONS: u32 = 64;
 
 /// As [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`], on SQL Server. With the
 /// entity's own policy (at most [`READ_PREDICATE_MSSQL_MAX_RELATIONS`]), a
-/// statement holds at most 12. With these limits lifted, statements on the
+/// statement holds at most 14. With these limits lifted, statements on the
 /// owned server failed with error 8623 from 29 relations (deep relation
 /// chains on both sides) and 32 (relations to many children combined with
-/// `and`), and closure-heavy statements from 28; the limit leaves more than
-/// twice that margin. Plan-resource errors on untested shapes remain
+/// `and`), and closure-heavy statements from 28; the limit leaves twice that
+/// margin. Plan-resource errors on untested shapes remain
 /// possible: they fail the read.
 pub const READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS: u32 = MSSQL_MAX_STATEMENT_RELATIONS;
-const MSSQL_MAX_STATEMENT_RELATIONS: u32 = 6;
+const MSSQL_MAX_STATEMENT_RELATIONS: u32 = 5;
 
 /// The most terms a generated `orderBy` list may hold. Each relation-count
 /// term adds a correlated `COUNT(*)` subquery; a longer list is refused as

@@ -1087,15 +1087,16 @@ fn closures_and_count_orderings_are_charged_per_statement() {
             .finish();
             let misconfigured = Some("\"AUTHORIZATION_MISCONFIGURED\"");
             // A closure counts as several relations: with a closure kid
-            // policy, three kid filters fit the statement budget on every
-            // backend (64 / (1 + 3 + 16) elsewhere, 6 / (1 + 1) on SQL
-            // Server), and a fourth is refused.
+            // policy, each kid filter costs 1 + 3 + 16 relations elsewhere
+            // (the closure's own three subqueries and its weight) and 1 + 1
+            // on SQL Server: three fit the budget of 64, or two of 5.
+            let filters = if cfg!(feature = "mssql") { 2 } else { 3 };
             *KID_POLICY.lock().unwrap() = Some(
                 ReadPredicate::related_closure::<B, ZrKid>(&[("parent_id", "id")], leaf()).unwrap(),
             );
-            let response = parents_with_kid_filters(&schema, 3).await;
+            let response = parents_with_kid_filters(&schema, filters).await;
             assert!(response.errors.is_empty(), "{:?}", response.errors);
-            let response = parents_with_kid_filters(&schema, 4).await;
+            let response = parents_with_kid_filters(&schema, filters + 1).await;
             assert_eq!(
                 code(&response).as_deref(),
                 misconfigured,
