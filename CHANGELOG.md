@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,15 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - ORM/macros 0.184.0
+
+Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01820-to-01840-read-predicate-columns-bound-to-their-row).
+
+- **Fix (authorization): read-predicate columns no longer resolve against an outer row (#796).** `ReadPredicate::column`, `is_null` and `is_not_null` rendered an unqualified column. Relation, `not_related` and closure predicates evaluate their target's predicate inside a correlated subquery (`EXISTS (SELECT 1 FROM (SELECT * FROM <target> WHERE ...) AS __gom_visibility ...)`, the closure CTE on SQLite and PostgreSQL, and the SQL Server walk), as do generated related-row filters and relation-count orderings. When a column was declared in the entity's metadata but missing from its physical table, for example after schema drift or before a migration was applied, SQLite, PostgreSQL and SQL Server resolved the name against an outer query's table, so the policy was evaluated against another row and could admit it. Each such column is now written with the entity's table path, as `"records"."owner_id" = ?` (`[records].[owner_id]` on SQL Server). A column the table lacks then fails the statement on every read path. The table path is the one the statement's FROM and the existing relation keys already use, so ordinary policies admit exactly the same rows.
+- **Generated filters in read predicates are bound too.** New `ReadVisibilityFilter::to_row_bound_filter_expression` renders a filter with each column qualified by the entity's table. Generated where inputs override it, and `ReadPredicate::from_filter` and generated related-row filters (`where: { relation: [...] }`) use it. The default returns the unqualified `to_filter_expression`, so a hand-written `ReadVisibilityFilter` keeps its columns unbound unless it overrides the method. Generated filters elsewhere (root reads, writes, aggregates), where no outer row is in scope, render as before; the `filter_sql_*` snapshots are unchanged, and new `filter_sql_row_bound_*` snapshots pin the bound form, which differs only by the qualifier.
+- **Budget.** The composition budget measures the rendered text, so the qualifier counts towards `READ_PREDICATE_MAX_RENDERED_BYTES` and the per-statement relation budget: each column term is longer by the rendered table path plus one byte. Depth, nesting and relation counts are unchanged. A 25,000-term `or` of single-column tests is about 750 KB to 900 KB and builds and runs on every backend. The 50,000-term figure in the 0.181.0 notes no longer fits, because each term is about 1.5 to 2 times longer.
+- **Tests.** A new regression runs on SQLite, owned PostgreSQL and owned SQL Server. Its target table physically lacks a column named in its policy, and the source table has a column of that name. Every read path fails: repository list and count, GraphQL page, keyset page and point read, under relation, `is_null`/`is_not_null`, `not exists`, `not_related`, closure (any and all, inside a relation) and `from_filter` policies, and a related-row filter and a relation-count ordering under the target's own policy. Before this change, each admitted rows bound to the source's column. Once the column exists, each shape admits exactly the rows the target's values select. Budget tests are resized for the longer terms.
 
 ## Unreleased - ORM/macros 0.182.0
 

@@ -5727,12 +5727,27 @@ fn generate_entity_tokens(
                     field_name,
                     field_type,
                     &graphql_name,
-                    &db_col_sql,
+                    &quote! { __gom_column },
                     filter_type,
                     &field_meta,
                 )?;
                 where_input_fields.push(input_field);
-                filter_to_sql.push(sql_gen);
+                // Unqualified, or bound to the entity's table when
+                // `_gom_table` names it (#796).
+                filter_to_sql.push(quote! {
+                    {
+                        let __gom_bound_column;
+                        let __gom_column: &str = match _gom_table {
+                            Some(table) => {
+                                __gom_bound_column = <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT
+                                    .row_bound_filter_column(table, #db_col_sql);
+                                &__gom_bound_column
+                            }
+                            None => #db_col_sql,
+                        };
+                        #sql_gen
+                    }
+                });
                 filter_to_entity_match.push(entity_match_gen);
                 filter_is_empty_checks.push(is_empty_check);
                 filter_contains_spatial_checks.push(contains_spatial_check);
@@ -6724,6 +6739,14 @@ fn generate_entity_tokens(
         impl ::graphql_orm::graphql::orm::ReadVisibilityFilter for #where_input_name {
             fn entity_type_id() -> ::std::any::TypeId { ::std::any::TypeId::of::<#struct_name>() }
             fn backend() -> ::graphql_orm::graphql::orm::DatabaseBackend { <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT }
+            fn to_row_bound_filter_expression(&self) -> Option<::graphql_orm::graphql::orm::FilterExpression> {
+                let table = <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT
+                    .render_table_identifier_path(
+                        <#struct_name as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                    );
+                let (conditions, values) = self.__gom_sql_conditions(false, Some(&table));
+                ::graphql_orm::graphql::orm::filter_expression_from_conditions(&conditions, &values)
+            }
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseFilter for #where_input_name {
@@ -6747,7 +6770,7 @@ fn generate_entity_tokens(
             }
 
             fn to_sql_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
-                self.__gom_sql_conditions(false)
+                self.__gom_sql_conditions(false, None)
             }
 
             fn is_empty(&self) -> bool {
@@ -6880,10 +6903,16 @@ fn generate_entity_tokens(
             }
 
             fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
-                self.__gom_sql_conditions(true)
+                self.__gom_sql_conditions(true, None)
             }
 
-            fn __gom_sql_conditions(&self, _gom_spatial_prefilter: bool) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+            /// The filter's conditions, each column bound to `_gom_table`
+            /// (a rendered table path) when it is given.
+            fn __gom_sql_conditions(
+                &self,
+                _gom_spatial_prefilter: bool,
+                _gom_table: Option<&str>,
+            ) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
                     return (vec!["1 = 0".to_owned()], Vec::new());
                 }
@@ -6896,7 +6925,7 @@ fn generate_entity_tokens(
                 // Handle And
                 if let Some(ref and_filters) = self.and {
                     for filter in and_filters {
-                        let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                        let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter, _gom_table);
                         conditions.extend(sub_conds);
                         values.extend(sub_vals);
                     }
@@ -6907,7 +6936,7 @@ fn generate_entity_tokens(
                     if let Some(ref or_filters) = self.or {
                         let mut or_parts = Vec::new();
                         for filter in or_filters {
-                            let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                            let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter, _gom_table);
                             // An empty branch is true. Keep it explicit so earlier
                             // binds retain their numbered placeholder positions.
                             // Balanced, so a long list stays shallow for
@@ -6928,7 +6957,7 @@ fn generate_entity_tokens(
 
                     // Handle Not
                     if let Some(ref not_filter) = self.not {
-                        let (sub_conds, sub_vals) = not_filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                        let (sub_conds, sub_vals) = not_filter.__gom_sql_conditions(_gom_spatial_prefilter, _gom_table);
                         if !sub_conds.is_empty() {
                             conditions.push(format!(
                                 "NOT ({})",
@@ -7636,7 +7665,7 @@ fn generate_filter_field(
     field_name: &syn::Ident,
     field_type: &syn::Type,
     graphql_name: &str,
-    db_col: &str,
+    db_col: &proc_macro2::TokenStream,
     filter_type: &str,
     field_meta: &FieldMetadata,
 ) -> syn::Result<(

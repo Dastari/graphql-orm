@@ -3,12 +3,38 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.182.0 to 0.184.0: read-predicate columns bound to their row
+
+Upgrade ORM and macros together. Read predicates now write every column with
+the entity's table path, such as `"records"."owner_id" = ?` (#796). Generated
+SQL text changes, but ordinary policies admit exactly the same rows.
+
+- **Missing physical columns fail the read. Action needed** only if a
+  table lacks a column that a read policy names, for example after schema
+  drift or before a migration is applied. Relation, `not_related` and
+  closure policies, generated related-row filters and relation-count
+  orderings evaluate the target's predicate inside a correlated subquery.
+  There, such a column used to resolve against an outer table that had a
+  column of that name, so the policy was evaluated against the wrong row.
+  The read now fails instead. Apply the pending migration.
+- **Large policies. Action needed** only for a policy near the 1 MiB
+  rendered-size budget (`READ_PREDICATE_MAX_RENDERED_BYTES`) or the
+  per-statement relation budget. Each column term is longer by the rendered
+  table path plus one byte, so such a policy can now be refused with
+  `AUTHORIZATION_MISCONFIGURED` when it is built. Express a long list of
+  values on one column as `from_filter` with an `in_list`, which writes the
+  qualifier once.
+- **Hand-written `ReadVisibilityFilter`. No action.** The new
+  `to_row_bound_filter_expression` defaults to `to_filter_expression`, so a
+  hand-written filter renders as before, with its columns unqualified.
+  Override it to bind them. Generated where inputs override it.
 
 ## 0.181.0 to 0.182.0: SQL identifier quoting
 

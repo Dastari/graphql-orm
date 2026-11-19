@@ -3,12 +3,17 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.184.0 binds every column a read predicate renders to its own row with the entity's
+table path, so a column missing from a target table fails the read instead of resolving against an
+outer row inside a relation, `not_related` or closure subquery (#796).
+See the [migration guide](../../MIGRATION.md#01820-to-01840-read-predicate-columns-bound-to-their-row).
 
 Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
 is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server

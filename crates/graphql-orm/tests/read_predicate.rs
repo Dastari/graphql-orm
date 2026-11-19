@@ -451,8 +451,13 @@ fn nested_negation_renders_parenthesized_trees_in_bind_order() {
         .unwrap()
         .build_delete_sql();
     assert_eq!(binds, vec![SqlValue::Int(7)]);
+    // The column is bound to its own table (#796).
     assert!(
-        sql.contains(&format!("NOT (NOT ({} = ", q("rank"))),
+        sql.contains(&format!(
+            "NOT (NOT ({}.{} = ",
+            q("predicate_records"),
+            q("rank")
+        )),
         "{sql}"
     );
 }

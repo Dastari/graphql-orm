@@ -3,12 +3,16 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.184.0 generates `ReadVisibilityFilter::to_row_bound_filter_expression` for where
+inputs, which renders each filter column qualified by the entity's table for read predicates and
+related-row filters (#796). Other generated SQL is unchanged.
 
 Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
 well-formed delimited identifier, refuses a `table` or `db_column` part that only looks

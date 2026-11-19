@@ -2958,6 +2958,16 @@ pub fn generate_candidate_pattern(value: &str) -> String {
     contains_like_pattern(value)
 }
 
+/// Generated filter support: the expression
+/// [`DatabaseFilter::to_filter_expression`] builds from these conditions.
+#[doc(hidden)]
+pub fn filter_expression_from_conditions(
+    conditions: &[String],
+    values: &[SqlValue],
+) -> Option<FilterExpression> {
+    filter_expression_from_raw_parts(current_backend(), conditions, values)
+}
+
 fn filter_expression_from_raw_parts(
     dialect: DatabaseBackend,
     conditions: &[String],

@@ -24,6 +24,32 @@ fn query_error(error: sqlx::Error) -> async_graphql::Error {
 pub trait ReadVisibilityFilter: DatabaseFilter {
     fn entity_type_id() -> TypeId;
     fn backend() -> DatabaseBackend;
+
+    /// This filter as [`DatabaseFilter::to_filter_expression`] renders it,
+    /// with every column bound to the entity's own table: `table.column`,
+    /// the table written as [`DatabaseBackend::render_table_identifier_path`]
+    /// writes it. [`ReadPredicate::from_filter`] and generated related-row
+    /// filters use it, because they evaluate the filter inside correlated
+    /// subqueries, where an unqualified column the table does not physically
+    /// have would resolve against an outer row (#796).
+    ///
+    /// Generated filters override it. The default returns the unqualified
+    /// expression, so a hand-written filter's columns stay unbound unless
+    /// its implementation qualifies them.
+    fn to_row_bound_filter_expression(&self) -> Option<FilterExpression> {
+        self.to_filter_expression()
+    }
+}
+
+/// `column`, a validated declared column of the entity stored in `table`,
+/// bound to that table's row: `table.column`, with the table path written as
+/// in the statement's FROM and the column part as a delimited identifier.
+fn row_bound_column(backend: DatabaseBackend, table: &str, column: &str) -> String {
+    format!(
+        "{}.{}",
+        backend.render_table_identifier_path(table),
+        backend.quote_column_identifier(column)
+    )
 }
 
 /// Closed set of scalar comparisons for trusted read policy columns.
@@ -775,7 +801,7 @@ impl ReadPredicate {
             B::DIALECT,
             format!(
                 "{} {operator} ?",
-                B::DIALECT.quote_column_identifier(column)
+                row_bound_column(B::DIALECT, T::TABLE_NAME, column)
             ),
             vec![value],
         )
@@ -811,7 +837,10 @@ impl ReadPredicate {
         Self::fragment(
             TypeId::of::<T>(),
             B::DIALECT,
-            format!("{} {test}", B::DIALECT.quote_column_identifier(column)),
+            format!(
+                "{} {test}",
+                row_bound_column(B::DIALECT, T::TABLE_NAME, column)
+            ),
             Vec::new(),
         )
     }
@@ -872,7 +901,9 @@ impl ReadPredicate {
         if F::backend() != B::DIALECT || filter.requires_in_memory_filtering(B::DIALECT) {
             return Err(invalid());
         }
-        let expression = filter.to_filter_expression().ok_or_else(invalid)?;
+        let expression = filter
+            .to_row_bound_filter_expression()
+            .ok_or_else(invalid)?;
         Self::measured(F::entity_type_id(), B::DIALECT, expression)
     }
 
@@ -1460,7 +1491,7 @@ where
         }
         super::authorize_read_fields::<T, B>(db, ctx, filter.referenced_fields()).await?;
         expressions.push(
-            filter.to_filter_expression().unwrap_or_else(|| {
+            filter.to_row_bound_filter_expression().unwrap_or_else(|| {
                 FilterExpression::trusted_fragment("1 = 1".to_owned(), Vec::new())
             }),
         );

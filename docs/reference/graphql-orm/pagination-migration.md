@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -149,6 +149,19 @@ SqlValue::Int(bound))` validates the physical name against `Entity::columns()`,
 quotes it, and binds the value. It accepts private (`read = false, filter = false`)
 persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
 `Lt`, `Lte`, `Gt`, and `Gte`; NULL comparisons use ordinary SQL semantics.
+
+Every column a read predicate renders is bound to the row it describes: the
+entity's table path qualifies it, `"records"."owner_id" > ?`, in `column`,
+`is_null`, `is_not_null` and the conditions `from_filter` renders from a
+generated filter, as well as in relation keys. Relation, `not_related` and
+closure predicates, generated related-row filters and relation-count orderings
+evaluate a target's predicate inside a correlated subquery. There, the table
+qualifier makes a column that the target table does not physically have (after
+schema drift, or before a migration is applied) fail the statement. Without
+it, the column would resolve against an outer row on every backend (#796).
+The metadata check only covers `Entity::columns()`, so keep the physical
+schema migrated. A hand-written `ReadVisibilityFilter` keeps its own
+rendering unless it overrides `to_row_bound_filter_expression`.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
 
@@ -435,9 +448,13 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     as a balanced binary tree of parenthesised pairs: `(a) OR ((b) OR (c))`.
     A list of `n` operands is about `log2(n)` levels deep, where the plain
     chain `a OR b OR c` would be `n` levels deep to the parser. A
-    50,000-term `or` of short terms is 18 levels deep and about 1 MB, within
-    the byte budget, and it builds and runs on all three backends. Operand
-    order, and therefore bind order, is unchanged.
+    25,000-term `or` of single-column tests is 16 levels deep and about
+    750 KB to 900 KB, within the byte budget, and it builds and runs on all
+    three backends. Operand order, and therefore bind order, is unchanged.
+    Each column term carries its table qualifier, so a term costs the length
+    of the rendered table path plus one byte more than an unqualified name
+    would. For a long list of values on one column, use `from_filter` with
+    an `in_list`, which writes the qualifier once.
   - **Why these values.** On the owned servers, each extra closure level
     multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
     1.1 s for two and 8 s for three, while four levels exhausted server

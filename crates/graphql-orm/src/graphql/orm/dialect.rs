@@ -1336,6 +1336,19 @@ impl DatabaseBackend {
         self.quote_identifier(part)
     }
 
+    /// Generated filter support: a rendered filter column bound to the
+    /// rendered table path `table`, as `table.column`. The column's last
+    /// path part is kept as rendered, so it names the same column as the
+    /// unqualified form (#796).
+    #[doc(hidden)]
+    pub fn row_bound_filter_column(self, table: &str, column: &str) -> String {
+        let part = identifier_path_parts(self, column)
+            .filter(|part| !part.is_empty())
+            .last()
+            .unwrap_or(column);
+        format!("{table}.{part}")
+    }
+
     fn identifier_needs_quoting(self, identifier: &str) -> bool {
         if self == Self::Mysql || self.is_one_delimited_identifier(identifier) {
             // MySQL identifiers are rendered verbatim, and an identifier that is
