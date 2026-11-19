@@ -68,6 +68,15 @@ Added, opt-in or no action:
 - **Fixed (AI tool profiles, AI):** runtime live key inputs compile under the ORM's default `RuntimeInt64` identities as well as `with_legacy_int_identities()`. A UUID-keyed runtime collection with live subscriptions and a node identity no longer fails every capability catalogue with `InvalidConfiguration`.
 - **Tests:** the 40 trybuild compile-contract binaries of `graphql-orm` are one `compile_ui` test binary with a module each (#508).
 
+## Unreleased - ORM/macros 0.185.0
+
+- SQL Server migrations render closed-set filtered-index string values as
+  Unicode literals (for example, `N'状態'`). Rebuilding an index preserves
+  values outside the database code page. ASCII values also gain the `N`
+  prefix. Opaque filters read from SQL Server are emitted verbatim. See the
+  [migration guide](MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
+  ([#795](https://github.com/Dastari/graphql-orm/issues/795)).
+
 ## Unreleased - ORM/macros 0.183.0 and operation catalog 0.9.1
 
 - The workspace dependency check compares documented direct edges with

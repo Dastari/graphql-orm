@@ -33,6 +33,10 @@ in upgrade order. For the macros:
 
 Upgrade ORM and macros together.
 
+Version 0.185.0 aligns with the runtime's
+[SQL Server filtered-index fix](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).
+Macro output is unchanged.
+
 Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
 well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
 delimited or contains NUL, and splits declared paths with each backend's own delimiters (#782).

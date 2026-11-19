@@ -52,6 +52,11 @@ steps in upgrade order. In short:
 
 Upgrade ORM and macros together.
 
+Version 0.185.0 renders SQL Server filtered-index strings as Unicode literals,
+including ASCII values. Filters introspected as opaque SQL are replayed
+verbatim. See the
+[migration guide](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).
+
 Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
 is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
 writes a name bare only under its regular-identifier rule (#783).

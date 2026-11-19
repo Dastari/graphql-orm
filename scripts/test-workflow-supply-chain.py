@@ -168,6 +168,35 @@ class SupplyChainTests(unittest.TestCase):
                   './.github/actions/owned-postgres-complete', './.github/actions/other')
         self.assertReported('owned PostgreSQL caller must use the shared action')
 
+    def test_postgres_lane_selects_remaining_ignored_targets(self):
+        # Record the launcher arguments without building or starting containers.
+        binary = self.root / "bin"
+        binary.mkdir()
+        cargo = binary / "cargo"
+        cargo.write_text('#!/bin/bash\nprintf "%s\\n" "$*"\n')
+        cargo.chmod(0o755)
+        env = {**os.environ, "PATH": str(binary) + ":" + os.environ["PATH"]}
+        for variable in ("DATABASE_URL", "TEST_DATABASE_URL", "MSSQL_TEST_DATABASE_URL"):
+            env.pop(variable, None)
+        result = subprocess.run(
+            ["bash", "scripts/run-owned-database-lanes.sh", "postgres"],
+            cwd=ROOT, env=env, check=True, capture_output=True, text=True,
+        )
+        selected = set()
+        for line in result.stdout.splitlines():
+            if "--test-threads=1" in line and ("--ignored" in line or "--include-ignored" in line):
+                arguments = line.split()
+                selected.update(value for option, value in zip(arguments, arguments[1:]) if option == "--test")
+        for target in (
+            "authorized_pagination_postgres", "bounded_mutation_sentinels",
+            "bulk_refusals", "delete_propagation", "denied_relations",
+            "host_integer_key", "host_primary_keys", "postgres_constraint_index_idempotency",
+            "repository_only_postgres", "runtime_records_postgres", "runtime_relations_postgres",
+            "single_row_refusals",
+        ):
+            with self.subTest(target=target):
+                self.assertIn(target, selected)
+
     def test_untagged_container_run_image_is_rejected(self):
         path = self.root / 'crates/example/tests/container.rs'
         path.parent.mkdir(parents=True)

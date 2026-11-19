@@ -114,6 +114,10 @@ No action:
 - **No action** — router 0.17.0: the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default (#764). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
 
+Also unreleased on main, before the breaking release:
+
+- **Action needed** — ORM/macros 0.185.0: if you compare generated SQL Server filtered-index DDL, update expected string literals to include the `N` prefix, even for ASCII values. [Migration](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
+
 ### workspace-2026.11.19.2
 
 Commit `3e9c34a5fcc9` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.19.2)
