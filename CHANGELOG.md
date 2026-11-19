@@ -14,9 +14,9 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.184.0
+## Unreleased - ORM/macros 0.180.0
 
-A separate opt-in lets narrowed SQL Server bulk writes select their targets from snapshots, so they no longer lock or wait on hidden rows ([#752](https://github.com/Dastari/graphql-orm/issues/752)). See the [migration guide](MIGRATION.md#01791-to-01840-opt-in-sql-server-snapshot-bulk-write-targets).
+A separate opt-in lets narrowed SQL Server bulk writes select their targets from snapshots, so they no longer lock or wait on hidden rows ([#752](https://github.com/Dastari/graphql-orm/issues/752)). See the [migration guide](MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
 
 - **New opt-in: `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)`** (also `Database::with_mssql_snapshot_bulk_write_targets(bool)`, getter `mssql_snapshot_bulk_write_targets_enabled()`). It is off by default and stays separate from `narrow_bulk_writes_to_read_visibility`, which it requires. Narrowing alone keeps SQL Server's serializable `UPDLOCK, HOLDLOCK` read.
 - **What the opt-in changes.** It applies to generated GraphQL `updateMany`/`deleteMany` with a SQL predicate (read visibility or a `write_target_prefilter`), when all of these hold:
@@ -27,16 +27,15 @@ A separate opt-in lets narrowed SQL Server bulk writes select their targets from
 
   The write then:
   - reads every candidate in one snapshot without a lock (at most `max_scanned_rows` + 1);
-  - locks those keys exclusively with `XLOCK` and a `FORCESEEK` on that index (read committed, so no key-range lock reaches a neighbouring row), and checks the filter and the predicate again on each locked row;
+  - locks those keys exclusively with `XLOCK` and a `FORCESEEK` on that index (read committed, so no key-range lock reaches a neighbouring row), and checks the filter and the predicate again on each locked row (the re-check column alias can't collide with a table column of the same name);
   - reads the candidates again in a new snapshot, under the same budget. If they are not exactly the locked rows that still match, the write is refused with a retryable `SERVICE_UNAVAILABLE` and nothing is written.
 
   Otherwise the serializable locking read is kept.
-- **Exact guarantee.** The target set equals the rows that match at the validation snapshot, and they cannot change before the write commits. An atomic multi-row insert is never split. The write never locks, or waits on a lock on, a row outside its candidates, whatever plan SQL Server picks.
+- **Exact guarantee.** The target set equals the rows that match at the validation snapshot, and they cannot change before the write commits. An atomic multi-row insert is never split. The write never locks, or waits on a lock on, a row outside its candidates, whatever plan SQL Server picks, except through lock escalation (see below).
 - **Not serializable.** No range is locked, so another transaction can commit a row that starts to match, with other changes, without waiting. That row isn't written, but later reads in the same bulk write (hooks, field authorizers, triggers) can see the other changes.
 - **What else remains.**
   - **Exclusive locks:** candidates stay exclusively locked until the write ends, including rows that drop out. Readers using row versions don't wait, and neither does a `READCOMMITTEDLOCK` read of an unchanged row. Readers that hold locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
   - **Lock escalation** to a table lock still covers hidden rows.
-- **Fix:** the re-check column alias can't collide with a table column of the same name.
 - Defaults are unchanged on every backend. PostgreSQL and SQLite are unchanged in both modes.
 - Generated `updateMany` and `deleteMany` pass the runtime a key accessor, so ORM and macros must be upgraded together.
 - **New tests (owned SQL Server):**

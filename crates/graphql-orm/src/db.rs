@@ -2465,7 +2465,8 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
 
     /// SQL Server only: let a narrowed bulk write select its targets from
     /// snapshots instead of the serializable locking read, so it never locks
-    /// or waits on a row outside its candidates. Off by default, and
+    /// or waits on a row outside its candidates, except through lock
+    /// escalation (see below). Off by default, and
     /// independent of
     /// [`narrow_bulk_writes_to_read_visibility`](Self::narrow_bulk_writes_to_read_visibility),
     /// which it requires. **It weakens the bulk write's transaction from
@@ -2474,7 +2475,7 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// It applies to a generated GraphQL `updateMany` or `deleteMany` with a
     /// SQL predicate (read visibility or a `write_target_prefilter`), when the
     /// database has `READ_COMMITTED_SNAPSHOT` on and the target is a base
-    /// table whose key has a unique single-column index, of type
+    /// table whose key has an enabled, unfiltered unique single-column index, of type
     /// `uniqueidentifier`, `nvarchar`/`nchar` or an integer, with row locks
     /// allowed on every index. Otherwise the serializable locking read is
     /// used. The write reads its candidates in one snapshot without a lock,
@@ -2490,7 +2491,9 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// other changes, without waiting for the write; later reads in the same
     /// bulk write (before-update hooks, field authorizers, triggers) can see
     /// those other changes while the row itself is not written. The
-    /// strict-authorization reference lists what else remains.
+    /// strict-authorization reference lists what else remains, including that
+    /// SQL Server can escalate the write's row locks to a table lock, which
+    /// covers hidden rows.
     pub fn mssql_snapshot_bulk_write_targets(mut self, enabled: bool) -> Self {
         self.database.mssql_snapshot_bulk_write_targets = enabled;
         self

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.1 to 0.184.0: opt-in SQL Server snapshot bulk-write targets
+## 0.179.1 to 0.180.0: opt-in SQL Server snapshot bulk-write targets
 
 Upgrade ORM and macros together and recompile entities: generated bulk writes
 pass the runtime a key accessor. No data migration is needed.

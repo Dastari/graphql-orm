@@ -413,8 +413,9 @@ applies, the write takes three steps:
 1. **Candidates.** One statement reads every candidate: the rows that match
    the filter and the predicate, at most `max_scanned_rows` + 1 of them, read
    committed (`WITH (READCOMMITTED)`). With `READ_COMMITTED_SNAPSHOT` on, that
-   is one consistent snapshot, and it takes no lock. More than the budget
-   refuses the write.
+   is one consistent snapshot, and the read takes no lock on the target
+   table. Related or policy tables that the filter reads are still read at the
+   transaction's `SERIALIZABLE` level. More than the budget refuses the write.
 2. **Lock and check.** Up to 500 keys at a time, it locks the candidates with
    `XLOCK` and a `FORCESEEK` on that unique index, with a `WHERE` on the key
    alone, so each seek finds at most one row. The lock runs read committed, so
@@ -437,7 +438,8 @@ What this guarantees, exactly:
   A transaction that inserts several matching rows at once never has some of
   them written and others not.
 - **The write never locks a row outside its candidates,** and never waits on a
-  lock another transaction holds on one, whatever plan the optimizer picks.
+  lock another transaction holds on one, whatever plan the optimizer picks,
+  except through lock escalation (see below).
   Rows outside read visibility are not candidates.
 
 What it does **not** guarantee:

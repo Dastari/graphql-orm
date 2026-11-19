@@ -10,10 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.184.0 passes the runtime a key accessor from generated `updateMany` and `deleteMany`,
+Version 0.180.0 passes the runtime a key accessor from generated `updateMany` and `deleteMany`,
 which the opt-in SQL Server snapshot bulk-write target selection uses to lock its targets by key (#752).
 Upgrade ORM and macros together; see the
-[migration guide](../../MIGRATION.md#01791-to-01840-opt-in-sql-server-snapshot-bulk-write-targets).
+[migration guide](../../MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
 
 Version 0.179.1 changes no macro output; it keeps the version line aligned with the ORM, whose test-owned PostgreSQL containers are now memory-capped.
 
