@@ -368,10 +368,8 @@ where
     visibility.validate::<T, B>()?;
     if let Some(predicate) = visibility.predicate_expression() {
         key.filter = Some(match key.filter {
-            Some(filter) => {
-                crate::graphql::orm::FilterExpression::And(vec![filter, predicate.clone()])
-            }
-            None => predicate.clone(),
+            Some(filter) => crate::graphql::orm::FilterExpression::And(vec![filter, predicate]),
+            None => predicate,
         });
         key.where_signature = Some(format!("{:?}", key.filter));
     }

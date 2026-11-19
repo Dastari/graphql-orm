@@ -3922,7 +3922,7 @@ where
             .into_iter()
             .collect();
         if let Some(predicate) = visibility.predicate_expression() {
-            filters.push(predicate.clone());
+            filters.push(predicate);
         }
         if options.exclude_blank {
             filters.push(FilterExpression::trusted_fragment(
@@ -4053,7 +4053,7 @@ where
             .as_ref()
             .and_then(DatabaseFilter::to_filter_expression)
             .into_iter()
-            .chain(visibility.predicate_expression().cloned())
+            .chain(visibility.predicate_expression())
             .collect();
         let filter = if filters.is_empty() {
             None
@@ -4897,7 +4897,9 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::All)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self
+            .state
+            .render(bound, visibility.predicate_expression().as_ref());
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -4916,7 +4918,9 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::First)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self
+            .state
+            .render(bound, visibility.predicate_expression().as_ref());
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -4936,7 +4940,9 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::OptionalOne)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self
+            .state
+            .render(bound, visibility.predicate_expression().as_ref());
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -5055,7 +5061,9 @@ where
         let bound = self
             .state
             .bound(self.context.database().pagination_config(), read)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self
+            .state
+            .render(bound, visibility.predicate_expression().as_ref());
         let rows = self
             .context
             .fetch_rows(&rendered.sql, &rendered.values)

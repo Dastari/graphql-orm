@@ -12,9 +12,16 @@ supersedes: []
 
 ## 0.183.0 to 0.184.0: read-predicate columns bound to their row
 
-Upgrade ORM and macros together. Read predicates now write every column with
-the entity's table path, such as `"records"."owner_id" = ?` (#796). Generated
-SQL text changes, but ordinary policies admit exactly the same rows.
+Upgrade ORM and macros together. Read predicates now bind every column to
+the row it describes (#796):
+
+- at the root of a statement, through the entity's table path, such as
+  `"records"."owner_id" = ?`;
+- inside relation, `not_related`, closure and count subqueries, through an
+  alias no other scope uses, such as `__gom_row_1."owner_id"`.
+
+Generated SQL text changes, but ordinary policies admit exactly the same
+rows.
 
 - **Missing physical columns fail the read. Action needed** only if a
   table lacks a column that a read policy names, for example after schema
@@ -24,17 +31,36 @@ SQL text changes, but ordinary policies admit exactly the same rows.
   There, such a column used to resolve against an outer table that had a
   column of that name, so the policy was evaluated against the wrong row.
   The read now fails instead. Apply the pending migration.
+- **Hand-written `ReadVisibilityFilter`. Action needed** if you implement
+  `ReadVisibilityFilter` yourself and pass the filter to
+  `ReadPredicate::from_filter` for a relation, `not_related` or closure
+  target. Its conditions keep the original hazard, because the ORM cannot
+  rewrite them: an unqualified column the table lacks still resolves against
+  an outer row. Either:
+  - use the generated where input for the entity, which binds every column;
+    or
+  - override `to_row_bound_filter_expression` to write each column as
+    `READ_PREDICATE_ROW.column` (`format!("{READ_PREDICATE_ROW}.{column}")`,
+    with the column quoted), and override `table_name` to return the
+    entity's table. `from_filter` refuses a filter that writes the
+    qualifier without naming its table.
+
+  Filters used only at the root of a statement are unaffected.
 - **Large policies. Action needed** only for a policy near the 1 MiB
   rendered-size budget (`READ_PREDICATE_MAX_RENDERED_BYTES`) or the
-  per-statement relation budget. Each column term is longer by the rendered
-  table path plus one byte, so such a policy can now be refused with
+  per-statement relation budget. Each column term is longer by its
+  qualifier plus one byte. At the root that is the rendered table path, and
+  inside a subquery a row alias. Such a policy can now be refused with
   `AUTHORIZATION_MISCONFIGURED` when it is built. Express a long list of
   values on one column as `from_filter` with an `in_list`, which writes the
   qualifier once.
-- **Hand-written `ReadVisibilityFilter`. No action.** The new
-  `to_row_bound_filter_expression` defaults to `to_filter_expression`, so a
-  hand-written filter renders as before, with its columns unqualified.
-  Override it to bind them. Generated where inputs override it.
+- **Tables named like internal aliases. Action needed** only if an entity's
+  table is named like a read-predicate row alias: `__gom_row_N`,
+  `__gom_visibility_N`, or `__gom_closure_N_t`, `_k` or `_hN`. Relations,
+  closures and count orderings over it are now refused with
+  `AUTHORIZATION_MISCONFIGURED`; rename the table. A quoted name that only
+  contains such text, such as `"__gom_closure_3"`, is accepted and no
+  longer affects closure limits.
 
 ## 0.182.0 to 0.183.0: install documentation
 

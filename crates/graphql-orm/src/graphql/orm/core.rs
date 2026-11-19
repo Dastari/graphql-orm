@@ -1356,7 +1356,10 @@ where
         }
         let query = self.query;
         query
-            .count_with_visibility_in_transaction(self.hook_ctx, visibility.predicate_expression())
+            .count_with_visibility_in_transaction(
+                self.hook_ctx,
+                visibility.predicate_expression().as_ref(),
+            )
             .await
     }
 

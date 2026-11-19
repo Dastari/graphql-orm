@@ -26,30 +26,192 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     fn backend() -> DatabaseBackend;
 
     /// This filter as [`DatabaseFilter::to_filter_expression`] renders it,
-    /// with every column bound to the entity's own table: `table.column`,
-    /// the table written as [`DatabaseBackend::render_table_identifier_path`]
-    /// writes it. [`ReadPredicate::from_filter`] and generated related-row
-    /// filters use it, because they evaluate the filter inside correlated
-    /// subqueries, where an unqualified column the table does not physically
-    /// have would resolve against an outer row (#796).
+    /// with every column qualified by [`READ_PREDICATE_ROW`]:
+    /// `__gom_self."column"`. [`ReadPredicate::from_filter`] and generated
+    /// related-row filters use it. A read predicate binds that qualifier to
+    /// the row it describes wherever it is rendered: the entity's table at
+    /// the root of a statement, and a row alias that no other scope uses
+    /// inside a relation, `not_related` or closure subquery. A column the
+    /// table does not physically have then fails the statement instead of
+    /// resolving against an outer row (#796).
     ///
-    /// Generated filters override it. The default returns the unqualified
-    /// expression, so a hand-written filter's columns stay unbound unless
-    /// its implementation qualifies them.
+    /// Generated filters override it, and [`Self::table_name`] with it. The
+    /// default returns the unqualified expression, whose columns stay
+    /// unbound: inside a correlated subquery, a column the table lacks
+    /// resolves against an outer row. A hand-written filter that qualifies
+    /// its columns with [`READ_PREDICATE_ROW`] must also return its table
+    /// from [`Self::table_name`], or [`ReadPredicate::from_filter`] refuses
+    /// it with `AUTHORIZATION_MISCONFIGURED`.
     fn to_row_bound_filter_expression(&self) -> Option<FilterExpression> {
         self.to_filter_expression()
     }
+
+    /// The entity's declared table, which binds [`READ_PREDICATE_ROW`] at
+    /// the root of a statement. Generated filters return it; the default is
+    /// `None`.
+    fn table_name() -> Option<&'static str> {
+        None
+    }
 }
 
-/// `column`, a validated declared column of the entity stored in `table`,
-/// bound to that table's row: `table.column`, with the table path written as
-/// in the statement's FROM and the column part as a delimited identifier.
-fn row_bound_column(backend: DatabaseBackend, table: &str, column: &str) -> String {
+/// The qualifier read predicates write for "the row this predicate
+/// describes": `__gom_self."column"`. It is never sent to the database. Each
+/// place a predicate is rendered replaces it, outside quoted identifiers and
+/// strings, with the row's own binding: the entity's table path at the root
+/// of a statement, or a row alias unique to its subquery (#796).
+pub const READ_PREDICATE_ROW: &str = "__gom_self";
+
+/// `column`, a validated declared column, bound to [`READ_PREDICATE_ROW`].
+fn row_bound_column(backend: DatabaseBackend, column: &str) -> String {
     format!(
-        "{}.{}",
-        backend.render_table_identifier_path(table),
+        "{READ_PREDICATE_ROW}.{}",
         backend.quote_column_identifier(column)
     )
+}
+
+/// Calls `visit` with the byte range of each word (ASCII letters, digits,
+/// `_` and `$`) of `sql` outside quoted strings and identifiers: `'...'`,
+/// `"..."`, `` `...` `` and `[...]`, each closed by its delimiter unless
+/// doubled. A word inside a quoted name, such as a table called
+/// `"__gom_closure_3"`, is never visited.
+fn unquoted_words(sql: &str, mut visit: impl FnMut(std::ops::Range<usize>)) {
+    let bytes = sql.as_bytes();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"' | b'`' | b'[') => {
+                let close = if quote == b'[' { b']' } else { quote };
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == close {
+                        if bytes.get(index + 1) == Some(&close) {
+                            index += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            byte if word(byte) => {
+                let start = index;
+                while index < bytes.len() && word(bytes[index]) {
+                    index += 1;
+                }
+                visit(start..index);
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+/// `sql` with each unquoted [`READ_PREDICATE_ROW`] qualifier replaced by
+/// `row`.
+#[doc(hidden)]
+pub fn bind_read_predicate_row(sql: &str, row: &str) -> String {
+    let mut bound = String::with_capacity(sql.len());
+    let mut copied = 0;
+    unquoted_words(sql, |range| {
+        if &sql[range.clone()] == READ_PREDICATE_ROW {
+            bound.push_str(&sql[copied..range.start]);
+            bound.push_str(row);
+            copied = range.end;
+        }
+    });
+    bound.push_str(&sql[copied..]);
+    bound
+}
+
+/// How many unquoted [`READ_PREDICATE_ROW`] qualifiers `sql` holds.
+fn row_qualifiers(sql: &str) -> usize {
+    let mut count = 0;
+    unquoted_words(sql, |range| {
+        count += usize::from(&sql[range] == READ_PREDICATE_ROW)
+    });
+    count
+}
+
+/// One above the largest `N` of the unquoted words `<prefix>N...` in `sql`,
+/// or 1: the next level of a scope-unique name, so a new alias or closure
+/// never shadows one rendered inside `sql`.
+fn next_level(sql: &str, prefix: &str) -> usize {
+    let mut level = 0;
+    unquoted_words(sql, |range| {
+        if let Some(rest) = sql[range].strip_prefix(prefix)
+            && let Ok(n) = rest
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<usize>()
+        {
+            level = level.max(n);
+        }
+    });
+    level + 1
+}
+
+/// Whether `expression` holds an unquoted [`READ_PREDICATE_ROW`] qualifier.
+fn holds_row_qualifier(expression: &FilterExpression) -> bool {
+    match expression {
+        FilterExpression::Raw { clause, .. } | FilterExpression::TrustedFragment { clause, .. } => {
+            row_qualifiers(clause) > 0
+        }
+        FilterExpression::And(children) | FilterExpression::Or(children) => {
+            children.iter().any(holds_row_qualifier)
+        }
+    }
+}
+
+/// `expression` with [`READ_PREDICATE_ROW`] bound to `row` in every clause.
+fn bind_expression_row(expression: &FilterExpression, row: &str) -> FilterExpression {
+    match expression {
+        FilterExpression::Raw { clause, values } => FilterExpression::Raw {
+            clause: bind_read_predicate_row(clause, row),
+            values: values.clone(),
+        },
+        FilterExpression::TrustedFragment { clause, values } => FilterExpression::TrustedFragment {
+            clause: bind_read_predicate_row(clause, row),
+            values: values.clone(),
+        },
+        FilterExpression::And(children) => FilterExpression::And(
+            children
+                .iter()
+                .map(|child| bind_expression_row(child, row))
+                .collect(),
+        ),
+        FilterExpression::Or(children) => FilterExpression::Or(
+            children
+                .iter()
+                .map(|child| bind_expression_row(child, row))
+                .collect(),
+        ),
+    }
+}
+
+/// Whether a table's own name has the shape of a row alias read predicates
+/// render (`__gom_row_N`, `__gom_visibility_N`, or a closure's
+/// `__gom_closure_N_t`, `_k` or `_hN`). Relations and closures over such a
+/// table are refused: as an unaliased outer table it could take the place
+/// of an alias that a missing column falls back to on SQLite.
+fn names_row_alias(backend: DatabaseBackend, table: &str) -> bool {
+    let name = backend.table_name_part(table).to_ascii_lowercase();
+    let numbered = |rest: &str| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    if let Some(rest) = name
+        .strip_prefix("__gom_row_")
+        .or_else(|| name.strip_prefix("__gom_visibility_"))
+    {
+        return numbered(rest);
+    }
+    let Some(rest) = name.strip_prefix("__gom_closure_") else {
+        return false;
+    };
+    let Some((level, suffix)) = rest.split_once('_') else {
+        return false;
+    };
+    numbered(level)
+        && (suffix == "t" || suffix == "k" || suffix.strip_prefix('h').is_some_and(numbered))
 }
 
 /// Closed set of scalar comparisons for trusted read policy columns.
@@ -109,6 +271,11 @@ pub enum ReadPredicateOp {
 pub struct ReadPredicate {
     entity: TypeId,
     backend: DatabaseBackend,
+    /// The entity's declared table, which binds [`READ_PREDICATE_ROW`] at
+    /// the root of a statement. `None` only for a hand-written filter whose
+    /// expression holds no row qualifier.
+    table: Option<&'static str>,
+    /// Columns are written over [`READ_PREDICATE_ROW`].
     expression: FilterExpression,
     cost: Cost,
 }
@@ -193,19 +360,7 @@ pub enum ReadPredicateQuantifier {
 /// The nesting level for a new closure CTE: one above any closure already
 /// rendered inside `predicate`, so nested closures never shadow each other.
 fn closure_level(predicate: &str) -> usize {
-    predicate
-        .match_indices("__gom_closure_")
-        .filter_map(|(start, marker)| {
-            predicate[start + marker.len()..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse::<usize>()
-                .ok()
-        })
-        .max()
-        .unwrap_or(0)
-        + 1
+    next_level(predicate, "__gom_closure_")
 }
 
 /// The largest hop bound [`ReadPredicate::related_closure_within`] accepts on
@@ -356,10 +511,22 @@ impl Cost {
         self.exists
             .saturating_add(self.instances.saturating_mul(closure))
     }
-    fn of_expression(expression: &FilterExpression) -> Self {
-        let clause =
-            render_filter_expression(DatabaseBackend::Sqlite, expression, &mut 1, &mut Vec::new());
-        Self::of(&clause)
+    /// [`Self::of`], counting each [`READ_PREDICATE_ROW`] qualifier at the
+    /// length of the table path that binds it at the root of a statement,
+    /// where it can be longer. Inside a subquery it binds to a row alias,
+    /// and the enclosing predicate is measured again as rendered.
+    fn rooted(clause: &str, backend: DatabaseBackend, table: Option<&str>) -> Self {
+        let mut cost = Self::of(clause);
+        if let Some(table) = table {
+            let longer = backend
+                .render_table_identifier_path(table)
+                .len()
+                .saturating_sub(READ_PREDICATE_ROW.len());
+            cost.bytes = cost
+                .bytes
+                .saturating_add(row_qualifiers(clause).saturating_mul(longer));
+        }
+        cost
     }
     fn of(clause: &str) -> Self {
         // Placeholders render as `$n` or `@Pn` on the server: count each as
@@ -563,7 +730,12 @@ fn nesting(sql: &str) -> Nesting {
 ///    (the CTE's "at the bound and not seen before"). An all-NULL pointer
 ///    names no row and is complete: a root.
 /// 4. The authorized row's own truth is evaluated first, in a derived table
-///    with no FROM, so the target's columns bind to the authorized row.
+///    with no FROM, over [`READ_PREDICATE_ROW`], which the enclosing context
+///    binds to the authorized row.
+///
+/// Every row of `table` the walk reads has its own alias: `{prefix}_hK` in
+/// hop `K` and `{prefix}_t` where the target is evaluated, so a pointer, key
+/// or target column binds to that row or fails the statement (#796).
 ///
 /// The CTE form expands a pointer each time it is reached, but a later
 /// expansion only reaches pointers already reached earlier, so both forms see
@@ -590,21 +762,25 @@ fn render_mssql_closure(
     };
     let of = |alias: &str| columns(&|index, _, _| format!("{alias}.__gom_p{index}"), ", ");
     let names = columns(&|index, _, _| format!("__gom_p{index}"), ", ");
-    let pointers = columns(
-        &|index, pointer, _| {
-            format!(
-                "{table}.{} AS __gom_p{index}",
-                dialect.quote_column_identifier(pointer)
-            )
-        },
-        ", ",
-    );
-    // The rows of `table` whose key equals the pointer carried by `alias`.
-    let named_by = |alias: &str| {
+    // The pointer columns of the row `row`.
+    let pointers = |row: &str| {
+        columns(
+            &|index, pointer, _| {
+                format!(
+                    "{row}.{} AS __gom_p{index}",
+                    dialect.quote_column_identifier(pointer)
+                )
+            },
+            ", ",
+        )
+    };
+    // The row `row` of `table` is one whose key equals the pointer carried
+    // by `alias`.
+    let named_by = |row: &str, alias: &str| {
         columns(
             &|index, _, key| {
                 format!(
-                    "{table}.{} = {alias}.__gom_p{index}",
+                    "{row}.{} = {alias}.__gom_p{index}",
                     dialect.quote_column_identifier(key)
                 )
             },
@@ -619,22 +795,29 @@ fn render_mssql_closure(
             format!("{prefix}_l{depth}")
         }
     };
-    let mut walk = format!("(SELECT {pointers}, 0 AS __gom_depth) AS {}", level(0));
+    let mut walk = format!(
+        "(SELECT {}, 0 AS __gom_depth) AS {}",
+        pointers(READ_PREDICATE_ROW),
+        level(0)
+    );
     for depth in 1..=max_depth {
         let previous = level(depth - 1);
         let child = format!("{prefix}_c{depth}");
         let merged = format!("{prefix}_v{depth}");
+        let hop = format!("{prefix}_h{depth}");
         walk = format!(
             "(SELECT {merged_names}, MIN({merged}.__gom_depth) AS __gom_depth FROM {walk} \
-             OUTER APPLY (SELECT DISTINCT TOP (2147483647) 1 AS __gom_r, {pointers} FROM {table} \
+             OUTER APPLY (SELECT DISTINCT TOP (2147483647) 1 AS __gom_r, {hop_pointers} \
+             FROM {table} AS {hop} \
              WHERE {previous}.__gom_depth = {frontier} AND {step}) AS {child} \
              CROSS APPLY (VALUES ({previous_names}, {previous}.__gom_depth), \
              ({child_names}, CASE WHEN {child}.__gom_r IS NOT NULL THEN {depth} END)) \
              AS {merged} ({names}, __gom_depth) WHERE {merged}.__gom_depth IS NOT NULL \
              GROUP BY {merged_names}) AS {current}",
             merged_names = of(&merged),
+            hop_pointers = pointers(&hop),
             frontier = depth - 1,
-            step = named_by(&previous),
+            step = named_by(&hop, &previous),
             previous_names = of(&previous),
             child_names = of(&child),
             current = level(depth),
@@ -655,12 +838,16 @@ fn render_mssql_closure(
     } else {
         String::new()
     };
-    // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
-    let truth = format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END");
+    // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row `row`.
+    let truth = |row: &str| {
+        let predicate = bind_read_predicate_row(predicate, row);
+        format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END")
+    };
     let reached = format!("{prefix}_r");
     let truths = format!("{prefix}_x");
     let summary = format!("{prefix}_s");
     let own = format!("{prefix}_a");
+    let target = format!("{prefix}_t");
     let verdict = match quantifier {
         ReadPredicateQuantifier::Any => format!(
             "CASE WHEN {own}.__gom_truth = 2 OR {summary}.__gom_max = 2 THEN 1 \
@@ -673,28 +860,30 @@ fn render_mssql_closure(
              THEN NULL ELSE 1 END"
         ),
     };
-    // `table` is unaliased where the target is evaluated. In `truths` it is
-    // the reached row. `own` has no FROM and comes first, so it sees no
-    // `__gom_` column of this subquery: the target's unqualified columns
-    // bind to the authorized row, never to the summary.
+    // In `truths` the target is the reached row `target`. `own` has no FROM
+    // and comes first, so it sees no `__gom_` column of this subquery: its
+    // target is the authorized row, as the enclosing context binds it.
     format!(
-        "(SELECT {verdict} FROM (SELECT {truth} AS __gom_truth) AS {own} CROSS APPLY (\
+        "(SELECT {verdict} FROM (SELECT {own_truth} AS __gom_truth) AS {own} CROSS APPLY (\
          SELECT MAX({reached}.__gom_max) AS __gom_max, MIN({reached}.__gom_min) AS __gom_min, \
          MAX(CASE WHEN {ambiguous}({followed} AND ({group}.__gom_depth = {max_depth} \
          OR {reached}.__gom_rows = 0)) THEN 1 ELSE 0 END) AS __gom_incomplete FROM {walk} \
          OUTER APPLY (SELECT MAX({truths}.__gom_truth) AS __gom_max, \
          MIN({truths}.__gom_truth) AS __gom_min, COUNT(*) AS __gom_rows \
-         FROM (SELECT {truth} AS __gom_truth FROM {table} \
+         FROM (SELECT {target_truth} AS __gom_truth FROM {table} AS {target} \
          WHERE {step} AND {group}.__gom_depth < {max_depth}) AS {truths}) AS {reached}) AS {summary}) = 1",
-        step = named_by(&group),
+        own_truth = truth(READ_PREDICATE_ROW),
+        target_truth = truth(&target),
+        step = named_by(&target, &group),
     )
 }
 
 /// A validated key relation from `S` to `T` with its rendered target predicate
-/// (anonymous placeholders) and bind values.
+/// (anonymous placeholders, over [`READ_PREDICATE_ROW`]) and bind values.
 struct Relation {
     table: String,
-    joins: String,
+    /// `(target key, source key)` pairs, each one quoted column.
+    keys: Vec<(String, String)>,
     predicate: String,
     values: Vec<SqlValue>,
 }
@@ -705,21 +894,24 @@ impl Relation {
         S: Entity + 'static,
         T: Entity + 'static,
     {
-        if keys.is_empty() || target.entity != TypeId::of::<T>() || target.backend != B::DIALECT {
+        if keys.is_empty()
+            || target.entity != TypeId::of::<T>()
+            || target.backend != B::DIALECT
+            || names_row_alias(B::DIALECT, S::TABLE_NAME)
+            || names_row_alias(B::DIALECT, T::TABLE_NAME)
+        {
             return Err(invalid());
         }
-        let mut joins = Vec::new();
+        let mut pairs = Vec::new();
         for (source, destination) in keys {
             if validate_column::<B, S>(source).is_err()
                 || validate_column::<B, T>(destination).is_err()
             {
                 return Err(invalid());
             }
-            joins.push(format!(
-                "__gom_visibility.{} = {}.{}",
+            pairs.push((
                 B::DIALECT.quote_column_identifier(destination),
-                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
-                B::DIALECT.quote_column_identifier(source)
+                B::DIALECT.quote_column_identifier(source),
             ));
         }
         let mut values = Vec::new();
@@ -731,17 +923,33 @@ impl Relation {
         );
         Ok(Self {
             table: B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
-            joins: joins.join(" AND "),
+            keys: pairs,
             predicate,
             values,
         })
     }
 
-    /// Correlated EXISTS over the related rows where `predicate` is TRUE.
+    /// Correlated EXISTS over the related rows where `predicate` (over
+    /// [`READ_PREDICATE_ROW`], the related row) is TRUE. The related row and
+    /// the derived table each get an alias one level above any rendered
+    /// inside `predicate`, so no enclosing scope uses it; the source keys are
+    /// written over [`READ_PREDICATE_ROW`], for the enclosing context to bind.
     fn exists(&self, predicate: &str) -> String {
+        let level = next_level(predicate, "__gom_row_");
+        let row = format!("__gom_row_{level}");
+        let related = format!("__gom_visibility_{level}");
+        let joins = self
+            .keys
+            .iter()
+            .map(|(destination, source)| {
+                format!("{related}.{destination} = {READ_PREDICATE_ROW}.{source}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
         format!(
-            "EXISTS (SELECT 1 FROM (SELECT * FROM {} WHERE {predicate}) AS __gom_visibility WHERE {})",
-            self.table, self.joins
+            "EXISTS (SELECT 1 FROM (SELECT * FROM {} AS {row} WHERE {}) AS {related} WHERE {joins})",
+            self.table,
+            bind_read_predicate_row(predicate, &row),
         )
     }
 }
@@ -752,12 +960,20 @@ impl ReadPredicate {
     fn measured(
         entity: TypeId,
         backend: DatabaseBackend,
+        table: Option<&'static str>,
         expression: FilterExpression,
     ) -> async_graphql::Result<Self> {
-        let cost = Cost::of_expression(&expression).check(backend)?;
+        let clause = render_filter_expression(
+            DatabaseBackend::Sqlite,
+            &expression,
+            &mut 1,
+            &mut Vec::new(),
+        );
+        let cost = Cost::rooted(&clause, backend, table).check(backend)?;
         Ok(Self {
             entity,
             backend,
+            table,
             expression,
             cost,
         })
@@ -767,16 +983,31 @@ impl ReadPredicate {
     fn fragment(
         entity: TypeId,
         backend: DatabaseBackend,
+        table: Option<&'static str>,
         clause: String,
         values: Vec<SqlValue>,
     ) -> async_graphql::Result<Self> {
-        let cost = Cost::of(&clause).check(backend)?;
+        let cost = Cost::rooted(&clause, backend, table).check(backend)?;
         Ok(Self {
             entity,
             backend,
+            table,
             expression: FilterExpression::trusted_fragment(clause, values),
             cost,
         })
+    }
+
+    /// This predicate as the root of a statement renders it: each
+    /// [`READ_PREDICATE_ROW`] qualifier bound to the entity's table, which is
+    /// the row the statement reads.
+    fn root_expression(&self) -> FilterExpression {
+        match self.table {
+            Some(table) => bind_expression_row(
+                &self.expression,
+                &self.backend.render_table_identifier_path(table),
+            ),
+            None => self.expression.clone(),
+        }
     }
 
     /// Compare a validated persisted physical column with a bound value.
@@ -799,10 +1030,8 @@ impl ReadPredicate {
         Self::fragment(
             TypeId::of::<T>(),
             B::DIALECT,
-            format!(
-                "{} {operator} ?",
-                row_bound_column(B::DIALECT, T::TABLE_NAME, column)
-            ),
+            Some(T::TABLE_NAME),
+            format!("{} {operator} ?", row_bound_column(B::DIALECT, column)),
             vec![value],
         )
     }
@@ -837,10 +1066,8 @@ impl ReadPredicate {
         Self::fragment(
             TypeId::of::<T>(),
             B::DIALECT,
-            format!(
-                "{} {test}",
-                row_bound_column(B::DIALECT, T::TABLE_NAME, column)
-            ),
+            Some(T::TABLE_NAME),
+            format!("{} {test}", row_bound_column(B::DIALECT, column)),
             Vec::new(),
         )
     }
@@ -890,7 +1117,13 @@ impl ReadPredicate {
         if contains_match_nothing(&clause) {
             return Err(invalid());
         }
-        Self::fragment(self.entity, self.backend, format!("NOT ({clause})"), values)
+        Self::fragment(
+            self.entity,
+            self.backend,
+            self.table,
+            format!("NOT ({clause})"),
+            values,
+        )
     }
 
     /// Reject filters requiring residual Rust matching on this backend. A partial
@@ -904,7 +1137,12 @@ impl ReadPredicate {
         let expression = filter
             .to_row_bound_filter_expression()
             .ok_or_else(invalid)?;
-        Self::measured(F::entity_type_id(), B::DIALECT, expression)
+        // A row qualifier binds to the entity's table at the root; without
+        // the table it could not be bound.
+        if F::table_name().is_none() && holds_row_qualifier(&expression) {
+            return Err(invalid());
+        }
+        Self::measured(F::entity_type_id(), B::DIALECT, F::table_name(), expression)
     }
 
     /// A parameterized EXISTS join over validated persisted columns. `keys`
@@ -922,7 +1160,13 @@ impl ReadPredicate {
         reserve(target.cost.bytes, 1, 1024)?;
         let relation = Relation::new::<B, S, T>(keys, &target)?;
         let clause = relation.exists(&relation.predicate);
-        Self::fragment(TypeId::of::<S>(), B::DIALECT, clause, relation.values)
+        Self::fragment(
+            TypeId::of::<S>(),
+            B::DIALECT,
+            Some(S::TABLE_NAME),
+            clause,
+            relation.values,
+        )
     }
 
     /// Fail-closed absence: "no related row can match `target`".
@@ -967,15 +1211,9 @@ impl ReadPredicate {
         if relation.predicate.trim().is_empty() || contains_match_nothing(&relation.predicate) {
             return Err(invalid());
         }
-        let source = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
         let null_key = keys
             .iter()
-            .map(|(column, _)| {
-                format!(
-                    "{source}.{} IS NULL",
-                    B::DIALECT.quote_column_identifier(column)
-                )
-            })
+            .map(|(column, _)| format!("{} IS NULL", row_bound_column(B::DIALECT, column)))
             .collect::<Vec<_>>()
             .join(" OR ");
         let matching = relation.exists(&relation.predicate);
@@ -988,6 +1226,7 @@ impl ReadPredicate {
         Self::fragment(
             TypeId::of::<S>(),
             B::DIALECT,
+            Some(S::TABLE_NAME),
             format!(
                 "(CASE WHEN {null_key} THEN NULL WHEN {matching} THEN 0 WHEN {possible} THEN NULL ELSE 1 END) = 1"
             ),
@@ -1190,7 +1429,13 @@ impl ReadPredicate {
                 &relation.predicate,
                 max_depth,
             );
-            return Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values);
+            return Self::fragment(
+                TypeId::of::<T>(),
+                B::DIALECT,
+                Some(T::TABLE_NAME),
+                clause,
+                values,
+            );
         }
         let join = |items: Vec<String>, separator: &str| items.join(separator);
         let indexed = |render: &dyn Fn(usize, &str, &str) -> String| {
@@ -1199,29 +1444,37 @@ impl ReadPredicate {
                 .map(|(index, &(pointer, key))| render(index, pointer, key))
                 .collect::<Vec<_>>()
         };
-        let pointers = join(
-            indexed(&|_, pointer, _| {
-                format!("{table}.{}", dialect.quote_column_identifier(pointer))
-            }),
-            ", ",
-        );
+        // The pointer columns of the row `row`.
+        let pointers = |row: &str| {
+            join(
+                indexed(&|_, pointer, _| {
+                    format!("{row}.{}", dialect.quote_column_identifier(pointer))
+                }),
+                ", ",
+            )
+        };
         let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
-        let predicate = &relation.predicate;
-        // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
-        let truth =
-            format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END");
-        // The anchor has no FROM, so `table` is the row being authorized.
-        // In the step, the unaliased join makes `table` the reached row, so
-        // the target (including any nested relation) is evaluated on it.
+        // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row `row`.
+        let truth = |row: &str| {
+            let predicate = bind_read_predicate_row(&relation.predicate, row);
+            format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END")
+        };
+        // The anchor has no FROM: its row is the one being authorized, which
+        // the enclosing context binds to [`READ_PREDICATE_ROW`]. The step
+        // joins the reached row as `reached`, an alias unique to this
+        // closure, and evaluates the target (including any nested relation)
+        // on it, so a column it lacks fails the statement (#796).
+        let reached = format!("{cte}_t");
         let step = join(
             indexed(&|index, _, key| {
                 format!(
-                    "{table}.{} = {cte}.__gom_p{index}",
+                    "{reached}.{} = {cte}.__gom_p{index}",
                     dialect.quote_column_identifier(key)
                 )
             }),
             " AND ",
         );
+        let named = format!("{cte}_k");
         let followed = join(
             indexed(&|index, _, _| format!("__gom_node.__gom_p{index} IS NOT NULL")),
             " AND ",
@@ -1240,7 +1493,7 @@ impl ReadPredicate {
         let resolves = join(
             indexed(&|index, _, key| {
                 format!(
-                    "__gom_target.{} = __gom_node.__gom_p{index}",
+                    "{named}.{} = __gom_node.__gom_p{index}",
                     dialect.quote_column_identifier(key)
                 )
             }),
@@ -1254,7 +1507,7 @@ impl ReadPredicate {
         );
         let incomplete = format!(
             "EXISTS (SELECT 1 FROM {cte} AS __gom_node WHERE {ambiguous}({followed} AND (\
-             NOT EXISTS (SELECT 1 FROM {table} AS __gom_target WHERE {resolves}) \
+             NOT EXISTS (SELECT 1 FROM {table} AS {named} WHERE {resolves}) \
              OR (__gom_node.__gom_depth = {max_depth} AND NOT EXISTS (SELECT 1 FROM {cte} AS __gom_seen \
              WHERE {seen} AND __gom_seen.__gom_depth < {max_depth})))))"
         );
@@ -1268,12 +1521,23 @@ impl ReadPredicate {
         };
         let clause = format!(
             "(WITH RECURSIVE {cte} ({columns}, __gom_depth, __gom_truth) AS (\
-             SELECT {pointers}, 0, {truth} \
-             UNION SELECT {pointers}, {cte}.__gom_depth + 1, {truth} FROM {cte} JOIN {table} ON {step} \
+             SELECT {anchor_pointers}, 0, {anchor_truth} \
+             UNION SELECT {reached_pointers}, {cte}.__gom_depth + 1, {reached_truth} \
+             FROM {cte} JOIN {table} AS {reached} ON {step} \
              WHERE {cte}.__gom_depth < {max_depth}) \
-             SELECT {verdict} FROM {cte}) = 1"
+             SELECT {verdict} FROM {cte}) = 1",
+            anchor_pointers = pointers(READ_PREDICATE_ROW),
+            anchor_truth = truth(READ_PREDICATE_ROW),
+            reached_pointers = pointers(&reached),
+            reached_truth = truth(&reached),
         );
-        Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values)
+        Self::fragment(
+            TypeId::of::<T>(),
+            B::DIALECT,
+            Some(T::TABLE_NAME),
+            clause,
+            values,
+        )
     }
 
     pub fn and(self, other: Self) -> async_graphql::Result<Self> {
@@ -1339,6 +1603,9 @@ impl ReadPredicate {
         Ok(Self {
             entity: self.entity,
             backend: self.backend,
+            // One entity has one table; a side without it has no row
+            // qualifier to bind.
+            table: self.table.or(other.table),
             expression: if and {
                 FilterExpression::And(children)
             } else {
@@ -1501,17 +1768,25 @@ where
     } else {
         FilterExpression::Or(expressions)
     };
-    if let Some(policy) = visibility.predicate_expression() {
+    if let Some(policy) = visibility.row_expression() {
         expression = FilterExpression::And(vec![expression, policy.clone()]);
     }
     let predicate = ReadPredicate::related::<B, S, T>(
         keys,
-        ReadPredicate::measured(TypeId::of::<T>(), B::DIALECT, expression)?,
+        ReadPredicate::measured(
+            TypeId::of::<T>(),
+            B::DIALECT,
+            Some(T::TABLE_NAME),
+            expression,
+        )?,
     )?;
     let mut values = Vec::new();
     // Keep anonymous placeholders in this composable fragment. EntityQuery
     // rebases them after preceding scalar/policy binds using B::DIALECT.
     // Identifiers inside the EXISTS are already quoted by ReadPredicate::related.
+    // The source keys stay over READ_PREDICATE_ROW: the generated filter
+    // binds them to the source table at the root of a statement, or keeps
+    // them for an enclosing read predicate to bind (#796).
     let clause = render_filter_expression(
         DatabaseBackend::Sqlite,
         &predicate.expression,
@@ -1521,7 +1796,10 @@ where
     if values.len() > 512 {
         return Err(input_error());
     }
-    budget.charge::<B>(&clause)?;
+    budget.charge::<B>(&bind_read_predicate_row(
+        &clause,
+        &B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
+    ))?;
     Ok((vec![clause], values))
 }
 
@@ -1569,7 +1847,7 @@ where
         return Err(invalid());
     }
     let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
-    let Some(policy) = visibility.predicate_expression() else {
+    let Some(policy) = visibility.row_expression() else {
         // Unrestricted target: the count subquery still costs a relation.
         let count = format!("(SELECT COUNT(*) FROM {table} AS {alias} WHERE {join})");
         budget.charge_with::<B>(&count, 1)?;
@@ -1585,11 +1863,18 @@ where
     if values.len() > 512 {
         return Err(input_error());
     }
+    if names_row_alias(B::DIALECT, T::TABLE_NAME) {
+        return Err(invalid());
+    }
     // The count wraps the policy in two more subquery levels: check the
     // wrapped expression, as for a relation filter.
     reserve(predicate.len(), 1, 1024)?;
+    // The counted row has an alias no enclosing scope uses, so a policy
+    // column its table lacks fails the statement (#796).
+    let row = format!("__gom_row_{}", next_level(&predicate, "__gom_row_"));
+    let predicate = bind_read_predicate_row(&predicate, &row);
     let count = format!(
-        "(SELECT COUNT(*) FROM (SELECT * FROM {table} WHERE {predicate}) AS {alias} WHERE {join})"
+        "(SELECT COUNT(*) FROM (SELECT * FROM {table} AS {row} WHERE {predicate}) AS {alias} WHERE {join})"
     );
     budget.charge_with::<B>(&count, 1)?;
     Ok((count, values))
@@ -1608,7 +1893,19 @@ pub enum ReadVisibility {
     Unrestricted,
 }
 impl ReadVisibility {
-    pub(crate) fn predicate_expression(&self) -> Option<&FilterExpression> {
+    /// The SQL predicate as the root of a statement over the entity's table
+    /// renders it, its row qualifiers bound to that table.
+    pub(crate) fn predicate_expression(&self) -> Option<FilterExpression> {
+        match self {
+            Self::Prefilter(predicate) | Self::Complete(predicate) => {
+                Some(predicate.root_expression())
+            }
+            _ => None,
+        }
+    }
+    /// The SQL predicate over [`READ_PREDICATE_ROW`], to be embedded where
+    /// a subquery binds the row.
+    fn row_expression(&self) -> Option<&FilterExpression> {
         match self {
             Self::Prefilter(predicate) | Self::Complete(predicate) => Some(&predicate.expression),
             _ => None,
@@ -2148,7 +2445,7 @@ where
             // them together with the caller's filters and ordering parameters.
             let clause = render_filter_expression(
                 DatabaseBackend::Sqlite,
-                &p.expression,
+                &p.root_expression(),
                 &mut 1,
                 &mut values,
             );
@@ -2753,6 +3050,7 @@ mod predicate_tests {
             let predicate = ReadPredicate {
                 entity: TypeId::of::<()>(),
                 backend: DatabaseBackend::Sqlite,
+                table: None,
                 expression,
                 cost: Cost::default(),
             };
@@ -2764,6 +3062,7 @@ mod predicate_tests {
         ReadPredicate {
             entity: TypeId::of::<()>(),
             backend: DatabaseBackend::Sqlite,
+            table: None,
             expression: FilterExpression::trusted_fragment(clause, values),
             cost: Cost::of(clause),
         }
@@ -2988,6 +3287,7 @@ mod predicate_tests {
             let predicate = ReadPredicate {
                 entity: TypeId::of::<()>(),
                 backend: DatabaseBackend::Sqlite,
+                table: None,
                 expression,
                 cost: Cost::default(),
             };

@@ -1285,6 +1285,15 @@ impl DatabaseBackend {
         }
     }
 
+    /// The name a table path's last part denotes, undelimited.
+    pub(crate) fn table_name_part(self, table: &str) -> String {
+        let part = identifier_path_parts(self, table)
+            .filter(|part| !part.is_empty())
+            .last()
+            .unwrap_or(table);
+        self.identifier_part_name(part)
+    }
+
     /// The name one path part denotes: the inside of a well-formed delimited
     /// identifier, or the part itself.
     fn identifier_part_name(self, part: &str) -> String {
@@ -1336,17 +1345,16 @@ impl DatabaseBackend {
         self.quote_identifier(part)
     }
 
-    /// Generated filter support: a rendered filter column bound to the
-    /// rendered table path `table`, as `table.column`. The column's last
-    /// path part is kept as rendered, so it names the same column as the
-    /// unqualified form (#796).
+    /// Generated filter support: a rendered filter column qualified by
+    /// `row`, as `row.column`. The column's last path part is kept as
+    /// rendered, so it names the same column as the unqualified form (#796).
     #[doc(hidden)]
-    pub fn row_bound_filter_column(self, table: &str, column: &str) -> String {
+    pub fn row_bound_filter_column(self, row: &str, column: &str) -> String {
         let part = identifier_path_parts(self, column)
             .filter(|part| !part.is_empty())
             .last()
             .unwrap_or(column);
-        format!("{table}.{part}")
+        format!("{row}.{part}")
     }
 
     fn identifier_needs_quoting(self, identifier: &str) -> bool {

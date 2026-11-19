@@ -10,9 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.184.0 generates `ReadVisibilityFilter::to_row_bound_filter_expression` for where
-inputs, which renders each filter column qualified by the entity's table for read predicates and
-related-row filters (#796). Other generated SQL is unchanged.
+Version 0.184.0 generates `ReadVisibilityFilter::to_row_bound_filter_expression` and `table_name`
+for where inputs. The first renders each filter column over the read-predicate row qualifier, which
+read predicates and related-row filters bind to the row they describe (#796). Related-row filter
+keys are bound the same way. Other generated SQL is unchanged.
 
 Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
 well-formed delimited identifier, refuses a `table` or `db_column` part that only looks

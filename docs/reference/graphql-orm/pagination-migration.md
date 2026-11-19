@@ -150,18 +150,31 @@ quotes it, and binds the value. It accepts private (`read = false, filter = fals
 persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
 `Lt`, `Lte`, `Gt`, and `Gte`; NULL comparisons use ordinary SQL semantics.
 
-Every column a read predicate renders is bound to the row it describes: the
-entity's table path qualifies it, `"records"."owner_id" > ?`, in `column`,
-`is_null`, `is_not_null` and the conditions `from_filter` renders from a
-generated filter, as well as in relation keys. Relation, `not_related` and
-closure predicates, generated related-row filters and relation-count orderings
-evaluate a target's predicate inside a correlated subquery. There, the table
-qualifier makes a column that the target table does not physically have (after
-schema drift, or before a migration is applied) fail the statement. Without
-it, the column would resolve against an outer row on every backend (#796).
-The metadata check only covers `Entity::columns()`, so keep the physical
-schema migrated. A hand-written `ReadVisibilityFilter` keeps its own
-rendering unless it overrides `to_row_bound_filter_expression`.
+Every column a read predicate renders is bound to the row it describes, in
+`column`, `is_null`, `is_not_null`, the conditions `from_filter` renders
+from a generated filter, and relation keys and closure pointers:
+
+- At the root of a statement the entity's table path qualifies it:
+  `"records"."owner_id" > ?`.
+- Relation, `not_related` and closure predicates, generated related-row
+  filters and relation-count orderings evaluate a target's predicate inside
+  a correlated subquery. There the target row has an alias that no
+  enclosing scope uses, such as `__gom_row_1`, and its columns are written
+  through it.
+
+So a column that the target table does not physically have, after schema
+drift or before a migration is applied, fails the statement. Unqualified, it
+would resolve against an outer row on every backend. A table qualifier alone
+would not be enough on SQLite, which keeps searching outer scopes for
+another table exposing the same name (#796). The metadata check only covers
+`Entity::columns()`, so keep the physical schema migrated.
+
+A hand-written `ReadVisibilityFilter` renders unqualified columns, which
+keep that hazard inside a relation or closure target. Use the generated
+where input, or override `to_row_bound_filter_expression` to qualify each
+column with `READ_PREDICATE_ROW` and `table_name` to return the table.
+Relations and closures over a table named like a row alias (`__gom_row_N`)
+are refused.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
 

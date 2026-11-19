@@ -264,11 +264,12 @@ async fn execute(db: &Database<B>, sql: &str) {
         .unwrap_or_else(|error| panic!("{sql}: {error}"));
 }
 
-/// Sources (`flag`): s1 (1), s2 (0), s3 (NULL), s4 (1). Targets, created
+/// Sources (`flag`): s1 (NULL), s2 (0), s3 (5), s4 (1). Targets, created
 /// without `flag` (the value it gets in the control phase in brackets):
 /// t1 -> s1 [0], a root; t2 -> s2 [1], up t1; t3 -> s3 [NULL], up t2.
-/// s4 has no target. The source flags differ from their targets' flags, so
-/// a predicate bound to the source row would admit different rows.
+/// s4 has no target. Each source's flag differs from its target's, in
+/// nullness too for s1 and s3, so a predicate bound to the source row would
+/// admit different rows under every shape, the NULL tests included.
 async fn fixture() -> (Database<B>, Owned) {
     #[cfg(feature = "sqlite")]
     let (db, owned) = (
@@ -298,7 +299,7 @@ async fn fixture() -> (Database<B>, Owned) {
         format!(
             "CREATE TABLE bind_targets (id {TEXT} NOT NULL PRIMARY KEY, source_id {TEXT} NOT NULL, up {TEXT} NULL)"
         ),
-        "INSERT INTO bind_sources (id, flag) VALUES ('s1', 1), ('s2', 0), ('s3', NULL), ('s4', 1)"
+        "INSERT INTO bind_sources (id, flag) VALUES ('s1', NULL), ('s2', 0), ('s3', 5), ('s4', 1)"
             .to_owned(),
         "INSERT INTO bind_targets (id, source_id, up) VALUES ('t1', 's1', NULL), ('t2', 's2', 't1'), ('t3', 's3', 't2')"
             .to_owned(),
@@ -384,29 +385,30 @@ async fn graphql_admitted(
     })
 }
 
-/// The sources the repository list admits under `predicate`, checked
-/// against its count.
-async fn repository_admitted(
+/// The sources the repository list admits under `predicate`.
+async fn repository_list(
     db: &Database<B>,
     predicate: &ReadPredicate,
 ) -> Result<Vec<String>, String> {
-    let visibility = ReadVisibility::Complete(predicate.clone());
     let rows = EntityQuery::<BindSource>::new()
-        .with_read_visibility(&visibility)
+        .with_read_visibility(&ReadVisibility::Complete(predicate.clone()))
         .map_err(|error| format!("{error:?}"))?
         .fetch_all(db)
         .await
         .map_err(|error| format!("{error:?}"))?;
-    let count = EntityQuery::<BindSource>::new()
-        .with_read_visibility(&visibility)
+    let mut ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+/// How many sources the repository count admits under `predicate`.
+async fn repository_count(db: &Database<B>, predicate: &ReadPredicate) -> Result<i64, String> {
+    EntityQuery::<BindSource>::new()
+        .with_read_visibility(&ReadVisibility::Complete(predicate.clone()))
         .map_err(|error| format!("{error:?}"))?
         .count(db)
         .await
-        .map_err(|error| format!("{error:?}"))?;
-    let mut ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
-    ids.sort();
-    assert_eq!(count as usize, ids.len());
-    Ok(ids)
+        .map_err(|error| format!("{error:?}"))
 }
 
 /// Generated reads of the sources that evaluate the target's own policy
@@ -441,8 +443,12 @@ async fn policy_columns_bind_to_their_own_row() {
     // Drift: the target table lacks `flag`. Every read fails.
     let mut admitted = Vec::new();
     for (index, (name, predicate, _)) in shapes().into_iter().enumerate() {
-        if let Ok(rows) = repository_admitted(&db, &predicate).await {
-            admitted.push(format!("{name}: repository read admitted {rows:?}"));
+        // Each read path on its own, so one failing cannot hide another.
+        if let Ok(rows) = repository_list(&db, &predicate).await {
+            admitted.push(format!("{name}: repository list admitted {rows:?}"));
+        }
+        if let Ok(count) = repository_count(&db, &predicate).await {
+            admitted.push(format!("{name}: repository count admitted {count}"));
         }
         SHAPE.store(index, Ordering::SeqCst);
         for query in graphql_reads() {
@@ -466,8 +472,13 @@ async fn policy_columns_bind_to_their_own_row() {
     execute(&db, "UPDATE bind_targets SET flag = 1 WHERE id = 't2'").await;
     for (index, (name, predicate, expected)) in shapes().into_iter().enumerate() {
         assert_eq!(
-            repository_admitted(&db, &predicate).await.unwrap(),
+            repository_list(&db, &predicate).await.unwrap(),
             expected,
+            "{name}"
+        );
+        assert_eq!(
+            repository_count(&db, &predicate).await.unwrap(),
+            expected.len() as i64,
             "{name}"
         );
         SHAPE.store(index, Ordering::SeqCst);

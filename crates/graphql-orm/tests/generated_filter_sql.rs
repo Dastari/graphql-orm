@@ -117,13 +117,9 @@ fn emitted_sql_and_bind_order_are_pinned() {
     pin("filter_sql_row_bound", backend, &row_bound);
 
     // The row-bound form, which read predicates and related-row filters
-    // render (#796), differs only by the table qualifier on each column.
-    // The qualifier as the snapshot's `Debug` output escapes it.
-    let escaped = format!(
-        "{:?}",
-        backend.render_table_identifier_path("sql_filter_rows")
-    );
-    let table = format!("{}.", &escaped[1..escaped.len() - 1]);
+    // render (#796), differs only by the row qualifier on each column, which
+    // the predicate binds to a row alias or, at the root, the table.
+    let table = format!("{}.", graphql_orm::graphql::orm::READ_PREDICATE_ROW);
     assert!(row_bound.contains(&table), "{row_bound}");
     let unqualified = actual
         .lines()
