@@ -1044,11 +1044,132 @@ fn not_related_chains_stop_at_the_case_and_relation_limits() {
                 &|_| true,
             );
             // Two CASE levels each: at most five within the CASE limit of 10.
-            // SQL Server's 16-relation total stops it at three.
-            assert_eq!(levels, if cfg!(feature = "mssql") { 3 } else { 5 });
+            // SQL Server's six-relation total stops it at two.
+            assert_eq!(levels, if cfg!(feature = "mssql") { 2 } else { 5 });
             let failures = run_statement_paths(&db, "deepest not_related chain", &deepest).await;
             let _keep = owned;
             assert!(failures.is_empty(), "{failures:#?}");
+        })
+    });
+}
+
+fn parents_ordered_by_kid_counts(terms: usize) -> String {
+    format!(
+        "query {{ rows: {}({}: [{}]) {{ edges {{ node {{ {} }} }} }} }}",
+        r("zrParents"),
+        a("orderBy"),
+        vec!["{ KidCount: DESC }"; terms].join(", "),
+        f("id")
+    )
+}
+
+#[test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+fn closures_and_count_orderings_are_charged_per_statement() {
+    on_thread(2 << 20, || {
+        let _serial = KID_POLICY_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        block_on(async {
+            let (mut db, owned) = database().await;
+            db.set_row_policy(Policy);
+            db.set_entity_policy(Policy);
+            let schema = async_graphql::Schema::build(
+                QueryRoot::default(),
+                MutationRoot::default(),
+                SubscriptionRoot::default(),
+            )
+            .data(db)
+            .data(AuthSubject::builder("reader").build())
+            .finish();
+            let misconfigured = Some("\"AUTHORIZATION_MISCONFIGURED\"");
+            // A closure counts as several relations: with a closure kid
+            // policy, three kid filters fit the statement budget on every
+            // backend (64 / (1 + 3 + 16) elsewhere, 6 / (1 + 1) on SQL
+            // Server), and a fourth is refused.
+            *KID_POLICY.lock().unwrap() = Some(
+                ReadPredicate::related_closure::<B, ZrKid>(&[("parent_id", "id")], leaf()).unwrap(),
+            );
+            let response = parents_with_kid_filters(&schema, 3).await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let response = parents_with_kid_filters(&schema, 4).await;
+            assert_eq!(
+                code(&response).as_deref(),
+                misconfigured,
+                "{:?}",
+                response.errors
+            );
+            // Each count ordering costs its policy plus its own subquery.
+            let policy = if cfg!(feature = "mssql") { 1 } else { 4 };
+            *KID_POLICY.lock().unwrap() = Some(
+                grow(
+                    leaf(),
+                    &|p, n| {
+                        if n < policy {
+                            wrap(p)
+                        } else {
+                            Err(async_graphql::Error::new("stop"))
+                        }
+                    },
+                    &|_| true,
+                )
+                .0,
+            );
+            let statement = if cfg!(feature = "mssql") {
+                READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS
+            } else {
+                READ_PREDICATE_MAX_STATEMENT_RELATIONS
+            } as usize;
+            let admitted = statement / (policy + 1);
+            assert!(admitted < MAX_ORDER_BY_TERMS, "{admitted}");
+            let response = schema
+                .execute(async_graphql::Request::new(parents_ordered_by_kid_counts(
+                    admitted,
+                )))
+                .await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let response = schema
+                .execute(async_graphql::Request::new(parents_ordered_by_kid_counts(
+                    admitted + 1,
+                )))
+                .await;
+            assert_eq!(
+                code(&response).as_deref(),
+                misconfigured,
+                "{:?}",
+                response.errors
+            );
+            // An unrestricted target is charged too, and the list itself is
+            // capped at 16 terms.
+            *KID_POLICY.lock().unwrap() = None;
+            let response = schema
+                .execute(async_graphql::Request::new(parents_ordered_by_kid_counts(
+                    MAX_ORDER_BY_TERMS + 1,
+                )))
+                .await;
+            assert_eq!(
+                code(&response).as_deref(),
+                Some("\"INVALID_INPUT\""),
+                "{:?}",
+                response.errors
+            );
+            if cfg!(feature = "mssql") {
+                let response = schema
+                    .execute(async_graphql::Request::new(parents_ordered_by_kid_counts(
+                        statement + 1,
+                    )))
+                    .await;
+                assert_eq!(
+                    code(&response).as_deref(),
+                    misconfigured,
+                    "{:?}",
+                    response.errors
+                );
+            }
+            let _keep = owned;
         })
     });
 }

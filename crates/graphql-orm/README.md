@@ -14,9 +14,11 @@ Version 0.180.0 supports the transitive-closure read predicates on SQL Server, a
 breadth-first search with the same semantics as the recursive CTE on SQLite and PostgreSQL;
 SQL Server accepts bounds up to `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64). Read predicates
 are budgeted at build: two nested closures, 1 MiB of rendered SQL, 256 expression levels, 10 nested
-`CASE` expressions, and 32 nested and 128 total relations, plus 75 subqueries, 16 nested and 16 total
-relations and 900 weighted levels on SQL Server. Each statement's relation filters may add 128
-relations more (16 on SQL Server). `and`/`or` folds are flattened, and lists render as balanced pairs.
+`CASE` expressions, and 32 nested and 128 total relations (a closure counting as 16), plus 75
+subqueries, 6 nested and 6 total relations (a closure counting as 1) and 900 weighted levels on SQL
+Server. Each statement's relation filters and count orderings may add 64 relations more (6 on SQL
+Server), and a generated `orderBy` list holds at most 16 terms. `and`/`or` folds are flattened, and
+lists render as balanced pairs.
 See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
 
 Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).

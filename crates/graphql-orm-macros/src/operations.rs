@@ -6029,6 +6029,10 @@ fn generate_graphql_operations_unfiltered(
     let order_read_authorization = quote! {
         let mut order_by = order_by;
         if let Some(orders) = order_by.as_mut() {
+            if orders.len() > ::graphql_orm::graphql::orm::MAX_ORDER_BY_TERMS {
+                return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
+            }
             for order in orders.iter_mut() {
                 order.__gom_prepare_read(ctx, &mut __gom_statement_budget).await?;
             }

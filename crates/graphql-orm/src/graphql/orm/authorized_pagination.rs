@@ -73,11 +73,12 @@ pub enum ReadPredicateOp {
 /// is one node, and every list of three or more renders as a balanced binary
 /// tree of parenthesised pairs, so its parse depth grows with the logarithm
 /// of its length. Within these limits a predicate renders,
-/// formats and drops without deep recursion, and every shape tested at the
-/// limits ran within bounded server memory. They do not cover a statement's
-/// bind-parameter count, which each server caps itself (SQL Server at 2,100
-/// for the whole statement), nor server resource use beyond the tested
-/// shapes and data: set a statement timeout on the server as well.
+/// formats and drops without deep recursion, and every shape probed at the
+/// limits ran or was refused, within bounded server memory. They do not
+/// bound execution time, cover a statement's bind-parameter count (which
+/// each server caps itself, SQL Server at 2,100 for the whole statement), or
+/// rule out SQL Server plan-resource errors (8623, 8621) on untested shapes,
+/// which fail that read: set a statement timeout on the server as well.
 #[derive(Clone, Debug)]
 pub struct ReadPredicate {
     entity: TypeId,
@@ -212,12 +213,12 @@ const MSSQL_MAX_NESTING: u32 = 75;
 /// The deepest nesting of relation subqueries (`EXISTS (SELECT ...)`, as
 /// [`ReadPredicate::related`] and [`ReadPredicate::not_related`] render) one
 /// [`ReadPredicate`] may render on SQL Server. Relations are correlated
-/// joins the optimizer plans together: on the owned server, 39 or 40 nested
-/// ones failed with "insufficient resources" (error 8623), and so did two
-/// 27-deep relations from a parent to its children. A deeper predicate is
+/// joins the optimizer plans together, and statements failed with
+/// "insufficient resources" (error 8623) from 29 relations in all; see
+/// [`READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`]. A deeper predicate is
 /// refused with `AUTHORIZATION_MISCONFIGURED`.
 pub const READ_PREDICATE_MSSQL_MAX_RELATION_NESTING: u32 = MSSQL_MAX_RELATION_NESTING;
-const MSSQL_MAX_RELATION_NESTING: u32 = 16;
+const MSSQL_MAX_RELATION_NESTING: u32 = 6;
 
 /// The deepest nesting of relation subqueries one [`ReadPredicate`] may
 /// render on SQLite and PostgreSQL. PostgreSQL plans nested relations
@@ -237,12 +238,26 @@ const MAX_RELATION_NESTING: u32 = 32;
 pub const READ_PREDICATE_MAX_RELATIONS: u32 = MAX_RELATIONS;
 const MAX_RELATIONS: u32 = 128;
 
-/// The most relation subqueries one [`ReadPredicate`] may render in total on
-/// SQL Server. Relations that fan out (a parent's relation to many children)
-/// exhausted the optimizer (error 8623) from about 112 relation subqueries
-/// in one statement.
+/// The most relations one [`ReadPredicate`] may render in total on SQL
+/// Server, closures counted at
+/// [`READ_PREDICATE_MSSQL_CLOSURE_RELATION_WEIGHT`]. See
+/// [`READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`] for the measurements.
 pub const READ_PREDICATE_MSSQL_MAX_RELATIONS: u32 = MSSQL_MAX_RELATIONS;
-const MSSQL_MAX_RELATIONS: u32 = 16;
+const MSSQL_MAX_RELATIONS: u32 = 6;
+
+/// How many relations one closure counts as towards the relation totals on
+/// SQLite and PostgreSQL ([`READ_PREDICATE_MAX_RELATIONS`] and
+/// [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`]). A closure walks and
+/// evaluates its target for every row it reaches, so it costs far more than
+/// one relation. Closures are counted as rendered: a closure inside a closure
+/// counts its inner closure four times, once per inlined copy.
+pub const READ_PREDICATE_CLOSURE_RELATION_WEIGHT: u32 = CLOSURE_RELATION_WEIGHT;
+const CLOSURE_RELATION_WEIGHT: u32 = 16;
+
+/// As [`READ_PREDICATE_CLOSURE_RELATION_WEIGHT`], on SQL Server, where a
+/// closure renders no relation subquery of its own.
+pub const READ_PREDICATE_MSSQL_CLOSURE_RELATION_WEIGHT: u32 = MSSQL_CLOSURE_RELATION_WEIGHT;
+const MSSQL_CLOSURE_RELATION_WEIGHT: u32 = 1;
 
 /// The deepest nesting of `CASE` expressions one [`ReadPredicate`] may
 /// render, on every backend. SQL Server refuses `CASE` nested deeper than
@@ -295,10 +310,21 @@ struct Cost {
     nesting: u32,
     relations: u32,
     exists: u32,
+    instances: u32,
     cases: u32,
     closures: u32,
 }
 impl Cost {
+    /// Relation subqueries plus closures at their weight on `backend`.
+    fn relation_weight(self, backend: DatabaseBackend) -> u32 {
+        let closure = if backend == DatabaseBackend::Mssql {
+            MSSQL_CLOSURE_RELATION_WEIGHT
+        } else {
+            CLOSURE_RELATION_WEIGHT
+        };
+        self.exists
+            .saturating_add(self.instances.saturating_mul(closure))
+    }
     fn of_expression(expression: &FilterExpression) -> Self {
         let clause =
             render_filter_expression(DatabaseBackend::Sqlite, expression, &mut 1, &mut Vec::new());
@@ -314,6 +340,7 @@ impl Cost {
             subqueries: nesting,
             relations,
             exists,
+            instances,
             cases,
         } = nesting(clause);
         Self {
@@ -325,6 +352,7 @@ impl Cost {
             nesting,
             relations,
             exists,
+            instances,
             cases,
             closures: closure_level(clause) as u32 - 1,
         }
@@ -341,7 +369,7 @@ impl Cost {
             || self.depth > MAX_EXPRESSION_DEPTH
             || self.cases > MAX_CASE_NESTING
             || self.relations > relation_nesting
-            || self.exists > relations
+            || self.relation_weight(backend) > relations
             || (mssql && (self.nesting > MSSQL_MAX_NESTING || self.units > MSSQL_MAX_NESTING_UNITS))
         {
             return Err(invalid());
@@ -371,6 +399,8 @@ struct Nesting {
     relations: u32,
     /// Relation subqueries in total, along every path.
     exists: u32,
+    /// Closures in total, as rendered.
+    instances: u32,
     /// `CASE ... END` expressions.
     cases: u32,
 }
@@ -387,9 +417,14 @@ fn nesting(sql: &str) -> Nesting {
         subqueries: 0,
         relations: 0,
         exists: 0,
+        instances: 0,
         cases: 0,
     };
     let mut cases = 0_u32;
+    // The word before the current one, to recognise a closure's opening:
+    // `WITH RECURSIVE __gom_closure_N` (the CTE form) or
+    // `AS __gom_closure_N_g` (the SQL Server walk), once per closure.
+    let mut previous: &[u8] = b"";
     let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
     let mut index = 0;
     while index < bytes.len() {
@@ -459,7 +494,16 @@ fn nesting(sql: &str) -> Nesting {
                     deepest.cases = deepest.cases.max(cases);
                 } else if token.eq_ignore_ascii_case(b"END") {
                     cases = cases.saturating_sub(1);
+                } else if let Some(rest) = token.strip_prefix(b"__gom_closure_") {
+                    let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+                    let opening = (previous.eq_ignore_ascii_case(b"RECURSIVE")
+                        && digits == rest.len())
+                        || (previous.eq_ignore_ascii_case(b"AS") && &rest[digits..] == b"_g");
+                    if digits > 0 && opening {
+                        deepest.instances += 1;
+                    }
                 }
+                previous = token;
                 index = end - 1;
             }
             _ => {}
@@ -1241,6 +1285,7 @@ impl ReadPredicate {
             nesting: self.cost.nesting.max(other.cost.nesting),
             relations: self.cost.relations.max(other.cost.relations),
             exists: self.cost.exists.saturating_add(other.cost.exists),
+            instances: self.cost.instances.saturating_add(other.cost.instances),
             cases: self.cost.cases.max(other.cost.cases),
             closures: self.cost.closures.max(other.cost.closures),
         }
@@ -1266,20 +1311,32 @@ impl ReadPredicate {
 /// `AUTHORIZATION_MISCONFIGURED` before the statement is rendered.
 pub const READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES: usize = 1 << 20;
 
-/// The most relation subqueries (`EXISTS (SELECT ...)`) that the generated
-/// relation filters and relation-count orderings of one statement may add
-/// together on SQLite and PostgreSQL. With the entity's own policy (at most
-/// [`READ_PREDICATE_MAX_RELATIONS`]), a statement holds at most 256. On a
-/// memory-capped PostgreSQL server, 264 relation subqueries nested 32 deep
-/// peaked at about 590 MB.
+/// The most relations (`EXISTS (SELECT ...)` subqueries, closures at
+/// [`READ_PREDICATE_CLOSURE_RELATION_WEIGHT`], and one per relation-count
+/// ordering) that the generated relation filters and count orderings of one
+/// statement may add together on SQLite and PostgreSQL. With the entity's
+/// own policy (at most [`READ_PREDICATE_MAX_RELATIONS`]), a statement holds
+/// at most 192. On a PostgreSQL server capped at 4 GB, every shape probed at
+/// these limits ran, peaking at about 470 MB of server memory; the slowest
+/// took about 8 s on 60 rows, so set `statement_timeout` as well.
 pub const READ_PREDICATE_MAX_STATEMENT_RELATIONS: u32 = MAX_STATEMENT_RELATIONS;
-const MAX_STATEMENT_RELATIONS: u32 = 128;
+const MAX_STATEMENT_RELATIONS: u32 = 64;
 
 /// As [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`], on SQL Server. With the
 /// entity's own policy (at most [`READ_PREDICATE_MSSQL_MAX_RELATIONS`]), a
-/// statement holds at most 64; fan-out relations failed from about 112.
+/// statement holds at most 12. With these limits lifted, statements on the
+/// owned server failed with error 8623 from 29 relations (deep relation
+/// chains on both sides) and 32 (relations to many children combined with
+/// `and`), and closure-heavy statements from 28; the limit leaves more than
+/// twice that margin. Plan-resource errors on untested shapes remain
+/// possible: they fail the read.
 pub const READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS: u32 = MSSQL_MAX_STATEMENT_RELATIONS;
-const MSSQL_MAX_STATEMENT_RELATIONS: u32 = 16;
+const MSSQL_MAX_STATEMENT_RELATIONS: u32 = 6;
+
+/// The most terms a generated `orderBy` list may hold. Each relation-count
+/// term adds a correlated `COUNT(*)` subquery; a longer list is refused as
+/// invalid input.
+pub const MAX_ORDER_BY_TERMS: usize = 16;
 
 /// Per-statement budget threaded through generated where-input and ordering
 /// preparation: where-input nodes left, and relation policy SQL added so far.
@@ -1314,9 +1371,21 @@ impl RelationFilterBudget {
     }
     /// Check a rendered relation fragment and add it to this statement.
     fn charge<B: OrmBackend>(&mut self, fragment: &str) -> async_graphql::Result<()> {
+        self.charge_with::<B>(fragment, 0)
+    }
+    /// As [`Self::charge`], adding `extra` relations: a count ordering's own
+    /// correlated `COUNT(*)` subquery counts as one.
+    fn charge_with<B: OrmBackend>(
+        &mut self,
+        fragment: &str,
+        extra: u32,
+    ) -> async_graphql::Result<()> {
         let cost = Cost::of(fragment).check(B::DIALECT)?;
         self.bytes = self.bytes.saturating_add(cost.bytes);
-        self.relations = self.relations.saturating_add(cost.exists);
+        self.relations = self
+            .relations
+            .saturating_add(cost.relation_weight(B::DIALECT))
+            .saturating_add(extra);
         let relations = if B::DIALECT == DatabaseBackend::Mssql {
             MSSQL_MAX_STATEMENT_RELATIONS
         } else {
@@ -1455,10 +1524,10 @@ where
     }
     let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
     let Some(policy) = visibility.predicate_expression() else {
-        return Ok((
-            format!("(SELECT COUNT(*) FROM {table} AS {alias} WHERE {join})"),
-            Vec::new(),
-        ));
+        // Unrestricted target: the count subquery still costs a relation.
+        let count = format!("(SELECT COUNT(*) FROM {table} AS {alias} WHERE {join})");
+        budget.charge_with::<B>(&count, 1)?;
+        return Ok((count, Vec::new()));
     };
     let mut values = Vec::new();
     // Anonymous placeholders: the sort renderer renumbers them per dialect
@@ -1476,7 +1545,7 @@ where
     let count = format!(
         "(SELECT COUNT(*) FROM (SELECT * FROM {table} WHERE {predicate}) AS {alias} WHERE {join})"
     );
-    budget.charge::<B>(&count)?;
+    budget.charge_with::<B>(&count, 1)?;
     Ok((count, values))
 }
 
@@ -2802,6 +2871,23 @@ mod predicate_tests {
         assert_eq!(cost.bytes, clause.len() + 6);
         assert_eq!(Cost::of("(WITH c AS (SELECT 1) SELECT 1)").nesting, 2);
         assert_eq!(Cost::of("__gom_closure_2_l0 __gom_closure_1").closures, 2);
+        // Closure instances: one per CTE opening or SQL Server walk alias,
+        // not per reference.
+        let cte = Cost::of("(WITH RECURSIVE __gom_closure_1 (__gom_p0) AS (SELECT 1) SELECT 1)");
+        assert_eq!(cte.instances, 1);
+        let walk = Cost::of(
+            "(SELECT 1 FROM (SELECT 1) AS __gom_closure_2_g OUTER APPLY (SELECT 1 WHERE \
+             __gom_closure_2_g.__gom_p0 = 1) AS __gom_closure_2_r) AS __gom_closure_1_g",
+        );
+        assert_eq!(walk.instances, 2);
+        assert_eq!(
+            walk.relation_weight(DatabaseBackend::Mssql),
+            2 * READ_PREDICATE_MSSQL_CLOSURE_RELATION_WEIGHT
+        );
+        assert_eq!(
+            cte.relation_weight(DatabaseBackend::Postgres),
+            READ_PREDICATE_CLOSURE_RELATION_WEIGHT
+        );
         // Only SQL Server has a nesting budget; the others refuse by size.
         let deep = Cost {
             nesting: READ_PREDICATE_MSSQL_MAX_NESTING + 1,

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.0 to 0.180.0: closure read predicates on SQL Server
+## 0.179.1 to 0.180.0: closure read predicates on SQL Server
 
 Upgrade ORM and macros together and recompile entities: generated where
 inputs render their nested lists as balanced pairs and share a
@@ -39,19 +39,23 @@ per-statement relation budget. No data migration is needed. See
     such as more than five nested `not_related`;
   - over 32 nested relations or 128 relations in total on SQLite and
     PostgreSQL (`READ_PREDICATE_MAX_RELATION_NESTING`,
-    `READ_PREDICATE_MAX_RELATIONS`), or over 16 of either on SQL Server
+    `READ_PREDICATE_MAX_RELATIONS`), or over 6 of either on SQL Server
     (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`,
-    `READ_PREDICATE_MSSQL_MAX_RELATIONS`);
+    `READ_PREDICATE_MSSQL_MAX_RELATIONS`). Each closure counts as 16
+    relations, or 1 on SQL Server;
   - on SQL Server, over 75 nested subquery levels
     (`READ_PREDICATE_MSSQL_MAX_NESTING`) or over 900 weighted levels
     (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than four
     `related` around a 64-hop closure;
-  - more than 1 MiB of policy SQL, or more than 128 relations (16 on SQL
+  - more than 1 MiB of policy SQL, or more than 64 relations (6 on SQL
     Server), from the generated relation filters and relation-count
     orderings of one statement (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`,
     `READ_PREDICATE_MAX_STATEMENT_RELATIONS`,
-    `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`). A client request with
-    more relation filters than that is refused.
+    `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`). Each count ordering
+    counts at least one. A client request with more relation filters or count
+    orderings than that is refused;
+  - more than 16 terms in a generated `orderBy` list (`MAX_ORDER_BY_TERMS`),
+    refused as `INVALID_INPUT`.
 
   Such a policy is now refused with `AUTHORIZATION_MISCONFIGURED` when it is
   built or, for relation filters, when the request is prepared. Before, it

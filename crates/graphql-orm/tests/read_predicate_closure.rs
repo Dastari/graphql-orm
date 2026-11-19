@@ -565,8 +565,10 @@ mod portable {
                 ));
             }
         }
-        // Combining two-level closures side by side is not nesting.
-        two.or(through).unwrap();
+        // Combining closures side by side is not nesting; each counts towards
+        // the relation total, so two two-level closures together exceed it.
+        two.clone().or(any(PARENT, passes())).unwrap();
+        misconfigured(two.or(through));
     }
 
     #[test]
@@ -594,12 +596,12 @@ mod portable {
         }
         // Each level adds two nested CASE expressions: the CASE limit stops
         // the chain at five levels, before its doubled target grows large.
-        // SQL Server's 16-relation total stops it at three.
+        // SQL Server's six-relation total stops it at two.
         assert_eq!(READ_PREDICATE_MAX_CASE_NESTING, 10);
         assert_eq!(
             built,
             if B::DIALECT == DatabaseBackend::Mssql {
-                3
+                2
             } else {
                 5
             }
