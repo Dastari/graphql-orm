@@ -638,9 +638,9 @@ write:
   more candidates fails with `PAGE_LIMIT_EXCEEDED` and the scan-budget message, before any row
   changes. Whether the budget runs out can depend on rows the caller cannot see; that is the
   documented residual of the budget, and it is the only way hidden rows can affect a bulk write.
-  A `write_target_prefilter`, or without one and with
-  `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` a SQL predicate from the row
-  policy's `read_visibility` (see [row policy on generated
+  A `write_target_prefilter`, or without one a SQL predicate from the row
+  policy's `read_visibility` (the default; `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(false)`
+  turns it off) (see [row policy on generated
   writes](strict-authorization.md#row-policy-on-generated-writes)), removes hidden rows in SQL, so
   they are not counted against the budget. Set the budget in trusted code.
 - **Per field.** The bound applies to each bulk mutation field. A request with several aliased

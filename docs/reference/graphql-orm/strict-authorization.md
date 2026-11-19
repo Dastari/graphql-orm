@@ -351,11 +351,12 @@ cannot grant a write; a row it leaves out is treated as missing even where the
 callbacks would have allowed it, so it must not exclude rows the caller can
 write. The default returns `None`. Repository writes do not ask.
 
-**Narrowing bulk writes to read visibility (opt-in).** With
-`DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or
-`Database::with_narrow_bulk_writes_to_read_visibility(true)`), GraphQL
+**Narrowing bulk writes to read visibility (default).** GraphQL
 `updateMany` and `deleteMany` also narrow their locking read by read
-visibility when the policy declares no `write_target_prefilter`. If
+visibility when the policy declares no `write_target_prefilter`. This is the
+default since the breaking release;
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility(false)` (or
+`Database::with_narrow_bulk_writes_to_read_visibility(false)`) turns it off. If
 `RowPolicy::read_visibility` returns `Prefilter` or `Complete` for the
 `GraphqlMutation` surface, its predicate is added to the bulk write's locking
 read. A row outside the caller's read visibility is then never passed to a row
@@ -363,8 +364,8 @@ callback or counted. The predicate only narrows. Every selected row is still
 classified as in the table above, so the payload and the rows written for
 visible rows are unchanged.
 
-The setting is off by default, and bulk writes then select the same rows as
-before. With it on:
+With the setting off, bulk writes select every row their filter matches, as
+before the breaking release. With it on:
 
 - A row outside read visibility that `can_write_row` would allow is left out,
   as a missing row is. If callers may bulk-write rows they cannot read, return
@@ -390,8 +391,8 @@ rows that a scan reads.
 **Snapshot target selection on SQL Server (separate opt-in).**
 `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` (or
 `Database::with_mssql_snapshot_bulk_write_targets(true)`) lets a narrowed
-bulk write avoid that read. It is off by default, and stays off when narrowing
-becomes the default. It needs `narrow_bulk_writes_to_read_visibility` too. It
+bulk write avoid that read. It is off by default, and the narrowing default
+does not turn it on. It needs `narrow_bulk_writes_to_read_visibility` too. It
 applies to a bulk write with a SQL predicate (read visibility or a
 `write_target_prefilter`) **when all of these hold**:
 

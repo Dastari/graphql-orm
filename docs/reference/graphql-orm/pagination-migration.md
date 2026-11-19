@@ -186,8 +186,11 @@ counts, aggregates, keyset and connection pages, authorized scans, search and
 subscription delivery. Each renders the same SQL clause; no path evaluates a
 policy in Rust.
 
-- `predicate.not()?` renders `NOT (...)` with the inner bind values in their
-  original order. It is TRUE exactly when the inner predicate is FALSE. A
+- `predicate.not()?` is TRUE exactly when the inner predicate is FALSE. For a
+  column comparison, NULL test, generated filter or closure it renders
+  `NOT (...)` with the inner bind values in their original order; a relation
+  renders its own FALSE rows (below), and `and`/`or` trees that contain one
+  are negated by De Morgan. A
   comparison with a NULL column is UNKNOWN, and `NOT` keeps it UNKNOWN, so
   negation does not admit a row because a compared column is NULL:
   `column("secret", Eq, 1).not()?` admits rows whose `secret` holds another
@@ -215,19 +218,24 @@ policy in Rust.
   refused as before.
 - **Absence of a related row.** `ReadPredicate::not_related::<Backend, Source,
   Target>(&[("source_column", "target_column")], target_predicate)` is the
-  fail-closed "no related row matching P". For each source row it is UNKNOWN
-  when a source key column is NULL, FALSE when a related row has `P` TRUE,
-  UNKNOWN when no related row has `P` TRUE but one has it UNKNOWN (it might
-  match), and TRUE otherwise, including when there is no related row. It
-  renders a `CASE` over two correlated `EXISTS` subqueries (related rows where
-  `P`, and related rows where `P` is not FALSE), so the target's bind values
-  appear twice. `not_related(k, p).not()?` admits the same rows as
-  `related(k, p)`. Add `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?`
+  fail-closed "no related row matching P", and is exactly
+  `related(k, p)?.not()`. For each source row it is UNKNOWN when a source key
+  column is NULL, FALSE when a related row has `P` TRUE, UNKNOWN when no
+  related row has `P` TRUE but one has it UNKNOWN (it might match), and TRUE
+  otherwise, including when there is no related row. It renders
+  `<every key IS NOT NULL> AND NOT EXISTS (<related rows where P is TRUE or
+  UNKNOWN>)`, one correlated subquery that binds the target's values once.
+  `not_related(k, p).not()?` admits the same rows as `related(k, p)`. Add `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?`
   to admit rows with a NULL key. A target predicate rendering the deny
   fallback is refused, as for `not()`.
-- `related(k, p).not()?` is plain `NOT EXISTS`, which is two-valued: it admits
-  a row with a NULL key, or whose related rows all have `P` UNKNOWN. This form
-  is unchanged since 0.92; prefer `not_related` for absence policies.
+- `related(k, p).not()?` is that same three-valued negation since the
+  breaking release (#770). Before it, the form rendered plain `NOT EXISTS`,
+  which admitted a row with a NULL key, or whose related rows all had `P`
+  UNKNOWN.
+- A negated relation nests one `CASE` for each relation level it negates, so
+  the `CASE` limit below also bounds negation: a relation chain more than ten
+  levels deep builds but cannot be negated, and `not()` refuses it with
+  `AUTHORIZATION_MISCONFIGURED`.
 - **Visibility of related rows.** As with `related`, the policy owns the join:
   the target's row policy is not applied inside `related` or `not_related`, so
   a target row the caller cannot read counts like any other. `not_related(P)`
@@ -360,7 +368,7 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     shape.
 
 - **Composition limits.** Relations, negations and closures inline their
-  target: a closure four times, `not_related` twice. A closure inside a
+  target: a closure four times. A closure inside a
   closure also evaluates the inner walk for every row the outer walk
   reaches. Unbounded composition could therefore render a statement of many
   megabytes, nest past what the server parses, or recurse deeply enough to
@@ -458,9 +466,11 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
     1.1 s for two and 8 s for three, while four levels exhausted server
     memory. PostgreSQL followed the same curve: 3.7 s at two levels, 21 s at
-    three and 172 s at four. A `not_related` chain inlines its target twice
-    per level: on PostgreSQL eight levels took 150 s and nine 542 s, while
-    five, the most the `CASE` limit allows, take about 30 ms.
+    three and 172 s at four. Until the breaking release a `not_related`
+    chain inlined its target twice per level: on PostgreSQL eight levels took
+    150 s and nine 542 s. It now inlines its target once and nests one `CASE`
+    for every two levels, so the `CASE` limit stops it at twenty levels (nine
+    on SQL Server, at the relation total).
   - **What fits on SQL Server.** A closure at the default 64 hops uses 67
     subquery levels and counts as one relation; each `related` or
     `not_related` around it adds two subquery levels and one relation. That
