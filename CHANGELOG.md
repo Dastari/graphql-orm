@@ -35,6 +35,15 @@ Transitive-closure read predicates on SQL Server ([#779](https://github.com/Dast
 - **Fix (SQL Server closure):** the authorized row's own target is evaluated in a scope that sees no internal `__gom_` column, so a target column named like one (for example `__gom_max`) binds to the row, not to the closure's summary.
 - New tests run the closure suite on owned SQL Server: truth tables, the depth bound, keyset and connection pages, refusals, rendering and bind order, and a 3,000-row performance check that asserts the plan shape. Subscription delivery also runs on owned SQL Server. A new parity test runs 248 generated cases on SQLite, owned PostgreSQL and owned SQL Server and checks each admitted set against a reference evaluator of the documented rules. The cases cover cycles, self-loops, chains past the bound, unreachable and partially NULL pointers, composite and fan-out keys, nested closures and `not()`. Budget tests cover each refusal on every backend and run the largest policies that build on every read path on SQLite, owned PostgreSQL and owned SQL Server. A further test covers a target column named like an internal column. Expression-depth tests cover refusals at the limit on every backend, the deepest `not()` chains and alternating trees that build running on every read path (on SQL Server also around the deepest closure nesting), a 50,000-term fold on every backend, rendering at the limit on an explicit 2 MiB stack, and the per-statement relation budget through generated GraphQL relation filters. Relation and CASE tests refuse the reviewed deep-chain and many-relation-filter shapes, through generated GraphQL, and run the largest admitted shapes on every backend. A budget-shape suite runs, on all three backends, every shape grown to the limits on every statement and GraphQL path, including wide alternations, relation chains with negations and long generated `or` lists, and checks on SQLite and PostgreSQL that balanced grouping matches the plain chain on 150 random trees.
 
+## Unreleased - ORM/macros 0.179.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- Every PostgreSQL container started by the ORM, backup and AI test harnesses now
+  runs with a hard `--memory 4g --memory-swap 4g` limit, matching the SQL Server
+  harness, so a runaway test backend cannot exhaust the build host. Library code,
+  public API, generated SQL and stored data are unchanged.
+
 ## Unreleased - ORM/macros 0.179.0
 
 Security property suites for identifier quoting and canonical JSON ([#725](https://github.com/Dastari/graphql-orm/issues/725)). See the [migration guide](MIGRATION.md#01770-to-01790-identifier-quoting-and-canonical-json-properties).

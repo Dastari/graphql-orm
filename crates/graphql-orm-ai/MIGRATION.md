@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.150.0 to 0.150.1
+
+**No action.** Test-owned PostgreSQL containers are memory-capped. The library,
+durable state, schema and approvals are unchanged.
+
 ## 0.149.0 to 0.150.0
 
 **No action**. Registered tools reuse their compiled argument validators.

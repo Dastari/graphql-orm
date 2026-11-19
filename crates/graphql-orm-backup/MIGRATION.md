@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.27.0 to 0.27.1
+
+**No action.** Test-owned PostgreSQL containers are memory-capped. The library,
+manifests and restore behavior are unchanged.
+
 ## 0.27.0
 
 **Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.

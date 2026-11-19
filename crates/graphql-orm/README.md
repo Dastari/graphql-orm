@@ -19,6 +19,8 @@ relations and 900 weighted levels on SQL Server. Each statement's relation filte
 relations more (16 on SQL Server). `and`/`or` folds are flattened, and lists render as balanced pairs.
 See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
 
+Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
+
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
 read as whitespace, and adds seeded property suites for identifier quoting on every backend
 and for canonical JSON defaults ([#725](https://github.com/Dastari/graphql-orm/issues/725)).

@@ -71,6 +71,12 @@ per-statement relation budget. No data migration is needed. See
   bind order is unchanged. Long generated `or` lists that SQLite refused past
   its 1,000-deep expression limit now run.
 
+## 0.179.0 to 0.179.1: test-owned PostgreSQL memory cap
+
+**No action.** Upgrade ORM and macros together. Test-owned PostgreSQL containers
+are memory-capped (`--memory 4g --memory-swap 4g`); the library, generated code,
+stored data and configuration are unchanged.
+
 ## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
 
 Upgrade ORM and macros together.
