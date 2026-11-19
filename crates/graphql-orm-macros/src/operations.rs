@@ -1649,6 +1649,12 @@ fn generate_graphql_operations_unfiltered(
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
     let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
+    crate::backend::validate_declared_identifier_path(
+        backend,
+        table_name,
+        struct_name.span(),
+        "table",
+    )?;
     // Generated DML names the table with the backend's rendered identifier;
     // `table_name` itself stays the raw identity used by hooks and descriptors.
     let sql_table_name = backend_render_identifier_path(backend, table_name);

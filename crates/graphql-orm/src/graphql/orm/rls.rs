@@ -671,7 +671,10 @@ pub(crate) fn change_journal_tables(schema: &super::core::SchemaModel) -> Vec<Ch
             Some(ChangeJournalTable {
                 entity_name: table.entity_name.clone(),
                 table_name: table.table_name.clone(),
-                bare: super::dialect::identifier_path_is_bare(&table.table_name),
+                bare: super::dialect::identifier_path_is_bare(
+                    DatabaseBackend::Postgres,
+                    &table.table_name,
+                ),
                 primary_key: primary_key.clone(),
                 encoding: change_journal_key_encoding(sql_type),
             })
@@ -2278,6 +2281,8 @@ mod drift_tests {
                 "\"\"\"a\"\" OR true OR \"\"b\"\"\"",
             ),
             ("\"\"", "\"\"\"\"\"\""),
+            // A quoted name containing NUL is not one delimited identifier.
+            ("\"a\0b\"", "\"\"\"a\0b\"\"\""),
         ] {
             assert_eq!(quote_policy_column(column), rendered, "{column}");
         }
@@ -2482,7 +2487,11 @@ mod identifier_path_tests {
             ("user", "\"user\"", true),
         ] {
             assert_eq!(change_journal_orm_path(path), rendered, "{path}");
-            assert_eq!(identifier_path_is_bare(path), bare, "{path}");
+            assert_eq!(
+                identifier_path_is_bare(super::super::DatabaseBackend::Postgres, path),
+                bare,
+                "{path}"
+            );
         }
     }
 }

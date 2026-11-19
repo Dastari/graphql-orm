@@ -86,10 +86,15 @@ pub struct ReadPredicate {
     expression: FilterExpression,
     cost: Cost,
 }
-fn validate_column<T: Entity>(column: &str) -> async_graphql::Result<()> {
+/// A persisted physical column of `T`. A table-qualified column is accepted
+/// only when its qualifier names `T`'s own table: the predicate binds the
+/// column to `T`'s row, so any other qualifier is refused rather than
+/// stripped (#782).
+fn validate_column<B: OrmBackend, T: Entity>(column: &str) -> async_graphql::Result<()> {
     if T::columns()
         .iter()
         .any(|definition| definition.name == column)
+        && B::DIALECT.column_qualifier_names_table(column, T::TABLE_NAME)
     {
         Ok(())
     } else {
@@ -563,7 +568,7 @@ fn render_mssql_closure(
         &|index, pointer, _| {
             format!(
                 "{table}.{} AS __gom_p{index}",
-                dialect.quote_identifier(pointer)
+                dialect.quote_column_identifier(pointer)
             )
         },
         ", ",
@@ -574,7 +579,7 @@ fn render_mssql_closure(
             &|index, _, key| {
                 format!(
                     "{table}.{} = {alias}.__gom_p{index}",
-                    dialect.quote_identifier(key)
+                    dialect.quote_column_identifier(key)
                 )
             },
             " AND ",
@@ -679,16 +684,16 @@ impl Relation {
         }
         let mut joins = Vec::new();
         for (source, destination) in keys {
-            if !S::columns().iter().any(|c| c.name == *source)
-                || !T::columns().iter().any(|c| c.name == *destination)
+            if validate_column::<B, S>(source).is_err()
+                || validate_column::<B, T>(destination).is_err()
             {
                 return Err(invalid());
             }
             joins.push(format!(
                 "__gom_visibility.{} = {}.{}",
-                B::DIALECT.quote_identifier(destination),
+                B::DIALECT.quote_column_identifier(destination),
                 B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
-                B::DIALECT.quote_identifier(source)
+                B::DIALECT.quote_column_identifier(source)
             ));
         }
         let mut values = Vec::new();
@@ -756,7 +761,7 @@ impl ReadPredicate {
         op: ReadPredicateOp,
         value: SqlValue,
     ) -> async_graphql::Result<Self> {
-        validate_column::<T>(column)?;
+        validate_column::<B, T>(column)?;
         let operator = match op {
             ReadPredicateOp::Eq => "=",
             ReadPredicateOp::Ne => "<>",
@@ -768,7 +773,10 @@ impl ReadPredicate {
         Self::fragment(
             TypeId::of::<T>(),
             B::DIALECT,
-            format!("{} {operator} ?", B::DIALECT.quote_identifier(column)),
+            format!(
+                "{} {operator} ?",
+                B::DIALECT.quote_column_identifier(column)
+            ),
             vec![value],
         )
     }
@@ -799,11 +807,11 @@ impl ReadPredicate {
         column: &str,
         test: &str,
     ) -> async_graphql::Result<Self> {
-        validate_column::<T>(column)?;
+        validate_column::<B, T>(column)?;
         Self::fragment(
             TypeId::of::<T>(),
             B::DIALECT,
-            format!("{} {test}", B::DIALECT.quote_identifier(column)),
+            format!("{} {test}", B::DIALECT.quote_column_identifier(column)),
             Vec::new(),
         )
     }
@@ -931,7 +939,12 @@ impl ReadPredicate {
         let source = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
         let null_key = keys
             .iter()
-            .map(|(column, _)| format!("{source}.{} IS NULL", B::DIALECT.quote_identifier(column)))
+            .map(|(column, _)| {
+                format!(
+                    "{source}.{} IS NULL",
+                    B::DIALECT.quote_column_identifier(column)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" OR ");
         let matching = relation.exists(&relation.predicate);
@@ -1156,7 +1169,9 @@ impl ReadPredicate {
                 .collect::<Vec<_>>()
         };
         let pointers = join(
-            indexed(&|_, pointer, _| format!("{table}.{}", dialect.quote_identifier(pointer))),
+            indexed(&|_, pointer, _| {
+                format!("{table}.{}", dialect.quote_column_identifier(pointer))
+            }),
             ", ",
         );
         let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
@@ -1171,7 +1186,7 @@ impl ReadPredicate {
             indexed(&|index, _, key| {
                 format!(
                     "{table}.{} = {cte}.__gom_p{index}",
-                    dialect.quote_identifier(key)
+                    dialect.quote_column_identifier(key)
                 )
             }),
             " AND ",
@@ -1195,7 +1210,7 @@ impl ReadPredicate {
             indexed(&|index, _, key| {
                 format!(
                     "__gom_target.{} = __gom_node.__gom_p{index}",
-                    dialect.quote_identifier(key)
+                    dialect.quote_column_identifier(key)
                 )
             }),
             " AND ",

@@ -1559,7 +1559,7 @@ fn scalar_output_is_readable(
 fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -> String {
     let rendered = reference.then(|| backend_render_identifier_path(backend, name));
     let name = rendered.as_deref().map_or(name, |rendered| {
-        crate::backend::identifier_path_parts(rendered)
+        crate::backend::identifier_path_parts(backend, rendered)
             .last()
             .unwrap_or("")
     });
@@ -4269,6 +4269,30 @@ fn generate_entity_tokens(
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
+    if let Some(table) = entity_meta.table_name.as_deref() {
+        crate::backend::validate_declared_identifier_path(
+            backend,
+            table,
+            struct_name.span(),
+            "table",
+        )?;
+    }
+    for parsed in &parsed_fields {
+        if let Some(column) = parsed.meta.db_column.as_deref() {
+            crate::backend::validate_declared_identifier_path(
+                backend,
+                column,
+                syn::spanned::Spanned::span(&parsed.field),
+                "db_column",
+            )?;
+            crate::backend::validate_declared_column_qualifier(
+                backend,
+                entity_meta.table_name.as_deref().unwrap_or("unknown"),
+                column,
+                syn::spanned::Spanned::span(&parsed.field),
+            )?;
+        }
+    }
     let relation_readability_columns = parsed_fields
         .iter()
         .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)

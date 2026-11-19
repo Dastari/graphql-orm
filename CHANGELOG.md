@@ -14,6 +14,21 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.182.0
+
+SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issues/782), [#783](https://github.com/Dastari/graphql-orm/issues/783)), found by the identifier-quoting property suite. See the [migration guide](MIGRATION.md#01810-to-01820-sql-identifier-quoting).
+
+- **Fix (SQL rendering): only one well-formed delimited identifier is passed through (#782).** `SqlDialect::quote_identifier`, `DatabaseBackend::render_identifier`, `quote_identifier_path`, `render_identifier_path` and the derive macros returned any input unchanged that merely started and ended with a delimiter, so text such as `"a"b"`, `"`, `[a]]` or `[a] , [b]` reached SQL as an unterminated identifier or as more than one token. Input is now passed through only when it is exactly one well-formed, non-empty delimited identifier for the dialect (every inner closing delimiter doubled; SQLite `[...]` with no `]` inside). Any other input is delimited as one literal name with the closing delimiter doubled, so the result always reads back as exactly one identifier. Well-formed delimited names and paths, and every undelimited name, render byte-identically.
+- **Declared names that start and end with a delimiter but are not one well-formed delimited identifier are refused at compile time (#782).** A `#[graphql_orm(table = "...")]` or `db_column = "..."` path part such as `"a"b"` or `[a] , [b]` now fails the derive with a spanned error that names the part, instead of generating malformed SQL.
+- **Fix (SQL Server): names outside the regular-identifier rule are bracketed (#783).** `DatabaseBackend::Mssql.render_identifier` wrote every non-ASCII name bare, and SQL Server refused names such as `x²`, `雪🦀`, `x\u{3000}y` or names with letters added after Unicode 3.2 with error 102. A name is now written bare only under SQL Server's regular-identifier rule, measured against the server for every Basic Multilingual Plane character: a first character that is a Unicode 3.2 letter, letter number, U+FF3F or `_ @ #`, then those, Unicode 3.2 marks, decimal digits, connector punctuation, format characters or `$`. Everything else is bracketed. Every name SQL Server accepted bare keeps its exact text, so runtime DDL, migration plans and their hashes are unchanged for those names. The tables are generated from Unicode 3.2.0 by `scripts/generate-mssql-identifier-tables.py`. The derive macros already bracket every SQL Server name.
+- **Schema introspection treats catalogue names literally.** SQL Server introspection quotes every raw schema, table and column name it reads back unconditionally, with `]` doubled, both in the reported model and in the `OBJECT_ID` lookups for indexes and foreign keys, so a table literally named `[ledger]` no longer reads `ledger`'s metadata or collides with it. SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read quote raw names literally too, and PostgreSQL foreign-key targets render a raw name bare only when it is plain, never passing it through as SQL text.
+- **Paths are split with each backend's own delimiters.** The runtime and derive path splitters read only the dialect's delimited forms: `"..."` on PostgreSQL; `"..."`, backticks and `[...]` (closed at the first `]`) on SQLite; `[...]` and `"..."` on SQL Server. A PostgreSQL part that starts with `[` no longer swallows the following separator.
+- **Empty and NUL names.** A delimited identifier containing NUL is never passed through, and the derives refuse a declared name containing NUL. SQLite's empty delimited names (`""`, `[]`, two backticks) are still passed through; on PostgreSQL and SQL Server, which refuse them, they are quoted literally.
+- **Table-qualified columns in read predicates, group pages and dependent deletes.** New `DatabaseBackend::quote_column_identifier` renders the column part of a declared column path. `ReadPredicate::column`, `is_null`/`is_not_null`, and the relation, `not_related` and closure joins use it, so a `db_column` such as `"t"."c"` names column `c` through any alias instead of erroring or (on SQLite) reading as a string constant. A qualifier that does not name the entity's own table is refused by the derives at compile time, so no generated filter, sort or projection references another table, and by read predicates with `AUTHORIZATION_MISCONFIGURED` rather than stripped (SQL Server compares the qualifier's exact text). Dependent-delete selection receives its column rendered by the caller: a declared key as its column part, a catalogue foreign-key column as one literal name (SQLite and PostgreSQL report raw names, always escaped and delimited; SQL Server reports them delimited), so a literal `parent.ref` or `"x"` is never read as `ref` or `x`; the `exclude_blank` filter of `fetch_group_page` uses the path renderer, as grouping and metrics do. A test checks the exact rows admitted through each predicate on SQLite, owned PostgreSQL and owned SQL Server.
+- **Catalogue names round-trip.** SQL Server introspection reports bracketed or dotted index, index-column, filtered-index predicate and foreign-key constraint names delimited, so dropping or recreating them names the same object, and its filter parser is character-boundary safe and bracket-aware, so a filter on a non-ASCII column reads back instead of panicking. PostgreSQL reports foreign-key targets and table names that bare SQL would fold or split, or that start with `"`, delimited, and always delimits another schema's name (`"Archive"."Parent"`, `"local.parent"`), so they resolve to the referenced table. Ordinary names are reported as before.
+- **NUL in PostgreSQL row-level security columns.** The policy column helper no longer passes through a quoted name containing NUL.
+- New tests: a seeded property suite (`identifier_quoting_properties`) checks that every input quotes to exactly one identifier naming it, that bare renderings are plain and unreserved, and that each rendering round-trips through `CREATE TABLE`, `INSERT`, `SELECT` and `DROP` on in-memory SQLite and owned PostgreSQL and SQL Server, with the minimized cases from both issues retained. An owned SQL Server test compares the generated tables with the server for every non-ASCII Basic Multilingual Plane character, and another introspects tables named `ledger` and `[ledger]` side by side. Path properties round-trip `schema.table` paths in every delimited form through each database, and a group-page test covers a table-qualified column on SQLite and owned PostgreSQL. The shared runtime/derive cases gain the minimized malformed inputs, and a derive unit test covers the compile-time refusal.
+
 ## Unreleased - ORM/macros 0.181.0
 
 Transitive-closure read predicates on SQL Server ([#779](https://github.com/Dastari/graphql-orm/issues/779)). See [read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures) and the [migration guide](MIGRATION.md#01800-to-01810-closure-read-predicates-on-sql-server).
@@ -1294,7 +1309,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   Align ORM/macros at 0.55.1. No source, public API, generated code, SDL,
   persistence or behavior change.
 
-
 ## 0.55.0 (unreleased)
 
 - Add typed, bounded runtime literal defaults for UUID, JSON (canonical JSON v1),
@@ -1335,7 +1349,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   new `RuntimeSchemaDiagnosticCode::InvalidFormat`. Align ORM/macros at 0.55.0;
   no generated code, stored-data or automatic database migration.
 
-
 ## 0.54.1 (unreleased)
 
 - Pair ORM/macros 0.54.1 and AI 0.107.4 with published Auth `v0.22.1` at
@@ -1343,14 +1356,12 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   correction. Align direct host fixtures and regenerate their real Cargo locks.
   No generated code, public ORM API, SDL, persistence or AI schema change.
 
-
 ## Router 0.6.3 (unreleased)
 
 - Increase the finite default signed role-catalogue response bound to 2 MiB,
   retaining exact signature/content binding and explicit smaller host bounds.
   This requires the coordinated Auth signature-envelope correction; no new
   router artifact or workspace release is implied by the source change.
-
 
 ## 0.54.0 (unreleased)
 
@@ -1364,7 +1375,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   barriers, explicit lag/refetch signals and an owned Auth bridge adapter.
   Align ORM/macros at 0.54.0; no automatic database migration.
 
-
 ## 0.53.0 (unreleased)
 
 - Re-read original status and current authority after binding and successful
@@ -1376,7 +1386,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   `997707e060bcf5fabf879a5f98146dc2732b1c99` for explicit validated
   current-session proofs that retain the exact original credential reference.
 - Align ORM/macros at 0.53.0. No generated code, SDL, stored-data or schema change.
-
 
 ## 0.52.0 (unreleased)
 
@@ -1505,7 +1514,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   Recheck status, identity, grants, bindings and expiry for each sensitive operation;
   deny changed authority and context-free repository bypasses.
 - Align ORM/macros at 0.47.0 and adopt a reviewed full external auth revision.
-
 
 ## 0.46.0 (unreleased)
 
@@ -1865,7 +1873,6 @@ See the [pagination guide](docs/reference/graphql-orm/pagination-migration.md)
 for backend/capability boundaries, consistency, and migration details. The new
 scan fields extend keyset-enabled GraphQL SDL and operation catalogues.
 No stored-data migration is required.
-
 
 ## 0.32.0 - 2026-09-17
 

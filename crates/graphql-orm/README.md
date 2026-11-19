@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
+is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
+writes a name bare only under its regular-identifier rule (#783).
+See the [migration guide](../../MIGRATION.md#01810-to-01820-sql-identifier-quoting).
+
 Version 0.181.0 supports the transitive-closure read predicates on SQL Server, as an unrolled
 breadth-first search with the same semantics as the recursive CTE on SQLite and PostgreSQL;
 SQL Server accepts bounds up to `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64). Read predicates
@@ -207,7 +212,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -724,7 +728,6 @@ that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
 
-
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
 preserve compiler-native hashes and have separate admission; format 1, default-off
@@ -758,7 +761,6 @@ PostgreSQL migration default alterations are corrected in the paired 0.48.2
 runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
-
 
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD

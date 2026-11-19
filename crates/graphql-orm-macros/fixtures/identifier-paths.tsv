@@ -19,3 +19,25 @@ sqlite	﻿bom	"﻿bom"
 sqlite	app.﻿bom	app."﻿bom"
 sqlite	bom﻿mid	bom﻿mid
 postgres	﻿bom	﻿bom
+# #782: text that only starts and ends with delimiters is one literal name.
+sqlite	"a"b"	"""a""b"""
+sqlite	"""	""""""""
+sqlite	[a]b]	"[a]b]"
+sqlite	app."a"b"	app."""a""b"""
+postgres	"	""""
+postgres	""	""""""
+postgres	"a" , "b"	"""a"" , ""b"""
+mssql	[a]]	[[a]]]]]
+mssql	[a] , [b]	[[a]] , [b]]]
+mssql	[app].[a]]	[app].[[a]]]]]
+mssql	[]	[[]]]
+# Round 2: each dialect splits a path with its own delimited forms.
+postgres	[s.t	"[s".t
+postgres	[a.b]	"[a"."b]"
+postgres	`a.b`	"`a"."b`"
+sqlite	[a]].b]	"[a]]"."b]"
+sqlite	`a``.b`.c	`a``.b`.c
+mssql	`a.b`	[`a].[b`]
+# SQLite accepts an empty delimited name; PostgreSQL and SQL Server do not.
+sqlite	""	""
+sqlite	[]	[]

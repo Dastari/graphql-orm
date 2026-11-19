@@ -512,10 +512,11 @@ pub(crate) fn generate(
         #(#structs)*
         impl #name {#(#methods)*}
         impl ::graphql_orm::graphql::orm::StaticDeleteEntity<#marker> for #name {
-            fn select<'a>(tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,column:&'a str,value: ::graphql_orm::graphql::orm::SqlValue,limit:usize)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::StaticDeleteRow>>> {
+            fn select<'a>(tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,column_sql:&'a str,value: ::graphql_orm::graphql::orm::SqlValue,limit:usize)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::StaticDeleteRow>>> {
                 Box::pin(async move {
-                    use ::graphql_orm::graphql::orm::{DatabaseEntity,EntityQuery,OrmBackend,SqlDialect};
-                    let clause=format!("{} = {}",<#marker as OrmBackend>::DIALECT.quote_identifier(column),Self::__gom_placeholder(1));
+                    use ::graphql_orm::graphql::orm::{DatabaseEntity,EntityQuery};
+                    // The caller renders the column: a declared key or a catalogue name.
+                    let clause=format!("{} = {}",column_sql,Self::__gom_placeholder(1));
                     let rows=EntityQuery::<Self,#marker>::new().where_values(&clause,vec![value]).fetch_bounded_mutation_sentinel_in_transaction(tx,::graphql_orm::graphql::orm::MutationLimit::new(limit as u32).map_err(|_|::graphql_orm::async_graphql::Error::new("Dependent delete refused"))?).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                     Ok(rows.into_iter().map(|entity|::graphql_orm::graphql::orm::StaticDeleteRow{key:Self::__gom_key_values(&entity.#pk).remove(0),entity: ::std::sync::Arc::new(entity)}).collect())
                 })

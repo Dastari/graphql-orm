@@ -10,6 +10,110 @@ supersedes: []
 
 # Migration Guide
 
+## 0.181.0 to 0.182.0: SQL identifier quoting
+
+Upgrade ORM and macros together. Generated code and statement text are
+unchanged for every name that rendered as exactly one identifier before,
+except for the per-backend path splitting below.
+
+- **Malformed delimited input is quoted as one literal name (#782). Action
+  needed** only if code passes a qualified path that is already quoted, such
+  as `"app"."users"`, to the single-identifier `quote_identifier` or
+  `render_identifier`. Those calls now treat it as one name, because it is not
+  one delimited identifier; pass the path to `quote_identifier_path` or
+  `render_identifier_path`, which keep each well-formed part unchanged, or a
+  table-qualified column to the new `DatabaseBackend::quote_column_identifier`,
+  which keeps its column part. Inside the workspace, read predicates
+  (`ReadPredicate::column`, `is_null`, `is_not_null` and the relation,
+  `not_related` and closure joins) and the `exclude_blank` group-page filter
+  did this with a table-qualified `db_column` such as `"t"."c"`; they now
+  render its column part (the group filter, its path). Generated
+  dependent-delete selection now receives its column already rendered: the
+  root's declared key as its column part, and each dependent's foreign-key
+  column, which is read from the catalogue, as one name, so a column
+  literally named `parent.ref` is never shortened to `ref`. Input that is
+  exactly one well-formed delimited identifier, such as `"Mixed Case"` or
+  `[order]`, is still returned unchanged.
+- **A table-qualified `db_column` must name its own entity's table (#782).
+  Action needed** only if a `db_column` has a qualifier that does not name
+  the declaring entity's table (its table name, or its schema and table
+  name), such as `db_column = "\"parents\".\"owner\""` on a `children`
+  entity. The derives now refuse it at compile time, because generated
+  filters, sorts and projections render the declared path as written and
+  would reference the other table, including from inside a correlated
+  subquery. Read predicates (`ReadPredicate::column`, `is_null`,
+  `is_not_null`, relation and closure keys) also refuse such a column with
+  `AUTHORIZATION_MISCONFIGURED` when the policy is built. The qualifier is
+  compared as each backend compares identifiers: PostgreSQL by resolved name
+  and SQLite without ASCII case. SQL Server compares the exact text even
+  under a case-insensitive collation, so a qualifier such as `[Children]` on
+  a table declared `children` is refused there: write the qualifier in the
+  table's declared case, or leave the column unqualified. The qualifier must
+  match a suffix of the *declared* table path: `main.parents.owner` on an
+  entity declared with `table = "parents"` is now a compile error, even
+  though SQLite accepts it. Declare `table = "main.parents"`, or write
+  `parents.owner`.
+- **Declared names that only look delimited are refused (#782). Action
+  needed** only if a `table` or `db_column` attribute has a path part that
+  starts and ends with a delimiter but is not one well-formed delimited
+  identifier for the backend, such as `"a"b"`, `[a]]` or `[a] , [b]`, or a
+  name that contains NUL. Most such parts were an unterminated identifier and
+  failed with a syntax error; `[a] , [b]` was accepted by SQL Server where a
+  column list was expected, as two columns rather than one. The derive now
+  fails with an error naming the part. Double every closing delimiter inside
+  the part, or write the name without delimiters and let the renderer quote
+  it.
+- **Paths are split with each backend's own delimiters (#782). Action
+  needed** only if a declared or rendered path has a part that the old
+  shared splitter read as delimited but the database does not: a PostgreSQL
+  part that starts with `[` or a backtick, a SQLite `[...]` part with `]`
+  inside, or a SQL Server part that starts with a backtick. Such a part is now
+  split at its dots as the database reads it. For example, PostgreSQL
+  `[s.t` now names table `t` in schema `[s` (`"[s".t`), where it was one
+  name (`"[s.t"`), and SQL Server `` `a.b` `` is now `` [`a].[b`] ``. Write
+  the part in the backend's own delimited form, such as `"[s.t"` on
+  PostgreSQL, to keep one name. Paths using each backend's own forms are
+  unchanged.
+- **Empty and NUL names (#782). No action.** SQLite still accepts `""`, `[]`
+  and two backticks as an empty name, and they are passed through unchanged.
+  PostgreSQL and SQL Server refuse an empty delimited identifier, so there
+  `""` or `[]` is now quoted as a literal two-character name instead of being
+  passed through to a syntax error. A delimited name that contains NUL is no
+  longer passed through; SQLite and PostgreSQL refuse NUL in any statement.
+- **SQL Server brackets names outside the regular-identifier rule (#783). No
+  action.** Names that SQL Server refused bare, such as `x²` or `雪🦀`, are now
+  bracketed and work. Every name SQL Server accepted bare keeps its exact
+  text, so existing migration plans, their hashes and stored statement
+  fingerprints are unchanged.
+- **Introspection reports catalogue names that re-render as themselves
+  (#782). Action needed** only if code stores or compares introspected model
+  names (`TableModel::table_name`, `ForeignKeyModel::target_table` and
+  `constraint_name`, index names and columns) by text for objects whose
+  catalogue name needs delimiting, or a PostgreSQL foreign-key target in
+  another schema. Other ordinary names are reported exactly as before, so
+  plans for them are unchanged. These change:
+  - SQL Server quotes every raw schema, table and column name, and reports an
+    index, index column, filtered-index predicate column or foreign-key
+    constraint name that is itself bracketed or contains a dot delimited
+    (`[[ix]]]`, `[a.b]`), and reads a filtered index's predicate on a
+    non-ASCII or bracketed column name instead of panicking or treating it
+    as unfiltered, so a table
+    literally named `[ledger]` is no longer read as `ledger`, and dropping or
+    recreating an introspected index or constraint names the same object.
+  - PostgreSQL reports a table name with a dot (`"local.parent"`) or a
+    leading `"` delimited, as it already did for names bare SQL would fold
+    (`"Local"`), and reports foreign-key targets the same way: in the current
+    schema, and in another schema with the schema always delimited
+    (`"Archive"."Parent"`, `"plain_other".target`). A target such as
+    `Local`, `local.parent` or `Archive.Parent` previously resolved to a
+    different table or none, so a plan could see a spurious foreign-key
+    change. An ordinary cross-schema target such as `plain_other.target`
+    already resolved correctly and is now reported as
+    `"plain_other".target`; code that compares that text must accept the
+    delimited schema.
+  - SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read
+    delimit the raw names they address.
+
 ## 0.180.0 to 0.181.0: closure read predicates on SQL Server
 
 Upgrade ORM and macros together and recompile entities: generated where

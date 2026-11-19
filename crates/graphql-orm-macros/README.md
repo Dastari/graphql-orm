@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
+well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
+delimited or contains NUL, and splits declared paths with each backend's own delimiters (#782).
+Generated code is otherwise unchanged.
+
 Version 0.181.0 pairs with the runtime's SQL Server closure read predicates. Generated where inputs
 render their nested `and`, `or` and `not` lists as balanced parenthesised pairs, which keeps long
 lists shallow for the SQL parser with the same meaning and bind order. Generated where-input and
@@ -173,7 +178,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -661,7 +665,6 @@ dependencies and refresh the lockfile to one source. The
 describes validated current-session proofs; earlier version notes below retain
 their historical selectors.
 
-
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
 preserve compiler-native hashes and have separate admission; format 1, default-off
@@ -695,7 +698,6 @@ PostgreSQL migration default alterations are corrected in the paired 0.48.2
 runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
-
 
 This is the procedural-macro implementation for `graphql-orm`. Applications
 normally depend on the runtime crate and import its prelude; that keeps the
@@ -922,7 +924,6 @@ arguments and propagation path authorization. See the workspace
 Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
-
 
 Version 0.91.1 keeps this crate aligned with `graphql-orm` 0.91.1. Generated code matches 0.91.0.
 
