@@ -1,11 +1,13 @@
 //! #752 on SQL Server: which tables a narrowed bulk write locks by key.
 //!
-//! With `narrow_bulk_writes_to_read_visibility` on and
-//! `READ_COMMITTED_SNAPSHOT` on, a SQL Server bulk write reads its candidates
-//! without a write lock and locks them by a forced key seek. It keeps the
-//! single `UPDLOCK, HOLDLOCK` read where a key seek would not lock only the
-//! candidates: a key type the ORM's parameter cannot seek on, or an index
-//! that does not allow row locks.
+//! With `narrow_bulk_writes_to_read_visibility`,
+//! `mssql_snapshot_bulk_write_targets` and `READ_COMMITTED_SNAPSHOT` on, a
+//! SQL Server bulk write reads its candidates without a write lock and locks
+//! them by a forced seek on a unique key index. It keeps the single
+//! `UPDLOCK, HOLDLOCK` read where a key seek would not lock only the
+//! candidates: no unique index on the key alone, a key type the ORM's
+//! parameter cannot seek on, an index that does not allow row locks, or a
+//! view.
 #![cfg(feature = "mssql")]
 #![cfg(not(any(feature = "sqlite", feature = "postgres")))]
 
@@ -91,8 +93,12 @@ impl EntityPolicy for AllowEntityPolicy {
     }
 }
 
-/// The caller sees and writes the rows it owns (`owner = 'mine'`).
-struct OwnerRows;
+/// The caller sees and writes the rows it owns (`owner = 'mine'`). With
+/// `insert`, the first write callback has another session run that batch.
+#[derive(Default)]
+struct OwnerRows {
+    insert: Option<(String, &'static str, Arc<Mutex<Option<bool>>>)>,
+}
 fn owns(row: &(dyn std::any::Any + Send + Sync)) -> bool {
     row.downcast_ref::<StringKey>()
         .map(|row| row.owner == "mine")
@@ -155,7 +161,16 @@ impl RowPolicy for OwnerRows {
         _: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async move { Ok(owns(row)) })
+        Box::pin(async move {
+            if let Some((connection, batch, committed)) = &self.insert {
+                let first = committed.lock().unwrap().is_none();
+                if first {
+                    let result = owned_mssql::execute_batch(connection, batch).await.is_ok();
+                    *committed.lock().unwrap() = Some(result);
+                }
+            }
+            Ok(owns(row))
+        })
     }
 }
 
@@ -171,7 +186,7 @@ impl SqlLog {
         let reads = std::mem::take(&mut *self.0.lock().unwrap());
         let keyed = reads
             .iter()
-            .any(|sql| sql.contains("WITH (XLOCK, FORCESEEK)"));
+            .any(|sql| sql.contains("WITH (XLOCK, FORCESEEK("));
         let single = reads
             .iter()
             .any(|sql| sql.contains("WITH (UPDLOCK, HOLDLOCK)"));
@@ -201,10 +216,11 @@ async fn fixture() -> (Database, SqlLog, owned_mssql::OwnedSqlServer) {
     let mut db = Database::builder(pool)
         .schema_policy(SchemaPolicy::ExternalWritable)
         .narrow_bulk_writes_to_read_visibility(true)
+        .mssql_snapshot_bulk_write_targets(true)
         .build()
         .with_read_query_observer(log.clone());
     db.set_entity_policy(AllowEntityPolicy);
-    db.set_row_policy(OwnerRows);
+    db.set_row_policy(OwnerRows::default());
     (db, log, owner)
 }
 
@@ -430,6 +446,159 @@ async fn the_key_path_keeps_the_scan_budget_and_the_bulk_bound() {
             assert_eq!(payload["affectedCount"], 3, "{payload}");
         }
     }
+    drop(db);
+    owner.cleanup().unwrap();
+}
+
+/// Without `mssql_snapshot_bulk_write_targets`, narrowing alone keeps the
+/// single serializable locking read.
+#[tokio::test]
+async fn narrowing_alone_keeps_the_single_locking_read() {
+    let (db, log, mut owner) = fixture().await;
+    execute(
+        &db,
+        &format!(
+            "CREATE TABLE int_keys (id INT PRIMARY KEY, category NVARCHAR(40) NOT NULL, \
+             owner NVARCHAR(40) NOT NULL, other NVARCHAR(40) NOT NULL); \
+             INSERT INTO int_keys VALUES {}",
+            rows(["1", "2", "3", "4"])
+        ),
+    )
+    .await;
+    let update = r#"updateIntKeys(where: {category: {eq: "key"}}, input: {other: "after"}) { success affectedCount error errorCode }"#;
+    for (snapshot_targets, keyed) in [(false, false), (true, true)] {
+        let db = db
+            .clone()
+            .with_mssql_snapshot_bulk_write_targets(snapshot_targets);
+        assert_eq!(mutate(&db, update).await["affectedCount"], 3);
+        assert_eq!(
+            log.took_key_path(),
+            keyed,
+            "snapshot_targets={snapshot_targets}"
+        );
+    }
+    drop(db);
+    owner.cleanup().unwrap();
+}
+
+/// The key path needs a unique index whose only key column is the key, on a
+/// base table that allows row locks. A heap without an index on the key, a key
+/// with only a non-unique index (whose seek would range-lock the next key), a
+/// key that leads a composite unique index, and a view (here over a table
+/// without row locks) keep the single locking read and still write exactly
+/// the caller's rows.
+#[tokio::test]
+async fn the_key_path_needs_a_unique_key_index_on_a_base_table() {
+    let (db, log, mut owner) = fixture().await;
+    let columns =
+        "category NVARCHAR(40) NOT NULL, owner NVARCHAR(40) NOT NULL, other NVARCHAR(40) NOT NULL";
+    let values = rows(["N'a1'", "N'a2'", "N'a3'", "N'a4'"]);
+    let shapes = [
+        (
+            "unique key index",
+            format!(
+                "CREATE TABLE string_keys (id NVARCHAR(40) NOT NULL, {columns}); \
+            CREATE UNIQUE NONCLUSTERED INDEX string_keys_id ON string_keys (id)"
+            ),
+            true,
+        ),
+        (
+            "heap",
+            format!("CREATE TABLE string_keys (id NVARCHAR(40) NOT NULL, {columns})"),
+            false,
+        ),
+        (
+            "non-unique index",
+            format!(
+                "CREATE TABLE string_keys (id NVARCHAR(40) NOT NULL, {columns}); \
+            CREATE CLUSTERED INDEX string_keys_id ON string_keys (id)"
+            ),
+            false,
+        ),
+        (
+            "composite unique index",
+            format!(
+                "CREATE TABLE string_keys (id NVARCHAR(40) NOT NULL, {columns}); \
+            CREATE UNIQUE INDEX string_keys_id ON string_keys (id, category)"
+            ),
+            false,
+        ),
+        (
+            "view",
+            format!(
+                "CREATE TABLE string_keys_base (id NVARCHAR(40) PRIMARY KEY, {columns}); \
+            ALTER INDEX ALL ON string_keys_base SET (ALLOW_ROW_LOCKS = OFF)"
+            ),
+            false,
+        ),
+    ];
+    for (shape, ddl, keyed) in shapes {
+        execute(&db, &ddl).await;
+        if shape == "view" {
+            execute(&db, "EXEC (N'CREATE VIEW string_keys AS SELECT id, category, owner, other FROM string_keys_base')").await;
+        }
+        execute(&db, &format!("INSERT INTO string_keys VALUES {values}")).await;
+        let payload = mutate(
+            &db,
+            r#"updateStringKeys(where: {category: {eq: "key"}}, input: {other: "after"}) { success affectedCount error errorCode }"#,
+        )
+        .await;
+        assert_eq!(payload["success"], true, "{shape}: {payload}");
+        assert_eq!(payload["affectedCount"], 3, "{shape}");
+        assert_eq!(log.took_key_path(), keyed, "{shape}");
+        assert_eq!(
+            others(&db, "string_keys").await,
+            ["after", "after", "before", "after"],
+            "{shape}"
+        );
+        if shape == "view" {
+            execute(&db, "DROP VIEW string_keys; DROP TABLE string_keys_base").await;
+        } else {
+            execute(&db, "DROP TABLE string_keys").await;
+        }
+    }
+    drop(db);
+    owner.cleanup().unwrap();
+}
+
+/// The validation read is bounded by the scan budget too: when a concurrent
+/// insert pushes the candidates past it, the write is refused with the scan
+/// budget's refusal, not validated against a cut-off read.
+#[tokio::test]
+async fn the_validation_read_keeps_the_scan_budget() {
+    let (mut db, log, mut owner) = fixture().await;
+    execute(
+        &db,
+        &format!(
+            "CREATE TABLE int_keys (id INT PRIMARY KEY, category NVARCHAR(40) NOT NULL, \
+             owner NVARCHAR(40) NOT NULL, other NVARCHAR(40) NOT NULL); \
+             INSERT INTO int_keys VALUES {}",
+            rows(["1", "2", "3", "4"])
+        ),
+    )
+    .await;
+    let committed = Arc::new(Mutex::new(None));
+    db.set_row_policy(OwnerRows {
+        insert: Some((
+            owner.connection_string.clone(),
+            "SET LOCK_TIMEOUT 1000; INSERT INTO int_keys VALUES (5, 'key', 'mine', 'before')",
+            committed.clone(),
+        )),
+    });
+    let db = db.with_pagination_config(PaginationConfig::default().with_max_scanned_rows(Some(3)));
+    let payload = mutate(
+        &db,
+        r#"updateIntKeys(where: {category: {eq: "key"}}, input: {other: "after"}) { success affectedCount error errorCode }"#,
+    )
+    .await;
+    assert!(log.took_key_path());
+    assert_eq!(*committed.lock().unwrap(), Some(true));
+    assert_eq!(payload["errorCode"], "PAGE_LIMIT_EXCEEDED", "{payload}");
+    assert!(
+        payload["error"].as_str().unwrap().contains("scan budget"),
+        "{payload}"
+    );
+    assert_eq!(others(&db, "int_keys").await, ["before"; 5]);
     drop(db);
     owner.cleanup().unwrap();
 }

@@ -10,13 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.184.0: with `narrow_bulk_writes_to_read_visibility` on and `READ_COMMITTED_SNAPSHOT`
-on, generated GraphQL `updateMany` and `deleteMany` on SQL Server read their candidates in a
-snapshot without a lock, lock only those keys by a forced key seek and validate the candidates
-in a second snapshot. They no longer lock or wait on rows outside the caller's read visibility,
-and target selection stays serializable; a concurrent change to the candidates refuses the write
-with a retryable `SERVICE_UNAVAILABLE` (#752). Elsewhere SQL Server keeps the single locking read.
-See the [migration guide](../../MIGRATION.md#01791-to-01840-sql-server-bulk-writes-lock-only-their-candidates).
+Version 0.184.0 adds the opt-in `DatabaseBuilder::mssql_snapshot_bulk_write_targets`, off by
+default and separate from `narrow_bulk_writes_to_read_visibility`. With both on and
+`READ_COMMITTED_SNAPSHOT` on, narrowed SQL Server bulk writes select their targets from
+snapshots and lock only those keys, so they no longer lock or wait on hidden rows (#752). The
+target set equals the rows matching at the validation snapshot, but the bulk write's transaction
+is then not serializable. See the
+[migration guide](../../MIGRATION.md#01791-to-01840-opt-in-sql-server-snapshot-bulk-write-targets).
 
 Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
 

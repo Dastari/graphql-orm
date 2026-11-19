@@ -806,7 +806,7 @@ impl SqlLog {
         let reads = std::mem::take(&mut *self.0.lock().unwrap());
         let keyed = reads
             .iter()
-            .any(|sql| sql.contains("WITH (XLOCK, FORCESEEK)"));
+            .any(|sql| sql.contains("WITH (XLOCK, FORCESEEK("));
         let single = reads
             .iter()
             .any(|sql| sql.contains("WITH (UPDLOCK, HOLDLOCK)"));
@@ -873,11 +873,12 @@ async fn run_mutation(
     (response, payload)
 }
 
-/// #752 on SQL Server: with the setting on and `READ_COMMITTED_SNAPSHOT` on,
-/// a bulk write narrowed by read visibility neither waits on another
+/// #752 on SQL Server: with narrowing, `mssql_snapshot_bulk_write_targets` and
+/// `READ_COMMITTED_SNAPSHOT` on, a bulk write narrowed by read visibility neither waits on another
 /// transaction's lock on a hidden row nor holds a lock on one, whatever access
-/// path the optimizer picks. With `READ_COMMITTED_SNAPSHOT` off it keeps the
-/// single serializable `UPDLOCK, HOLDLOCK` read, which may lock hidden rows.
+/// path the optimizer picks. With `READ_COMMITTED_SNAPSHOT` off, or narrowing
+/// alone, it keeps the single serializable `UPDLOCK, HOLDLOCK` read, which may
+/// lock hidden rows.
 ///
 /// A statement of the write gives up after five seconds, so a wait fails
 /// fast. (A `SET LOCK_TIMEOUT` sent through the pool runs inside
@@ -896,7 +897,8 @@ async fn a_lock_on_a_hidden_row_does_not_block_an_opted_in_narrowed_sql_server_b
     let with_policy = |db: &Database, visibility, narrow: bool| {
         let mut db = db
             .clone()
-            .with_narrow_bulk_writes_to_read_visibility(narrow);
+            .with_narrow_bulk_writes_to_read_visibility(narrow)
+            .with_mssql_snapshot_bulk_write_targets(true);
         let mut policy = OwnerRows::new(false, Default::default()).with_visibility(visibility);
         policy.probe = Some((connection.clone(), probes.clone()));
         db.set_row_policy(policy);
@@ -928,6 +930,15 @@ async fn a_lock_on_a_hidden_row_does_not_block_an_opted_in_narrowed_sql_server_b
 
     read_committed_snapshot_on(&connection).await;
     let db = open_sql_server(&connection, &log).await;
+
+    // Narrowing alone keeps the serializable locking read: the snapshot path
+    // is its own opt-in.
+    let narrowed_only =
+        with_policy(&db, Visibility::Prefilter, true).with_mssql_snapshot_bulk_write_targets(false);
+    let (_, payload) = run_mutation(narrowed_only, UPDATE_ALL).await;
+    assert_eq!(payload["affectedCount"], 2, "{payload}");
+    assert!(!log.took_key_path());
+    assert!(take_probes().contains(&false));
 
     // No other transaction: the narrowed write leaves the hidden rows free
     // while it runs. Without narrowing the write holds them.
@@ -1022,22 +1033,28 @@ async fn a_lock_on_a_hidden_row_does_not_block_an_opted_in_narrowed_sql_server_b
     owner.cleanup().unwrap();
 }
 
-/// #752 on SQL Server: a narrowed bulk write's target selection stays
-/// serializable. Another transaction inserts two matching rows at once, one
+/// #752 on SQL Server: a narrowed bulk write's target selection is never
+/// split by a concurrent transaction. Another transaction inserts two matching rows at once, one
 /// before and one after the rows already selected, while the write runs.
 ///
 /// - With `READ_COMMITTED_SNAPSHOT` on, the key path does not block the
 ///   insert; its validation read sees the changed targets and refuses the
 ///   write as a retryable conflict, and nothing is written. The retry writes
 ///   both new rows.
-/// - With it off, the narrowed write keeps the single serializable read,
-///   whose range locks block the insert, as they do without narrowing.
+/// - With it off, or without `mssql_snapshot_bulk_write_targets`, the narrowed
+///   write keeps the single serializable read, whose range locks block the
+///   insert, as they do without narrowing.
 ///
 /// The write never writes one inserted row but not the other.
 #[cfg(feature = "mssql")]
 #[tokio::test]
 async fn a_concurrent_atomic_insert_is_never_split_by_a_narrowed_sql_server_bulk_write() {
-    for (snapshot, narrow) in [(false, true), (true, false), (true, true)] {
+    for (snapshot, narrow, snapshot_targets) in [
+        (false, true, true),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ] {
         let (db, mut owner) = setup().await;
         execute(
             &db,
@@ -1057,7 +1074,8 @@ async fn a_concurrent_atomic_insert_is_never_split_by_a_narrowed_sql_server_bulk
         let log = SqlLog::default();
         let mut db = open_sql_server(&connection, &log)
             .await
-            .with_narrow_bulk_writes_to_read_visibility(narrow);
+            .with_narrow_bulk_writes_to_read_visibility(narrow)
+            .with_mssql_snapshot_bulk_write_targets(snapshot_targets);
         let committed = Arc::new(Mutex::new(None));
         let mut policy =
             OwnerRows::new(false, Default::default()).with_visibility(Visibility::Complete);
@@ -1069,13 +1087,14 @@ async fn a_concurrent_atomic_insert_is_never_split_by_a_narrowed_sql_server_bulk
                 .map(|(key, other)| (key.clone(), other.clone()))
                 .collect::<Vec<_>>()
         };
-        let label = format!("snapshot={snapshot} narrow={narrow}");
+        let label =
+            format!("snapshot={snapshot} narrow={narrow} snapshot_targets={snapshot_targets}");
 
         let (response, payload) = run_mutation(db.clone(), UPDATE_ALL).await;
         assert!(response.errors.is_empty(), "{label} {response:?}");
         let inserted = committed.lock().unwrap().expect("the insert ran");
         let rows = stored(&db).await;
-        if snapshot && narrow {
+        if snapshot && narrow && snapshot_targets {
             assert!(log.took_key_path(), "{label}");
             assert!(inserted, "{label}: the key path does not block the insert");
             assert_eq!(payload["success"], false, "{label} {payload}");

@@ -57,7 +57,10 @@ where
 /// row policy.
 ///
 /// Also returns whether the host opted in and a SQL predicate narrows the
-/// read. Only then does [`bulk_write_targets`] lock by key on SQL Server.
+/// read. Only then, and only with
+/// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets)
+/// as well, does [`bulk_write_targets`] select its targets from snapshots on
+/// SQL Server.
 async fn with_bulk_target_visibility<T, B>(
     db: &Database<B>,
     ctx: Option<&async_graphql::Context<'_>>,
@@ -125,14 +128,17 @@ fn bulk_limit_exceeded() -> sqlx::Error {
 /// selects it.
 ///
 /// With the opt-in and a SQL predicate, rows outside the predicate are not
-/// locked either. PostgreSQL's `FOR UPDATE` locks only the rows the predicate
-/// returns. SQL Server's `UPDLOCK` would lock every row a scan reads, so there,
-/// where [`EntityQuery::key_locked_write_candidates_supported`] allows it, the
-/// candidates are read in one snapshot without a lock, locked exclusively by a
-/// forced key seek and checked again, and then read again in a new snapshot:
-/// a candidate set that changed meanwhile refuses the write as a retryable
-/// conflict, so target selection stays serializable. Elsewhere SQL Server
-/// keeps the single serializable `UPDLOCK, HOLDLOCK` read. `key_value` gives a
+/// locked either on PostgreSQL, whose `FOR UPDATE` locks only the rows the
+/// predicate returns. SQL Server's single `UPDLOCK, HOLDLOCK` read locks every
+/// row a scan reads. With the separate opt-in
+/// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets),
+/// where [`EntityQuery::snapshot_write_candidates_key_index`] finds a unique
+/// key index, SQL Server instead reads the candidates in one snapshot without
+/// a lock, locks them exclusively by a forced seek on that index, checks them
+/// again, and reads them again in a new snapshot: a candidate set that changed
+/// meanwhile refuses the write as a retryable conflict. The target set then
+/// equals the rows that match at that validation snapshot, but no range is
+/// locked, so the transaction is no longer serializable. `key_value` gives a
 /// row's key.
 ///
 /// It also applies
@@ -187,10 +193,17 @@ where
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     // Generated bulk writes exist only for entities with a single-column key.
-    let lock_by_key = narrowed
+    // The snapshot path is a separate opt-in: it does not keep the bulk
+    // write's transaction serializable.
+    let key_index = if narrowed
+        && db.mssql_snapshot_bulk_write_targets_enabled()
         && <B as OrmBackend>::DIALECT == DatabaseBackend::Mssql
         && T::PRIMARY_KEYS.len() == 1
-        && EntityQuery::<T, B>::key_locked_write_candidates_supported(tx).await?;
+    {
+        EntityQuery::<T, B>::snapshot_write_candidates_key_index(tx).await?
+    } else {
+        None
+    };
     let config = db.pagination_config();
     let bound = config.max_bulk_write_rows.map(|bound| bound.max(0));
     let over_bound = |targets: usize| {
@@ -223,7 +236,7 @@ where
     // of candidates, counting only targets against the bound.
     let budget = config.max_scanned_rows.map(|budget| budget.max(0));
     let mut scanned = 0_i64;
-    if lock_by_key {
+    if let Some(key_index) = key_index {
         // One consistent read of every candidate, bounded by the budget.
         let limit = budget.map(|budget| budget.saturating_add(1));
         let candidates = query
@@ -235,7 +248,12 @@ where
         }
         let mut locked = std::collections::BTreeSet::new();
         for (row, matches) in query
-            .lock_write_candidates_by_key_in_transaction(tx, &candidates.keys, key_value)
+            .lock_write_candidates_by_key_in_transaction(
+                tx,
+                &candidates.keys,
+                &key_index,
+                key_value,
+            )
             .await?
         {
             // A row that left the filter or the predicate before it was
@@ -257,6 +275,10 @@ where
         let current = query
             .fetch_write_candidate_keys_in_transaction(tx, limit, key_value)
             .await?;
+        // A read cut off at the budget may have missed a candidate.
+        if budget.is_some_and(|budget| current.read > budget) {
+            return Err(super::query::scan_budget_exhausted());
+        }
         let current = current
             .keys
             .iter()
