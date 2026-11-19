@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.1 to 0.180.0: SQL identifier quoting
+## 0.181.0 to 0.182.0: SQL identifier quoting
 
 Upgrade ORM and macros together. Generated code and statement text are
 unchanged for every name that rendered as exactly one identifier before,
@@ -48,7 +48,11 @@ except for the per-backend path splitting below.
   and SQLite without ASCII case. SQL Server compares the exact text even
   under a case-insensitive collation, so a qualifier such as `[Children]` on
   a table declared `children` is refused there: write the qualifier in the
-  table's declared case, or leave the column unqualified.
+  table's declared case, or leave the column unqualified. The qualifier must
+  match a suffix of the *declared* table path: `main.parents.owner` on an
+  entity declared with `table = "parents"` is now a compile error, even
+  though SQLite accepts it. Declare `table = "main.parents"`, or write
+  `parents.owner`.
 - **Declared names that only look delimited are refused (#782). Action
   needed** only if a `table` or `db_column` attribute has a path part that
   starts and ends with a delimiter but is not one well-formed delimited
@@ -109,6 +113,107 @@ except for the per-backend path splitting below.
     delimited schema.
   - SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read
     delimit the raw names they address.
+
+## 0.180.0 to 0.181.0: closure read predicates on SQL Server
+
+Upgrade ORM and macros together and recompile entities: generated where
+inputs render their nested lists as balanced pairs and share a
+per-statement relation budget. No data migration is needed. See
+[read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+- **`related_closure`, `related_closure_all` and `related_closure_within` on
+  SQL Server (#779). No action.** They were refused on SQL Server with
+  `AUTHORIZATION_MISCONFIGURED` and are now supported there, with the same
+  semantics as on SQLite and PostgreSQL. A SQL Server policy that collects a
+  closure in memory can switch to them. `related_closure_within` accepts at
+  most `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) hops on SQL Server; the
+  default bound (64) is the same on every backend. Index the key columns,
+  normally the primary key. SQLite and PostgreSQL are unchanged.
+- **Read-predicate composition budget (#779). Action needed** only if a
+  policy would exceed a limit:
+  - closures nested more than two deep (`READ_PREDICATE_CLOSURE_MAX_NESTING`);
+  - over 1 MiB of rendered SQL (`READ_PREDICATE_MAX_RENDERED_BYTES`), which in
+    practice means deeply nested `not_related` or a very wide `or` of
+    closures;
+  - over 256 levels of expression nesting
+    (`READ_PREDICATE_MAX_EXPRESSION_DEPTH`), such as a long `not()` chain or
+    deeply alternating `and(or(and(...)))`. Folds of one kind are flattened
+    and do not count;
+  - over 10 nested `CASE` expressions (`READ_PREDICATE_MAX_CASE_NESTING`),
+    such as more than five nested `not_related`;
+  - over 32 nested relations or 128 relations in total on SQLite and
+    PostgreSQL (`READ_PREDICATE_MAX_RELATION_NESTING`,
+    `READ_PREDICATE_MAX_RELATIONS`), or over 9 of either on SQL Server
+    (`READ_PREDICATE_MSSQL_MAX_RELATION_NESTING`,
+    `READ_PREDICATE_MSSQL_MAX_RELATIONS`). Each closure counts as 16
+    relations, or 1 on SQL Server;
+  - on SQL Server, over 75 nested subquery levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING`) or over 900 weighted levels
+    (`READ_PREDICATE_MSSQL_MAX_NESTING_UNITS`). For example, more than four
+    `related` around a 64-hop closure;
+  - more than 1 MiB of policy SQL, or more than 64 relations (5 on SQL
+    Server), from the generated relation filters and relation-count
+    orderings of one statement (`READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES`,
+    `READ_PREDICATE_MAX_STATEMENT_RELATIONS`,
+    `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`). Each count ordering
+    counts at least one. A client request with more relation filters or count
+    orderings than that is refused. **On SQL Server in particular**, a target
+    that clients filter by (a generated relation filter) or count-order by
+    must keep its own policy to **4 relations or fewer**, closures counting
+    1 each: a relation filter or a count ordering costs its target's policy
+    plus one, against a statement budget of 5. Otherwise every such filter or
+    ordering is refused with `AUTHORIZATION_MISCONFIGURED`, and several in
+    one request share the same 5;
+  - more than 16 terms in a generated `orderBy` list (`MAX_ORDER_BY_TERMS`),
+    refused as `INVALID_INPUT`.
+
+  Such a policy is now refused with `AUTHORIZATION_MISCONFIGURED` when it is
+  built or, for relation filters, when the request is prepared. Before, it
+  rendered an oversized statement, ran for minutes, overflowed the stack,
+  exhausted PostgreSQL memory, or on SQL Server failed every read or
+  exhausted the server's resources. Also set PostgreSQL `statement_timeout`
+  (and on SQL Server a query timeout): the limits are measured on tested
+  shapes, not a proof for every plan and data volume. Flatten the
+  composition, use a shorter `related_closure_within` bound, or split the
+  policy. Policies within the limits are unchanged.
+- **`and`/`or` folds no longer overflow the stack (#779). No action.** A
+  `p = p.or(q)?` fold over a few thousand terms used to build a predicate
+  whose render overflowed a 2 MiB stack and aborted the process. Folds are
+  now flattened, and every `and`/`or` list of three or more operands,
+  including in generated where inputs, renders as balanced parenthesised
+  pairs. The rendered SQL groups operands differently but means the same, and
+  bind order is unchanged. Long generated `or` lists that SQLite refused past
+  its 1,000-deep expression limit now run.
+
+## 0.179.1 to 0.180.0: opt-in SQL Server snapshot bulk-write targets
+
+Upgrade ORM and macros together and recompile entities: generated bulk writes
+pass the runtime a key accessor. No data migration is needed.
+
+- **SQL Server snapshot bulk-write targets (#752). No action** (opt-in).
+  `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` is new and off
+  by default; with it off, every bulk write behaves as before, including
+  narrowed SQL Server bulk writes, which keep the serializable
+  `UPDLOCK, HOLDLOCK` read. With it and
+  `narrow_bulk_writes_to_read_visibility` on, generated GraphQL
+  `updateMany`/`deleteMany` on SQL Server read their candidates in a snapshot
+  without a lock, lock only those keys exclusively, and validate the
+  candidates in a second snapshot, so they no longer lock or wait on hidden
+  rows. This applies where the database has `READ_COMMITTED_SNAPSHOT` on and
+  the target is a base table with a unique index on the key alone, row locks
+  allowed on every index, and a `uniqueidentifier`, `nvarchar`/`nchar` or
+  integer key. Before you turn it on:
+  - the bulk write's transaction is then **not serializable**. The target set
+    equals the rows that match at the validation snapshot, but another
+    transaction can commit a row that starts to match, with other changes,
+    without waiting; later reads in the same bulk write (hooks, field
+    authorizers, triggers) can see those changes while the row is not written;
+  - a concurrent change to the candidates refuses the write with
+    `errorCode = "SERVICE_UNAVAILABLE"` (marked retryable); retry the mutation;
+  - the candidates are locked exclusively until the write ends; readers that
+    hold their locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
+
+  See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
 ## 0.179.0 to 0.179.1: test-owned PostgreSQL memory cap
 

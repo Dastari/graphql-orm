@@ -318,7 +318,7 @@ async fn qualified_columns_admit_exactly_the_right_rows() {
         [11, 14]
     );
 
-    #[cfg(not(feature = "mssql"))]
+    // Closures, including the SQL Server breadth-first form.
     {
         let nodes = [1, 2, 3, 4];
         let up: &[(&str, &str)] = &[(UP, "id")];
@@ -334,18 +334,6 @@ async fn qualified_columns_admit_exactly_the_right_rows() {
         let any = ReadPredicate::related_closure::<B, QualNode>(up, score(ReadPredicateOp::Lt, 5))
             .unwrap();
         assert_eq!(admitted::<QualNode>(&db, &nodes, any).await, [3, 4]);
-    }
-    #[cfg(feature = "mssql")]
-    {
-        // SQL Server refuses closures when the policy is built, qualified
-        // columns or not (see `read_predicate_closure`).
-        let refused = ReadPredicate::related_closure::<B, QualNode>(
-            &[(UP, "id")],
-            ReadPredicate::column::<B, QualNode>(SCORE, ReadPredicateOp::Lt, SqlValue::Int(5))
-                .unwrap(),
-        );
-        assert!(refused.is_err());
-        let _ = SCORE;
     }
     #[cfg(not(feature = "mssql"))]
     db.pool().close().await;

@@ -344,7 +344,8 @@ treated as missing. `RowPolicy::write_target_prefilter` removes that
 difference: return a `ReadPredicate` that selects the rows the caller can read
 **or** write, and generated GraphQL `update`, `delete`, `updateMany` and
 `deleteMany` add it to their locking read, so a row outside it is never
-selected, locked or passed to a callback. The predicate only narrows. Every
+selected or passed to a callback, and is not locked except as described under
+**Locks on hidden rows** below. The predicate only narrows. Every
 selected row is still classified by `can_write_row` and `can_read_row`, so it
 cannot grant a write; a row it leaves out is treated as missing even where the
 callbacks would have allowed it, so it must not exclude rows the caller can
@@ -377,12 +378,105 @@ before. With it on:
 
 **Locks on hidden rows.** On PostgreSQL a row a SQL predicate leaves out (a
 `write_target_prefilter`, or read visibility with the setting on) is never
-locked: the row lock is taken only on rows that pass the `WHERE` clause. On
-SQL Server it depends on the access path. The locking read uses
-`WITH (UPDLOCK, HOLDLOCK)`, which locks each row it reads before testing the
-predicate, so a scan still locks, and waits on, rows outside the predicate; an
-index seek on the predicate's columns avoids reading them. SQLite locks the
-whole database for a write, so there are no row locks to observe.
+locked: the row lock is taken only on rows that pass the `WHERE` clause. SQLite
+locks the whole database for a write, so there are no row locks to observe.
+
+On SQL Server the single locking read uses `WITH (UPDLOCK, HOLDLOCK)`, which
+locks each row it reads before testing the predicate, so a scan locks, and
+waits on, rows outside the predicate. The setting alone keeps that read, so a
+narrowed SQL Server bulk write stays serializable but may still lock hidden
+rows that a scan reads.
+
+**Snapshot target selection on SQL Server (separate opt-in).**
+`DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` (or
+`Database::with_mssql_snapshot_bulk_write_targets(true)`) lets a narrowed
+bulk write avoid that read. It is off by default, and stays off when narrowing
+becomes the default. It needs `narrow_bulk_writes_to_read_visibility` too. It
+applies to a bulk write with a SQL predicate (read visibility or a
+`write_target_prefilter`) **when all of these hold**:
+
+- the database has `READ_COMMITTED_SNAPSHOT` on;
+- the target is a base table, not a view;
+- the table has an enabled, unfiltered unique index whose only key column is
+  the key (a primary key or unique constraint on the key is one);
+- every index of the table allows row locks (`ALLOW_ROW_LOCKS = ON`, the
+  default);
+- the key column is `uniqueidentifier`, `nvarchar`, `nchar`, `bigint`, `int`,
+  `smallint` or `tinyint`. The ORM binds strings as Unicode, so a `varchar` or
+  `char` key is converted to compare, and seeks on it, including the per-row
+  writes, may become scans
+  ([#522](https://github.com/Dastari/graphql-orm/issues/522)).
+
+Otherwise the write keeps the single serializable locking read. Where it
+applies, the write takes three steps:
+
+1. **Candidates.** One statement reads every candidate: the rows that match
+   the filter and the predicate, at most `max_scanned_rows` + 1 of them, read
+   committed (`WITH (READCOMMITTED)`). With `READ_COMMITTED_SNAPSHOT` on, that
+   is one consistent snapshot, and the read takes no lock on the target
+   table. Related or policy tables that the filter reads are still read at the
+   transaction's `SERIALIZABLE` level. More than the budget refuses the write.
+2. **Lock and check.** Up to 500 keys at a time, it locks the candidates with
+   `XLOCK` and a `FORCESEEK` on that unique index, with a `WHERE` on the key
+   alone, so each seek finds at most one row. The lock runs read committed, so
+   it takes no key-range lock that would reach a neighbouring row. It then
+   checks the filter and the predicate again on each locked row, one seek on
+   the same index at a time, at the transaction's own isolation. A row that no
+   longer matches is left out before any row callback sees it. The locked rows
+   go through the row callbacks as before.
+3. **Validate.** One more statement reads the candidates again, in a new
+   snapshot, under the same budget. If they are not exactly the locked rows
+   that still match, another transaction changed which rows match since step 1.
+   The write is then refused with `errorCode = "SERVICE_UNAVAILABLE"`, marked
+   retryable, and nothing is written. Retry the mutation. More than the budget
+   refuses the write with the scan budget's refusal.
+
+What this guarantees, exactly:
+
+- **The target set equals the rows that match at the validation snapshot,**
+  and the exclusive locks keep those rows unchanged until the write commits.
+  A transaction that inserts several matching rows at once never has some of
+  them written and others not.
+- **The write never locks a row outside its candidates,** and never waits on a
+  lock another transaction holds on one, whatever plan the optimizer picks,
+  except through lock escalation (see below).
+  Rows outside read visibility are not candidates.
+
+What it does **not** guarantee:
+
+- **The bulk write's transaction is no longer serializable.** Generated bulk
+  writes run `SERIALIZABLE`, but no range is locked after validation. Another
+  transaction can commit a row that starts to match, together with changes to
+  other rows or tables, without waiting for the write. That row is not written,
+  yet later reads in the same bulk write (before-update hooks, field
+  authorizers, triggers) can see the transaction's other changes. With the
+  serializable locking read, that transaction would wait.
+
+What else remains:
+
+- The candidates are locked exclusively until the write ends, including those
+  that turn out not to be targets: a row that left the filter or the predicate
+  before step 2, or that a row callback leaves out or refuses. A reader that
+  uses row versions (read committed with `READ_COMMITTED_SNAPSHOT` on,
+  snapshot isolation) does not wait for them. A `READCOMMITTEDLOCK` read can
+  also read an exclusively locked row that has not been changed yet. Readers
+  that hold their locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
+- SQL Server can escalate a transaction's row locks on a table to one table
+  lock, by default when one statement takes about 5,000 locks on it or when
+  lock memory runs short, and a table lock covers hidden rows. Each lock
+  statement of this path locks at most 500 keys.
+  `ALTER TABLE ... SET (LOCK_ESCALATION = DISABLE)` prevents escalation.
+- The write reads its candidates twice, and a concurrent change to them makes
+  it fail with a retryable error rather than wait.
+
+With `READ_COMMITTED_SNAPSHOT` off, a read committed read takes and releases
+shared locks as it goes, so it is not a consistent snapshot. No read of a
+range is consistent without locking the range, and the range includes hidden
+rows, so the write keeps the serializable locking read even with the opt-in.
+
+Without the setting, a `write_target_prefilter` narrows SQL Server's single
+locking read as before, and whether a scan locks rows outside it depends on
+the access path.
 
 Without any SQL predicate (`CallbackOnly` or `Unrestricted` visibility, no
 prefilter, or the setting off) the bulk write still selects and locks every
@@ -392,7 +486,8 @@ rows match a readable filter can still be observed. It shows in latency and,
 on PostgreSQL and SQL Server, in waits on locks that other transactions hold on
 hidden rows. The caller also briefly locks rows it cannot see. A SQL predicate
 removes the callback and counting difference on every backend, and the lock
-difference on PostgreSQL.
+difference on PostgreSQL and, with `mssql_snapshot_bulk_write_targets` and the
+conditions above, on SQL Server.
 
 A generated GraphQL bulk write may write at most
 `PaginationConfig::max_bulk_write_rows` rows (default `10_000`) per mutation
