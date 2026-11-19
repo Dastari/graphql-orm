@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.26.0 to 0.26.1: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.25.0 to 0.26.0
 
 **No action**. Reusing compiled validators requires no host configuration or

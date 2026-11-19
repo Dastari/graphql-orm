@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.27.1 to 0.27.2: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
 ## 0.27.0 to 0.27.1
 
 **No action.** Test-owned PostgreSQL containers are memory-capped. The library,

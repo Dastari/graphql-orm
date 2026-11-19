@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.26.1
+
+- Install from a reviewed Git revision using the package inventory and release manifest.
+
 ## Unreleased - 0.26.0
 
 - Reuse compiled validators for query, mutation and subscription plans and
