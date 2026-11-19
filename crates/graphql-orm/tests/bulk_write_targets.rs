@@ -598,12 +598,12 @@ async fn write_only_rows_stay_bulk_targets_only_without_narrowing() {
             (Visibility::Prefilter, true),
             (Visibility::Complete, true),
         ] {
-            let expected =
-                if narrows(mode) && visibility != Visibility::CallbackOnly && !prefilter {
-                    2
-                } else {
-                    4
-                };
+            let expected = if narrows(mode) && visibility != Visibility::CallbackOnly && !prefilter
+            {
+                2
+            } else {
+                4
+            };
             let (mut db, mut owner) = setup().await;
             let mut policy =
                 OwnerRows::new(prefilter, Default::default()).with_visibility(visibility);
