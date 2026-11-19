@@ -3,7 +3,7 @@ title: graphql-orm-router operations runbook
 kind: runbook
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-19
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -251,6 +251,30 @@ uncertain: do not replay it automatically unless the application has an
 idempotency contract. An oversized serialized message is a connection-level
 failure; move bulk data to bounded HTTP or chunk it below 64 KiB rather than
 retrying the same frame.
+
+## Startup hand-off and ownership
+
+Hive 0.2.19 registers plugins by type and builds each one from serialisable
+configuration only, so it cannot be given a prepared instance. The router
+therefore passes each prepared runtime (graph lifecycle, authentication
+providers, request limits, persisted documents) to its Hive plugin through a
+process-wide `PLUGIN_RUNTIMES` registry in `server.rs`. This is an accepted
+design, scoped as follows:
+
+- The plugin configuration carries only a process-unique `runtime_id`. The
+  plugin removes its entry in `on_plugin_init`, so the entry exists only
+  between registration and Hive initialization.
+- A drop guard removes an unclaimed entry if startup fails or its future is
+  cancelled. A poisoned lock is recovered, because the map holds no invariant
+  that a panic could break.
+- Several routers can start in one process without sharing state: each has its
+  own ID and removes only its own entry.
+- Nothing in the registry is reachable after startup. The running plugin owns
+  its runtime.
+
+The registry is removed only if Hive gains a supported way to inject prepared
+state into a plugin, such as a stateful factory or an instance registration.
+Until then the router does not refactor it.
 
 ## Shutdown
 

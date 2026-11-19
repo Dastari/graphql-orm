@@ -13,7 +13,7 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
-Router 0.16.7 to 0.17.0. It ships in the workspace's single breaking release;
+Router 0.16.8 to 0.17.0. It ships in the workspace's single breaking release;
 see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
 ### Nested `@authenticated` and `@requiresScopes` are enforced (#729)
@@ -61,6 +61,11 @@ unchanged. A host whose clients need to tell that a refused operation never
 ran may enable it; each error of an operation refused before any subgraph
 request then also carries `extensions.outcome: "refused"`. See
 [refusal outcome](docs/configuration.md#refusal-outcome).
+## 0.16.7 to 0.16.8: operations documentation
+
+**No action.** The operations runbook records the startup hand-off and
+ownership rationale, and a few source comments are clearer. No behaviour,
+configuration or public API changes.
 
 ## 0.16.6 to 0.16.7: install documentation
 
