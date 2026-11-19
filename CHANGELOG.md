@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.185.0
+
+- SQL Server migrations render closed-set filtered-index string values as
+  Unicode literals (for example, `N'状態'`). Rebuilding an index preserves
+  values outside the database code page. ASCII values also gain the `N`
+  prefix. Opaque filters read from SQL Server are emitted verbatim. See the
+  [migration guide](MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
+  ([#795](https://github.com/Dastari/graphql-orm/issues/795)).
+
 ## Unreleased - ORM/macros 0.183.0 and operation catalog 0.9.1
 
 - The workspace dependency check compares documented direct edges with

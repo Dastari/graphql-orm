@@ -2473,10 +2473,22 @@ fn render_create_index_statement(
         .predicate
         .as_ref()
         .map_or_else(String::new, |predicate| {
+            if backend == DatabaseBackend::Mssql
+                && predicate.column.is_empty()
+                && let [filter] = predicate.values.as_slice()
+            {
+                // Introspection retained the catalog's opaque filter verbatim.
+                return format!(" WHERE {filter}");
+            }
+            let literal_prefix = if backend == DatabaseBackend::Mssql {
+                "N"
+            } else {
+                ""
+            };
             let values = predicate
                 .values
                 .iter()
-                .map(|value| sql_string_literal(value))
+                .map(|value| format!("{literal_prefix}{}", sql_string_literal(value)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -6273,14 +6285,14 @@ async fn introspect_mssql_indexes(
 }
 
 /// The closed-set predicate of a filtered index, read from the text SQL Server
-/// keeps for `WHERE [column] IN ('a', 'b')`: `([column] IN ('a', 'b'))`, or
-/// `([column]='a' OR [column]='b')` as older versions and hand-written
-/// filters spell it.
+/// keeps for `WHERE [column] IN (N'a', N'b')`: `([column] IN (N'a', N'b'))`, or
+/// `([column]=N'a' OR [column]=N'b')` as older versions and hand-written
+/// filters spell it. The model stores decoded values for comparison with
+/// declared predicates. SQL Server rendering always restores the Unicode prefix.
 ///
 /// A filter of any other form cannot be expressed in the model. It is kept as
 /// a predicate without a column, holding the filter text, which never equals
-/// a declared predicate, so a plan replaces the index rather than treating it
-/// as unfiltered.
+/// a declared predicate. Rendering an introspected index reuses that text.
 #[cfg(feature = "mssql")]
 fn mssql_index_predicate(filter: &str) -> super::owned_schema::IndexPredicateModel {
     parse_mssql_in_filter(filter)
@@ -6437,7 +6449,8 @@ fn mssql_filter_positions(text: &str) -> Option<Vec<(usize, bool)>> {
 
 #[cfg(all(test, feature = "mssql"))]
 mod mssql_index_predicate_tests {
-    use super::mssql_index_predicate;
+    use super::super::owned_schema::IndexModel;
+    use super::{DatabaseBackend, mssql_index_predicate, render_create_index_statement};
 
     #[test]
     fn closed_set_filters_read_back_as_predicates() {
@@ -6480,6 +6493,7 @@ mod mssql_index_predicate_tests {
             "([A]='x' OR [B]='y')",
             "([A]='x' AND [A]='y')",
             "([A]>(1))",
+            " ([列] <> N'状態''s') ",
             "([A]='unterminated)",
             "([A] IN ('x', [B]))",
             "([A] NOT IN ('x'))",
@@ -6492,6 +6506,18 @@ mod mssql_index_predicate_tests {
             assert_eq!(predicate.column, "", "{filter}");
             assert_eq!(predicate.values, [filter], "{filter}");
         }
+    }
+
+    #[test]
+    fn opaque_filter_is_rendered_verbatim() {
+        let filter = " ([列] <> N'状態''s') ";
+        let mut index = IndexModel::new("ix", vec!["列".to_owned()]);
+        index.predicate = Some(mssql_index_predicate(filter));
+
+        assert_eq!(
+            render_create_index_statement(DatabaseBackend::Mssql, "items", &index.borrowed()),
+            format!("CREATE INDEX [ix] ON [items] ([列]) WHERE {filter}"),
+        );
     }
 }
 
