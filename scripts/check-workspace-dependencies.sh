@@ -26,6 +26,7 @@ cargo metadata \
 python3 - "${metadata_file}" "${repository_root}" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 metadata_path = pathlib.Path(sys.argv[1])
@@ -66,6 +67,46 @@ for package_name in sorted(expected):
 
 packages_by_id = {package["id"]: package for package in metadata["packages"]}
 nodes_by_id = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+workspace_member_ids = set(metadata["workspace_members"])
+workspace_names = {packages_by_id[package_id]["name"] for package_id in workspace_member_ids}
+
+# Manifest declarations include optional edges even when inactive in the
+# resolved graph. Keep dependency kinds so the guide can distinguish dev
+# dependencies from production dependencies, including parallel declarations.
+declared_internal_edges = set()
+for package_id in workspace_member_ids:
+    package = packages_by_id[package_id]
+    for dependency in package["dependencies"]:
+        if dependency["name"] not in workspace_names:
+            continue
+        label = {
+            None: "",
+            "dev": " (dev-only)",
+            "build": " (build)",
+        }[dependency["kind"]]
+        if dependency["optional"]:
+            label += " (optional)"
+        declared_internal_edges.add(
+            f'`{package["name"]} -> {dependency["name"]}`{label}'
+        )
+
+guide = (repository_root / "AGENTS.md").read_text()
+heading = "- Preserve this acyclic dependency direction."
+_, separator, directions = guide.partition(heading)
+if not separator:
+    raise SystemExit("workspace-dependencies: dependency directions missing from AGENTS.md")
+directions = directions.split("\n- ", 1)[0]
+documented_internal_edges = set(re.findall(r"^  - (.+)$", directions, re.MULTILINE))
+
+edge_errors = []
+for description, edges in (
+    ("missing from AGENTS.md", declared_internal_edges - documented_internal_edges),
+    ("listed in AGENTS.md but not declared", documented_internal_edges - declared_internal_edges),
+):
+    edge_errors.extend(f"  {edge}: {description}" for edge in sorted(edges))
+if edge_errors:
+    raise SystemExit("workspace-dependencies: documented edges differ:\n" + "\n".join(edge_errors))
+
 allowed_internal_edges = {
     ("graphql-orm-ai", "graphql-orm-ai-tool-profiles"),
     # AI requires the producer contract version directly as well as via profiles.
@@ -97,13 +138,11 @@ test_only_internal_edges = {
     ("graphql-orm", "graphql-orm-ai-tool-profiles"),
 }
 actual_internal_edges = set()
-for package_id, node in nodes_by_id.items():
+for package_id in workspace_member_ids:
     source = packages_by_id[package_id]["name"]
-    if source not in expected:
-        continue
-    for dependency in node["deps"]:
-        target = packages_by_id[dependency["pkg"]]["name"]
-        if target in expected:
+    for dependency in nodes_by_id[package_id]["deps"]:
+        if dependency["pkg"] in workspace_member_ids:
+            target = packages_by_id[dependency["pkg"]]["name"]
             edge = (source, target)
             actual_internal_edges.add(edge)
             if edge in test_only_internal_edges and any(

@@ -513,7 +513,10 @@ impl Drop for GroupExecution {
 fn uncertain_error() -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
     wire_error("mutation_outcome_unknown").extend_with(|_, extensions| {
-        extensions.set("outcome", "unknown");
+        extensions.set(
+            "outcome",
+            crate::graphql::errors::MutationOutcome::Unknown.as_str(),
+        );
         extensions.set("retryable", false);
     })
 }
@@ -1359,7 +1362,10 @@ pub struct RuntimeMutationOutputCheck<'a> {
 fn committed_error(code: &'static str) -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
     wire_error(code).extend_with(|_, extensions| {
-        extensions.set("outcome", "committed");
+        extensions.set(
+            "outcome",
+            crate::graphql::errors::MutationOutcome::Committed.as_str(),
+        );
         extensions.set("retryable", false);
     })
 }

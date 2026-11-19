@@ -16,6 +16,10 @@ and `DeleteSnapshotResult`, refuses an unadmitted snapshot with the dedicated
 `#[non_exhaustive]`. `OrmBackupAdapter::clear_restore_target` keeps working on
 PostgreSQL databases whose change journal refuses `TRUNCATE`. Requires ORM
 0.166.0 for the optional ORM adapter. See [MIGRATION.md](MIGRATION.md).
+Version 0.27.1 memory-caps the test-owned PostgreSQL container used by its conformance tests; there is no runtime change.
+
+Version 0.27.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Version 0.26.0 adds host-held snapshot records: a known-snapshot list or a
 revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is
@@ -107,6 +111,11 @@ for an unverified target.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 Packages are Git-only. Pin one reviewed full monorepo revision for backup,
 storage, and any direct ORM dependency:
 
@@ -116,7 +125,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

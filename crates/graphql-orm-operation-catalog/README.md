@@ -3,7 +3,7 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-17
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -16,6 +16,21 @@ generated-operation fingerprints and from the catalogue order.
 Moving or re-exporting an entity no longer changes any fingerprint; every
 operation, catalogue and router-export fingerprint changes once at this
 upgrade. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+Version 0.9.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Version `0.8.1` adds `GraphqlClientMetadata`, a separate client-facing
+companion document of a semantic catalogue (wire version 1, its own
+fingerprint, bound to the catalogue's fingerprint), with
+`GraphqlClientEntityMetadata`, `GraphqlChangedStreamMetadata`,
+`GraphqlEntityLifetimeMetadata`, `GraphqlLifetimeEncoding`,
+`GraphqlRelationshipKeyMetadata`, `GraphqlRelationshipKeyMapping` and
+`GraphqlRelationshipNotBatchableReason`. The new types are non-exhaustive and
+have constructors. `compose` and `validate_against` check every name against
+the bound catalogue; `export_json` writes canonical JSON. The semantic
+catalogue, its wire version 3 and every existing fingerprint are unchanged. No
+data migration is needed. See
+[client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md).
 
 Version `0.8.0` (**breaking Rust API**) adds the host-only `generated_input_members` contract to entity
 metadata. ORM/macros 0.149.0 supplies exact types for generated members that
@@ -94,9 +109,14 @@ current producers emit none.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 serde_json = "1"
 ```
 

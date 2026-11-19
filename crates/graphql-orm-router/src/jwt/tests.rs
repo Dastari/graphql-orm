@@ -24,33 +24,7 @@ use agql_auth::{
 use super::*;
 use crate::{AuthenticationErrorKind, AuthenticationProvider};
 
-pub(crate) const RSA_PRIVATE_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
-MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTL
-UTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2V
-rUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8H
-oGfG/AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBI
-Mc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+j8MtvIj812dkS4QMiRVN/
-by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQABAoIBAHREk0I0O9DvECKd
-WUpAmF3mY7oY9PNQiu44Yaf+AoSuyRpRUGTMIgc3u3eivOE8ALX0BmYUO5JtuRNZ
-Dpvt4SAwqCnVUinIf6C+eH/wSurCpapSM0BAHp4aOA7igptyOMgMPYBHNA1e9A7j
-E0dCxKWMl3DSWNyjQTk4zeRGEAEfbNjHrq6YCtjHSZSLmWiG80hnfnYos9hOr5Jn
-LnyS7ZmFE/5P3XVrxLc/tQ5zum0R4cbrgzHiQP5RgfxGJaEi7XcgherCCOgurJSS
-bYH29Gz8u5fFbS+Yg8s+OiCss3cs1rSgJ9/eHZuzGEdUZVARH6hVMjSuwvqVTFaE
-8AgtleECgYEA+uLMn4kNqHlJS2A5uAnCkj90ZxEtNm3E8hAxUrhssktY5XSOAPBl
-xyf5RuRGIImGtUVIr4HuJSa5TX48n3Vdt9MYCprO/iYl6moNRSPt5qowIIOJmIjY
-2mqPDfDt/zw+fcDD3lmCJrFlzcnh0uea1CohxEbQnL3cypeLt+WbU6kCgYEAzSp1
-9m1ajieFkqgoB0YTpt/OroDx38vvI5unInJlEeOjQ+oIAQdN2wpxBvTrRorMU6P0
-7mFUbt1j+Co6CbNiw+X8HcCaqYLR5clbJOOWNR36PuzOpQLkfK8woupBxzW9B8gZ
-mY8rB1mbJ+/WTPrEJy6YGmIEBkWylQ2VpW8O4O0CgYEApdbvvfFBlwD9YxbrcGz7
-MeNCFbMz+MucqQntIKoKJ91ImPxvtc0y6e/Rhnv0oyNlaUOwJVu0yNgNG117w0g4
-t/+Q38mvVC5xV7/cn7x9UMFk6MkqVir3dYGEqIl/OP1grY2Tq9HtB5iyG9L8NIam
-QOLMyUqqMUILxdthHyFmiGkCgYEAn9+PjpjGMPHxL0gj8Q8VbzsFtou6b1deIRRA
-2CHmSltltR1gYVTMwXxQeUhPMmgkMqUXzs4/WijgpthY44hK1TaZEKIuoxrS70nJ
-4WQLf5a9k1065fDsFZD6yGjdGxvwEmlGMZgTwqV7t1I4X0Ilqhav5hcs5apYL7gn
-PYPeRz0CgYALHCj/Ji8XSsDoF/MhVhnGdIs2P99NNdmo3R2Pv0CuZbDKMU559LJH
-UvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8
-oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
------END RSA PRIVATE KEY-----"#;
+pub(crate) use crate::fuzzing::SYNTHETIC_RSA_PRIVATE_KEY as RSA_PRIVATE_KEY;
 
 /// Deterministic wall and monotonic clocks. `set` models elapsed time: the
 /// monotonic side advances by any forward wall step. `set_wall` moves only
@@ -146,11 +120,14 @@ impl JwksFixture {
                         #[cfg(feature = "auth-agql")]
                         let last_request = thread_last_request.clone();
                         thread::spawn(move || {
-                            let _ = stream.set_nonblocking(false);
+                            if stream.set_nonblocking(false).is_err() {
+                                tracing::debug!("could not configure the JWKS fixture socket");
+                            }
                             let mut request = [0_u8; 2048];
                             #[cfg(feature = "auth-agql")]
                             let bytes_read = stream.read(&mut request).unwrap_or_default();
                             #[cfg(not(feature = "auth-agql"))]
+                            // The client may close this test connection early.
                             let _ = stream.read(&mut request);
                             #[cfg(feature = "auth-agql")]
                             {
@@ -164,6 +141,7 @@ impl JwksFixture {
                                 body.len()
                             );
                             // A bounded client may close immediately after rejecting Content-Length.
+                            // The client may close this test connection early.
                             let _ = stream.write_all(response.as_bytes());
                         });
                     }
@@ -208,6 +186,7 @@ impl JwksFixture {
 impl Drop for JwksFixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Wake the listener if it is still accepting connections.
         let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
@@ -348,6 +327,62 @@ fn refresh_catalogue(provider: &JwksAuthenticationProvider) -> Result<(), Authen
         .name("role-scope-refresh-test")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move { provider.refresh_role_scope_catalogue().await })
+}
+
+/// Signs `claims` under a hand-written header padded with a filler member to
+/// exactly `json_bytes` bytes of header JSON.
+fn token_with_header_of_length(kid: &str, json_bytes: usize, claims: &JsonValue) -> String {
+    use base64::Engine as _;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let prefix = format!(r#"{{"typ":"JWT","alg":"RS256","kid":"{kid}","pad":""#);
+    let filler = json_bytes - prefix.len() - 2;
+    let header = format!("{prefix}{}\"}}", "p".repeat(filler));
+    assert_eq!(header.len(), json_bytes);
+    let message = format!(
+        "{}.{}",
+        encode(header.as_bytes()),
+        encode(claims.to_string().as_bytes())
+    );
+    let signature = jsonwebtoken::crypto::sign(
+        message.as_bytes(),
+        &EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap(),
+        Algorithm::RS256,
+    )
+    .unwrap();
+    format!("{message}.{signature}")
+}
+
+/// Review finding on #784: the protected header is bounded before it is
+/// decoded. 6,144 bytes of JSON encode to exactly the 8 KiB cap.
+#[test]
+fn protected_header_over_its_byte_cap_is_refused_before_decoding() {
+    assert_eq!(MAX_PROTECTED_HEADER_BYTES, 8 * 1024);
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let provider = provider(
+        &fixture,
+        Arc::new(TestClock::at(1_000)),
+        LegacyScopeClaims::Reject,
+    );
+    initialize(&provider).unwrap();
+    let at_cap = token_with_header_of_length("key-a", 6_144, &claims(1_100));
+    assert_eq!(
+        at_cap.split('.').next().unwrap().len(),
+        MAX_PROTECTED_HEADER_BYTES
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&at_cap).unwrap().subject(),
+        "user-7"
+    );
+    for json_bytes in [6_145, 256 * 1024] {
+        let oversized = token_with_header_of_length("key-a", json_bytes, &claims(1_100));
+        assert_eq!(
+            provider.authenticate_bearer(&oversized).unwrap_err().kind(),
+            AuthenticationErrorKind::InvalidCredential,
+            "{json_bytes} header bytes"
+        );
+    }
+    // No header end within the cap: refused without scanning the rest.
+    assert!(refuse_protected_header(&"e".repeat(1 << 20)));
 }
 
 #[test]
@@ -1016,6 +1051,63 @@ fn forged_role_catalogue_does_not_block_startup_and_role_bearers_fail_closed() {
             .kind(),
         AuthenticationErrorKind::Unavailable
     );
+}
+
+/// Review finding on #784: the role catalogue's signature check refuses every
+/// `crit` member, including `null`, which the JWT library reads as absent.
+#[cfg(feature = "auth-agql")]
+#[test]
+fn role_catalogue_signature_with_any_crit_member_is_refused() {
+    use base64::Engine as _;
+    let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+    let oversized = format!(r#","pad":"{}""#, "p".repeat(256 * 1024));
+    for (crit, accepted) in [
+        ("", true),
+        (r#","crit":["exp"]"#, false),
+        (r#","crit":[]"#, false),
+        (r#","crit":null"#, false),
+        // Over the protected-header cap.
+        (oversized.as_str(), false),
+    ] {
+        // Re-sign the catalogue's own claims under a hand-written header.
+        let mut envelope: JsonValue =
+            serde_json::from_str(&signed_catalogue("key-a", 1_000, 1_010)).unwrap();
+        let payload = envelope["signature"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let message = format!(
+            "{}.{payload}",
+            encode(&format!(
+                r#"{{"typ":"JWT","alg":"RS256","kid":"key-a"{crit}}}"#
+            ))
+        );
+        let signature = jsonwebtoken::crypto::sign(
+            message.as_bytes(),
+            &EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap(),
+            Algorithm::RS256,
+        )
+        .unwrap();
+        envelope["signature"] = json!(format!("{message}.{signature}"));
+        let keys = JwksFixture::start(jwks("key-a"));
+        let catalogue = JwksFixture::start(envelope.to_string());
+        let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+        initialize(&provider).unwrap();
+        let refreshed = refresh_catalogue(&provider);
+        if accepted {
+            refreshed.unwrap();
+        } else {
+            assert_eq!(
+                refreshed.unwrap_err().kind(),
+                AuthenticationErrorKind::Unavailable,
+                "{}",
+                &crit[..crit.len().min(40)]
+            );
+        }
+    }
 }
 
 #[cfg(feature = "auth-agql")]

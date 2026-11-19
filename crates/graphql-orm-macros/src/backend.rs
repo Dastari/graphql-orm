@@ -172,16 +172,185 @@ pub(crate) fn backend_current_text_timestamp_expr(backend: BackendKind) -> &'sta
 }
 
 pub(crate) fn backend_quote_identifier(backend: BackendKind, identifier: &str) -> String {
-    if backend == BackendKind::Mssql {
-        if (identifier.starts_with('[') && identifier.ends_with(']'))
-            || (identifier.starts_with('"') && identifier.ends_with('"'))
-        {
-            identifier.to_string()
-        } else {
-            format!("[{}]", identifier.replace(']', "]]"))
-        }
-    } else {
+    if backend != BackendKind::Mssql || backend_is_one_delimited_identifier(backend, identifier) {
         identifier.to_string()
+    } else {
+        format!("[{}]", identifier.replace(']', "]]"))
+    }
+}
+
+/// Opening delimiter, closing delimiter, and whether a doubled closing
+/// delimiter stands for one inside the name, matching the runtime
+/// `DatabaseBackend` dialect.
+fn backend_identifier_delimiters(backend: BackendKind) -> &'static [(char, char, bool)] {
+    match backend {
+        // SQLite reads `[...]` up to the first `]`, with no escape.
+        BackendKind::Sqlite => &[('"', '"', true), ('`', '`', true), ('[', ']', false)],
+        BackendKind::Postgres => &[('"', '"', true)],
+        BackendKind::Mssql => &[('[', ']', true), ('"', '"', true)],
+    }
+}
+
+/// Whether `identifier` is exactly one well-formed delimited identifier for
+/// `backend`, the only input passed through unchanged (#782). It contains no
+/// NUL, and its name may be empty only on SQLite. Matches the runtime
+/// `DatabaseBackend` rule; the shared `identifier-paths.tsv` cases keep them
+/// aligned.
+pub(crate) fn backend_is_one_delimited_identifier(backend: BackendKind, identifier: &str) -> bool {
+    if identifier.contains('\0') {
+        return false;
+    }
+    let mut characters = identifier.chars();
+    let Some(open) = characters.next() else {
+        return false;
+    };
+    let Some(&(_, close, doubled)) = backend_identifier_delimiters(backend)
+        .iter()
+        .find(|(candidate, _, _)| *candidate == open)
+    else {
+        return false;
+    };
+    let mut empty = true;
+    while let Some(character) = characters.next() {
+        if character != close {
+            empty = false;
+            continue;
+        }
+        if doubled && characters.clone().next() == Some(close) {
+            characters.next();
+            empty = false;
+            continue;
+        }
+        return (!empty || backend == BackendKind::Sqlite) && characters.next().is_none();
+    }
+    false
+}
+
+/// Refuse a declared identifier path with a part that starts and ends with a
+/// matching delimiter pair but is not exactly one well-formed, non-empty
+/// delimited identifier for `backend`, such as `"a"b"`, `[a]]` or
+/// `[a] , [b]` (#782). Earlier releases wrote such a part into SQL unchanged,
+/// where it read as malformed SQL or as more than one token. Every other
+/// declared name is accepted and rendered exactly as before.
+pub(crate) fn validate_declared_identifier_path(
+    backend: BackendKind,
+    path: &str,
+    span: proc_macro2::Span,
+    attribute: &str,
+) -> syn::Result<()> {
+    if path.contains('\0') {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "{attribute} `{}` contains NUL, which no backend accepts in a name",
+                path.escape_debug()
+            ),
+        ));
+    }
+    for part in identifier_path_parts(backend, path).filter(|part| !part.is_empty()) {
+        let looks_delimited = backend_identifier_delimiters(backend)
+            .iter()
+            .any(|(open, close, _)| part.starts_with(*open) && part.ends_with(*close));
+        if looks_delimited && !backend_is_one_delimited_identifier(backend, part) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "{attribute} part `{part}` starts and ends with a delimiter but is not one \
+                     well-formed delimited identifier for the {} backend; double every closing \
+                     delimiter inside it, or write the name without delimiters",
+                    backend.name()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a table-qualified `db_column` whose qualifier does not name the
+/// entity's own `table` path (#782). Generated SQL renders the declared
+/// column path as written, in filters, sorts and projections, so a qualifier
+/// naming another table would reference that table instead, including from
+/// inside a correlated subquery. The qualifier must equal the trailing parts
+/// of `table`, compared as the runtime `DatabaseBackend` compares them:
+/// PostgreSQL by resolved name, SQLite without ASCII case, SQL Server
+/// exactly. An unqualified column is always accepted.
+pub(crate) fn validate_declared_column_qualifier(
+    backend: BackendKind,
+    table: &str,
+    column: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
+    let parts = identifier_path_parts(backend, column)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some((_, qualifier)) = parts.split_last() else {
+        return Ok(());
+    };
+    let table_parts = identifier_path_parts(backend, table)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if qualifier.len() <= table_parts.len()
+        && qualifier
+            .iter()
+            .rev()
+            .zip(table_parts.iter().rev())
+            .all(|(left, right)| same_identifier_part(backend, left, right))
+    {
+        return Ok(());
+    }
+    Err(syn::Error::new(
+        span,
+        format!(
+            "db_column `{column}` is qualified by a table other than this entity's table \
+             `{table}`; qualify it with this entity's table or leave it unqualified"
+        ),
+    ))
+}
+
+/// The name one path part denotes: the inside of a well-formed delimited
+/// identifier, or the part itself.
+fn identifier_part_name(backend: BackendKind, part: &str) -> String {
+    if !backend_is_one_delimited_identifier(backend, part) {
+        return part.to_owned();
+    }
+    let mut characters = part.chars();
+    let open = characters.next().unwrap_or_default();
+    let (_, close, doubled) = backend_identifier_delimiters(backend)
+        .iter()
+        .copied()
+        .find(|(candidate, _, _)| *candidate == open)
+        .unwrap_or((open, open, false));
+    let inner: String = characters.collect();
+    let inner = inner.strip_suffix(close).unwrap_or(&inner);
+    if doubled {
+        inner.replace(&format!("{close}{close}"), &close.to_string())
+    } else {
+        inner.to_owned()
+    }
+}
+
+fn same_identifier_part(backend: BackendKind, left: &str, right: &str) -> bool {
+    match backend {
+        BackendKind::Postgres => {
+            // A bare part PostgreSQL folds; a delimited or quoted part keeps
+            // its case, as the runtime's `postgres_resolved_identifier`.
+            let resolved = |part: &str| {
+                if backend_is_one_delimited_identifier(backend, part) {
+                    identifier_part_name(backend, part)
+                } else if part.starts_with('"') || backend_render_identifier(backend, part) != part
+                {
+                    part.to_owned()
+                } else {
+                    part.to_ascii_lowercase()
+                }
+            };
+            resolved(left) == resolved(right)
+        }
+        BackendKind::Sqlite => identifier_part_name(backend, left)
+            .eq_ignore_ascii_case(&identifier_part_name(backend, right)),
+        BackendKind::Mssql => {
+            identifier_part_name(backend, left) == identifier_part_name(backend, right)
+        }
     }
 }
 
@@ -359,36 +528,45 @@ const POSTGRES_RESERVED_IDENTIFIERS: &[&str] = &[
 ];
 
 // SQL identifier delimiters may contain dots and doubled closing delimiters.
-// Slice only at unquoted dots; byte offsets are safe because delimiters are ASCII.
+// Slice only at dots outside a delimited part, reading each part with the
+// backend's own delimited forms, as the runtime `DatabaseBackend` splitter does.
+// Byte offsets are safe because every delimiter is ASCII.
 /// Split SQL identifier paths while preserving quoted dots and escapes.
-pub(crate) fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn identifier_path_parts(
+    backend: BackendKind,
+    identifier: &str,
+) -> impl Iterator<Item = &str> {
+    let delimiters = backend_identifier_delimiters(backend);
     let bytes = identifier.as_bytes();
     let mut start = 0;
     let mut offset = 0;
     std::iter::from_fn(move || {
-        let mut closing = None;
+        let mut closing: Option<(u8, bool)> = None;
         while offset < bytes.len() {
             let character = bytes[offset];
             offset += 1;
             match closing {
-                Some(delimiter) if character == delimiter => {
-                    if bytes.get(offset) == Some(&delimiter) {
+                Some((close, doubled)) if character == close => {
+                    if doubled && bytes.get(offset) == Some(&close) {
                         offset += 1;
                     } else {
                         closing = None;
                     }
                 }
-                None => match character {
-                    b'"' | b'`' if offset - 1 == start => closing = Some(character),
-                    b'[' if offset - 1 == start => closing = Some(b']'),
-                    b'.' => {
+                Some(_) => {}
+                None => {
+                    if offset - 1 == start
+                        && let Some(&(_, close, doubled)) = delimiters
+                            .iter()
+                            .find(|(open, _, _)| u32::from(*open) == u32::from(character))
+                    {
+                        closing = Some((close as u8, doubled));
+                    } else if character == b'.' {
                         let part = &identifier[start..offset - 1];
                         start = offset;
                         return Some(part);
                     }
-                    _ => {}
-                },
-                _ => {}
+                }
             }
         }
         if start <= bytes.len() {
@@ -411,22 +589,18 @@ pub(crate) fn backend_render_identifier(backend: BackendKind, identifier: &str) 
         BackendKind::Sqlite => SQLITE_RESERVED_IDENTIFIERS,
         BackendKind::Postgres => POSTGRES_RESERVED_IDENTIFIERS,
     };
-    if identifier.len() >= 2
-        && ((identifier.starts_with('"') && identifier.ends_with('"'))
-            || (backend == BackendKind::Sqlite
-                && ((identifier.starts_with('[') && identifier.ends_with(']'))
-                    || (identifier.starts_with('`') && identifier.ends_with('`')))))
-    {
+    if backend_is_one_delimited_identifier(backend, identifier) {
         return identifier.to_string();
     }
     let mut characters = identifier.chars();
     let plain_start = |character: char| {
         character.is_ascii_alphabetic() || character == '_' || !character.is_ascii()
     };
-    let plain = characters.next().is_some_and(plain_start)
-        && characters.all(|character| {
-            plain_start(character) || character.is_ascii_digit() || character == '$'
-        });
+    // SQLite reads a byte-order mark that starts a token as whitespace.
+    let plain = characters.next().is_some_and(|first| {
+        plain_start(first) && !(backend == BackendKind::Sqlite && first == '\u{feff}')
+    }) && characters
+        .all(|character| plain_start(character) || character.is_ascii_digit() || character == '$');
     if plain
         && reserved
             .binary_search(&identifier.to_ascii_lowercase().as_str())
@@ -440,7 +614,7 @@ pub(crate) fn backend_render_identifier(backend: BackendKind, identifier: &str) 
 
 /// [`backend_render_identifier`] for each part, preserving quoted dots and escapes.
 pub(crate) fn backend_render_identifier_path(backend: BackendKind, identifier: &str) -> String {
-    identifier_path_parts(identifier)
+    identifier_path_parts(backend, identifier)
         .filter(|part| !part.is_empty())
         .map(|part| backend_render_identifier(backend, part))
         .collect::<Vec<_>>()
@@ -459,7 +633,7 @@ pub(crate) fn backend_dialect_tokens(backend: BackendKind) -> proc_macro2::Token
 
 pub(crate) fn backend_quote_identifier_path(backend: BackendKind, identifier: &str) -> String {
     if backend == BackendKind::Mssql {
-        identifier_path_parts(identifier)
+        identifier_path_parts(backend, identifier)
             .filter(|part| !part.is_empty())
             .map(|part| backend_quote_identifier(backend, part))
             .collect::<Vec<_>>()
@@ -472,6 +646,171 @@ pub(crate) fn backend_quote_identifier_path(backend: BackendKind, identifier: &s
 #[cfg(test)]
 mod identifier_path_tests {
     use super::*;
+
+    #[test]
+    fn malformed_delimited_declared_names_are_refused() {
+        let span = proc_macro2::Span::call_site();
+        for (backend, path) in [
+            (BackendKind::Sqlite, "\"a\"b\""),
+            (BackendKind::Sqlite, "\"\"\""),
+            (BackendKind::Sqlite, "app.[a]b]"),
+            (BackendKind::Postgres, "\""),
+            (BackendKind::Postgres, "\"\""),
+            (BackendKind::Postgres, "\"a\" , \"b\""),
+            (BackendKind::Mssql, "[a]]"),
+            (BackendKind::Mssql, "[a] , [b]"),
+            (BackendKind::Mssql, "[app].[]"),
+            (BackendKind::Sqlite, "a\0b"),
+            (BackendKind::Postgres, "\"a\0b\""),
+            (BackendKind::Mssql, "[a\0b]"),
+            // SQLite closes `[...]` at the first `]`.
+            (BackendKind::Sqlite, "[a]]b]"),
+        ] {
+            let error = validate_declared_identifier_path(backend, path, span, "table")
+                .expect_err(path)
+                .to_string();
+            assert!(
+                error.contains("well-formed delimited identifier") || error.contains("NUL"),
+                "{error}"
+            );
+        }
+        for (backend, path) in [
+            (BackendKind::Sqlite, "users"),
+            (BackendKind::Sqlite, "\"a\"\"b\""),
+            (BackendKind::Sqlite, "[a b]"),
+            (BackendKind::Sqlite, "\"a"),
+            (BackendKind::Postgres, "app.\"Mixed Case\""),
+            (BackendKind::Postgres, "[a]"),
+            (BackendKind::Mssql, "[app].[a]].b]"),
+            (BackendKind::Mssql, "\"a\"\".b\""),
+            (BackendKind::Mssql, "a]"),
+            (BackendKind::Sqlite, "\"\""),
+            (BackendKind::Sqlite, "app.[]"),
+            // Not delimited forms on these backends.
+            (BackendKind::Postgres, "[s.t"),
+            (BackendKind::Mssql, "`a.b`"),
+        ] {
+            validate_declared_identifier_path(backend, path, span, "table").expect(path);
+        }
+    }
+
+    #[test]
+    fn declared_column_qualifiers_must_name_the_entitys_table() {
+        let span = proc_macro2::Span::call_site();
+        for (backend, table, column, accepted) in [
+            (BackendKind::Sqlite, "main.parents", "owner", true),
+            (
+                BackendKind::Sqlite,
+                "main.parents",
+                "\"parents\".\"owner\"",
+                true,
+            ),
+            (BackendKind::Sqlite, "main.parents", "PARENTS.owner", true),
+            (
+                BackendKind::Sqlite,
+                "main.parents",
+                "main.parents.owner",
+                true,
+            ),
+            (
+                BackendKind::Sqlite,
+                "main.parents",
+                "\"children\".\"owner\"",
+                false,
+            ),
+            (
+                BackendKind::Sqlite,
+                "main.parents",
+                "other.parents.owner",
+                false,
+            ),
+            (BackendKind::Sqlite, "parents", "main.parents.owner", false),
+            (
+                BackendKind::Postgres,
+                "public.parents",
+                "\"parents\".owner",
+                true,
+            ),
+            (
+                BackendKind::Postgres,
+                "public.parents",
+                "PARENTS.owner",
+                true,
+            ),
+            (
+                BackendKind::Postgres,
+                "public.parents",
+                "\"PARENTS\".owner",
+                false,
+            ),
+            (
+                BackendKind::Postgres,
+                "\"Parents\"",
+                "\"Parents\".owner",
+                true,
+            ),
+            (BackendKind::Postgres, "\"Parents\"", "parents.owner", false),
+            (
+                BackendKind::Postgres,
+                "public.parents",
+                "\"children\".owner",
+                false,
+            ),
+            (BackendKind::Mssql, "dbo.parents", "[parents].[owner]", true),
+            (
+                BackendKind::Mssql,
+                "[dbo].[parents]",
+                "\"parents\".owner",
+                true,
+            ),
+            (
+                BackendKind::Mssql,
+                "dbo.parents",
+                "[Parents].[owner]",
+                false,
+            ),
+            (
+                BackendKind::Mssql,
+                "dbo.parents",
+                "[children].[owner]",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                validate_declared_column_qualifier(backend, table, column, span).is_ok(),
+                accepted,
+                "{backend:?} {table} {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_one_well_formed_delimited_identifier_passes_through() {
+        assert_eq!(
+            backend_render_identifier(BackendKind::Sqlite, "\"join\""),
+            "\"join\""
+        );
+        assert_eq!(
+            backend_render_identifier(BackendKind::Sqlite, "\"a\"b\""),
+            "\"\"\"a\"\"b\"\"\""
+        );
+        assert_eq!(
+            backend_render_identifier(BackendKind::Postgres, "\""),
+            "\"\"\"\""
+        );
+        assert_eq!(
+            backend_quote_identifier(BackendKind::Mssql, "[key]"),
+            "[key]"
+        );
+        assert_eq!(
+            backend_quote_identifier(BackendKind::Mssql, "[a]]"),
+            "[[a]]]]]"
+        );
+        assert_eq!(
+            backend_render_identifier(BackendKind::Mssql, "[a] , [b]"),
+            "[[a]] , [b]]]"
+        );
+    }
 
     #[test]
     fn quoted_identifier_paths_match_the_runtime_cases() {

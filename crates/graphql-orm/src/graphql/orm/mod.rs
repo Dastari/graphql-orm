@@ -13,6 +13,8 @@ mod backend;
     all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
 ))]
 mod backup;
+mod client_metadata;
+pub use client_metadata::*;
 mod core;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod default_equivalence;
@@ -21,6 +23,7 @@ mod execution;
 mod lease;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
+mod mssql_identifier_tables;
 mod operation_metadata;
 mod owned_foreign_keys;
 mod owned_schema;

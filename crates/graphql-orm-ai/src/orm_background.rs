@@ -6,6 +6,8 @@
 ))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::map_transaction;
+use crate::sha256::valid_sha256_any_case;
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReference, PrincipalReferenceKind};
@@ -4386,7 +4388,7 @@ async fn load_background_claim_graph(
                 || retrieval.classification != egress.classification
                 || retrieval.outcome != "allow"
                 || retrieval.reason_code != "allowed"
-                || !valid_sha256_hex(&retrieval.manifest_hash)
+                || !valid_sha256_any_case(&retrieval.manifest_hash)
                 || retrieval.policy_version.trim().is_empty()
                 || u64::try_from(retrieval.estimated_bytes).ok()
                     != Some(provider_response_id.len() as u64)
@@ -4486,8 +4488,8 @@ fn validate_expired_submission(
         || submission.provider_model.trim().is_empty()
         || submission.provider_model.len() > 1_024
         || submission.maximum_output_tokens <= 0
-        || !valid_sha256_hex(&submission.request_hash)
-        || !valid_sha256_hex(&submission.egress_manifest_hash)
+        || !valid_sha256_any_case(&submission.request_hash)
+        || !valid_sha256_any_case(&submission.egress_manifest_hash)
         || !valid_response_id(provider_response_id)
         || !valid_provider_status(provider_status)
         || submission.created_at <= 0
@@ -4571,8 +4573,8 @@ fn validate_claimable_submission(
         || submission.provider_model.trim().is_empty()
         || submission.provider_model.len() > 1_024
         || submission.maximum_output_tokens <= 0
-        || !valid_sha256_hex(&submission.request_hash)
-        || !valid_sha256_hex(&submission.egress_manifest_hash)
+        || !valid_sha256_any_case(&submission.request_hash)
+        || !valid_sha256_any_case(&submission.egress_manifest_hash)
         || !valid_response_id(provider_response_id)
         || !valid_provider_status(provider_status)
         || submission.created_at <= 0
@@ -5202,10 +5204,6 @@ fn exact_background_state(state: &str) -> AiProviderBackgroundSubmissionRecordWh
     }
 }
 
-fn valid_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 fn persisted_classification(value: &str) -> Option<DataClassification> {
     match value {
         "public" => Some(DataClassification::Public),
@@ -5420,22 +5418,4 @@ fn valid_provider_status(value: &str) -> bool {
         value,
         "queued" | "in_progress" | "completed" | "failed" | "incomplete" | "cancelled"
     )
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
-        return AiError::RuntimeNotReady;
-    }
-    let public = error.public_error();
-    match public.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(public.message.clone()),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
 }

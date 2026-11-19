@@ -19,6 +19,7 @@ pub struct RouterMetricsSnapshot {
     websocket_rejections_total: u64,
     websocket_send_failures_total: u64,
     schema_refresh_total: u64,
+    authentication_refresh_failure_total: u64,
     composition_success_total: u64,
     composition_failure_total: u64,
     rejected_subgraphs_total: u64,
@@ -108,6 +109,12 @@ impl RouterMetricsSnapshot {
         "Total schema refresh rounds, including manual refresh."
     );
     snapshot_getter!(
+        authentication_refresh_failure_total,
+        authentication_refresh_failure_total,
+        u64,
+        "Total failed scheduled refreshes of public or administrative authentication verification state."
+    );
+    snapshot_getter!(
         composition_success_total,
         composition_success_total,
         u64,
@@ -147,6 +154,7 @@ pub(crate) struct RouterMetrics {
     websocket_rejections_total: AtomicU64,
     websocket_send_failures_total: AtomicU64,
     schema_refresh_total: AtomicU64,
+    authentication_refresh_failure_total: AtomicU64,
     composition_success_total: AtomicU64,
     composition_failure_total: AtomicU64,
     rejected_subgraphs_total: AtomicU64,
@@ -194,6 +202,9 @@ impl RouterMetrics {
                 .websocket_send_failures_total
                 .load(Ordering::Relaxed),
             schema_refresh_total: self.schema_refresh_total.load(Ordering::Relaxed),
+            authentication_refresh_failure_total: self
+                .authentication_refresh_failure_total
+                .load(Ordering::Relaxed),
             composition_success_total: self.composition_success_total.load(Ordering::Relaxed),
             composition_failure_total: self.composition_failure_total.load(Ordering::Relaxed),
             rejected_subgraphs_total: self.rejected_subgraphs_total.load(Ordering::Relaxed),
@@ -261,6 +272,11 @@ impl RouterMetrics {
 
     pub(crate) fn graph_activated(&self, version: u64) {
         self.active_graph_version.store(version, Ordering::Relaxed);
+    }
+
+    pub(crate) fn authentication_refresh_failed(&self) {
+        self.authentication_refresh_failure_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn schema_refresh(&self) {
@@ -428,8 +444,7 @@ impl ByteRouteCounters {
 }
 
 fn decrement(counter: &AtomicUsize, count: usize) {
-    // Keep the atomic saturating update compatible with the Rust 1.90 MSRV;
-    // current Rust deprecates fetch_update in favor of the newer try_update.
+    // Saturate without wrapping, retrying if another request updates the counter.
     let mut current = counter.load(Ordering::Relaxed);
     loop {
         match counter.compare_exchange_weak(

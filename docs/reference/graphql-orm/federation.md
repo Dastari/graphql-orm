@@ -261,7 +261,7 @@ router could evaluate. Any entity whose rows are not universally readable must
 declare its own entity policy, row policy, scope requirement, or
 `auth = "required"`; a router-level rule on the parent query grants nothing on
 the far side of the join. The router decision is recorded in
-[ADR-0014](../../decisions/ADR-0014-router-enforces-composed-authorization-directives.md).
+[ADR-0015](../../decisions/ADR-0015-router-enforces-composed-authorization-directives.md).
 
 ## Referencing an entity owned by another subgraph
 

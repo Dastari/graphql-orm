@@ -52,6 +52,19 @@ Regenerate tool manifests and operation contracts from the upgraded catalogue;
 ones bound under `graphql-orm-sha256-len-v1` are refused as stale. No Rust API
 or data change. Host steps are in the root
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+## 0.26.0 to 0.26.1: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
+## 0.25.0 to 0.26.0
+
+**No action**. Reusing compiled validators requires no host configuration or
+data migration. Published schemas and fingerprints are unchanged.
+
+## 0.25.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
 ## 0.23.0 to 0.24.0: capability scale
 

@@ -24,6 +24,21 @@ Capability index version 3 and compact signatures for broker version 2 (#551, as
 ## Unreleased - 0.25.0
 
 - **Fixed:** runtime live key inputs compile under the ORM's default string identities. With live subscriptions and a node identity, a UUID key member is `UUID!` in both identity modes, and an integer key member is `RuntimeInt64!` by default and `Int!` only under `with_legacy_int_identities()`. The matcher previously recognised live key inputs only when `RecordVersion` was `Int!`, so a UUID-keyed collection under default options failed every query, mutation and subscription catalogue with `InvalidConfiguration("generated input <Object>KeyInput.<field> differs from its canonical contract")`. The identity mode is now read from the `RecordVersion` scalar. No data migration is needed.
+## Unreleased - 0.26.1
+
+- Install from a reviewed Git revision using the package inventory and release manifest.
+
+## Unreleased - 0.26.0
+
+- Reuse compiled validators for query, mutation and subscription plans and
+  their GraphQL arguments. Plan schemas, validation and fingerprints are
+  unchanged.
+- Classify compact query plan corrections at the validation site so editing
+  diagnostics cannot change the model-facing correction code.
+
+## Unreleased - 0.25.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
 
 ## Unreleased - 0.24.0
 

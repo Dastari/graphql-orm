@@ -2,17 +2,15 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_support::{map_usage, page_input, principal_identity};
 use std::sync::Arc;
 
 use agql_auth::AuthPrincipal;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
-use graphql_orm::graphql::errors::OrmPublicError;
 use graphql_orm::graphql::filters::{Int64Filter, StringFilter};
 use graphql_orm::graphql::orm::DefaultWriteBackend;
-use graphql_orm::graphql::pagination::{
-    KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
-};
+use graphql_orm::graphql::pagination::ValidatedKeysetConnection;
 
 use crate::persistence::*;
 use crate::{
@@ -116,7 +114,7 @@ impl AiUsageService for OrmAiUsageService {
             };
             crate::orm_read_bounds::keyset_window(
                 self.database.pagination_config().max_limit,
-                page_input(&page),
+                page_input(&page, false),
                 move |chunk| {
                     AiUsageEntryRecord::keyset_connection_page(
                         &self.database,
@@ -127,7 +125,7 @@ impl AiUsageService for OrmAiUsageService {
             )
         }
         .await
-        .map_err(map_orm)?;
+        .map_err(map_usage)?;
         Ok(AiUsageConnection {
             edges: connection
                 .edges
@@ -165,21 +163,6 @@ fn usage_view(record: AiUsageEntryRecord) -> AiUsageView {
     }
 }
 
-fn page_input(page: &ValidatedKeysetConnection) -> KeysetConnectionInput {
-    match page.direction {
-        KeysetWindowDirection::Forward => KeysetConnectionInput {
-            after: page.cursor.clone(),
-            first: Some(page.limit),
-            ..Default::default()
-        },
-        KeysetWindowDirection::Backward => KeysetConnectionInput {
-            before: page.cursor.clone(),
-            last: Some(page.limit),
-            ..Default::default()
-        },
-    }
-}
-
 fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
     if scope.kind.trim().is_empty()
         || scope.kind.len() > 128
@@ -195,31 +178,12 @@ fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
     Ok(())
 }
 
-fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
-    match principal {
-        AuthPrincipal::User(user) => ("user".to_owned(), &user.user_id),
-        AuthPrincipal::ApiToken(token) => (
-            format!("api_token:{}", token.principal_kind.as_str()),
-            &token.subject,
-        ),
-    }
-}
-
-fn map_orm(error: impl Into<OrmPublicError>) -> AiError {
-    let error = error.into();
-    match error.code {
-        graphql_orm::graphql::errors::OrmErrorCode::Forbidden => AiError::Forbidden,
-        graphql_orm::graphql::errors::OrmErrorCode::NotFound => AiError::NotFound,
-        graphql_orm::graphql::errors::OrmErrorCode::Conflict => AiError::Conflict,
-        _ => AiError::PersistenceFailed,
-    }
-}
-
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use agql_auth::{AccessTokenMetadata, AuthUser, SessionContext};
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
+    use graphql_orm::graphql::pagination::KeysetConnectionInput;
     use graphql_orm::prelude::SqliteBackend;
     use uuid::Uuid;
 

@@ -28,6 +28,21 @@ supersedes: []
   such a transaction; without this the clear would be refused on a journaled
   database. The clear is not journaled, as before. Requires ORM 0.166.0 for
   the optional ORM adapter. SQLite is unchanged.
+## Unreleased - 0.27.2
+
+- Install from a reviewed Git revision using the package inventory and release manifest.
+
+## Unreleased - 0.27.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- The PostgreSQL conformance harness starts its disposable container with a hard
+  `--memory 4g --memory-swap 4g` limit. Library code, manifests, restore
+  behavior and the public API are unchanged.
+
+## Unreleased - 0.27.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
 
 ## 0.26.0 (unreleased)
 

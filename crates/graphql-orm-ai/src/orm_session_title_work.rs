@@ -3,6 +3,9 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, principal_identity, record_scope,
+};
 use std::sync::Arc;
 
 use agql_auth::{
@@ -22,10 +25,7 @@ use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::orm_runs::{canonical_second, validate_worker_id};
-use crate::orm_sessions::{
-    content_context, map_orm, map_protection, map_transaction, normalize_title, principal_identity,
-    record_scope, session_title_hash, session_view,
-};
+use crate::orm_sessions::{map_protection, normalize_title, session_title_hash, session_view};
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,

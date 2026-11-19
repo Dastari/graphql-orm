@@ -824,11 +824,13 @@ impl SmbStorageBackend {
         let actual = match actual {
             Ok(actual) => actual,
             Err(error) => {
+                // Best-effort cleanup preserves the probe failure.
                 let _ = backend.delete_blob(&key).await;
                 return Err(error);
             }
         };
         if actual != expected {
+            // Best-effort cleanup preserves the probe failure.
             let _ = backend.delete_blob(&key).await;
             return Err(probe_mismatch());
         }
@@ -1016,6 +1018,7 @@ impl SmbStorageBackend {
                 timeout: self.inner.config.operation_timeout,
             }),
             other => {
+                // Closing an unexpected resource is best-effort cleanup.
                 let _ = close_resource(other).await;
                 Err(probe_mismatch())
             }
@@ -1057,6 +1060,7 @@ impl SmbStorageBackend {
         // and count closes that failed; stopping the session releases them
         // anyway.
         while let Some(held) = progress.chain.pop() {
+            // The sweep tally already records any close failure.
             let _ = tally
                 .confirm_close(
                     &held.share_relative,
@@ -1141,6 +1145,7 @@ impl SmbStorageBackend {
                 let done = chain.pop().expect("a held directory");
                 // Counted until confirmed, so a close the deadline cancels
                 // stays counted; stopping the session releases the handle.
+                // The sweep tally already records any close failure.
                 let _ = tally
                     .confirm_close(
                         &done.share_relative,
@@ -1181,6 +1186,7 @@ impl SmbStorageBackend {
                         let entries = match source.enumerate(&directory, &mut budget).await {
                             Ok(entries) => entries,
                             Err(error) => {
+                                // The sweep tally already records any close failure.
                                 let _ = tally
                                     .confirm_close(
                                         &share_relative,
@@ -1289,6 +1295,7 @@ impl SmbStorageBackend {
             }
         };
         let Resource::Directory(directory) = resource else {
+            // The sweep tally already records any close failure.
             let _ = tally
                 .confirm_close(path, self.with_timeout("close", close_resource(resource)))
                 .await;
@@ -1307,12 +1314,14 @@ impl SmbStorageBackend {
                 Ok(DirectoryHold::Held(directory))
             }
             Ok(_) => {
+                // The sweep tally already records any close failure.
                 let _ = tally
                     .confirm_close(path, self.with_timeout("close", directory.close()))
                     .await;
                 Ok(DirectoryHold::Refused)
             }
             Err(error) => {
+                // The sweep tally already records any close failure.
                 let _ = tally
                     .confirm_close(path, self.with_timeout("close", directory.close()))
                     .await;
@@ -1345,6 +1354,7 @@ impl SmbStorageBackend {
             .await?;
         let label = self.mapped_key(&key)?;
         let Resource::File(file) = resource else {
+            // The sweep tally already records any close failure.
             let _ = tally
                 .confirm_close(&label, self.with_timeout("close", close_resource(resource)))
                 .await;
@@ -1430,6 +1440,7 @@ impl SmbStorageBackend {
         };
         let label = self.mapped_key(&file.key)?;
         let Resource::File(handle) = resource else {
+            // The sweep tally already records any close failure.
             let _ = tally
                 .confirm_close(&label, self.with_timeout("close", close_resource(resource)))
                 .await;
@@ -1498,7 +1509,7 @@ impl SmbStorageBackend {
             Ok(facts) => facts,
             Err(error) => {
                 if error.is_retryable() {
-                    let _ = self.reconnect_after(generation).await;
+                    self.recover_connection(generation).await;
                 }
                 return Err(error);
             }
@@ -1531,7 +1542,7 @@ impl SmbStorageBackend {
                         if let Err(error) = &close
                             && error.is_retryable()
                         {
-                            let _ = backend.reconnect_after(generation).await;
+                            backend.recover_connection(generation).await;
                         }
                         close?;
                         return Ok(None);
@@ -1561,7 +1572,7 @@ impl SmbStorageBackend {
                         Ok(read) => read,
                         Err(error) => {
                             if error.is_retryable() {
-                                let _ = backend.reconnect_after(generation).await;
+                                backend.recover_connection(generation).await;
                             }
                             return Err(error);
                         }
@@ -1636,6 +1647,18 @@ impl SmbStorageBackend {
             client: Arc::clone(&client.client),
             generation: client.generation,
             properties: client.properties,
+        }
+    }
+
+    /// Attempts to restore the connection for later operations while the
+    /// failed operation still reports its original result.
+    async fn recover_connection(&self, failed_generation: u64) {
+        if let Err(error) = self.reconnect_after(failed_generation).await {
+            tracing::warn!(
+                event = "reconnect_failed",
+                error_kind = ?provider_error_kind(&error),
+                "SMB connection recovery failed"
+            );
         }
     }
 
@@ -1935,7 +1958,7 @@ impl SmbStorageBackend {
                 if let Err(retry_error) = &result
                     && retry_error.is_retryable()
                 {
-                    let _ = self.reconnect_after(retry.generation).await;
+                    self.recover_connection(retry.generation).await;
                 }
                 result?
             }
@@ -1944,6 +1967,7 @@ impl SmbStorageBackend {
         match resource {
             Resource::File(file) => Ok(file),
             other => {
+                // Closing an unexpected resource is best-effort cleanup.
                 let _ = close_resource(other).await;
                 Err(remote_error(
                     StorageProviderErrorKind::Protocol,
@@ -1980,7 +2004,7 @@ impl SmbStorageBackend {
             .await
         {
             if error.is_retryable() {
-                let _ = self.reconnect_after(generation).await;
+                self.recover_connection(generation).await;
             }
             cleanup.cleanup().await;
             return Err(error);
@@ -2010,7 +2034,7 @@ impl SmbStorageBackend {
             Ok(outcome) => outcome,
             Err(error) => {
                 if error.is_retryable() {
-                    let _ = self.reconnect_after(generation).await;
+                    self.recover_connection(generation).await;
                 }
                 cleanup.cleanup().await;
                 tracing::warn!(
@@ -2025,7 +2049,7 @@ impl SmbStorageBackend {
 
         if let Err(error) = self.with_io_timeout("flush", cleanup.file().flush()).await {
             if error.is_retryable() {
-                let _ = self.reconnect_after(generation).await;
+                self.recover_connection(generation).await;
             }
             cleanup.cleanup().await;
             return Err(error);
@@ -2040,14 +2064,14 @@ impl SmbStorageBackend {
             .await
         {
             if error.is_retryable() {
-                let _ = self.reconnect_after(generation).await;
+                self.recover_connection(generation).await;
             }
             cleanup.cleanup().await;
             return Err(error);
         }
         if let Err(error) = self.with_timeout("close", cleanup.file().close()).await {
             if error.is_retryable() {
-                let _ = self.reconnect_after(generation).await;
+                self.recover_connection(generation).await;
             }
             cleanup.cleanup().await;
             return Err(error);
@@ -2086,6 +2110,7 @@ impl SmbStorageBackend {
                     ));
                 }
                 Ok(other) => {
+                    // Closing an unexpected resource is best-effort cleanup.
                     let _ = self.with_timeout("close", close_resource(other)).await;
                     return Err(remote_error(
                         StorageProviderErrorKind::Protocol,
@@ -2142,7 +2167,7 @@ impl SmbStorageBackend {
         if let Err(error) = &combined
             && error.is_retryable()
         {
-            let _ = self.reconnect_after(generation).await;
+            self.recover_connection(generation).await;
         }
         combined
     }
@@ -2179,7 +2204,7 @@ impl SmbStorageBackend {
         let connection_lost = matches!(&linked, Err(LinkFailure::Unknown(error)) if error.is_retryable())
             || closed.as_ref().is_err_and(StorageError::is_retryable);
         if connection_lost {
-            let _ = self.reconnect_after(generation).await;
+            self.recover_connection(generation).await;
         }
         Ok((linked, closed))
     }
@@ -2634,6 +2659,7 @@ impl SessionControl {
     /// Asks the runtime thread to stop. It never waits.
     fn stop(&self) {
         if let Some(stop) = lock_ignoring_poison(&self.stop).take() {
+            // The runtime has already stopped if the receiver is gone.
             let _ = stop.send(());
         }
     }
@@ -2694,6 +2720,7 @@ impl SessionRuntime {
                     return;
                 }
                 runtime.block_on(async {
+                    // Dropping the stop sender requests shutdown too.
                     let _ = stop_requested.await;
                 });
                 {
@@ -2701,6 +2728,7 @@ impl SessionRuntime {
                     drop(lock_ignoring_poison(&thread_client).take());
                 }
                 drop(runtime);
+                // A cancelled shutdown waiter no longer needs confirmation.
                 let _ = stopped_tx.send(());
             })
             .map_err(|_| unavailable())?;
@@ -3152,10 +3180,12 @@ impl ListingContinuation {
         let mut parts = rest.splitn(3, ':');
         let pages = parts
             .next()
+            // A malformed counter returns the invalid continuation error.
             .and_then(|v| v.parse().ok())
             .ok_or_else(invalid)?;
         let returned = parts
             .next()
+            // A malformed counter returns the invalid continuation error.
             .and_then(|v| v.parse().ok())
             .ok_or_else(invalid)?;
         let after = parts.next().ok_or_else(invalid)?.to_string();
@@ -3274,6 +3304,7 @@ impl ListingSource for SmbListingSource<'_> {
         let directory = match resource {
             Resource::Directory(directory) => Arc::new(directory),
             other => {
+                // Closing an unexpected resource is best-effort cleanup.
                 let _ = close_resource(other).await;
                 listing_not_directory(directory_path, discovered)?;
                 return Ok(None);
@@ -3407,6 +3438,7 @@ where
     F: std::future::Future<Output = Result<(), StorageError>>,
 {
     close.await;
+    // Removal of abandoned temporary data is best effort.
     let _ = remove(temp_key).await;
 }
 
@@ -3435,6 +3467,7 @@ impl TempObjectCleanupGuard {
 
     async fn cleanup(&mut self) {
         if self.armed {
+            // Removal of abandoned temporary data is best effort.
             let _ = self.backend.remove_file(&self.key).await;
             self.armed = false;
         }
@@ -3454,6 +3487,7 @@ impl Drop for TempObjectCleanupGuard {
         let key = self.key.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
+                // Removal of abandoned temporary data is best effort.
                 let _ = backend.remove_file(&key).await;
             });
         }
@@ -3489,7 +3523,7 @@ impl WriteCleanupGuard {
                     if let Err(error) = close
                         && error.is_retryable()
                     {
-                        let _ = self.backend.reconnect_after(self.generation).await;
+                        self.backend.recover_connection(self.generation).await;
                     }
                 }
             },
@@ -3526,7 +3560,7 @@ impl Drop for WriteCleanupGuard {
                         if let Err(error) = close
                             && error.is_retryable()
                         {
-                            let _ = backend.reconnect_after(generation).await;
+                            backend.recover_connection(generation).await;
                         }
                     },
                     |key| backend.remove_file(key),
@@ -3733,6 +3767,7 @@ impl BlobStore for SmbStorageBackend {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(error) => {
+                // Removal of abandoned temporary data is best effort.
                 let _ = self.remove_file(&temp).await;
                 return Err(error);
             }
@@ -3761,6 +3796,7 @@ impl BlobStore for SmbStorageBackend {
         let outcome = match self.write_file(&temp, body).await {
             Ok(outcome) => outcome,
             Err(error) => {
+                // Removal of abandoned temporary data is best effort.
                 let _ = self.remove_file(&temp).await;
                 return Err(error);
             }
@@ -3837,7 +3873,7 @@ impl BlobStore for SmbStorageBackend {
             Ok(facts) => facts,
             Err(error) => {
                 if error.is_retryable() {
-                    let _ = self.reconnect_after(generation).await;
+                    self.recover_connection(generation).await;
                 }
                 return Err(error);
             }
@@ -4330,6 +4366,7 @@ fn is_stale_temp(
 ) -> bool {
     is_temp_key(key)
         && last_write
+            // A future timestamp is ineligible for stale-file cleanup.
             .and_then(|written| server_now.duration_since(written).ok())
             .is_some_and(|age| age >= older_than)
 }

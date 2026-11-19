@@ -77,6 +77,128 @@ impl fmt::Display for OrmErrorCode {
     }
 }
 
+/// What a mutation's write did, as the error's `extensions.outcome` reports it.
+///
+/// Generated mutation roots send it on every error once a host enables
+/// [`DatabaseBuilder::mutation_error_outcome`](crate::db::DatabaseBuilder::mutation_error_outcome).
+/// Runtime GraphQL mutations send `committed` and `unknown` from the same
+/// vocabulary. A client must read an absent value as [`Self::Unknown`].
+/// The outcome says whether the write took effect, never whether a retry
+/// would succeed; the error's `code` says that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MutationOutcome {
+    /// The write committed. Repeating the mutation applies it again.
+    Committed,
+    /// Refused before the mutation attempted its write, for example by
+    /// authentication, an entity or row policy, or a before hook. Nothing
+    /// was written.
+    Refused,
+    /// The write was attempted and rolled back, for example after a failed
+    /// statement or an after hook's refusal. Nothing remains.
+    Failed,
+    /// The server cannot tell, for example because the commit itself failed.
+    Unknown,
+}
+
+impl MutationOutcome {
+    /// Wire representation used in GraphQL `extensions.outcome`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether the server proved that nothing was written.
+    pub const fn wrote_nothing(self) -> bool {
+        matches!(self, Self::Refused | Self::Failed)
+    }
+}
+
+impl fmt::Display for MutationOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Progress of one generated mutation root, for its `extensions.outcome`.
+///
+/// Generated code marks the write and the commit; the root's error then
+/// reports the last phase reached. It starts refused, and only moves forward.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct MutationOutcomeTracker(std::sync::atomic::AtomicU8);
+
+impl MutationOutcomeTracker {
+    const REFUSED: u8 = 0;
+    const FAILED: u8 = 1;
+    const UNKNOWN: u8 = 2;
+    const COMMITTED: u8 = 3;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn advance(&self, phase: u8) {
+        self.0
+            .fetch_max(phase, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The mutation is about to run its write statement.
+    pub fn write_attempted(&self) {
+        self.advance(Self::FAILED);
+    }
+
+    /// The commit is about to be sent; from here the server may not know.
+    pub fn commit_started(&self) {
+        self.advance(Self::UNKNOWN);
+    }
+
+    /// The commit returned success.
+    pub fn committed(&self) {
+        self.advance(Self::COMMITTED);
+    }
+
+    /// The outcome an error raised now would report.
+    pub fn outcome(&self) -> MutationOutcome {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            Self::REFUSED => MutationOutcome::Refused,
+            Self::FAILED => MutationOutcome::Failed,
+            Self::COMMITTED => MutationOutcome::Committed,
+            _ => MutationOutcome::Unknown,
+        }
+    }
+
+    /// Whether the request's database has opted into `extensions.outcome`.
+    pub fn enabled<B: crate::graphql::orm::OrmBackend>(ctx: &async_graphql::Context<'_>) -> bool {
+        ctx.data_opt::<crate::db::Database<B>>()
+            .is_some_and(crate::db::Database::mutation_error_outcome_enabled)
+    }
+
+    /// Stamp the root's error with its outcome, under the host's opt-in.
+    ///
+    /// The ORM's value replaces any `outcome` a host callback set, so a
+    /// callback cannot report a committed write as refused.
+    pub fn finish<T, B: crate::graphql::orm::OrmBackend>(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        result: async_graphql::Result<T>,
+    ) -> async_graphql::Result<T> {
+        result.map_err(|mut error| {
+            if Self::enabled::<B>(ctx) {
+                error
+                    .extensions
+                    .get_or_insert_with(Default::default)
+                    .set("outcome", self.outcome().as_str());
+            }
+            error
+        })
+    }
+}
+
 /// Public-facing ORM error with an optional internal diagnostic source.
 #[derive(Clone)]
 pub struct OrmPublicError {

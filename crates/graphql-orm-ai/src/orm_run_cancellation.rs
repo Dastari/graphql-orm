@@ -4,6 +4,10 @@
 
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
+use crate::orm_support::{
+    content_context, map_orm, map_transaction, principal_identity, record_scope,
+};
+use crate::persisted_state::ToolCallState;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -19,9 +23,7 @@ use time::Duration;
 use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
-use crate::orm_sessions::{
-    content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
-};
+use crate::orm_sessions::map_protection;
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
@@ -583,10 +585,10 @@ async fn cancel_active_tool_calls(
             }),
             state: Some(StringFilter {
                 in_list: Some(vec![
-                    "executing".to_owned(),
-                    "source_retained".to_owned(),
-                    "waiting_approval".to_owned(),
-                    "waiting_subscription".to_owned(),
+                    ToolCallState::Executing.as_str().to_owned(),
+                    ToolCallState::SourceRetained.as_str().to_owned(),
+                    ToolCallState::WaitingApproval.as_str().to_owned(),
+                    ToolCallState::WaitingSubscription.as_str().to_owned(),
                 ]),
                 ..Default::default()
             }),

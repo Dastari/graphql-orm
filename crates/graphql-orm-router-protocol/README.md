@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-router-protocol
 
+Version 0.3.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Versioned, serializable declarations that a GraphQL subgraph advertises to a
 compatible router. It works with generated and hand-written Federation
 services alike.
@@ -21,11 +24,16 @@ advertisements; a router owns SSRF, DNS, credential, and network policy.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.2.1" }
+graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
 
 ## Minimal descriptor route

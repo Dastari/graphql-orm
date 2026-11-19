@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.3.1
+
+- Install from a reviewed Git revision using the package inventory and release manifest.
+
+## Unreleased - 0.3.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## 0.2.1 - 2026-08-13
 
 - Published the maintained protocol configuration and example navigation from

@@ -327,6 +327,7 @@ fn router_child_entrypoint() {
                             ),
                     );
                 }
+                // Fixture defaults apply when this override is unavailable.
                 let control = env::var("PERSISTED_CONTROL").ok();
                 if let Some(control) = &control {
                     config = config.with_schema_poll_interval(Duration::from_secs(3600)).validate().unwrap();
@@ -342,7 +343,13 @@ fn router_child_entrypoint() {
                             if fs::remove_file(&control).is_ok() {
                                 let outcome = handle.refresh().await.unwrap();
                                 let status = handle.status().await;
-                                fs::write(format!("{control}.result"), serde_json::to_vec(&json!({"outcome": format!("{outcome:?}"), "error": status.last_persisted_documents_error().or_else(|| status.last_composition_error()), "snapshotError": status.last_persisted_documents_error(), "compositionError": status.last_composition_error(), "compositionFailures": handle.metrics().composition_failure_total(), "version": status.active_graph().version(), "observed": status.subgraphs().iter().map(|s| s.observed_fingerprint()).collect::<Vec<_>>()})).unwrap()).unwrap();
+                                let result = serde_json::to_vec(&json!({"outcome": format!("{outcome:?}"), "error": status.last_persisted_documents_error().or_else(|| status.last_composition_error()), "snapshotError": status.last_persisted_documents_error(), "compositionError": status.last_composition_error(), "compositionFailures": handle.metrics().composition_failure_total(), "version": status.active_graph().version(), "observed": status.subgraphs().iter().map(|s| s.observed_fingerprint()).collect::<Vec<_>>()})).unwrap();
+                                // The parent treats the result file's existence as
+                                // completion, so publish it with an atomic rename:
+                                // `fs::write` creates the file before writing it.
+                                let staged = format!("{control}.result.partial");
+                                fs::write(&staged, result).unwrap();
+                                fs::rename(&staged, format!("{control}.result")).unwrap();
                             }
                             hive_router::tokio::time::sleep(Duration::from_millis(20)).await;
                         }
@@ -386,6 +393,7 @@ pub(crate) fn bind_test_listener(address: SocketAddr, kind: &str) -> io::Result<
         let mut listeners = CHILD_LISTENERS.lock().unwrap();
         listeners
             .iter()
+            // An unreadable address cannot match the listener sought here.
             .position(|listener| listener.local_addr().ok() == Some(address))
             .map(|index| listeners.swap_remove(index))
     };
@@ -402,6 +410,7 @@ pub(crate) fn bind_test_listener(address: SocketAddr, kind: &str) -> io::Result<
 
 async fn run_wire_app() {
     use hive_router::{background_tasks, config::load_config, ntex::web};
+    // Fixture defaults apply when this override is unavailable.
     let config = load_config(env::var("ROUTER_CONFIG_FILE_PATH").ok())
         .unwrap()
         .into_static();
@@ -451,6 +460,7 @@ async fn run_wire_app() {
                         .guard(web::guard::fn_guard(|head| {
                             head.headers()
                                 .get(hive_router::ntex::http::header::UPGRADE)
+                                // Non-text headers are treated as absent by this fixture.
                                 .and_then(|value| value.to_str().ok())
                                 .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
                         }))
@@ -504,6 +514,7 @@ impl TestAuthority {
             clock_ms: None,
         };
         let content = env::var_os(AUTHORITY_CONTROL_ENV)
+            // Use the default fixture authority while its control file is unavailable.
             .and_then(|path| fs::read_to_string(path).ok())
             .unwrap_or_default();
         for line in content.lines().map(str::trim) {
@@ -729,6 +740,7 @@ impl RouterPlugin for WireProofPlugin {
                 .router_http_request
                 .headers()
                 .get("x-graphql-orm-wire-switch")
+                // Non-text headers are treated as absent by this fixture.
                 .and_then(|value| value.to_str().ok())
             {
                 Some("v2") => self.replace(PRODUCTS_V2, REVIEWS),
@@ -748,6 +760,7 @@ impl RouterPlugin for WireProofPlugin {
             .router_http_request
             .headers
             .get("x-graphql-orm-wire-deny")
+            // Non-text headers are treated as absent by this fixture.
             .and_then(|value| value.to_str().ok())
             == Some("root");
         if deny_roots {
@@ -923,24 +936,20 @@ fn persisted_documents_wire_case(case: &str) {
         router.wait_until_ready();
     }
     let headers = [("authorization", "Bearer product-events")];
-    let graphql = |payload| {
-        router
-            .graphql_response_at("/api/graphql", payload, &headers)
-            .1
-    };
+    let graphql =
+        |status, payload| router.graphql_expecting("/api/graphql", payload, &headers, status);
     match case {
         "document_sizes" => {
             let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
             socket.connection_init_bearer("product-p1");
             for (label, document, unused_bytes, fits_websocket) in &sized_documents {
                 let variables = json!({"Id": "p1", "Unused": "x".repeat(*unused_bytes)});
-                let result = router
-                    .graphql_response_at(
-                        "/api/graphql",
-                        json!({"documentId": hash(document), "variables": variables}),
-                        &[("authorization", "Bearer product-p1")],
-                    )
-                    .1;
+                let result = router.graphql_expecting(
+                    "/api/graphql",
+                    json!({"documentId": hash(document), "variables": variables}),
+                    &[("authorization", "Bearer product-p1")],
+                    200,
+                );
                 assert_eq!(result["data"]["product"]["id"], "p1", "{label}: {result}");
                 let opens = products.opens();
                 socket.send_json(&json!({"id": label, "type": "subscribe", "payload": {
@@ -1008,12 +1017,12 @@ fn persisted_documents_wire_case(case: &str) {
             .unwrap();
             let opens_before = products.opens();
             for _ in 0..3 {
-                let (status, result) = router.graphql_response_at(
+                let result = router.graphql_expecting(
                     "/api/graphql",
                     json!({"documentId": hash(query)}),
                     &headers,
+                    503,
                 );
-                assert_eq!(status, 503, "{result}");
                 assert_eq!(
                     result["errors"][0]["extensions"]["code"], "SERVICE_UNAVAILABLE",
                     "{result}"
@@ -1027,7 +1036,7 @@ fn persisted_documents_wire_case(case: &str) {
             }
             // A pre-build check failure does not poison the generation.
             fs::write(&snapshot, original).unwrap();
-            let original = graphql(json!({"documentId": hash(query)}));
+            let original = graphql(200, json!({"documentId": hash(query)}));
             assert_eq!(original["data"]["__typename"], "Query", "{original}");
         }
         "snapshot_retry" => {
@@ -1045,7 +1054,6 @@ fn persisted_documents_wire_case(case: &str) {
                 "persisted-policy-v2",
                 200,
             );
-            let result_path = format!("{}.result", control.display());
             let mut rounds = Vec::new();
             for round in 0..2 {
                 if round == 1 {
@@ -1057,13 +1065,7 @@ fn persisted_documents_wire_case(case: &str) {
                     }
                 }
                 fs::write(&control, "refresh").unwrap();
-                wait_until("persisted refresh retry result", || {
-                    std::path::Path::new(&result_path).exists()
-                });
-                let result: Value =
-                    serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
-                fs::remove_file(&result_path).unwrap();
-                rounds.push(result);
+                rounds.push(take_refresh_result(&control));
             }
             assert_eq!(rounds[0]["outcome"], "Rejected", "{:?}", rounds);
             assert_eq!(rounds[1]["outcome"], "Activated", "{:?}", rounds);
@@ -1089,7 +1091,7 @@ fn persisted_documents_wire_case(case: &str) {
         }
 
         "snapshot_rewrite" | "snapshot_delete" => {
-            let original = graphql(json!({"documentId": hash(query)}));
+            let original = graphql(200, json!({"documentId": hash(query)}));
             assert_eq!(original["data"]["__typename"], "Query", "{original}");
             let snapshot = fs::read_to_string(format!("{}.snapshot", control.display())).unwrap();
             if case == "snapshot_rewrite" {
@@ -1113,11 +1115,7 @@ fn persisted_documents_wire_case(case: &str) {
                 200,
             );
             fs::write(&control, "refresh").unwrap();
-            let result_path = format!("{}.result", control.display());
-            wait_until("explicit persisted refresh result", || {
-                std::path::Path::new(&result_path).exists()
-            });
-            let result: Value = serde_json::from_slice(&fs::read(result_path).unwrap()).unwrap();
+            let result = take_refresh_result(&control);
             assert_eq!(result["outcome"], "Rejected", "{result}");
             assert!(
                 result["error"]
@@ -1126,7 +1124,7 @@ fn persisted_documents_wire_case(case: &str) {
                     .contains("persisted documents snapshot"),
                 "{result}"
             );
-            let result = graphql(json!({"documentId": hash(query)}));
+            let result = graphql(200, json!({"documentId": hash(query)}));
             assert_eq!(result["data"]["__typename"], "Query", "{result}");
             let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
             socket.connection_init_bearer("product-events");
@@ -1136,13 +1134,13 @@ fn persisted_documents_wire_case(case: &str) {
             socket.close();
         }
         "introspection_disabled" | "non_strict_introspection_disabled" => {
-            let result = graphql(json!({"documentId": hash(introspection)}));
+            let result = graphql(403, json!({"documentId": hash(introspection)}));
             assert_eq!(
                 result["errors"][0]["extensions"]["code"], "INTROSPECTION_DISABLED",
                 "{result}"
             );
             if case.starts_with("non_strict") {
-                let plain = graphql(json!({"query": introspection}));
+                let plain = graphql(403, json!({"query": introspection}));
                 assert_eq!(
                     plain["errors"][0]["extensions"]["code"],
                     result["errors"][0]["extensions"]["code"]
@@ -1150,19 +1148,18 @@ fn persisted_documents_wire_case(case: &str) {
             }
         }
         "authorization" | "non_strict_authorization" => {
-            for (text, expected, credentials) in [
-                (protected, "UNAUTHENTICATED", &[][..]),
-                (protected, "FORBIDDEN", &headers[..]),
-                (introspection, "UNAUTHENTICATED", &[][..]),
+            for (text, expected, status, credentials) in [
+                (protected, "UNAUTHENTICATED", 200, &[][..]),
+                (protected, "FORBIDDEN", 200, &headers[..]),
+                (introspection, "UNAUTHENTICATED", 401, &[][..]),
             ] {
                 let opens = products.opens();
-                let result = router
-                    .graphql_response_at(
-                        "/api/graphql",
-                        json!({"documentId": hash(text)}),
-                        credentials,
-                    )
-                    .1;
+                let result = router.graphql_expecting(
+                    "/api/graphql",
+                    json!({"documentId": hash(text)}),
+                    credentials,
+                    status,
+                );
                 assert_eq!(
                     result["errors"][0]["extensions"]["code"], expected,
                     "{result}"
@@ -1173,13 +1170,12 @@ fn persisted_documents_wire_case(case: &str) {
                     "id denial must precede upstream execution"
                 );
                 if case == "authorization" {
-                    let both = router
-                        .graphql_response_at(
-                            "/api/graphql",
-                            json!({"documentId": hash(text), "query": query}),
-                            credentials,
-                        )
-                        .1;
+                    let both = router.graphql_expecting(
+                        "/api/graphql",
+                        json!({"documentId": hash(text), "query": query}),
+                        credentials,
+                        status,
+                    );
                     assert_eq!(both["errors"][0]["extensions"]["code"], expected, "{both}");
                     assert_eq!(
                         products.opens(),
@@ -1188,9 +1184,12 @@ fn persisted_documents_wire_case(case: &str) {
                     );
                 }
                 if case == "non_strict_authorization" {
-                    let plain = router
-                        .graphql_response_at("/api/graphql", json!({"query": text}), credentials)
-                        .1;
+                    let plain = router.graphql_expecting(
+                        "/api/graphql",
+                        json!({"query": text}),
+                        credentials,
+                        status,
+                    );
                     assert_eq!(
                         plain["errors"][0]["extensions"]["code"],
                         result["errors"][0]["extensions"]["code"]
@@ -1200,13 +1199,12 @@ fn persisted_documents_wire_case(case: &str) {
                         opens,
                         "free-text denial must precede upstream execution"
                     );
-                    let both = router
-                        .graphql_response_at(
-                            "/api/graphql",
-                            json!({"documentId": hash(text), "query": query}),
-                            credentials,
-                        )
-                        .1;
+                    let both = router.graphql_expecting(
+                        "/api/graphql",
+                        json!({"documentId": hash(text), "query": query}),
+                        credentials,
+                        200,
+                    );
                     assert_eq!(both["data"]["__typename"], "Query", "{both}");
                 }
             }
@@ -1228,6 +1226,7 @@ fn persisted_documents_wire_case(case: &str) {
         }
         "apollo_unknown" => {
             let result = graphql(
+                200,
                 json!({"query": query, "extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash("unknown")}}}),
             );
             assert_eq!(
@@ -1250,13 +1249,14 @@ fn persisted_documents_wire_case(case: &str) {
                 HTTP_STREAM_PROBE,
             )
             .unwrap();
-            let result: Value = serde_json::from_slice(&result.body).unwrap();
+            let result = expect_graphql_json(&result, 200, "persisted GET");
             assert_eq!(result["data"]["__typename"], "Query", "{result}");
         }
         "non_strict" | "disabled" => {
-            let plain = graphql(json!({"query": query}));
+            let plain = graphql(200, json!({"query": query}));
             assert_eq!(plain["data"]["__typename"], "Query", "{plain}");
-            let result = graphql(json!({"documentId": hash(query)}));
+            let status = if case == "disabled" { 400 } else { 200 };
+            let result = graphql(status, json!({"documentId": hash(query)}));
             if case == "disabled" {
                 assert!(result.get("errors").is_some(), "{result}");
             } else {
@@ -1264,7 +1264,7 @@ fn persisted_documents_wire_case(case: &str) {
             }
         }
         "post" => {
-            let plain = graphql(json!({"query": query}));
+            let plain = graphql(200, json!({"query": query}));
             assert_eq!(
                 plain["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
                 "{plain}"
@@ -1273,7 +1273,7 @@ fn persisted_documents_wire_case(case: &str) {
                 json!({"documentId": hash(query)}),
                 json!({"extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash(query)}}}),
             ] {
-                let result = graphql(payload);
+                let result = graphql(200, payload);
                 assert_eq!(result["data"]["__typename"], "Query", "{result}");
             }
             let body = serde_json::to_vec(&json!({"documentId": hash(subscription)})).unwrap();
@@ -1291,11 +1291,11 @@ fn persisted_documents_wire_case(case: &str) {
             }
             // Rewriting the operator file cannot change the prepared allow-list.
             fs::write(&manifest, b"{}").unwrap();
-            let result = graphql(json!({"documentId": hash(query)}));
+            let result = graphql(200, json!({"documentId": hash(query)}));
             assert_eq!(result["data"]["__typename"], "Query", "{result}");
         }
         "redaction" => {
-            let result = graphql(json!({"documentId": query, "query": query}));
+            let result = graphql(200, json!({"documentId": query, "query": query}));
             assert_eq!(
                 result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
                 "{result}"
@@ -1350,18 +1350,18 @@ fn persisted_documents_wire_case(case: &str) {
             socket.close();
         }
         "unknown" => {
-            let result = graphql(json!({"documentId": hash("unknown"), "query": query}));
+            let result = graphql(200, json!({"documentId": hash("unknown"), "query": query}));
             assert_eq!(
                 result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
                 "{result}"
             );
         }
         "both" => {
-            let result = graphql(json!({"documentId": hash(query), "query": mutation}));
+            let result = graphql(200, json!({"documentId": hash(query), "query": mutation}));
             assert_eq!(result["data"]["__typename"], "Query", "{result}");
         }
         "batch" => {
-            let result = graphql(json!([{"documentId": hash(query)}, {"query": query}]));
+            let result = graphql(400, json!([{"documentId": hash(query)}, {"query": query}]));
             assert_eq!(
                 result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
                 "{result}"
@@ -1377,8 +1377,10 @@ fn persisted_documents_wire_case(case: &str) {
                 HTTP_STREAM_PROBE,
             )
             .unwrap();
-            assert!(
-                String::from_utf8_lossy(&result.body).contains("PERSISTED_DOCUMENT_ID_REQUIRED")
+            let result = expect_graphql_json(&result, 200, "free-text GET");
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
+                "{result}"
             );
             let path = format!("/api/graphql?documentId={}", hash(query));
             let result = raw_http_within(
@@ -1390,7 +1392,7 @@ fn persisted_documents_wire_case(case: &str) {
                 HTTP_STREAM_PROBE,
             )
             .unwrap();
-            let result: Value = serde_json::from_slice(&result.body).unwrap();
+            let result = expect_graphql_json(&result, 200, "persisted GET");
             assert_eq!(result["data"]["__typename"], "Query", "{result}");
         }
         "ws_query" | "ws_mutation" | "ws_subscription" => {
@@ -1431,6 +1433,26 @@ fn persisted_documents_wire_case(case: &str) {
         }
         _ => unreachable!(),
     }
+}
+
+/// Waits for the router child's answer to one control-file refresh, then
+/// consumes it so the next refresh can be awaited the same way.
+///
+/// The child publishes the file with an atomic rename, so its existence
+/// means the JSON is complete.
+fn take_refresh_result(control: &std::path::Path) -> Value {
+    let path = format!("{}.result", control.display());
+    wait_until("persisted refresh result", || {
+        std::path::Path::new(&path).exists()
+    });
+    let bytes = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+        panic!(
+            "persisted refresh result is not JSON ({error}): {:?}",
+            String::from_utf8_lossy(&bytes)
+        )
+    })
 }
 
 #[test]
@@ -1699,6 +1721,38 @@ fn public_static_router_serves_only_after_complete_preparation() {
         "SUBGRAPH_FAILURE"
     );
 
+    // A subgraph error's `outcome` extension reaches the client unchanged
+    // beside its code, and the router adds none when the subgraph sent none.
+    for outcome in [
+        None,
+        Some("refused"),
+        Some("failed"),
+        Some("committed"),
+        Some("unknown"),
+    ] {
+        let name = format!("outcome-{}", outcome.unwrap_or("none"));
+        let response = router.graphql_at(
+            "/api/graphql",
+            json!({"query": format!("mutation {{ renameProduct(id: \"p1\", name: \"{name}\") {{ id }} }}")}),
+            &[],
+        );
+        let error = &response["errors"][0];
+        assert_eq!(
+            error["extensions"]["code"], "CONFLICT",
+            "{name}: {response}"
+        );
+        assert_eq!(
+            error["path"],
+            json!(["renameProduct"]),
+            "{name}: {response}"
+        );
+        assert_eq!(
+            error["extensions"].get("outcome").and_then(Value::as_str),
+            outcome,
+            "{name}: {response}"
+        );
+    }
+
     // Pinned engine defaults: no mutations over GET and no request batching.
     let get_mutation = raw_http(
         router.address,
@@ -1735,6 +1789,7 @@ fn public_static_router_serves_only_after_complete_preparation() {
         .unwrap();
     let started = Instant::now();
     let mut stalled = Vec::new();
+    // This fixture checks shutdown timing and bytes even if the peer resets.
     let _ = slow.read_to_end(&mut stalled);
     assert!(
         started.elapsed() < TEST_TIMEOUT,
@@ -1840,6 +1895,7 @@ fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
     let mut scrape = None;
     wait_until("Prometheus scrape", || {
         scrape = raw_http(metrics, "GET", "/internal/metrics", &[], None)
+            // The exporter may still be starting during this bounded retry.
             .ok()
             .filter(|response| response.status == 200);
         scrape.is_some()
@@ -4297,6 +4353,7 @@ fn websocket_upgrade_status(address: SocketAddr, path: &str) -> u16 {
         .split("\r\n")
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
+        // Malformed fixture values are treated as absent.
         .and_then(|value| value.parse::<u16>().ok())
         .expect("router WebSocket response status")
 }
@@ -4658,6 +4715,7 @@ impl TestWebSocket {
             .split("\r\n")
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
+            // Malformed fixture values are treated as absent.
             .and_then(|value| value.parse::<u16>().ok());
         assert_eq!(status, Some(101), "WebSocket upgrade response: {head}");
         assert!(
@@ -4828,6 +4886,7 @@ impl TestWebSocket {
         });
         let bytes =
             serde_json::to_vec(&message).expect("oversized WebSocket JSON should serialize");
+        // The peer may already be closing the failed connection.
         let _ = write_websocket_frame(&mut self.stream, 0x1, &bytes);
     }
 
@@ -4900,6 +4959,7 @@ impl TestWebSocket {
                     return;
                 }
                 Ok((0x9, payload)) => {
+                    // The peer may already be closing the failed connection.
                     let _ = write_websocket_frame(&mut self.stream, 0xA, &payload);
                 }
                 Ok(_) => {}
@@ -5047,6 +5107,7 @@ impl TestRouter {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if let Some(bound) = line.strip_prefix("WIRE_BOUND ") {
+                    // Once startup returns there is no readiness receiver.
                     let _ = sender.send(bound.to_owned());
                 }
             }
@@ -5348,10 +5409,30 @@ impl TestRouter {
         (response.status, value)
     }
 
+    /// Like [`Self::graphql_response_at`], but checks the status and media
+    /// type before decoding the body.
+    fn graphql_expecting(
+        &self,
+        path: &str,
+        payload: Value,
+        headers: &[(&str, &str)],
+        expected_status: u16,
+    ) -> Value {
+        let body = serde_json::to_vec(&payload).expect("request JSON should serialize");
+        let response = raw_http(self.address, "POST", path, headers, Some(&body))
+            .expect("router should respond over loopback HTTP");
+        expect_graphql_json(
+            &response,
+            expected_status,
+            &format!("POST {path} {payload}"),
+        )
+    }
+
     fn stop(&mut self) {
         let Some(mut child) = lock_child(&self.child).take() else {
             return;
         };
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = child.kill();
         let status = child.wait().expect("router child should terminate");
         assert!(
@@ -5369,7 +5450,9 @@ impl Drop for TestRouter {
         let Some(mut child) = lock_child(&self.child).take() else {
             return;
         };
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = child.kill();
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = child.wait();
     }
 }
@@ -5412,6 +5495,7 @@ impl TemporaryConfig {
 
 impl Drop for TemporaryConfig {
     fn drop(&mut self) {
+        // Best-effort teardown of a fixture that may already be gone.
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -5580,6 +5664,7 @@ impl Drop for LoopbackSubgraph {
         self.stopping.store(true, Ordering::Release);
         self.slow_gate.release();
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -5630,6 +5715,7 @@ impl LoopbackSdl {
                             continue;
                         };
                         if !has_header(&head, "authorization", "Bearer schema-secret") {
+                            // The client may close this fixture connection early.
                             let _ = write_http_response(stream, 401, b"{}");
                             continue;
                         }
@@ -5639,12 +5725,14 @@ impl LoopbackSdl {
                             .expect("loopback SDL endpoint state")
                             .clone();
                         if let Some(location) = &snapshot.redirect {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                 snapshot.status, location
                             );
                         } else if snapshot.status != 200 {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -5656,10 +5744,12 @@ impl LoopbackSdl {
                             &format!("\"{}\"", snapshot.etag),
                         ) {
                             thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                            // The client may close this fixture connection early.
                             let _ = stream.write_all(
                                 b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
                             );
                         } else {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/graphql\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5711,6 +5801,7 @@ impl Drop for LoopbackSdl {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -5754,6 +5845,7 @@ impl LoopbackProtocol {
                             continue;
                         };
                         if !has_header(&head, "authorization", "Bearer schema-secret") {
+                            // The client may close this fixture connection early.
                             let _ = write_http_response(stream, 401, b"{}");
                             continue;
                         }
@@ -5763,12 +5855,14 @@ impl LoopbackProtocol {
                             .expect("loopback protocol endpoint state")
                             .clone();
                         if let Some(location) = &snapshot.redirect {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                 snapshot.status, location
                             );
                         } else if snapshot.status != 200 {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -5780,10 +5874,12 @@ impl LoopbackProtocol {
                             &format!("\"{}\"", snapshot.etag),
                         ) {
                             thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                            // The client may close this fixture connection early.
                             let _ = stream.write_all(
                                 b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
                             );
                         } else {
+                            // The client may close this fixture connection early.
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5851,6 +5947,7 @@ impl Drop for LoopbackProtocol {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
         }
     }
@@ -6030,6 +6127,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
         return;
     };
     if matches!(kind, SubgraphKind::Products) && has_header(&request.head, "upgrade", "websocket") {
+        // The client may close this fixture connection early.
         let _ = handle_subgraph_websocket(request, &state);
         return;
     }
@@ -6067,6 +6165,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
                 }
             }
             if state.quiet.burst_quiet_tail.load(Ordering::Acquire) {
+                // The client may close this fixture connection early.
                 let _ = stream.flush();
                 while !state.stopping.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(25));
@@ -6080,11 +6179,14 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
                 }
                 return;
             }
+            // The client may close this fixture connection early.
             let _ = stream.write_all(b"event: complete\ndata: {}\n\n");
+            // The client may close this fixture connection early.
             let _ = stream.flush();
             return;
         }
         let event = json!({"data": {field: {"id": "p1", "name": name}}});
+        // The client may close this fixture connection early.
         let _ = write_sse_subscription(request.stream, &event, &state.stopping);
         return;
     }
@@ -6093,7 +6195,8 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
         SubgraphKind::Products if query.contains("_entities") => {
             json!({"data": {"_entities": [{"id": "p1", "name": "desk"}]}})
         }
-        // A subgraph's own refusal, with the outcome named in the new name.
+        // A refused write carrying the generated services' `outcome`
+        // extension, named by the `outcome-<value>` argument.
         SubgraphKind::Products if query.contains("renameProduct") && query.contains("outcome-") => {
             let mut extensions = json!({"code": "CONFLICT"});
             for outcome in ["refused", "failed", "committed", "unknown"] {
@@ -6153,6 +6256,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
             json!({"data": {"_entities": [{"reviews": [{"body": "excellent"}]}]}})
         }
     };
+    // The client may close this fixture connection early.
     let _ = write_http_response(
         request.stream,
         200,
@@ -6410,6 +6514,7 @@ fn write_sse_subscription(
         if stream.write_all(b": heartbeat\n\n").is_err() {
             break;
         }
+        // The client may close this fixture connection early.
         let _ = stream.flush();
     }
     Ok(())
@@ -6423,6 +6528,7 @@ struct HttpRequest {
 
 struct HttpResponse {
     status: u16,
+    head: String,
     body: Vec<u8>,
 }
 
@@ -6473,6 +6579,37 @@ fn read_http_request(mut stream: TcpStream) -> io::Result<HttpRequest> {
     Ok(HttpRequest { stream, head, body })
 }
 
+/// Decodes a GraphQL JSON response after checking its status and media type,
+/// so an empty or non-JSON body reports what the router actually sent.
+fn expect_graphql_json(response: &HttpResponse, expected_status: u16, context: &str) -> Value {
+    let body = String::from_utf8_lossy(&response.body);
+    assert_eq!(
+        response.status, expected_status,
+        "{context}: unexpected HTTP status; head: {:?}; body: {body:?}",
+        response.head
+    );
+    let media_type = response.head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-type").then(|| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        })
+    });
+    assert!(
+        matches!(
+            media_type.as_deref(),
+            Some("application/json" | "application/graphql-response+json")
+        ),
+        "{context}: expected a GraphQL JSON media type, got {media_type:?}; body: {body:?}"
+    );
+    serde_json::from_slice(&response.body)
+        .unwrap_or_else(|error| panic!("{context}: response is not JSON ({error}); body: {body:?}"))
+}
+
 fn has_header(head: &str, expected_name: &str, expected_value: &str) -> bool {
     head.lines().skip(1).any(|line| {
         line.split_once(':').is_some_and(|(name, value)| {
@@ -6487,10 +6624,11 @@ fn read_http_response(mut stream: TcpStream) -> io::Result<HttpResponse> {
         .split("\r\n")
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
+        // Malformed fixture values are treated as absent.
         .and_then(|status| status.parse().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP status"))?;
     read_http_body(&mut stream, &head, &mut body)?;
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse { status, head, body })
 }
 
 fn read_http_body(stream: &mut TcpStream, head: &str, body: &mut Vec<u8>) -> io::Result<()> {

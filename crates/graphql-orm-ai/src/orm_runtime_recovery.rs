@@ -1516,23 +1516,10 @@ fn retryable(error: &TransactionError) -> bool {
 
 fn map_transaction(error: TransactionError) -> AiError {
     let public = error.public_error();
-    if is_epoch_not_live(public) {
-        return AiError::RuntimeNotReady;
-    }
-    if public.message == BOUND_REACHED {
+    if !is_epoch_not_live(public) && public.message == BOUND_REACHED {
         return AiError::InvalidConfiguration(BOUND_REACHED.to_owned());
     }
-    match public.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(public.message.clone()),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
-    }
+    crate::orm_support::map_transaction(error)
 }
 
 /// Records the first live epoch for a test store and returns its proof.

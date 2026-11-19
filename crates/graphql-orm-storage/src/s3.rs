@@ -549,6 +549,7 @@ impl S3StorageBackend {
                 Err(err) => Err(map_s3_error(err)),
             }
         };
+        // Best-effort abort preserves the conditional publication failure.
         let _ = self
             .client
             .abort_multipart_upload()
@@ -589,6 +590,7 @@ impl MultipartAbortGuard {
             .key(&self.key)
             .upload_id(upload_id);
         async move {
+            // The bucket lifecycle can reclaim an upload that this abort leaves behind.
             let _ = request.send().await;
         }
     }
@@ -690,6 +692,7 @@ impl BlobStore for S3StorageBackend {
             key: key.to_string(),
             size_bytes: output
                 .content_length()
+                // A negative provider length is reported as unknown.
                 .and_then(|size| u64::try_from(size).ok()),
             sha256_hex: None,
             etag: output.e_tag().map(ToString::to_string),
@@ -753,6 +756,7 @@ impl BlobStore for S3StorageBackend {
             key: key.to_string(),
             size_bytes: output
                 .content_length()
+                // A negative provider length is reported as unknown.
                 .and_then(|size| u64::try_from(size).ok()),
             sha256_hex: None,
             etag: output.e_tag().map(ToString::to_string),
@@ -796,6 +800,7 @@ impl BlobStore for S3StorageBackend {
             key: key.to_string(),
             size_bytes: output
                 .content_length()
+                // A negative provider length is reported as unknown.
                 .and_then(|size| u64::try_from(size).ok()),
             sha256_hex: None,
             etag: output.e_tag().map(ToString::to_string),

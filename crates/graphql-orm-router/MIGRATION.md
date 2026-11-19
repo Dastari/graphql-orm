@@ -4,6 +4,7 @@ kind: reference
 status: active
 owner: graphql-orm-router-maintainers
 last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -60,6 +61,48 @@ operation returns no `data`, only errors with `UNAUTHENTICATED` or
 
 Anonymous development mode is unchanged. No configuration or public API
 changes.
+## 0.16.6 to 0.16.7: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
+## 0.16.5 to 0.16.6
+
+**No action.** Bounded HTTP retrieval, WebSocket frame encoding and the Hive
+plugin startup handoff are internal changes. Existing configuration and
+public APIs continue to work.
+
+## 0.16.4 to 0.16.5
+
+**Action needed** only if your issuer writes `iss` as an array or adds a
+`crit` header member (including `"crit": null`) to access tokens or the signed
+role-scope catalogue: those tokens are now refused with `UNAUTHENTICATED` by
+both `JwksAuthenticationProvider` and `AgqlAuthenticationProvider`, and such
+a catalogue is refused. A protected header longer than 8 KiB encoded is also
+refused; check this only if your issuer puts large members, such as an `x5c`
+certificate chain, in access-token or catalogue headers. Issuers that follow RFC 7519 and RFC 7515 write `iss` as
+one string and use no critical extensions, and need no change. Configuration
+and public APIs are unchanged.
+
+## 0.16.2 to 0.16.4
+
+**No action.** The authenticated metrics response adds
+`router_authentication_refresh_failure_total`. Public readiness still checks
+for an active graph. No configuration changes are required.
+
+## 0.16.1 to 0.16.2
+
+**No action.** No consumer migration is required. Only the wire tests change;
+router behavior, configuration and public APIs are unchanged.
+
+## 0.16.0 to 0.16.1
+
+No consumer migration is required. Only the wire tests change; router
+behavior, configuration and public APIs are unchanged.
+
+## 0.16.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
 ## 0.15.4 to 0.15.5
 

@@ -180,6 +180,8 @@ class SupplyChainTests(unittest.TestCase):
             self.assertReported('container run image is not pinned by digest')
         path.write_text('Command::new("docker").args(["run", "redis@sha256:' + 'a' * 64 + '"]).status();')
         self.assertEqual(self.messages(), [])
+        path.write_text('Command::new("docker").args(["run", "--memory", "4g", "--memory-swap", "4g", "redis@sha256:' + 'a' * 64 + '"]).status();')
+        self.assertEqual(self.messages(), [])
 
     def test_credentials_are_masked_and_never_passed_in_git_argv(self):
         workflow = supply_chain.jobs((self.root / '.github/workflows/release.yml').read_text())
@@ -227,7 +229,7 @@ class SupplyChainTests(unittest.TestCase):
         self.assertReported("selects no reviewed toolchain")
 
     def test_floating_toolchain_input_is_rejected(self):
-        self.edit(".github/workflows/ci.yml", "toolchain: 1.90.0", "toolchain: stable")
+        self.edit(".github/workflows/ci.yml", "toolchain: 1.97.1", "toolchain: stable")
         self.assertReported("selects floating toolchain stable")
 
     def test_publisher_may_not_restore_caches_or_build(self):

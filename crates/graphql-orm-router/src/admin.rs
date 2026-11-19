@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
 use graphql_orm_router_protocol::SubgraphDescriptor;
-use reqwest::header::ETAG;
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
@@ -9,7 +8,7 @@ use url::Url;
 use crate::{
     AdminConfig, AuthenticatedPrincipal, AuthenticationErrorKind, AuthenticationProvider,
     RouterError, RouterErrorKind, ScopeMatcher, StaticSubgraph, TrustedSubgraph,
-    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
+    http_body::{FetchError, USER_AGENT, fetch_bounded},
     lifecycle::{FetchedSubgraph, GraphLifecycle},
     network::{NetworkPolicy, ResolvedUrl},
     server::strict_bearer_token,
@@ -65,6 +64,7 @@ impl AdminRuntime {
         let Some(value) = request
             .headers()
             .get(hive_router::ntex::http::header::AUTHORIZATION)
+            // Non-text authorization headers are refused as invalid credentials.
             .and_then(|value| value.to_str().ok())
         else {
             return Err(admin_error(
@@ -369,6 +369,7 @@ async fn metrics_handler(
         "router_websocket_rejections_total": metrics.websocket_rejections_total(),
         "router_websocket_send_failures_total": metrics.websocket_send_failures_total(),
         "router_schema_refresh_total": metrics.schema_refresh_total(),
+        "router_authentication_refresh_failure_total": metrics.authentication_refresh_failure_total(),
         "router_composition_success_total": metrics.composition_success_total(),
         "router_composition_failure_total": metrics.composition_failure_total(),
         "router_rejected_subgraphs_total": metrics.rejected_subgraphs_total(),
@@ -520,6 +521,7 @@ fn unix_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
     value.and_then(|value| {
         value
             .duration_since(UNIX_EPOCH)
+            // An unrepresentable status timestamp is reported as unknown.
             .ok()
             .map(|value| value.as_secs())
     })
@@ -563,38 +565,23 @@ async fn fetch_resource(
     for (name, value) in headers {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|_| {
-        RouterError::new(
-            RouterErrorKind::Registration,
-            format!("failed to fetch {field}"),
-        )
-    })?;
-    policy.validate_peer(&response, target, field)?;
-    if !response.status().is_success() {
-        return Err(RouterError::new(
-            RouterErrorKind::Registration,
-            format!("{field} returned a non-success status"),
-        ));
-    }
-    let etag = response
-        .headers()
-        .get(ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let bytes = read_bounded_body(response, maximum)
-        .await
-        .map_err(|error| {
-            RouterError::new(
-                RouterErrorKind::Registration,
-                match error {
-                    BoundedBodyError::TooLarge => {
-                        format!("{field} exceeds its configured size limit")
-                    }
-                    BoundedBodyError::Read => format!("failed while reading {field}"),
-                },
-            )
-        })?;
-    Ok((bytes, etag))
+    let response = fetch_bounded(
+        request,
+        maximum,
+        false,
+        |response| policy.validate_peer(response, target, field),
+        |error| {
+            let detail = match error {
+                FetchError::Send => format!("failed to fetch {field}"),
+                FetchError::Status(_) => format!("{field} returned a non-success status"),
+                FetchError::TooLarge => format!("{field} exceeds its configured size limit"),
+                FetchError::Read => format!("failed while reading {field}"),
+            };
+            RouterError::new(RouterErrorKind::Registration, detail)
+        },
+    )
+    .await?;
+    Ok((response.bytes, response.etag))
 }
 
 fn validate_identity(
@@ -613,6 +600,7 @@ fn validate_identity(
 }
 
 fn same_url(left: &str, right: &str) -> bool {
+    // The trusted metadata URL has already been validated.
     Url::parse(left).ok() == Url::parse(right).ok()
 }
 

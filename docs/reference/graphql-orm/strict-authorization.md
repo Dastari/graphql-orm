@@ -344,11 +344,150 @@ treated as missing. `RowPolicy::write_target_prefilter` removes that
 difference: return a `ReadPredicate` that selects the rows the caller can read
 **or** write, and generated GraphQL `update`, `delete`, `updateMany` and
 `deleteMany` add it to their locking read, so a row outside it is never
-selected, locked or passed to a callback. The predicate only narrows. Every
+selected or passed to a callback, and is not locked except as described under
+**Locks on hidden rows** below. The predicate only narrows. Every
 selected row is still classified by `can_write_row` and `can_read_row`, so it
 cannot grant a write; a row it leaves out is treated as missing even where the
 callbacks would have allowed it, so it must not exclude rows the caller can
 write. The default returns `None`. Repository writes do not ask.
+
+**Narrowing bulk writes to read visibility (opt-in).** With
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or
+`Database::with_narrow_bulk_writes_to_read_visibility(true)`), GraphQL
+`updateMany` and `deleteMany` also narrow their locking read by read
+visibility when the policy declares no `write_target_prefilter`. If
+`RowPolicy::read_visibility` returns `Prefilter` or `Complete` for the
+`GraphqlMutation` surface, its predicate is added to the bulk write's locking
+read. A row outside the caller's read visibility is then never passed to a row
+callback or counted. The predicate only narrows. Every selected row is still
+classified as in the table above, so the payload and the rows written for
+visible rows are unchanged.
+
+The setting is off by default, and bulk writes then select the same rows as
+before. With it on:
+
+- A row outside read visibility that `can_write_row` would allow is left out,
+  as a missing row is. If callers may bulk-write rows they cannot read, return
+  a `write_target_prefilter` that selects them. It takes precedence in both
+  modes, and the bulk write uses it instead of read visibility.
+- An error from `read_visibility` on the `GraphqlMutation` surface refuses the
+  bulk write before any row is selected. A policy that returns `Err` for some
+  callers, such as write-only ones, must return `CallbackOnly` for them instead
+  to keep their bulk writes working.
+- Single-row updates and deletes still use only the `write_target_prefilter`.
+
+**Locks on hidden rows.** On PostgreSQL a row a SQL predicate leaves out (a
+`write_target_prefilter`, or read visibility with the setting on) is never
+locked: the row lock is taken only on rows that pass the `WHERE` clause. SQLite
+locks the whole database for a write, so there are no row locks to observe.
+
+On SQL Server the single locking read uses `WITH (UPDLOCK, HOLDLOCK)`, which
+locks each row it reads before testing the predicate, so a scan locks, and
+waits on, rows outside the predicate. The setting alone keeps that read, so a
+narrowed SQL Server bulk write stays serializable but may still lock hidden
+rows that a scan reads.
+
+**Snapshot target selection on SQL Server (separate opt-in).**
+`DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` (or
+`Database::with_mssql_snapshot_bulk_write_targets(true)`) lets a narrowed
+bulk write avoid that read. It is off by default, and stays off when narrowing
+becomes the default. It needs `narrow_bulk_writes_to_read_visibility` too. It
+applies to a bulk write with a SQL predicate (read visibility or a
+`write_target_prefilter`) **when all of these hold**:
+
+- the database has `READ_COMMITTED_SNAPSHOT` on;
+- the target is a base table, not a view;
+- the table has an enabled, unfiltered unique index whose only key column is
+  the key (a primary key or unique constraint on the key is one);
+- every index of the table allows row locks (`ALLOW_ROW_LOCKS = ON`, the
+  default);
+- the key column is `uniqueidentifier`, `nvarchar`, `nchar`, `bigint`, `int`,
+  `smallint` or `tinyint`. The ORM binds strings as Unicode, so a `varchar` or
+  `char` key is converted to compare, and seeks on it, including the per-row
+  writes, may become scans
+  ([#522](https://github.com/Dastari/graphql-orm/issues/522)).
+
+Otherwise the write keeps the single serializable locking read. Where it
+applies, the write takes three steps:
+
+1. **Candidates.** One statement reads every candidate: the rows that match
+   the filter and the predicate, at most `max_scanned_rows` + 1 of them, read
+   committed (`WITH (READCOMMITTED)`). With `READ_COMMITTED_SNAPSHOT` on, that
+   is one consistent snapshot, and the read takes no lock on the target
+   table. Related or policy tables that the filter reads are still read at the
+   transaction's `SERIALIZABLE` level. More than the budget refuses the write.
+2. **Lock and check.** Up to 500 keys at a time, it locks the candidates with
+   `XLOCK` and a `FORCESEEK` on that unique index, with a `WHERE` on the key
+   alone, so each seek finds at most one row. The lock runs read committed, so
+   it takes no key-range lock that would reach a neighbouring row. It then
+   checks the filter and the predicate again on each locked row, one seek on
+   the same index at a time, at the transaction's own isolation. A row that no
+   longer matches is left out before any row callback sees it. The locked rows
+   go through the row callbacks as before.
+3. **Validate.** One more statement reads the candidates again, in a new
+   snapshot, under the same budget. If they are not exactly the locked rows
+   that still match, another transaction changed which rows match since step 1.
+   The write is then refused with `errorCode = "SERVICE_UNAVAILABLE"`, marked
+   retryable, and nothing is written. Retry the mutation. More than the budget
+   refuses the write with the scan budget's refusal.
+
+What this guarantees, exactly:
+
+- **The target set equals the rows that match at the validation snapshot,**
+  and the exclusive locks keep those rows unchanged until the write commits.
+  A transaction that inserts several matching rows at once never has some of
+  them written and others not.
+- **The write never locks a row outside its candidates,** and never waits on a
+  lock another transaction holds on one, whatever plan the optimizer picks,
+  except through lock escalation (see below).
+  Rows outside read visibility are not candidates.
+
+What it does **not** guarantee:
+
+- **The bulk write's transaction is no longer serializable.** Generated bulk
+  writes run `SERIALIZABLE`, but no range is locked after validation. Another
+  transaction can commit a row that starts to match, together with changes to
+  other rows or tables, without waiting for the write. That row is not written,
+  yet later reads in the same bulk write (before-update hooks, field
+  authorizers, triggers) can see the transaction's other changes. With the
+  serializable locking read, that transaction would wait.
+
+What else remains:
+
+- The candidates are locked exclusively until the write ends, including those
+  that turn out not to be targets: a row that left the filter or the predicate
+  before step 2, or that a row callback leaves out or refuses. A reader that
+  uses row versions (read committed with `READ_COMMITTED_SNAPSHOT` on,
+  snapshot isolation) does not wait for them. A `READCOMMITTEDLOCK` read can
+  also read an exclusively locked row that has not been changed yet. Readers
+  that hold their locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
+- SQL Server can escalate a transaction's row locks on a table to one table
+  lock, by default when one statement takes about 5,000 locks on it or when
+  lock memory runs short, and a table lock covers hidden rows. Each lock
+  statement of this path locks at most 500 keys.
+  `ALTER TABLE ... SET (LOCK_ESCALATION = DISABLE)` prevents escalation.
+- The write reads its candidates twice, and a concurrent change to them makes
+  it fail with a retryable error rather than wait.
+
+With `READ_COMMITTED_SNAPSHOT` off, a read committed read takes and releases
+shared locks as it goes, so it is not a consistent snapshot. No read of a
+range is consistent without locking the range, and the range includes hidden
+rows, so the write keeps the serializable locking read even with the opt-in.
+
+Without the setting, a `write_target_prefilter` narrows SQL Server's single
+locking read as before, and whether a scan locks rows outside it depends on
+the access path.
+
+Without any SQL predicate (`CallbackOnly` or `Unrestricted` visibility, no
+prefilter, or the setting off) the bulk write still selects and locks every
+matching row and passes each one to the row callbacks before it leaves hidden
+rows out. The payload still does not depend on hidden rows, but how many hidden
+rows match a readable filter can still be observed. It shows in latency and,
+on PostgreSQL and SQL Server, in waits on locks that other transactions hold on
+hidden rows. The caller also briefly locks rows it cannot see. A SQL predicate
+removes the callback and counting difference on every backend, and the lock
+difference on PostgreSQL and, with `mssql_snapshot_bulk_write_targets` and the
+conditions above, on SQL Server.
 
 A generated GraphQL bulk write may write at most
 `PaginationConfig::max_bulk_write_rows` rows (default `10_000`) per mutation
@@ -359,14 +498,16 @@ rows after the classification above, so hidden rows never decide whether it is
 reached. With a row policy installed the candidates are classified in pages
 under the read scan budget (`max_scanned_rows`); a scan that would need more
 candidates is refused as an authorized read is, which is the one way hidden
-rows can still affect the outcome, and a prefilter removes them from the scan.
+rows can still affect the outcome. A prefilter, or with the opt-in a
+read-visibility predicate, removes them from the scan.
 
 For a dependent delete, leaving hidden rows out holds for
 the root row only. A dependent child row the caller can neither read nor write is
 not left out. Like any other unauthorized dependent, it makes the whole delete
 refuse with `Dependent delete refused`, so the refusal can reveal that such a
 child exists. A write-only caller still writes rows it can't
-read. Reading a row means entity read access plus `can_read_row`, which runs
+read, except that a bulk write narrowed by read visibility, with that
+setting on, leaves them out (see above). Reading a row means entity read access plus `can_read_row`, which runs
 only for rows `can_write_row` refuses. An upsert whose conflicting row is
 unwritable refuses with `FORBIDDEN` whether or not the caller can read it. Its
 key is unique, so the row can't be treated as absent; a plain create discloses

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -58,6 +58,164 @@ Host steps are in the [migration guide](MIGRATION.md#breaking-release-unreleased
 - **Fixed (migrations):** conditional unique-index duplicate preflights skip indexes whose predicate column is added by the same plan. Existing-column predicates still restrict the duplicate check to included rows.
 - **AI 0.149.0, AI tool profiles 0.26.0 (#551):** capability broker version 2. Describe returns compact typed signatures and `describe_type` expands one named type at a time; discovery returns one entity capability per entity with the root chosen per call; search uses an inverted index with fixed per-entry weights; large surfaces default to the fixed broker, with an opt-out. Retained fixed-broker sessions rebind once.
 - **AI 0.146.0:** fixed-broker sessions survive catalogue changes, `capability_stale` and `selection_stale` are separate model-facing codes (#551), HighImpact approvals force step-up and the approval lifetime cap has a 7-day ceiling (#465), and the AI schema module adds three unique indexes (#532; `0.83.0` in the breaking release, together with main's stored-response ledger table). See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md).
+## Unreleased - ORM/macros 0.183.0 and operation catalog 0.9.1
+
+- The workspace dependency check compares documented direct edges with
+  Cargo metadata, including optional and dev-only dependencies (#503).
+- Install examples use a reviewed Git revision and point to the package
+  inventory and release manifest. Direct Auth guidance follows the selected
+  revision's workspace manifest (#509).
+
+## Unreleased - ORM/macros 0.182.0
+
+SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issues/782), [#783](https://github.com/Dastari/graphql-orm/issues/783)), found by the identifier-quoting property suite. See the [migration guide](MIGRATION.md#01810-to-01820-sql-identifier-quoting).
+
+- **Fix (SQL rendering): only one well-formed delimited identifier is passed through (#782).** `SqlDialect::quote_identifier`, `DatabaseBackend::render_identifier`, `quote_identifier_path`, `render_identifier_path` and the derive macros returned any input unchanged that merely started and ended with a delimiter, so text such as `"a"b"`, `"`, `[a]]` or `[a] , [b]` reached SQL as an unterminated identifier or as more than one token. Input is now passed through only when it is exactly one well-formed, non-empty delimited identifier for the dialect (every inner closing delimiter doubled; SQLite `[...]` with no `]` inside). Any other input is delimited as one literal name with the closing delimiter doubled, so the result always reads back as exactly one identifier. Well-formed delimited names and paths, and every undelimited name, render byte-identically.
+- **Declared names that start and end with a delimiter but are not one well-formed delimited identifier are refused at compile time (#782).** A `#[graphql_orm(table = "...")]` or `db_column = "..."` path part such as `"a"b"` or `[a] , [b]` now fails the derive with a spanned error that names the part, instead of generating malformed SQL.
+- **Fix (SQL Server): names outside the regular-identifier rule are bracketed (#783).** `DatabaseBackend::Mssql.render_identifier` wrote every non-ASCII name bare, and SQL Server refused names such as `x²`, `雪🦀`, `x\u{3000}y` or names with letters added after Unicode 3.2 with error 102. A name is now written bare only under SQL Server's regular-identifier rule, measured against the server for every Basic Multilingual Plane character: a first character that is a Unicode 3.2 letter, letter number, U+FF3F or `_ @ #`, then those, Unicode 3.2 marks, decimal digits, connector punctuation, format characters or `$`. Everything else is bracketed. Every name SQL Server accepted bare keeps its exact text, so runtime DDL, migration plans and their hashes are unchanged for those names. The tables are generated from Unicode 3.2.0 by `scripts/generate-mssql-identifier-tables.py`. The derive macros already bracket every SQL Server name.
+- **Schema introspection treats catalogue names literally.** SQL Server introspection quotes every raw schema, table and column name it reads back unconditionally, with `]` doubled, both in the reported model and in the `OBJECT_ID` lookups for indexes and foreign keys, so a table literally named `[ledger]` no longer reads `ledger`'s metadata or collides with it. SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read quote raw names literally too, and PostgreSQL foreign-key targets render a raw name bare only when it is plain, never passing it through as SQL text.
+- **Paths are split with each backend's own delimiters.** The runtime and derive path splitters read only the dialect's delimited forms: `"..."` on PostgreSQL; `"..."`, backticks and `[...]` (closed at the first `]`) on SQLite; `[...]` and `"..."` on SQL Server. A PostgreSQL part that starts with `[` no longer swallows the following separator.
+- **Empty and NUL names.** A delimited identifier containing NUL is never passed through, and the derives refuse a declared name containing NUL. SQLite's empty delimited names (`""`, `[]`, two backticks) are still passed through; on PostgreSQL and SQL Server, which refuse them, they are quoted literally.
+- **Table-qualified columns in read predicates, group pages and dependent deletes.** New `DatabaseBackend::quote_column_identifier` renders the column part of a declared column path. `ReadPredicate::column`, `is_null`/`is_not_null`, and the relation, `not_related` and closure joins use it, so a `db_column` such as `"t"."c"` names column `c` through any alias instead of erroring or (on SQLite) reading as a string constant. A qualifier that does not name the entity's own table is refused by the derives at compile time, so no generated filter, sort or projection references another table, and by read predicates with `AUTHORIZATION_MISCONFIGURED` rather than stripped (SQL Server compares the qualifier's exact text). Dependent-delete selection receives its column rendered by the caller: a declared key as its column part, a catalogue foreign-key column as one literal name (SQLite and PostgreSQL report raw names, always escaped and delimited; SQL Server reports them delimited), so a literal `parent.ref` or `"x"` is never read as `ref` or `x`; the `exclude_blank` filter of `fetch_group_page` uses the path renderer, as grouping and metrics do. A test checks the exact rows admitted through each predicate on SQLite, owned PostgreSQL and owned SQL Server.
+- **Catalogue names round-trip.** SQL Server introspection reports bracketed or dotted index, index-column, filtered-index predicate and foreign-key constraint names delimited, so dropping or recreating them names the same object, and its filter parser is character-boundary safe and bracket-aware, so a filter on a non-ASCII column reads back instead of panicking. PostgreSQL reports foreign-key targets and table names that bare SQL would fold or split, or that start with `"`, delimited, and always delimits another schema's name (`"Archive"."Parent"`, `"local.parent"`), so they resolve to the referenced table. Ordinary names are reported as before.
+- **NUL in PostgreSQL row-level security columns.** The policy column helper no longer passes through a quoted name containing NUL.
+- New tests: a seeded property suite (`identifier_quoting_properties`) checks that every input quotes to exactly one identifier naming it, that bare renderings are plain and unreserved, and that each rendering round-trips through `CREATE TABLE`, `INSERT`, `SELECT` and `DROP` on in-memory SQLite and owned PostgreSQL and SQL Server, with the minimized cases from both issues retained. An owned SQL Server test compares the generated tables with the server for every non-ASCII Basic Multilingual Plane character, and another introspects tables named `ledger` and `[ledger]` side by side. Path properties round-trip `schema.table` paths in every delimited form through each database, and a group-page test covers a table-qualified column on SQLite and owned PostgreSQL. The shared runtime/derive cases gain the minimized malformed inputs, and a derive unit test covers the compile-time refusal.
+
+## Unreleased - ORM/macros 0.181.0
+
+Transitive-closure read predicates on SQL Server ([#779](https://github.com/Dastari/graphql-orm/issues/779)). See [read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures) and the [migration guide](MIGRATION.md#01800-to-01810-closure-read-predicates-on-sql-server).
+
+- **`ReadPredicate::related_closure`, `related_closure_all` and `related_closure_within` work on SQL Server.** They were refused there with `AUTHORIZATION_MISCONFIGURED`, because SQL Server does not allow a common table expression inside a subquery. SQL Server now renders the bounded walk as a correlated breadth-first search: one nested derived table and one correlated `OUTER APPLY` key lookup per hop, deduplicated per level by pointer with the hop it was first reached at, then one lookup per reached pointer to evaluate the target. It adds no schema objects or DDL, is evaluated per row in SQL (never in memory or for the whole table), and applies on every read path: reads, counts, aggregates, keyset and connection pages, and subscription delivery. SQL Server has no search execution, so search does not apply there.
+- **Identical semantics.** Three-valued TRUE/FALSE/UNKNOWN, fail-closed incomplete walks (a partially NULL composite pointer, a non-NULL pointer naming no row, or the depth bound), all-NULL pointers as roots, cycles that are complete once the bound covers them, both quantifiers, `not()` and the deny-fallback refusal all match the CTE form.
+- **SQL Server bound.** `related_closure_within` accepts 1 to the new `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) hops on SQL Server and refuses larger bounds with `AUTHORIZATION_MISCONFIGURED`. SQL Server refuses statements nested about 100 levels deep. The default bound (64) is unchanged on every backend, so `related_closure` and `related_closure_all` behave identically everywhere. SQLite and PostgreSQL keep the 1,024-hop maximum.
+- **Cost.** Each level holds only distinct pointers, so the work per row is bounded by the bound times the distinct pointers reached, whatever the fan-out. Each hop's `OUTER APPLY` carries a no-op `TOP (2147483647)` fence, which keeps plan compilation fast (about 0.1 to 0.3 s for a first compile at the default bound) and keeps every hop a nested-loops seek on the key.
+- **Composition budget on every backend.** Relations, negations and closures inline their target (a closure four times), and a closure inside a closure evaluates the inner walk per reached row, so unbounded composition could render a multi-megabyte statement, run for minutes or exhaust server memory. Every `ReadPredicate` is now measured as it is built. A constructor, `not()`, `and` or `or` that would exceed a limit is refused with `AUTHORIZATION_MISCONFIGURED`, before anything is rendered:
+  - per predicate, at most `READ_PREDICATE_CLOSURE_MAX_NESTING` (2) closures nested inside one another;
+  - per predicate, at most `READ_PREDICATE_MAX_RENDERED_BYTES` (1 MiB) of rendered SQL, with placeholders counted at full width;
+  - per predicate, at most `READ_PREDICATE_MAX_EXPRESSION_DEPTH` (256) levels of expression nesting, counted as nested parentheses;
+  - per predicate, at most `READ_PREDICATE_MAX_CASE_NESTING` (10) nested `CASE` expressions, SQL Server's own limit (error 125). Each `not_related` adds two and each closure one, so `not_related` chains, whose target is inlined twice per level, stop at five;
+  - per predicate, at most `READ_PREDICATE_MAX_RELATION_NESTING` (32) nested relations and `READ_PREDICATE_MAX_RELATIONS` (128) relations in total on SQLite and PostgreSQL, or `READ_PREDICATE_MSSQL_MAX_RELATION_NESTING` (9) and `READ_PREDICATE_MSSQL_MAX_RELATIONS` (9) on SQL Server. Each closure counts as `READ_PREDICATE_CLOSURE_RELATION_WEIGHT` (16) relations, or `READ_PREDICATE_MSSQL_CLOSURE_RELATION_WEIGHT` (1) on SQL Server, counted as rendered;
+  - per predicate on SQL Server, at most `READ_PREDICATE_MSSQL_MAX_NESTING` (75) nested subqueries and `READ_PREDICATE_MSSQL_MAX_NESTING_UNITS` (900) weighted levels (11 per subquery, 2 per `NOT (`, 1 per other parenthesis). The owned server failed with "nested too deeply" (error 191) from about 1,050 units (97 subqueries, or 550 negations, alone);
+  - per statement, at most `READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES` (1 MiB) of policy SQL and `READ_PREDICATE_MAX_STATEMENT_RELATIONS` (64; `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`, 5, on SQL Server) relations added by all generated relation filters and relation-count orderings together, each also checked like a predicate and each count ordering charged at least one. A statement therefore holds at most 2 MiB of policy SQL and 192 weighted relations (14 on SQL Server);
+  - per request, at most `MAX_ORDER_BY_TERMS` (16) terms in a generated `orderBy` list, refused as `INVALID_INPUT`.
+- **Fix (availability, reachable from a client): relation-heavy statements exhausted server resources.** A host policy of a deep relation chain, combined by a client with many relation filters (`parents(where: {or: [16 × {kids: …}]})`, each embedding the policy), passed every per-fragment check. On PostgreSQL memory grows steeply with nested and total relations: a 128-deep chain peaked at 2.5 GB, and that shape would have needed about 40 GB (extrapolated), enough to exhaust a shared host. SQL Server failed with 701 (out of memory for the whole server) on an `or` of 256 relation chains, and with 8623 and 8621 on smaller shapes. Closures and relation-count orderings were not charged at all. The relation limits above, closure weights and count-ordering charges refuse those shapes when the policy is built or the request is prepared. Measured margins: with the limits lifted, SQL Server statements failed from 28 weighted relations, twice its per-statement 14; within the limits, every probed shape ran or was refused, a 4 GB-capped PostgreSQL peaked at about 470 MB, and the 3 GB-capped SQL Server at 1.49 GB. Not guaranteed: SQL Server plan-resource errors (8623, 8621) on untested shapes can still fail individual reads, and execution time is not bounded (admitted `or` and closure shapes took up to about 8 s on 60 rows on PostgreSQL, and about 4.5 s on SQL Server for a policy of nine closures with nested closures). Set PostgreSQL `statement_timeout`, and on SQL Server a query timeout and Resource Governor limits.
+- **Fix (availability): deep `and`/`or` folds no longer overflow the stack.** `and` and `or` nested a binary node per call and rendering recursed once per node. A host folding about 2,000 grants with `p = p.or(q)?` built a predicate whose render overflowed a 2 MiB stack and aborted the process (about 30,000 terms in a release build). This affects releases since `ReadPredicate::and`/`or` were added. They now flatten a child of the same kind, so a fold of any length is one node. Every `and`/`or` list of three or more operands renders as a balanced binary tree of parenthesised pairs, so a list of `n` operands is about `log2(n)` levels deep to the SQL parser. Each counted level is one parser level. Generated where inputs render their `and`, `or` and `not` lists the same way. A plain chain is as deep as it is long, and SQLite refused one past 1,000 operands. A 50,000-term `or` is 18 levels deep, and builds and runs on SQLite, PostgreSQL and SQL Server. Deeper alternating trees and `not()` chains are refused by the expression limit above; on SQLite, every tested family fails only from 450 counted levels or more.
+- **Fix (SQL Server closure):** the authorized row's own target is evaluated in a scope that sees no internal `__gom_` column, so a target column named like one (for example `__gom_max`) binds to the row, not to the closure's summary.
+- New tests run the closure suite on owned SQL Server: truth tables, the depth bound, keyset and connection pages, refusals, rendering and bind order, and a 3,000-row performance check that asserts the plan shape. Subscription delivery also runs on owned SQL Server. A new parity test runs 248 generated cases on SQLite, owned PostgreSQL and owned SQL Server and checks each admitted set against a reference evaluator of the documented rules. The cases cover cycles, self-loops, chains past the bound, unreachable and partially NULL pointers, composite and fan-out keys, nested closures and `not()`. Budget tests cover each refusal on every backend and run the largest policies that build on every read path on SQLite, owned PostgreSQL and owned SQL Server. A further test covers a target column named like an internal column. Expression-depth tests cover refusals at the limit on every backend, the deepest `not()` chains and alternating trees that build running on every read path (on SQL Server also around the deepest closure nesting), a 50,000-term fold on every backend, rendering at the limit on an explicit 2 MiB stack, and the per-statement relation budget through generated GraphQL relation filters. Relation and CASE tests refuse the reviewed deep-chain and many-relation-filter shapes, through generated GraphQL, and run the largest admitted shapes on every backend. A budget-shape suite runs, on all three backends, every shape grown to the limits on every statement and GraphQL path, including wide alternations, relation chains with negations and long generated `or` lists, and checks on SQLite and PostgreSQL that balanced grouping matches the plain chain on 150 random trees.
+
+## Unreleased - ORM/macros 0.180.0
+
+A separate opt-in lets narrowed SQL Server bulk writes select their targets from snapshots, so they no longer lock or wait on hidden rows ([#752](https://github.com/Dastari/graphql-orm/issues/752)). See the [migration guide](MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
+
+- **New opt-in: `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)`** (also `Database::with_mssql_snapshot_bulk_write_targets(bool)`, getter `mssql_snapshot_bulk_write_targets_enabled()`). It is off by default and stays separate from `narrow_bulk_writes_to_read_visibility`, which it requires. Narrowing alone keeps SQL Server's serializable `UPDLOCK, HOLDLOCK` read.
+- **What the opt-in changes.** It applies to generated GraphQL `updateMany`/`deleteMany` with a SQL predicate (read visibility or a `write_target_prefilter`), when all of these hold:
+  - the database has `READ_COMMITTED_SNAPSHOT` on;
+  - the target is a base table with an enabled, unfiltered unique index whose only key column is the key;
+  - every index of the table allows row locks;
+  - the key is `uniqueidentifier`, `nvarchar`/`nchar` or an integer.
+
+  The write then:
+  - reads every candidate in one snapshot without a lock (at most `max_scanned_rows` + 1);
+  - locks those keys exclusively with `XLOCK` and a `FORCESEEK` on that index (read committed, so no key-range lock reaches a neighbouring row), and checks the filter and the predicate again on each locked row (the re-check column alias can't collide with a table column of the same name);
+  - reads the candidates again in a new snapshot, under the same budget. If they are not exactly the locked rows that still match, the write is refused with a retryable `SERVICE_UNAVAILABLE` and nothing is written.
+
+  Otherwise the serializable locking read is kept.
+- **Exact guarantee.** The target set equals the rows that match at the validation snapshot, and they cannot change before the write commits. An atomic multi-row insert is never split. The write never locks, or waits on a lock on, a row outside its candidates, whatever plan SQL Server picks, except through lock escalation (see below).
+- **Not serializable.** No range is locked, so another transaction can commit a row that starts to match, with other changes, without waiting. That row isn't written, but later reads in the same bulk write (hooks, field authorizers, triggers) can see the other changes.
+- **What else remains.**
+  - **Exclusive locks:** candidates stay exclusively locked until the write ends, including rows that drop out. Readers using row versions don't wait, and neither does a `READCOMMITTEDLOCK` read of an unchanged row. Readers that hold locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
+  - **Lock escalation** to a table lock still covers hidden rows.
+- Defaults are unchanged on every backend. PostgreSQL and SQLite are unchanged in both modes.
+- Generated `updateMany` and `deleteMany` pass the runtime a key accessor, so ORM and macros must be upgraded together.
+- **New tests (owned SQL Server):**
+  - **Hidden-row locks:** with the opt-in, a narrowed bulk write neither waits on another transaction's update lock on a hidden row (the next key after a target) or on an uncommitted change to one, nor holds a lock on another hidden row. Narrowing alone, the unnarrowed controls and `READ_COMMITTED_SNAPSHOT` off keep the single locking read.
+  - **Atomic insert:** a concurrent atomic two-row insert is never split. With the opt-in it refuses the write as a retryable conflict, and the retry writes both rows. Without it, the range locks block the insert.
+  - **Key path by key type:** `nvarchar` and integer keys take the key path. `varchar`/`char` keys keep the single read.
+  - **Key path by table shape:** a unique non-clustered key index takes the key path. A heap, a non-unique key index, a composite unique index, a view, and an index with `ALLOW_ROW_LOCKS = OFF` keep the single read.
+  - **Budget and bound:** the scan budget bounds both candidate reads, and the bulk bound counts targets.
+  - **Alias:** a column named `__gom_still_matches` works.
+- **New tests (every backend):** a narrowed bulk write over three pages of visible rows interleaved with hidden ones writes each visible row once, and the scan budget counts only the narrowed candidates.
+
+## Unreleased - ORM/macros 0.179.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- Every PostgreSQL container started by the ORM, backup and AI test harnesses now
+  runs with a hard `--memory 4g --memory-swap 4g` limit, matching the SQL Server
+  harness, so a runaway test backend cannot exhaust the build host. Library code,
+  public API, generated SQL and stored data are unchanged.
+
+## Unreleased - ORM/macros 0.179.0
+
+Security property suites for identifier quoting and canonical JSON ([#725](https://github.com/Dastari/graphql-orm/issues/725)). See the [migration guide](MIGRATION.md#01770-to-01790-identifier-quoting-and-canonical-json-properties).
+
+- **Fix: a SQLite name that starts with U+FEFF is delimited.** SQLite reads a byte-order mark that starts a token as whitespace, so `render_identifier` and the derive macros wrote such a name bare and SQLite used the name without it. Both now delimit it. Other names render exactly as before.
+- New seeded property tests check, for SQLite, PostgreSQL and SQL Server, that an undelimited name quotes to one delimited identifier that reads back as the same name, that quoting and rendering are idempotent, that a bare rendering contains only plain identifier characters, and that quoted paths keep each part one identifier. On in-memory SQLite and the owned PostgreSQL and SQL Server containers, each case creates, writes, reads and drops a table named by generated identifiers, and checks the catalogue for exactly the expected names.
+- New canonical JSON v1 property tests check that written defaults read back, that equivalent values (key order, `-0.0`, escaped spellings, whitespace) produce identical bytes, that accepted text is a fixed point and every other spelling is refused, and that arbitrary input fails closed at the depth, node and byte limits.
+- Known issues found by the suites are tracked with ignored regression tests: [#782](https://github.com/Dastari/graphql-orm/issues/782) (`quote_identifier` passes through text that only starts and ends with a delimiter) and [#783](https://github.com/Dastari/graphql-orm/issues/783) (SQL Server bare non-ASCII names that the server rejects).
+
+## Unreleased - ORM/macros 0.177.0
+
+- **Opt-in: bulk writes narrowed to read visibility ([#752](https://github.com/Dastari/graphql-orm/issues/752), part).** `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or `Database::with_narrow_bulk_writes_to_read_visibility`) makes generated GraphQL `updateMany` and `deleteMany` add the SQL predicate of `RowPolicy::read_visibility` (`Prefilter` or `Complete`, `GraphqlMutation` surface) to their locking read when the policy declares no `write_target_prefilter`. Rows outside it are not passed to `can_write_row`/`can_read_row` or counted against the bulk bound or scan budget. On PostgreSQL they are also not locked, so another transaction's lock on a hidden row no longer delays the write. On SQL Server the `UPDLOCK, HOLDLOCK` read still locks rows a scan reads before testing the predicate; an index seek avoids it. Every selected row is still classified by the row callbacks, and visible rows give the same payload and writes. With the setting on, a row outside read visibility that `can_write_row` allows is left out (a declared `write_target_prefilter` takes precedence and keeps it), and a `read_visibility` error refuses the bulk write. Off by default: bulk writes are unchanged. The residual lock and timing behaviour is documented in [strict authorization](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes). Single-row writes are unchanged.
+- **Coded dependent-delete root refusals ([#763](https://github.com/Dastari/graphql-orm/issues/763)).** On an entity with `dependent_deletes` and `mutation_error_codes`, a root delete the plan refuses (for example `Entity not found` for a row hidden once the transaction holds it) reports the direct delete's `errorCode` (`NOT_FOUND`) instead of null.
+- **Error-code reference ([#763](https://github.com/Dastari/graphql-orm/issues/763)).** Lists the router codes `SUBSCRIPTIONS_NOT_SUPPORTED` and `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`, states that a bulk payload's `errorCode` can be a host refusal's own code, and that a subgraph's `extensions.outcome` passes through the router (now covered by a router wire test). The client metadata reference states that `carried_fields` grants no access and points to `classification` for secret fields. A new test checks that a key-field or default-sort change changes the interpretation fingerprint.
+
+## Unreleased - ORM/macros 0.176.0
+
+Transitive-closure read predicates ([#772](https://github.com/Dastari/graphql-orm/issues/772)). See [read-predicate transitive closures](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures) and the [migration guide](MIGRATION.md#01750-to-01760-transitive-read-policy-closures).
+
+- **`ReadPredicate::related_closure`, `related_closure_all` and `related_closure_within`.** A policy can admit a row based on every row reachable from it through a self-referencing key, such as `&[("parent_id", "id")]`, with composite keys supported. The existential form is TRUE when some reached row (the row itself included) matches `P`. The universal form is TRUE when every reached row matches `P` and the walk is complete: "no reachable row fails `P`". Both are three-valued and fail closed. An UNKNOWN `P`, a partially NULL composite pointer, a pointer that names no row, or a walk cut short by the depth bound makes the result UNKNOWN, so the universal form never admits on it and a negation never admits either. An all-NULL pointer ends the walk at a root. Cycles terminate, and a cycle is complete once the bound covers its length. The default bound is `READ_PREDICATE_CLOSURE_DEFAULT_DEPTH` (64) hops, and `related_closure_within` accepts up to `READ_PREDICATE_CLOSURE_MAX_DEPTH` (1,024). As with `related`, the policy owns the walk: rows hidden by their own policy are reached like any other. The result reveals, hop by hop, what `related`/`not_related` reveal, plus whether the walk was complete, which can only deny a row.
+- It renders a correlated `WITH RECURSIVE` scalar subquery on SQLite and PostgreSQL, used by every read path: reads, counts, aggregates, keyset and connection pages, search and subscription delivery. SQL Server cannot nest a common table expression in a subquery, so there the closure is refused with `AUTHORIZATION_MISCONFIGURED` when the policy is built, rather than evaluated in memory.
+- New tests cover truth tables with NULLs and UNKNOWNs, chains, cycles and self-loops, unreachable and ambiguous steps, composite and fan-out keys, nested relations and closures, the depth bound, universal versus existential forms and their negations, bind order, refusals, keyset and connection pages and aggregates on SQLite and owned PostgreSQL, a performance check over 3,000 rows with a 1,000-row chain, and subscription delivery and search on SQLite. An owned SQL Server test confirms the refusal and the server limitation behind it.
+
+## Unreleased - ORM/macros 0.174.0
+
+Read-policy negation with a stated fail-closed NULL rule ([#766](https://github.com/Dastari/graphql-orm/issues/766)). See [read-predicate negation and NULLs](docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls) and the [migration guide](MIGRATION.md#01730-to-01740-read-policy-negation).
+
+- **`ReadPredicate::not_related`.** The fail-closed "no related row matching P" counterpart of `ReadPredicate::related`, with the same key, entity and backend validation. It is three-valued: UNKNOWN when a source key is NULL, FALSE when a related row has `P` TRUE, UNKNOWN when no related row has `P` TRUE but one has it UNKNOWN, TRUE otherwise (including no related rows). It renders a `CASE` over two correlated `EXISTS` subqueries on SQLite, PostgreSQL and SQL Server, so it composes with `not`, `and` and `or` under the same rule as every other predicate, and `not_related(k, p).not()?` admits exactly the rows of `related(k, p)`. As with `related`, the policy owns the join and the target's row policy is not imported. The outcome reveals what `related(k, p)` reveals plus whether some related row, hidden or not, has `p` UNKNOWN; that case fails closed (it can deny a row, never admit one).
+- **`ReadPredicate::is_null` and `is_not_null`.** Validated, two-valued NULL tests on persisted columns, including private ones, for policies that want NULL rows (`p.not()?.or(ReadPredicate::is_null::<B, T>("column")?)?`) or every row with a value.
+- **Fix (authorization, fail closed): negating the deny fallback is refused.** A generated filter renders the deny fallback `1 = 0` for an empty `in_list` or `or` list, for a filter that fails validation (such as a list over `MAX_FILTER_LIST_OPERANDS`, 1,000, operands) and for an invalid filter value. `ReadPredicate::not()` now refuses with `AUTHORIZATION_MISCONFIGURED`, when the policy is built, any predicate that renders `1 = 0` anywhere, including inside a relation. Previously, negating such a predicate admitted all rows of the entity, including rows whose column is NULL; it is now refused. `not_related` refuses such a target too. A generated client filter's own `not: { field: { inList: [] } }` is unchanged: it still matches every row the request can see, and row policy still applies.
+- **Documented NULL rule.** `not()` keeps SQL three-valued semantics: it is TRUE only when the inner predicate is FALSE, so a NULL compared column never admits a row, double negation is the identity, and the rule holds in nested `and`/`or` trees. `related(..).not()` remains the two-valued `NOT EXISTS` it has been since 0.92.0. Every read path, including keyset and connection pages, authorized scans, search and subscription delivery, applies the same SQL clause.
+- New tests run truth tables with NULLs for negation, double negation, nested trees, `related`/`not_related` with matching, non-matching, UNKNOWN and absent related rows and NULL keys, empty-list refusals, bind order and placeholder numbering, and keyset and connection pages over negated policies on SQLite and owned PostgreSQL and SQL Server; a SQLite test checks that subscription delivery admits exactly the rows of the SQL read.
+
+## Unreleased - ORM/macros 0.173.0
+
+- The operation catalogue 0.9.0 and companion package releases declare the same
+  minimum compiler; serialized contracts and stored data remain unchanged.
+- Refresh eight root-collision diagnostic snapshots for the pinned Rust 1.97.1
+  panic-display excerpt and require `rust-src` in the toolchain/ORM CI setup; collision rejection and error messages are unchanged.
+- Declare Rust 1.97.1 consistently across published packages, pin development to
+  1.97.1 and verify workspace/backend/provider MSRV graphs in CI (#501).
+- Retire the obsolete macros postgres-smoke fixture and its floating PostgreSQL
+  image (#684; removes its #615 pin only).
+- Validate scoped-release and router-binary approval URLs through the GitHub API
+  using the guard job token with read-only PR permission (#499).
+- Retain Tiberius 0.12.4: unpatched upstream 0.13.0 cannot compile the existing
+  query-notification API. See the SQL Server reference for exact errors (#516).
+- Record dated advisory exceptions, release/changelog policy, generator split
+  and security property-testing scope (#504, #505, #513).
+
+## Unreleased - ORM/macros 0.172.0, operation catalogue 0.8.1
+
+Client-facing metadata, all opt-in. Without the new options, generated SDL, operation catalogues, semantic catalogues and fingerprints are unchanged. See [client-facing schema metadata](docs/reference/graphql-orm/client-metadata.md) and the [migration guide](MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
+- **Client metadata export ([#340](https://github.com/Dastari/graphql-orm/issues/340), [#670](https://github.com/Dastari/graphql-orm/issues/670), [#672](https://github.com/Dastari/graphql-orm/issues/672)).** `schema_roots!(client_metadata: true)` emits `graphql_orm_client_metadata()`, a `GraphqlClientMetadata` document bound to `graphql_orm_semantic_catalog()` by its fingerprint and exported at build time with `export_json` (canonical JSON). Per entity it lists the fields the generated `Changed` stream can carry (computed by the same rules as the subscribe-time selection check), the declared lifetime field and its encoding, and each public relationship's key mapping: `batchable` with ordered source and target public field names and whether the target filter accepts `Equal` and `In`, `not_batchable` for relationships with a source or target condition or a field policy, or `no_exposed_key` when a key field is not public, is policy-guarded or is classified `secret` (`sensitive`). Conditions and column names are never published. Router-served delivery is later.
+- **Lifetime fields ([#670](https://github.com/Dastari/graphql-orm/issues/670)).** `#[graphql_entity(lifetime(field = "...", format = "rfc3339_utc" | "unix_seconds" | "unix_milliseconds" | "sqlite_utc_text"))]` names the field holding a record's UTC expiry time; `DateTime<Utc>` defaults to `rfc3339_utc`, and integer and `String` fields must state their format. The derive refuses private, policy-guarded, secret, list and non-time fields. `Entity::graphql_lifetime()` returns it. Expiry is not enforced.
+- **Started signal on `Changed` streams ([#341](https://github.com/Dastari/graphql-orm/issues/341)).** `#[graphql_entity(changed_started = true)]` adds `Started: Boolean` to the entity's `Changed` root. With `Started: true` the subscriber first receives one frame with `Started: true` and every other field null, sent once the stream is admitted, authorized and listening: every change committed after it is delivered. The event type keeps its name, gains `Started: Boolean!` and makes `Action`, `ChangeKind`, `Id` and `Key` nullable. No new error code.
+- **Aggregate source entity ([#372](https://github.com/Dastari/graphql-orm/issues/372)).** `#[graphql_entity(aggregate = true, aggregate_source = true)]` makes the aggregate root return `[<Entity>AggregateResultRow!]!`, whose always-null `SourceEntity: <Entity>` field names the source entity in the served schema, through introspection and composition.
+- **Interpretation fingerprint ([#671](https://github.com/Dastari/graphql-orm/issues/671)).** Every `schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`: SHA-256 over the cursor-format version, the backend dialect, and for each entity (sorted by name) its name, whether it serves `NodeId`, the exact keyset order fingerprint its cursors are bound to, its effective default sort and its primary-key fields, plus the digest of an optional host salt. It is stable across restarts, replicas and reorderings of `entities:`, and changes when any input changes. `GRAPHQL_ORM_INTERPRETATION_HEADER` and `GRAPHQL_ORM_INTERPRETATION_ACK_FIELD` name where a host serves it; router composition is later.
+- **Multi-page reads ([#673](https://github.com/Dastari/graphql-orm/issues/673)), docs only.** The pagination reference states that every page is an independent read and why the ORM offers no snapshot token.
+- **Design plan for `Changed` replay ([#668](https://github.com/Dastari/graphql-orm/issues/668)).** [docs/plans/active/changed-stream-replay](docs/plans/active/changed-stream-replay/README.md); no implementation.
+- Operation catalogue 0.8.1 adds the `GraphqlClientMetadata` types, `relationship_key_field_exposed` and `relationship_target_filterable`. Additive; no existing type, wire format or fingerprint changes.
+
+## Unreleased - ORM/macros 0.171.0
+
+An opt-in client error contract for generated roots, with one code vocabulary shared with the router. Nothing changes for a host that does not opt in: generated SDL, responses, operation catalogues and fingerprints are unchanged. See the [migration guide](MIGRATION.md#01700-to-01710-opt-in-client-error-contract) and the [error-code reference](docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router).
+
+- **A dedicated code for an unsupported subscription selection ([#342](https://github.com/Dastari/graphql-orm/issues/342)).** With `DatabaseBuilder::subscription_selection_unsupported_code(true)` or `Database::with_subscription_selection_unsupported_code(true)`, a generated `Changed` subscription whose selection can never be streamed (a relation, a computed field or an unavailable key) is refused with `extensions.code` `SUBSCRIPTION_SELECTION_UNSUPPORTED` (`graphql_orm::graphql::subscriptions::SUBSCRIPTION_SELECTION_UNSUPPORTED`) instead of `INVALID_INPUT`, with the same message. Other invalid stream input, such as a `Keys` list over its bound, stays `INVALID_INPUT`.
+- **A mutation's error says whether the write took effect ([#371](https://github.com/Dastari/graphql-orm/issues/371)).** With `DatabaseBuilder::mutation_error_outcome(true)` or `Database::with_mutation_error_outcome(true)`, every error from a generated create, upsert, update, delete, `updateMany` or `deleteMany` root carries `extensions.outcome`: `refused` (refused before the write was attempted, for example by a policy or a before hook), `failed` (attempted and rolled back, for example after a failed statement or an after hook's refusal), `committed` (for example a `notify` handler failing after the commit) or `unknown` (the commit itself failed). The ORM sets the value itself and replaces any `outcome` a callback put on its error. Under the setting, a bulk write whose commit fails raises a top-level `unknown` error instead of returning `success: false`, so `success: false` always means nothing was written. The new public `graphql_orm::graphql::errors::MutationOutcome` names the vocabulary, which runtime GraphQL mutations already use for `committed` and `unknown`.
+- **A stable code on a generated mutation result's `Error` ([#385](https://github.com/Dastari/graphql-orm/issues/385)).** An entity declared with `#[graphql_entity(mutation_error_codes)]` gains a nullable `errorCode` on its single-row `…Result`, beside `error`: `NOT_FOUND` for `Entity not found` and `Entity not found after update`, `INVALID_INPUT` for `No fields to update`, and the error's own code, such as `CONSTRAINT_VIOLATION`, for a failed write statement. The bulk `Where filter is required…` refusals get `INVALID_INPUT` in their existing `errorCode`. The codes reuse `OrmErrorCode` values; no new code is added. A `success: false` from a single-row root means nothing was written.
+- New tests run these on SQLite and owned PostgreSQL: each code and the outcome appear with the opt-in and not without it, including `failed` with a rollback after an after hook's refusal and `unknown` for a commit refused by a deferred foreign key.
 
 ## Unreleased - ORM/macros 0.170.0
 
@@ -1203,7 +1361,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   Align ORM/macros at 0.55.1. No source, public API, generated code, SDL,
   persistence or behavior change.
 
-
 ## 0.55.0 (unreleased)
 
 - Add typed, bounded runtime literal defaults for UUID, JSON (canonical JSON v1),
@@ -1244,7 +1401,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   new `RuntimeSchemaDiagnosticCode::InvalidFormat`. Align ORM/macros at 0.55.0;
   no generated code, stored-data or automatic database migration.
 
-
 ## 0.54.1 (unreleased)
 
 - Pair ORM/macros 0.54.1 and AI 0.107.4 with published Auth `v0.22.1` at
@@ -1252,14 +1408,12 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   correction. Align direct host fixtures and regenerate their real Cargo locks.
   No generated code, public ORM API, SDL, persistence or AI schema change.
 
-
 ## Router 0.6.3 (unreleased)
 
 - Increase the finite default signed role-catalogue response bound to 2 MiB,
   retaining exact signature/content binding and explicit smaller host bounds.
   This requires the coordinated Auth signature-envelope correction; no new
   router artifact or workspace release is implied by the source change.
-
 
 ## 0.54.0 (unreleased)
 
@@ -1273,7 +1427,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   barriers, explicit lag/refetch signals and an owned Auth bridge adapter.
   Align ORM/macros at 0.54.0; no automatic database migration.
 
-
 ## 0.53.0 (unreleased)
 
 - Re-read original status and current authority after binding and successful
@@ -1285,7 +1438,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   `997707e060bcf5fabf879a5f98146dc2732b1c99` for explicit validated
   current-session proofs that retain the exact original credential reference.
 - Align ORM/macros at 0.53.0. No generated code, SDL, stored-data or schema change.
-
 
 ## 0.52.0 (unreleased)
 
@@ -1414,7 +1566,6 @@ Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
   Recheck status, identity, grants, bindings and expiry for each sensitive operation;
   deny changed authority and context-free repository bypasses.
 - Align ORM/macros at 0.47.0 and adopt a reviewed full external auth revision.
-
 
 ## 0.46.0 (unreleased)
 
@@ -1774,7 +1925,6 @@ See the [pagination guide](docs/reference/graphql-orm/pagination-migration.md)
 for backend/capability boundaries, consistency, and migration details. The new
 scan fields extend keyset-enabled GraphQL SDL and operation catalogues.
 No stored-data migration is required.
-
 
 ## 0.32.0 - 2026-09-17
 

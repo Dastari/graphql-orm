@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -59,11 +59,15 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `key_only_deletes` | flag | absent; a `Key`/`Keys` subscriber of the exact key gets a key-only `DELETED` event when a delete releases no row. Not allowed when a primary-key field declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is not GraphQL-readable. See [subscription release authorization](entities-and-relations.md#subscription-release-authorization) |
 | `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
+| `mutation_error_codes` | flag | absent; generated single-row results gain a nullable `errorCode` and the bulk filter refusals a code; see [mutation result error codes](error-codes.md#mutation-result-error-codes) |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
 | `federation_key` | marker, or `(fields = ["GraphQLField", …], assume_unique = bool)` | repeatable; rejected on `repository_entity` and schema-only entities |
+| `lifetime` | `(field = "rust_field", format = "rfc3339_utc" \| "unix_seconds" \| "unix_milliseconds" \| "sqlite_utc_text")` | absent; names the field holding the record's expiry time for the [client metadata export](client-metadata.md#lifetime-fields); `format` is required for integer and `String` fields; descriptive only |
+| `changed_started` | boolean | `false`; adds the argument `Started: Boolean` to the `Changed` root for the [started signal](client-metadata.md#started-signal-on-changed-streams); the event gains the field `Started: Boolean!` and its `Action`, `ChangeKind`, `Id` and `Key` become nullable |
+| `aggregate_source` | boolean | `false`; requires `aggregate = true`; the aggregate root returns `<Entity>AggregateResultRow` with a [`SourceEntity` field](client-metadata.md#aggregate-source-entity) |
 | `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only entities and on float, nullable or read-policy primary-key fields |
 
 The bare `federation_key` keys on the primary key in declaration order.
@@ -682,6 +686,10 @@ in a legacy composition/semantic list.
 `federation: true` calls `enable_federation()` on the schema builder. It is
 needed only by a subgraph that declares no resolvable `@key` of its own and
 participates in Federation purely through `unresolvable` reference stubs.
+`client_metadata: true` also emits `graphql_orm_client_metadata()`, the
+[client metadata export](client-metadata.md#client-metadata-export). Every
+`schema_roots!` emits `graphql_orm_interpretation_fingerprint(salt)`; see the
+[interpretation fingerprint](client-metadata.md#interpretation-fingerprint).
 
 `schema_roots!` rejects root field name collisions at compile time. A merged root serves a field from
 only one of its members, so a handwritten field with the name of a generated operation would replace
@@ -1263,6 +1271,13 @@ bound parameter and each pattern a `LIKE` pattern, so the limits keep a filter i
 2,100 parameters and 8,000-byte patterns on every backend. Above a limit the request fails with
 `INVALID_INPUT` before any SQL runs; the same check applies to filters built in Rust, through each
 filter's `validate()` and the generated `WhereInput`'s `DatabaseFilter::validate`.
+
+An empty `inList` matches no rows, and so does an `or: []`. A client filter may
+still negate one: `not: { field: { inList: [] } }` matches every row the
+request can already see. Row policy still applies, so this is not a way past
+authorization; it is the plain negation of "matches nothing". Read policies are
+stricter: `ReadPredicate::not()` refuses a predicate that renders this deny
+fallback (see [read-predicate negation and NULLs](pagination-migration.md#read-predicate-negation-and-nulls)).
 
 ## Managed versions
 

@@ -25,6 +25,8 @@ mod access;
 mod agent_loop;
 mod approvals;
 mod attachments;
+mod sha256;
+use sha256::valid_sha256;
 mod budget;
 mod capability_delivery;
 mod configuration;
@@ -114,6 +116,7 @@ mod orm_subscriptions;
 mod orm_supervised;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_supervised_coordinator;
+mod orm_support;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tool_result_preview;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -127,6 +130,7 @@ mod orm_usage;
     feature = "provider-openai-core"
 ))]
 mod orm_webhooks;
+mod persisted_state;
 mod persistence;
 mod pricing;
 mod principal_projection;

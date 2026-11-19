@@ -1055,7 +1055,10 @@ where
     // The table the ORM's own writes reach: the declared path rendered as the
     // ORM renders it. A bare name must resolve in the journal's schema.
     let table = super::rls::change_journal_orm_path(metadata.table_name);
-    let qualified = !super::dialect::identifier_path_is_bare(metadata.table_name);
+    let qualified = !super::dialect::identifier_path_is_bare(
+        super::DatabaseBackend::Postgres,
+        metadata.table_name,
+    );
     let sql = format!(
         "SELECT 1
         FROM pg_catalog.pg_trigger tr

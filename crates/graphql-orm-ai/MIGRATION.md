@@ -184,6 +184,56 @@ In order:
    `authorization_denied`.
 
 No GraphQL SDL change.
+## 0.150.1 to 0.150.2: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
+## 0.150.0 to 0.150.1
+
+**No action.** Test-owned PostgreSQL containers are memory-capped. The library,
+durable state, schema and approvals are unchanged.
+
+## 0.149.0 to 0.150.0
+
+**No action**. Registered tools reuse their compiled argument validators.
+Durable state values, the schema module, and existing fingerprints and
+approvals are unchanged. No data migration is needed.
+
+## 0.148.0 to 0.149.0: output-limit stops and the bootstrap tool-call window
+
+No data migration is needed. GraphQL SDL and AI schema module `0.82.0` are
+unchanged.
+
+- **OpenAI Responses and Ollama output-limit stops. No action.** An OpenAI,
+  xAI or OpenAI-compatible stream that ended with `response.incomplete` for
+  `max_output_tokens` used to fail the turn with no usage after the tokens
+  were spent. An Ollama `done_reason = "length"` completed silently as if the
+  answer were whole. Both now complete with exact usage and a visible notice
+  that the answer may be incomplete, as Anthropic and chat completions do
+  since 0.147.0. A tool request in such a turn is never run. Clients that
+  render assistant text show the notice as part of the answer. Tool-call
+  events from these adapters now arrive when the response finishes rather
+  than as they stream; only their timing changes. See
+  [OpenAI output-limit stops](docs/read-only-tool-loop.md#openai-output-limit-stops)
+  and [Ollama](docs/ollama.md#supported-contract).
+- **Stored responses. No action.** With `store_responses = true`, the
+  response of an output-limit stop is now recorded in the stored-response
+  ledger and deleted with its session, like any returned turn. It is never
+  used as a continuation.
+- **Conversation bootstrap. No action.** The tool-call window now holds up to
+  the requested `tool_call_limit` (at most 500) whatever the database's page
+  maximum, read in pages no larger than that maximum. A bootstrap of a
+  conversation with more tool calls than the page maximum no longer reports
+  `reset_required` unless the selected runs hold more calls than requested.
+  A client that reloaded on that flag reloads less often; one that asked for a
+  large window receives more tool calls than before. See
+  [capability discovery and execution](docs/capability-discovery-and-execution.md).
+
+## 0.148.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
+
 ## 0.146.0 to 0.147.0: lease grace, provider stops and stored-response deletion
 
 Apply AI schema module `0.82.0` before starting workers. It adds one table,

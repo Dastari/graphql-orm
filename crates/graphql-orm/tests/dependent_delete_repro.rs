@@ -1594,6 +1594,142 @@ mod review_root_errors {
     }
 }
 
+/// #763: under `mutation_error_codes`, a dependent-delete root's refusal
+/// carries the same `errorCode` as the direct delete's.
+mod coded_root_errors {
+    use super::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        mutation_error_codes,
+        table = "coded_root_errors",
+        plural = "CodedRoots",
+        default_sort = "id ASC"
+    )]
+    struct CodedRoot {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+    }
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        mutation_error_codes,
+        table = "coded_root_errors",
+        plural = "CodedDirectRoots",
+        default_sort = "id ASC"
+    )]
+    struct CodedDirectRoot {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+    }
+    schema_roots! { query_custom_ops: [], entities: [CodedRoot,CodedDirectRoot], }
+    /// Allows the first write check of each request and hides the row from
+    /// every later check, so the locked root delete inside the dependent-delete
+    /// transaction treats a row that passed admission as missing.
+    #[derive(Default)]
+    struct HiddenAfterAdmission(std::sync::atomic::AtomicUsize);
+    impl RowPolicy for HiddenAfterAdmission {
+        fn can_read_row<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_write_row<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let first = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            Box::pin(async move { Ok(first) })
+        }
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        feature = "postgres",
+        ignore = "requires test-owned PostgreSQL container"
+    )]
+    async fn dependent_delete_root_not_found_carries_its_error_code() {
+        #[cfg(feature = "sqlite")]
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        #[cfg(feature = "postgres")]
+        let pool = owned_postgres::OwnedPostgres::pool("coded-root-errors", 5)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE coded_root_errors(id TEXT PRIMARY KEY,name TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO coded_root_errors VALUES('root','root')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let schema = |hidden_after_admission: bool| {
+            let registry = StaticDependentDeletes::<DefaultBackend>::new(
+                RuntimeDependentLimits::new(10, 4).unwrap(),
+            )
+            .register::<CodedRoot>()
+            .unwrap();
+            let mut db = Database::new(pool.clone());
+            if hidden_after_admission {
+                db.set_row_policy(HiddenAfterAdmission::default());
+            }
+            schema_builder(db)
+                .data(AuthSubject::new("test-principal"))
+                .data(registry)
+                .finish()
+        };
+        let mut payloads = Vec::new();
+        // A missing row is refused at admission; a row hidden only once the
+        // transaction holds it is refused by the root delete inside the plan.
+        for (root, id, hidden_after_admission) in [
+            ("deleteCodedDirectRoot", "absent", false),
+            ("deleteCodedRoot", "absent", false),
+            ("deleteCodedRoot", "root", true),
+        ] {
+            let response = schema(hidden_after_admission)
+                .execute(format!(
+                    "mutation {{ result:{root}(id:\"{id}\") {{ success error errorCode }} }}"
+                ))
+                .await;
+            assert!(response.errors.is_empty(), "{root}: {response:?}");
+            let payload = response.data.into_json().unwrap()["result"].clone();
+            assert_eq!(payload["success"], false, "{root}: {payload}");
+            assert_eq!(payload["error"], "Entity not found", "{root}: {payload}");
+            assert_eq!(payload["errorCode"], "NOT_FOUND", "{root}: {payload}");
+            payloads.push(payload);
+        }
+        assert!(payloads.windows(2).all(|pair| pair[0] == pair[1]));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM coded_root_errors")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "nothing was deleted");
+    }
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 #[ignore = "requires test-owned PostgreSQL container"]

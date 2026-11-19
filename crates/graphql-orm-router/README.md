@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -27,6 +27,31 @@ members, fragments and aliases. A refused selection refuses the whole
 operation with `UNAUTHENTICATED` or `FORBIDDEN` and its response path. See
 [MIGRATION.md](MIGRATION.md#0154-to-0160) and
 [nested directive authorization](docs/configuration.md#nested-directive-authorization).
+Version 0.16.6 consolidates outbound HTTP retrieval, reduces redundant
+WebSocket frame encoding and scopes the Hive plugin handoff to startup.
+
+Version 0.16.5 refuses, on both bearer providers, a token whose header has a
+`crit` member of any value (RFC 7515: the router understands no critical
+extension), and one whose `iss` is an array rather than the configured issuer
+string (RFC 7519). It refuses a protected header over 8 KiB encoded before
+decoding it. It adds cargo-fuzz targets for bearer and JWKS parsing with a
+retained corpus replayed in ordinary CI, a weekly bounded fuzz run, and
+scope-matching property tests
+([#725](https://github.com/Dastari/graphql-orm/issues/725),
+[#726](https://github.com/Dastari/graphql-orm/issues/726)). See
+[`fuzz/README.md`](fuzz/README.md).
+
+Version 0.16.2 changes only the wire tests, which now check that a subgraph
+error's `extensions.outcome` reaches the client unchanged. Router behavior,
+configuration and public APIs are unchanged.
+
+Version 0.16.1 changes only the wire tests: the persisted-documents snapshot
+tests no longer read a refresh result before it is fully written, and they
+check each response's status and media type before decoding it. Router
+behavior, configuration and public APIs are unchanged.
+
+Version 0.16.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Version 0.15.5 changes only the wire tests: the Prometheus exporter test no
 longer depends on which listeners other tests hold on the public loopback
@@ -44,12 +69,6 @@ Version 0.15.2 fixes an intermittent deadlock when established WebSocket
 operations refresh role authority. Authorization policy snapshots release their
 context read locks before the refreshed principal is stored. Configuration and
 public APIs are unchanged.
-
-The current workspace selects published Auth `v0.26.0`, peeled to
-`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
-that same tag and refresh their locks to one source; matching the commit alone
-does not unify revision and tag selectors. See the
-[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
 
 Version 0.15.0 lets the Prometheus exporter bind its own `host` (opt-in; the
 default is unchanged) and bounds stale role-scope catalogue use: after
@@ -148,9 +167,9 @@ workspace dependency guidance. The Rust implementation is unchanged; consuming
 applications must still review and qualify the coordinated companion revision.
 
 Version 0.6.1 selects published Auth `v0.21.3` for `auth-agql`, retaining the
-same reviewed commit. Direct Auth dependencies must use that tag too; refresh
-the lockfile and verify one Auth source. Existing clock and authorization
-contracts remain unchanged. See [MIGRATION.md](MIGRATION.md).
+same reviewed commit. That release required direct Auth dependencies to use
+the same tag and resolve one Auth source in the lockfile. Existing clock and
+authorization contracts remain unchanged. See [MIGRATION.md](MIGRATION.md).
 
 A project-neutral Federation router for statically configured and explicitly
 registered GraphQL subgraphs. It composes a complete candidate graph before
@@ -174,12 +193,22 @@ requirements.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
 adapter uses its validator's exact injected clock, including subsecond precision,
@@ -267,6 +296,11 @@ composition warnings before serving.
 | Subscriptions | Disabled by default; require authentication and a declared owner. |
 | Prometheus | Disabled by default; binds the public listener's IP address unless an explicit scrape `host` is set; deployment network policy protects its listener. |
 | Byte routes | Disabled by default; each streams `GET`/`HEAD` from one static prefix to one upstream, authenticated unless explicitly public. |
+
+Failed scheduled authentication verification refreshes emit a warning with the
+failure category and increment `router_authentication_refresh_failure_total`
+in the authenticated `/_router/metrics` response. Public readiness continues to
+indicate whether the router has an active graph.
 
 The [configuration reference](docs/configuration.md) is the complete field,
 secret-loading, default, and hard-limit source. Never put secret header values

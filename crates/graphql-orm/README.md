@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -49,6 +49,78 @@ uniqueness when creating the index instead of running the preflight. Predicate
 dependencies come from metadata, not SQL text; predicates that cannot be
 analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
+is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
+writes a name bare only under its regular-identifier rule (#783).
+See the [migration guide](../../MIGRATION.md#01810-to-01820-sql-identifier-quoting).
+
+Version 0.181.0 supports the transitive-closure read predicates on SQL Server, as an unrolled
+breadth-first search with the same semantics as the recursive CTE on SQLite and PostgreSQL;
+SQL Server accepts bounds up to `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64). Read predicates
+are budgeted at build: two nested closures, 1 MiB of rendered SQL, 256 expression levels, 10 nested
+`CASE` expressions, and 32 nested and 128 total relations (a closure counting as 16), plus 75
+subqueries, 9 nested and 9 total relations (a closure counting as 1) and 900 weighted levels on SQL
+Server. Each statement's relation filters and count orderings may add 64 relations more (5 on SQL
+Server), and a generated `orderBy` list holds at most 16 terms. `and`/`or` folds are flattened, and
+lists render as balanced pairs.
+See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+Version 0.180.0 adds the opt-in `DatabaseBuilder::mssql_snapshot_bulk_write_targets`, off by
+default and separate from `narrow_bulk_writes_to_read_visibility`. With both on and
+`READ_COMMITTED_SNAPSHOT` on, narrowed SQL Server bulk writes select their targets from
+snapshots and lock only those keys, so they no longer lock or wait on hidden rows (#752). The
+target set equals the rows matching at the validation snapshot, but the bulk write's transaction
+is then not serializable. See the
+[migration guide](../../MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
+
+Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
+read as whitespace, and adds seeded property suites for identifier quoting on every backend
+and for canonical JSON defaults ([#725](https://github.com/Dastari/graphql-orm/issues/725)).
+
+Version 0.177.0 adds the opt-in
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`, which narrows the
+locking read of generated GraphQL `updateMany` and `deleteMany` to the SQL
+predicate of the row policy's `read_visibility` when no
+`write_target_prefilter` is declared, so rows outside the caller's read
+visibility are not passed to row callbacks, and on PostgreSQL not locked
+(#752). Off by default. The root delete of a `dependent_deletes` entity now
+reports its `errorCode` under `mutation_error_codes` (#763). See the
+[migration guide](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+
+Version 0.176.0 adds transitive-closure read predicates: `ReadPredicate::related_closure`,
+`related_closure_all` and `related_closure_within`, rendered as a recursive CTE on SQLite and
+PostgreSQL and refused on SQL Server.
+See [read-predicate transitive closures](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+Version 0.174.0 adds fail-closed read-policy negation: `ReadPredicate::not_related`,
+`ReadPredicate::is_null` and `is_not_null`, and refuses `not()` over a predicate that renders
+the deny fallback `1 = 0` (an empty, over-limit or invalid filter list or value).
+See [read-predicate negation and NULLs](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-negation-and-nulls).
+
+Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Version 0.172.0 adds opt-in client-facing metadata: a build-time client
+metadata export (`schema_roots!(client_metadata: true)`) with `Changed` stream
+carried fields, lifetime fields and relationship key mappings, an opt-in
+`Changed` started signal, an opt-in aggregate source entity, and
+`graphql_orm_interpretation_fingerprint`. Defaults are unchanged. See
+[client-facing schema metadata](../../docs/reference/graphql-orm/client-metadata.md)
+and the [migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
+Version 0.171.0 adds an opt-in client error contract with one code vocabulary
+shared with the router: `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an
+unstreamable `Changed` selection
+(`DatabaseBuilder::subscription_selection_unsupported_code`),
+`extensions.outcome` on generated mutation errors
+(`DatabaseBuilder::mutation_error_outcome`, see `MutationOutcome`), and
+`errorCode` on the single-row results of entities declared with
+`mutation_error_codes`. Nothing changes without them. See the
+[error-code reference](../../docs/reference/graphql-orm/error-codes.md#one-vocabulary-with-the-router)
+and the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
 
 Version 0.170.0 refuses, on generated static schemas, a value that is not an
 object where an input object is expected, and on static and runtime schemas a
@@ -179,7 +251,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -690,12 +761,6 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth `v0.26.0`, peeled to
-`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
-that same tag and refresh their locks to one source; matching the commit alone
-does not unify revision and tag selectors. See the
-[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
-
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
@@ -709,10 +774,10 @@ complete sensitive schema evidence; offline verification returns passive facts.
 See the [replay contract](../../docs/reference/graphql-orm/owned-planning-replay.md).
 
 Version 0.50.2 aligns the paired runtime/macros release with published
-`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag
-selector for direct Auth dependencies as well; refresh the lockfile and verify
-one Auth source. No runtime behavior, generated code or schema migration is
-added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
+`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. That release
+required direct Auth dependencies to use the same tag and resolve one Auth
+source in the lockfile. No runtime behavior, generated code or schema migration
+is added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
 
 Version 0.50.1 adds checked original filter intent and conservative offline
 runtime-record matching in the core runtime. Upgrade ORM/macros together; no
@@ -730,7 +795,6 @@ PostgreSQL migration default alterations are corrected in the paired 0.48.2
 runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
-
 
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD
@@ -765,14 +829,24 @@ for deleted preimages, raw event observers, propagation limits and action filter
 
 ## Install from Git
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 Packages are distributed from this repository at reviewed full revisions. Pin
 the runtime and disable the default SQLite feature when selecting another
 backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
 ```
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
 
 This unpublished package has no docs.rs release. Use this Git README and the
 repository reference, or build matching local rustdoc with

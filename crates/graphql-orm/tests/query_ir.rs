@@ -252,7 +252,7 @@ fn mssql_renderer_numbers_placeholders_orders_and_paginates() {
 
     assert_eq!(
         rendered.sql,
-        "SELECT [Id], [JobName] FROM [dbo].[Jobs] WHERE ([JobName] LIKE @P1) AND ([ClosedAt] IS NULL) AND ([CustomerId] = @P2) ORDER BY [JobName] DESC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
+        "SELECT [Id], [JobName] FROM [dbo].[Jobs] WHERE ([JobName] LIKE @P1) AND (([ClosedAt] IS NULL) AND ([CustomerId] = @P2)) ORDER BY [JobName] DESC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
     );
     assert_eq!(
         rendered.values,

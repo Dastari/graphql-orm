@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_support::{content_context, map_orm, map_transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -12,8 +13,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionError,
-    TransactionMode,
+    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -25,8 +25,8 @@ use crate::{
     AiContentProtectionPolicy, AiContentProtectionPolicyResolver, AiContentProtector, AiError,
     AiResolvedSkill, AiScope, AiSkillAccessPolicy, AiSkillAction, AiSkillCatalogService,
     AiSkillUiIntentBindingInput, AiSkillUiIntentBindingView, AiSkillVersionView, AiSkillView,
-    AiUiIntentTypeId, ContentProtectionContext, ProtectedContentEnvelope,
-    PublishAiSkillVersionInput, SetAiSkillEnabledInput, UpsertAiSkillInput,
+    AiUiIntentTypeId, ProtectedContentEnvelope, PublishAiSkillVersionInput, SetAiSkillEnabledInput,
+    UpsertAiSkillInput,
 };
 
 const SKILL_POLICY_FORMAT_VERSION: u32 = 1;
@@ -248,7 +248,12 @@ impl OrmAiSkillCatalogService {
             .content_protector
             .protect(
                 &policy,
-                &content_context(id, scope),
+                &content_context(
+                    "graphql_orm_ai_skill_versions",
+                    id,
+                    "protected_instructions",
+                    scope,
+                ),
                 serde_json::Value::String(input.instructions.clone()),
             )
             .await
@@ -644,7 +649,16 @@ impl AiSkillCatalogService for OrmAiSkillCatalogService {
                 })?;
             let opened = self
                 .content_protector
-                .open(&policy, &content_context(version.id, &scope), &envelope)
+                .open(
+                    &policy,
+                    &content_context(
+                        "graphql_orm_ai_skill_versions",
+                        version.id,
+                        "protected_instructions",
+                        &scope,
+                    ),
+                    &envelope,
+                )
                 .await
                 .map_err(map_protection)?;
             let instructions = opened.as_str().map(str::to_owned).ok_or_else(|| {
@@ -1195,15 +1209,6 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn content_context(id: Uuid, scope: &AiScope) -> ContentProtectionContext {
-    ContentProtectionContext {
-        entity: "graphql_orm_ai_skill_versions".to_owned(),
-        row_id: id.to_string(),
-        field: "protected_instructions".to_owned(),
-        scope: scope.clone(),
-    }
-}
-
 async fn insert_skill_audit(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     actor: &str,
@@ -1248,27 +1253,6 @@ fn map_protection(error: crate::ContentProtectionError) -> AiError {
     match error {
         crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
         _ => AiError::PersistenceFailed,
-    }
-}
-
-fn map_transaction(error: TransactionError) -> AiError {
-    map_orm(error.public_error().clone())
-}
-
-fn map_orm(error: OrmPublicError) -> AiError {
-    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
-        return AiError::RuntimeNotReady;
-    }
-    match error.code {
-        OrmErrorCode::InvalidInput
-        | OrmErrorCode::CursorInvalid
-        | OrmErrorCode::PageLimitExceeded => AiError::InvalidInput(error.message),
-        OrmErrorCode::Unauthenticated | OrmErrorCode::Forbidden => AiError::Forbidden,
-        OrmErrorCode::NotFound => AiError::NotFound,
-        OrmErrorCode::Conflict | OrmErrorCode::ConstraintViolation => AiError::Conflict,
-        OrmErrorCode::ServiceUnavailable
-        | OrmErrorCode::InternalError
-        | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
     }
 }
 

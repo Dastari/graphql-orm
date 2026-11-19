@@ -19,6 +19,14 @@ AI 0.148.0 adopts tool profiles 0.25.0: UUID- and integer-keyed runtime collecti
 AI 0.147.0 adds `AiSchemaModule::admit_index_replacements`, which admits an upgrade plan whose only destructive steps replace a legacy AI webhook-receipt index; ORM 0.164.0 otherwise refuses the index drop. Requires `graphql-orm` 0.164.0. AI schema module stays `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission).
 
 AI 0.146.0 (placeholder, **breaking**) is the AI part of the single breaking release: fixed-broker provider sessions keep their binding across schema and catalogue changes, with `capability_stale` and the new `selection_stale` as separate recoverable model-facing codes; generated-operation fingerprints change once (catalogue 0.9.0); `HighImpact` approvals always require recent MFA and the approval lifetime cap has a 7-day ceiling; AI schema module `0.82.0` adds three unique indexes. Rebind, re-approve and migrate once; see the [migration guide](MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes).
+AI 0.150.1 memory-caps the test-owned PostgreSQL container used by its parity test; there is no runtime change. See the [migration guide](MIGRATION.md#01500-to-01501).
+
+AI 0.150.0 reuses compiled registered-tool validators and keeps stored lifecycle values and approvals compatible. See the [migration guide](MIGRATION.md#01490-to-01500).
+
+AI 0.149.0 completes OpenAI Responses (also xAI and OpenAI-compatible) `response.incomplete` output-limit stops and Ollama `length` stops with exact usage and a visible notice, never runs a tool request cut off by such a stop, and reads the conversation bootstrap's whole tool-call window so `reset_required` reports only a real reset. No schema change; see [migration guidance](MIGRATION.md#01480-to-01490-output-limit-stops-and-the-bootstrap-tool-call-window).
+
+Version 0.148.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 AI 0.147.0 gives lease recovery a default clock-skew grace (a quarter of the lease TTL, at most 30 seconds), completes Anthropic `max_tokens`, `model_context_window_exceeded` and `pause_turn` turns and chat-completions `length` turns with exact usage and a visible notice instead of failing after the spend, accepts dated-snapshot model echoes, never treats a provider-file 404 as proof of absence, and deletes OpenAI stored responses after their session is deleted through a fail-closed [stored-response ledger](docs/session-retention.md#stored-provider-responses). Apply AI schema module `0.82.0`; see [migration guidance](MIGRATION.md#01460-to-01470-lease-grace-provider-stops-and-stored-response-deletion).
 
@@ -90,14 +98,8 @@ producer metadata and finished SDL; see [MIGRATION.md](MIGRATION.md). No AI
 schema-module, persistence, provider or authorization behavior changes. The
 spatial/JSON scalar-codec gate remains outstanding.
 
-The current workspace selects published Auth `v0.26.0`, peeled to
-`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
-that same tag and refresh their locks to one source; matching the commit alone
-does not unify revision and tag selectors. See the
-[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
-
 Version `0.117.0` disables incidental async-graphql defaults and adopts the
-canonical reviewed Auth 0.24 source above. UUID and base GraphQL APIs remain;
+reviewed Auth 0.24 source for that release. UUID and base GraphQL APIs remain;
 provider, attachment, TLS and schema behavior are unchanged. See the
 [feature contract](../../docs/reference/graphql-features.md) and
 [migration guide](MIGRATION.md).
@@ -166,9 +168,9 @@ workspace dependency guidance. The Rust implementation is unchanged; consuming
 applications must still review and qualify the coordinated companion revision.
 
 Version `0.107.2` selects published Auth `v0.21.3` at the same reviewed commit.
-Align direct Auth dependencies to that tag, refresh the lockfile and verify one
-Auth source. No runtime or schema migration is added; schema module stays
-`0.72.0`. See [MIGRATION.md](MIGRATION.md).
+That release required direct Auth dependencies to use the same tag and resolve
+one Auth source in the lockfile. No runtime or schema migration was added.
+The schema module stayed at `0.72.0`. See [MIGRATION.md](MIGRATION.md).
 
 Version `0.107.1` adds read-only continuation task-context classification.
 Hosts preserve ordinary broker continuations, attach context only to verified
@@ -235,8 +237,8 @@ The coordinator counts already completed reads and automatic writes once, valida
 their ordered durable results and egress, and then persists the final provider output.
 These checkpoints cannot be adopted as pending execution; stale leases, changed
 rows or uncertain effects remain closed without replay. These completed-native
-semantics were introduced with schema module `0.68.0` in `0.102.1`; the current
-module is `0.69.0`. See [MIGRATION.md](MIGRATION.md).
+semantics were introduced with schema module `0.68.0` in `0.102.1`. Version
+`0.103.0` advanced the module to `0.69.0`. See [MIGRATION.md](MIGRATION.md).
 Version `0.102.2` makes restore-ordering test fixtures independent of wall-clock
 boundaries without changing runtime or schema behavior.
 
@@ -322,13 +324,23 @@ where required, and ordinary resolver authorization.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 This active pre-release is Git-only. Pin one reviewed full monorepo revision
 for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.120.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
 ```
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
 or `mssql`. MSSQL currently has schema/compile support only where ORM write

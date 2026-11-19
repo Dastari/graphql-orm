@@ -170,10 +170,15 @@ def check_publisher_split(bundle, publisher, bundle_name, validator, reference=N
     require("rust-cache" not in bundle, "bundle job restores a cache")
 
 
+def check_orm_setup(current, previous):
+    expected = setup_steps(previous).replace("components: clippy\n", "components: clippy,rust-src\n")
+    require(setup_steps(current) == expected, "ORM setup differs from the reviewed rust-src addition")
+
+
 def check_orm_split(old, new):
     qualified = old["orm"]
     for name in ORM_JOBS:
-        require(setup_steps(new[name]) == setup_steps(qualified), f"ORM job setup changed: {name}")
+        check_orm_setup(new[name], qualified)
         require("    needs: guard\n" in new[name], f"ORM job dependency changed: {name}")
     split = [line for name in ORM_JOBS for line in orm_commands(new[name])]
     expected = orm_commands(qualified)
@@ -223,6 +228,30 @@ def check_orm_split(old, new):
             "ORM lane build parallelism changed")
 
 
+# Reviewed expansion: full router tests already run on 1.97.1 in the router job.
+MSRV_SCRIPT = """#!/usr/bin/env bash
+set -euo pipefail
+# Invoke under the caller's build resource wrapper, like any other Cargo lane.
+python3 scripts/check-msrv.py
+export CARGO_BUILD_JOBS=1
+cargo check --workspace --all-targets --locked
+for backend in postgres mssql; do
+  cargo check -p graphql-orm --no-default-features --features "${backend}" --all-targets --locked
+done
+cargo check -p graphql-orm-ai --no-default-features --features postgres,provider-openai --locked
+cargo check -p graphql-orm-ai --no-default-features --features mssql --locked
+cargo check -p graphql-orm-storage --no-default-features --features local,s3,smb,azure --locked
+cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres --locked
+cargo check -p graphql-orm-router --features auth-agql --locked
+"""
+
+def check_msrv_expansion(current, previous, script):
+    expected = previous.replace("Router minimum supported Rust version", "Workspace minimum supported Rust version").replace("Verify router minimum", "Verify workspace minimum").replace("toolchain: 1.90.0", "toolchain: 1.97.1")
+    expected = expected.replace("          cargo test -p graphql-orm-router-protocol --locked\n          cargo test -p graphql-orm-router --locked\n", "          scripts/check-msrv.sh\n")
+    require(without_timeout(current).rstrip() == without_timeout(expected).rstrip(), "workspace MSRV job differs from its reviewed expansion")
+    require(script == MSRV_SCRIPT, "workspace MSRV commands differ from the reviewed expansion")
+
+
 def main():
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     old = jobs(source(QUALIFIED, ".github/workflows/release.yml").decode())
@@ -232,7 +261,8 @@ def main():
     # Every original matrix command, provider enumeration, failure/skip rule,
     # permission and full publisher step is byte-identical after selection.
     # Only the job-level timeout may differ, and the qualified ORM job is split
-    # into parallel jobs that together run the same commands.
+    # into parallel jobs that together run the same commands. The MSRV job has
+    # one exact reviewed expansion; full router tests already use that compiler.
     for name in ADDED_FULL_JOBS:
         require(name in EXCLUDED_JOBS and name not in old, f"added full lane is not recorded: {name}")
         require(new[name].startswith(f"  {name}:\n    if: inputs.validation_profile == 'full'\n")
@@ -246,6 +276,7 @@ def main():
         run: |
           python3 scripts/check-workflow-supply-chain.py
           python3 scripts/test-workflow-supply-chain.py
+          python3 scripts/test-release-approval.py
 """
             require(current in body, "workflow supply-chain gate is required")
             body = body.replace(current, "", 1)
@@ -270,6 +301,13 @@ def main():
 """
             require(current in body, "complete owned MSSQL execution is required")
             body = body.replace(current, previous, 1)
+        if name == "router-msrv":
+            check_msrv_expansion(body, old[name], (ROOT / "scripts/check-msrv.sh").read_text())
+            require(all(command in new["router"] for command in [
+                "cargo test -p graphql-orm-router-protocol --locked",
+                "cargo test -p graphql-orm-router --locked",
+            ]), "full router tests must remain at the workspace minimum compiler")
+            body = old[name]
         require(without_timeout(body).rstrip() == without_timeout(old[name]).rstrip(),
                 f"full profile changed: {name}")
     check_orm_split(old, new)

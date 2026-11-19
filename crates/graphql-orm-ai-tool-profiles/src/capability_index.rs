@@ -5,6 +5,7 @@
 //! is descriptive only; callers must reauthorize and load the exact current
 //! capability before execution.
 
+use crate::sha256::valid_sha256_any_case;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, OnceLock},
@@ -747,7 +748,7 @@ impl AiCapabilityIndexSet {
         let mut maximum_search_results = limits.maximum_search_results;
         for index in indexes {
             let index = index.into();
-            if !valid_sha256_fingerprint(&index.fingerprint) {
+            if !valid_sha256_any_case(&index.fingerprint) {
                 return Err(configuration_error(
                     "capability index set contains an invalid fingerprint",
                 ));
@@ -2547,10 +2548,6 @@ fn semantic_key(value: &str) -> String {
 
 fn sha256_json(value: &serde_json::Value) -> String {
     hex::encode(Sha256::digest(canonical_json_bytes(value)))
-}
-
-fn valid_sha256_fingerprint(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn input_error(message: &str) -> AiError {

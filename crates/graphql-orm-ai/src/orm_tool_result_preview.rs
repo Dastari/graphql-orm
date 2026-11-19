@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_support::{map_orm, principal_identity, record_scope};
 use std::sync::Arc;
 
 use agql_auth::AuthPrincipal;
@@ -10,7 +11,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::OrmPublicError;
 use graphql_orm::graphql::orm::DefaultWriteBackend;
 
-use crate::orm_sessions::{map_orm, map_protection, principal_identity, record_scope};
+use crate::orm_sessions::map_protection;
 use crate::persistence::{AiRunRecord, AiSessionRecord, AiToolCallRecord};
 use crate::{
     AiError, AiRunId, AiSessionAction, AiSessionId, AiToolCallId, AiToolCallResultPreviewInput,

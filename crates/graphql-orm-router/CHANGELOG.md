@@ -4,6 +4,7 @@ kind: reference
 status: active
 owner: graphql-orm-router-maintainers
 last_reviewed: 2026-11-17
+last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -90,6 +91,80 @@ supersedes: []
 - Each distinct rule is evaluated once per operation, and selection sets that
   cannot reach a rule are not walked. A graph with no composed directives
   skips the walk.
+## Unreleased - 0.16.7
+
+- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+
+## 0.16.6 (unreleased)
+
+- Schema polling, dynamic registration, JWKS and role-scope catalogue retrieval
+  share request execution, status handling and bounded response reads. Each
+  path keeps its existing diagnostics, and registration still verifies the
+  connected peer before handling the status.
+- WebSocket subscription forwarding reuses the encoded message when its
+  authorization-variable projection fits. If it must trim the projection, it
+  computes the trim point from exact JSON entry sizes before encoding again.
+- Scope the pending Hive plugin runtime to initialization so it is cleaned up
+  if the startup future is dropped before Hive claims it.
+
+## 0.16.5 (unreleased)
+
+- Fix (authentication, fail closed): both bearer providers,
+  `JwksAuthenticationProvider` and the `auth-agql` `AgqlAuthenticationProvider`,
+  refuse a token whose JOSE header has a `crit` member with any value: a list,
+  an empty list or `null`. The router understands no critical extension, and
+  RFC 7515 requires such a token to be refused; before, the header was
+  ignored, so `"b64": false` was accepted without its meaning. The check reads
+  the raw protected header before any key lookup, because the JWT library
+  reads `"crit": null` as absent, and the pinned `agql-auth` validator does
+  not check `crit` at all. A signed role-scope catalogue with any `crit`
+  member is refused the same way.
+- Fix (authentication, bounded input): both bearer providers and the signed
+  role-scope catalogue refuse a protected header longer than 8 KiB encoded
+  (`MAX_PROTECTED_HEADER_BYTES`, about 6 KiB of JSON) before decoding it.
+  HTTP, WebSocket and catalogue-fetch limits already bounded their own inputs;
+  this bounds direct provider calls too.
+- Fix (authentication, fail closed): a bearer token's `iss` must be exactly
+  the configured issuer string. The JWT library also accepted an array that
+  contained the issuer, such as `["https://issuer", "https://other"]`.
+- Tests: cargo-fuzz targets `bearer_structured`, `bearer_raw` and
+  `jwks_document` in `fuzz/`, with an independent acceptance oracle and
+  synthetic keys. The retained corpus and minimized regressions replay in the
+  ordinary test run, followed by a seeded property run of each target. A
+  weekly workflow fuzzes each target for 20 minutes. Seeded property tests
+  check that scope-template values can never broaden a grant under exact or
+  wildcard matching, and the `auth-agql` adapter's syntax check and expiry
+  conversion. ([#725](https://github.com/Dastari/graphql-orm/issues/725),
+  [#726](https://github.com/Dastari/graphql-orm/issues/726))
+
+## Unreleased - 0.16.4
+
+- Count failed scheduled authentication refreshes in process-local metrics and
+  include the static task identity in their redacted warnings.
+- Surface previously discarded refresh scheduler errors and malformed messages
+  from the private subscription endpoint without logging their contents.
+
+## Unreleased - 0.16.2
+
+- Tests: a wire test checks that a subgraph error's `extensions.outcome`
+  (`refused`, `failed`, `committed`, `unknown`, or none) reaches the client
+  unchanged beside its `code` over HTTP. No router behavior changes.
+  ([#763](https://github.com/Dastari/graphql-orm/issues/763))
+
+## 0.16.1 (unreleased)
+
+- Tests: the persisted-documents snapshot wire tests' router child publishes
+  each refresh result with an atomic rename, so the test can no longer read
+  the result file between its creation and its contents being written. That
+  window caused intermittent `EOF while parsing a value` failures in
+  `persisted_review_snapshot_rewrite`, `persisted_review_snapshot_retry` and
+  `persisted_review_snapshot_delete`. The persisted wire tests now assert each
+  HTTP response's status and JSON media type before decoding it. No router
+  behavior changes. ([#759](https://github.com/Dastari/graphql-orm/issues/759))
+
+## Unreleased - 0.16.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
 
 ## 0.15.5 (unreleased)
 

@@ -3,7 +3,7 @@ title: Plans index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-17
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -12,7 +12,10 @@ supersedes: []
 
 ## Active
 
+- [Generator and authorization pipeline split](active/generator-split/README.md)
+- [Security property and fuzz testing scope](active/security-property-testing/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
+- [Changed stream replay](active/changed-stream-replay/README.md)
 - [Documentation experience](active/documentation-experience/README.md)
 
 ## Backlog

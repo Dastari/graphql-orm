@@ -3,12 +3,20 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-storage
+
+Version 0.18.2 adds a seeded property suite for blob key validation: each validator
+matches an independent model of its documented contract, accepted keys stay below their
+root, and the local provider round-trips them without writing outside its root
+([#725](https://github.com/Dastari/graphql-orm/issues/725)). Behaviour and APIs are unchanged.
+
+Version 0.17.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
 construction for a host-protected tree; `new` does not exist on Windows. This mode does
@@ -26,6 +34,11 @@ bytes in database rows.
 The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
+
+Local listings return an I/O error when the backend cannot check a directory's
+identity against the reserved internal directory. Local setup, multipart
+receipt recovery, and SMB reconnect failures are logged through `tracing`
+without paths, object keys, or credential details.
 
 Version 0.16.0 resolves every Unix local storage operation relative to held
 directory handles without following links, so local storage refuses every
@@ -121,6 +134,11 @@ and [migration guide](MIGRATION.md) before updating a consuming lockfile.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 Packages are Git-only. Pin the full reviewed monorepo revision, and use that
 same revision for every GraphQL ORM companion crate in one application:
 
@@ -130,13 +148,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

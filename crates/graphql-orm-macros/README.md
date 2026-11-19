@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -45,6 +45,54 @@ fingerprints. Applying a planned migration now refuses, before any statement
 runs, a new unique index whose key existing rows repeat
 (`UniqueIndexDuplicates`). Upgrade ORM/macros together; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+Version 0.182.0 passes a declared identifier through unchanged only when it is exactly one
+well-formed delimited identifier, refuses a `table` or `db_column` part that only looks
+delimited or contains NUL, and splits declared paths with each backend's own delimiters (#782).
+Generated code is otherwise unchanged.
+
+Version 0.181.0 pairs with the runtime's SQL Server closure read predicates. Generated where inputs
+render their nested `and`, `or` and `not` lists as balanced parenthesised pairs, which keeps long
+lists shallow for the SQL parser with the same meaning and bind order. Generated where-input and
+ordering preparation share one per-statement relation-policy budget.
+
+Version 0.180.0 passes the runtime a key accessor from generated `updateMany` and `deleteMany`,
+which the opt-in SQL Server snapshot bulk-write target selection uses to lock its targets by key (#752).
+Upgrade ORM and macros together; see the
+[migration guide](../../MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
+
+Version 0.179.1 changes no macro output; it keeps the version line aligned with the ORM, whose test-owned PostgreSQL containers are now memory-capped.
+
+Version 0.179.0 delimits a SQLite name that starts with U+FEFF in generated SQL, matching
+the runtime renderer; every other name is generated as before.
+
+Version 0.177.0 gives the root delete of a `dependent_deletes` entity the
+same `errorCode` as a direct delete under `mutation_error_codes` (#763), and
+generates `updateMany` and `deleteMany` against the runtime's bulk-target
+selection, which can narrow targets to read visibility when the host opts in
+(#752). Upgrade ORM and macros together; see the
+[migration guide](../../MIGRATION.md#01760-to-01770-bulk-write-target-visibility-and-coded-dependent-delete-refusals).
+
+Version 0.176.0 pairs with the runtime transitive-closure read predicates; generated code is unchanged.
+
+Version 0.174.0 pairs with the runtime read-policy negation additions; generated code is unchanged.
+
+Version 0.173.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
+Version 0.172.0 accepts the entity options `lifetime(...)`,
+`changed_started` and `aggregate_source`, and the `schema_roots!` option
+`client_metadata`, and emits `graphql_orm_interpretation_fingerprint` from
+every `schema_roots!`. Without them generated output is unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#ormmacros-01720-and-operation-catalogue-081-client-facing-metadata).
+
+Version 0.171.0 accepts `#[graphql_entity(mutation_error_codes)]`, which adds
+a nullable `errorCode` to the entity's generated single-row results and a code
+to its bulk filter refusals, and wraps generated mutation roots so their
+errors can carry the opt-in `extensions.outcome`. Without the attribute and
+the `Database` setting, generated SDL and responses are unchanged. Recompile
+entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01700-to-01710-opt-in-client-error-contract).
 
 Version 0.170.0 installs `GeneratedInputValidation` in the generated schema
 builders, so a value that is not an object where an input object is expected
@@ -165,7 +213,6 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
-
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
@@ -646,13 +693,11 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth `v0.22.0` at
-`997707e060bcf5fabf879a5f98146dc2732b1c99`. Use that tag for direct Auth
-dependencies and refresh the lockfile to one source. The
+For that release, the workspace selected published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99` and required direct Auth dependencies
+to use the same tag and resolve one Auth source in the lockfile. The
 [0.53 migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks)
-describes validated current-session proofs; earlier version notes below retain
-their historical selectors.
-
+describes validated current-session proofs.
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
@@ -666,10 +711,10 @@ complete sensitive schema evidence; offline verification returns passive facts.
 See the [replay contract](../../docs/reference/graphql-orm/owned-planning-replay.md).
 
 Version 0.50.2 aligns the paired runtime/macros release with published
-`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag
-selector for direct Auth dependencies as well; refresh the lockfile and verify
-one Auth source. No runtime behavior, generated code or schema migration is
-added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
+`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. That release
+required direct Auth dependencies to use the same tag and resolve one Auth
+source in the lockfile. No runtime behavior, generated code or schema migration
+is added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
 
 Version 0.50.1 adds checked original filter intent and conservative offline
 runtime-record matching in the core runtime. Upgrade ORM/macros together; no
@@ -688,25 +733,6 @@ runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root
 migration guide for guarded repair of previously incomplete applications.
 
-
-This is the procedural-macro implementation for `graphql-orm`. Applications
-normally depend on the runtime crate and import its prelude; that keeps the
-macro/runtime versions aligned:
-
-```toml
-[dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
-```
-
-Direct use is supported for tooling that needs the macro package:
-
-```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
-```
-
-The direct dependency still requires a compatible `graphql-orm` runtime in the
-consumer crate because generated code refers to `::graphql_orm`. The macros do
-not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 Version 0.39.1 aligns with the runtime string/binding correction; generated
 static fragment rebasing, inputs, GraphQL SDL and timestamp behavior are unchanged.
@@ -729,6 +755,37 @@ metadata. Deleted snapshots additionally require explicit default-deny
 permission alone does not authorize them, including under database RLS.
 See the [subscription migration](../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
 for deleted preimages, raw event observers, propagation limits and action filters.
+
+## Install from Git
+
+This is the procedural-macro implementation for `graphql-orm`. Applications
+normally depend on the runtime crate and import its prelude; that keeps the
+macro/runtime versions aligned.
+
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
+If you depend directly on `agql-auth`, use the same Git URL and tag as the
+reviewed workspace revision's [Cargo.toml](../../Cargo.toml). Refresh your
+lockfile and verify that it resolves one Auth source. The workspace release
+manifest records the locked Auth commit.
+
+```toml
+[dependencies]
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
+```
+
+Direct use is supported for tooling that needs the macro package:
+
+```toml
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", default-features = false, features = ["sqlite"] }
+```
+
+The direct dependency still requires a compatible `graphql-orm` runtime in the
+consumer crate because generated code refers to `::graphql_orm`. The macros do
+not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 ## Public macros
 
@@ -774,8 +831,7 @@ positive `result_maximum_items`; `secret` may only use `never_export`.
 `sqlite` is the default. Select `postgres` or `mssql` by disabling default
 features. The macro compiler rejects a build with no backend and a consumer
 must select an explicit backend when Cargo feature unification enables more
-than one. `mysql` exists as a macro feature but the runtime package does not
-offer a MySQL backend in this release; do not use it as application support.
+than one.
 
 Generated GraphQL naming is selected per build by the
 `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
@@ -916,7 +972,6 @@ arguments and propagation path authorization. See the workspace
 Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
-
 
 Version 0.91.1 keeps this crate aligned with `graphql-orm` 0.91.1. Generated code matches 0.91.0.
 

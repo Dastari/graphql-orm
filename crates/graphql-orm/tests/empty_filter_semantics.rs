@@ -185,14 +185,15 @@ fn an_empty_or_branch_is_true_and_keeps_bind_positions() {
         ..Default::default()
     };
     let (sql, binds) = filter.to_sql_conditions();
-    assert!(sql.join(" ").contains(" OR 1 = 1"));
+    // Each alternative is parenthesised; the empty one is an explicit TRUE.
+    assert!(sql.join(" ").contains(" OR (1 = 1)"), "{sql:?}");
     assert_eq!(binds.len(), 1);
     assert!(filter.matches_entity(&row()).unwrap());
     let all_empty = EmptyFilterRowWhereInput {
         or: Some(vec![Default::default(), Default::default()]),
         ..Default::default()
     };
-    assert_eq!(all_empty.to_sql_conditions().0, ["(1 = 1 OR 1 = 1)"]);
+    assert_eq!(all_empty.to_sql_conditions().0, ["((1 = 1) OR (1 = 1))"]);
     assert!(all_empty.matches_entity(&row()).unwrap());
 }
 #[cfg(feature = "sqlite")]

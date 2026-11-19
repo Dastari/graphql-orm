@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-// The pinned Hive/Ntex service type exceeds rustc 1.90's default query depth
-// when the maintained loopback test server is monomorphized.
+// Allow enough query depth to monomorphize the pinned Hive/Ntex service type
+// in the maintained loopback test server.
 #![recursion_limit = "256"]
 //! Project-neutral federated GraphQL router.
 //!
@@ -15,6 +15,12 @@ mod byte_route;
 mod config;
 mod federation;
 mod file_config;
+/// Bearer-authentication fuzz and corpus harnesses (#726); tests and
+/// `--cfg graphql_orm_router_fuzzing` builds only, never a dependant's generic
+/// `--cfg fuzzing` build.
+#[cfg(any(test, graphql_orm_router_fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing;
 mod http_body;
 mod jwt;
 mod lifecycle;

@@ -34,6 +34,19 @@ the same reviewed revision.
   delete the rows; see the
   [workspace migration guide](../../MIGRATION.md#breaking-release-unreleased).
   Take a full backup after a restore to start a new incremental chain.
+## 0.27.1 to 0.27.2: install documentation
+
+**No action.** The README now shows how to select a reviewed Git revision.
+No data migration is needed.
+
+## 0.27.0 to 0.27.1
+
+**No action.** Test-owned PostgreSQL containers are memory-capped. The library,
+manifests and restore behavior are unchanged.
+
+## 0.27.0
+
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
 ## To 0.26.0: host-held snapshot records
 

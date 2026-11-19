@@ -2172,6 +2172,17 @@ where
     }
 
     pub async fn commit_and_emit(self) -> crate::Result<()> {
+        self.commit_and_emit_tracked(None).await
+    }
+
+    /// [`Self::commit_and_emit`], recording on `outcome` when the commit is
+    /// sent and when it succeeded. A refusal that rolls back first leaves it
+    /// where it was, since nothing was committed.
+    #[doc(hidden)]
+    pub async fn commit_and_emit_tracked(
+        self,
+        outcome: Option<&crate::graphql::errors::MutationOutcomeTracker>,
+    ) -> crate::Result<()> {
         if self.runtime_state.write_refused() {
             self.rollback().await?;
             return Err(crate::graphql::errors::sqlx_error_from_public(
@@ -2202,7 +2213,13 @@ where
         // Transaction extensions end before the commit: nothing that runs
         // afterwards, including a deferred action, can observe one.
         drop(extensions);
+        if let Some(outcome) = outcome {
+            outcome.commit_started();
+        }
         B::commit_write_transaction(tx).await?;
+        if let Some(outcome) = outcome {
+            outcome.committed();
+        }
         for event in deferred_events {
             event.emit(db);
         }
@@ -3441,6 +3458,20 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// The default preserves callback-only authorization. A complete predicate
     /// (or `Unrestricted`) replaces row callbacks only on read paths that
     /// explicitly support this contract (including typed projections and group pages). Errors fail the request closed.
+    ///
+    /// With [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
+    /// on (it is off by default), generated GraphQL `updateMany` and
+    /// `deleteMany` also ask, on the `GraphqlMutation` surface, when
+    /// [`Self::write_target_prefilter`] returns `None`. A `Prefilter` or
+    /// `Complete` predicate then narrows their locking read: rows outside it
+    /// are never passed to a row callback, and are never locked on PostgreSQL.
+    /// On SQL Server they are not locked only with the separate opt-in
+    /// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets),
+    /// which gives up a serializable bulk-write transaction for it.
+    /// Every selected row is still classified by the row callbacks. A row outside the predicate is left out even if
+    /// [`Self::can_write_row`] would allow it; return a write-target
+    /// prefilter that selects such rows if callers may bulk-write rows they
+    /// cannot read. An error then refuses the bulk write.
     fn read_visibility<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,
@@ -3500,18 +3531,27 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// [`Self::can_write_row`] and [`Self::can_read_row`]; a row the caller
     /// can neither write nor read is treated as missing. Return a predicate
     /// that selects the rows this caller can read **or** write, and rows
-    /// outside it are never selected, locked or passed to a callback, which
-    /// removes the timing and lock-contention difference between a hidden row
-    /// and a missing one. It also keeps hidden rows out of
+    /// outside it are never selected or passed to a callback, and on
+    /// PostgreSQL never locked, which removes the timing and lock-contention
+    /// difference between a hidden row and a missing one. On SQL Server a
+    /// scan of the single `UPDLOCK, HOLDLOCK` read can still lock rows outside
+    /// it, unless a bulk write uses
+    /// [`mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets).
+    /// It also keeps hidden rows out of
     /// [`PaginationConfig::max_bulk_write_rows`](super::PaginationConfig::max_bulk_write_rows).
     ///
     /// The predicate only narrows. Every selected row still goes through the
     /// row callbacks, so it can never grant a write. A row it leaves out is
     /// treated exactly like a missing row, including a row the callbacks
     /// would have allowed, so it must not exclude rows the caller can write.
-    /// The default, `None`, keeps the callback-only behaviour. `policy_key`
-    /// is the entity's write policy key. Errors fail the write closed.
-    /// Repository writes do not ask.
+    /// The default, `None`, keeps the callback-only behaviour; a bulk write
+    /// on a database that opted into
+    /// [`narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
+    /// then narrows by the SQL predicate of [`Self::read_visibility`], when it
+    /// has one. A returned predicate takes precedence over read visibility in
+    /// both modes. `policy_key` is the
+    /// entity's write policy key. Errors fail the write closed. Repository
+    /// writes do not ask.
     fn write_target_prefilter<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,

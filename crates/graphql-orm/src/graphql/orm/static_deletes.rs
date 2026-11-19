@@ -491,7 +491,37 @@ pub enum StaticWriteResult<T> {
     /// The direct operation succeeded or is ready to apply.
     Ready(T),
     /// The direct operation returned a false mutation result and public message.
-    Rejected(String),
+    Rejected(StaticRejection),
+}
+/// A direct mutation result's public refusal: its message, and its code when
+/// the entity reports `mutation_error_codes`.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StaticRejection {
+    /// The public message.
+    pub message: String,
+    /// The payload's `errorCode`, if the result carried one.
+    pub code: Option<String>,
+}
+impl StaticRejection {
+    /// A refusal with this message and optional code.
+    pub fn new(message: impl Into<String>, code: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            code,
+        }
+    }
+    /// The refusal for a missing (or hidden) root row.
+    fn not_found() -> Self {
+        Self::new(
+            "Entity not found",
+            Some(
+                crate::graphql::errors::OrmErrorCode::NotFound
+                    .as_str()
+                    .to_owned(),
+            ),
+        )
+    }
 }
 impl<T> StaticWriteResult<T> {
     fn dependent(self) -> Result<T> {
@@ -512,6 +542,30 @@ pub trait StaticPreparedWrite<B: StaticDeleteBackend>: Send {
         tx: &'a mut MutationContext<'_, B>,
     ) -> BoxFuture<'a, Result<StaticWriteResult<StaticWriteCompletion<B>>>>;
 }
+/// A declared key column of an entity, as SQL that names it in that entity's
+/// own query: the column part of the declared path, so a table-qualified
+/// `db_column` such as `"t"."c"` reads `"c"` (#782).
+pub(crate) fn declared_column_sql(backend: super::DatabaseBackend, column: &str) -> String {
+    backend.quote_column_identifier(column)
+}
+
+/// A foreign-key column read from the pinned physical catalogue model, as
+/// SQL that names exactly that column (#782). Each backend's model has its
+/// own contract:
+///
+/// - SQLite and PostgreSQL report the catalogue's raw name, so it is always
+///   escaped and delimited as one literal name, never split or passed
+///   through: `parent.ref` is `"parent.ref"`, and a column literally named
+///   `"x"` is `"""x"""`, not `x`.
+/// - SQL Server introspection already reports each name as one delimited
+///   identifier (`[x]`, `[[x]]]`), which is passed through unchanged.
+pub(crate) fn physical_column_sql(backend: super::DatabaseBackend, column: &str) -> String {
+    match backend {
+        super::DatabaseBackend::Mssql => super::SqlDialect::quote_identifier(&backend, column),
+        _ => backend.delimit_raw_identifier(column),
+    }
+}
+
 /// Generated capability, available only on opted-in single-key writable entities.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
@@ -520,9 +574,12 @@ pub trait StaticPreparedWrite<B: StaticDeleteBackend>: Send {
 pub trait StaticDeleteEntity<B: StaticDeleteBackend>:
     Entity + super::DatabaseRls + Send + Sync + 'static
 {
+    /// Rows whose `column_sql` equals `value`. `column_sql` is the column as
+    /// SQL text, already rendered by the caller: see [`declared_column_sql`]
+    /// and [`physical_column_sql`].
     fn select<'a>(
         tx: &'a mut MutationContext<'_, B>,
-        column: &'a str,
+        column_sql: &'a str,
         value: SqlValue,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StaticDeleteRow>>>;
@@ -543,7 +600,7 @@ trait Adapter<B: StaticDeleteBackend>: Send + Sync {
     fn select<'a>(
         &self,
         tx: &'a mut MutationContext<'_, B>,
-        column: &'a str,
+        column_sql: &'a str,
         value: SqlValue,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StaticDeleteRow>>>;
@@ -570,11 +627,11 @@ impl<B: StaticDeleteBackend, T: StaticDeleteEntity<B>> Adapter<B> for TypedAdapt
     fn select<'a>(
         &self,
         tx: &'a mut MutationContext<'_, B>,
-        column: &'a str,
+        column_sql: &'a str,
         value: SqlValue,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StaticDeleteRow>>> {
-        T::select(tx, column, value, limit)
+        T::select(tx, column_sql, value, limit)
     }
     fn prepare<'a>(
         &self,
@@ -638,7 +695,7 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         ctx: &Context<'_>,
         key: SqlValue,
         expected: Option<i64>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<StaticRejection>> {
         let table = T::TABLE_NAME;
         // A physical table may have multiple GraphQL views. Never substitute
         // another view's policies, assurance, hooks or event type for this root.
@@ -671,7 +728,10 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         table: &str,
         key: SqlValue,
         expected: Option<i64>,
-    ) -> Result<(Option<String>, Vec<Box<dyn StaticCommittedNotification<B>>>)> {
+    ) -> Result<(
+        Option<StaticRejection>,
+        Vec<Box<dyn StaticCommittedNotification<B>>>,
+    )> {
         let db = ctx.data::<crate::db::Database<B>>()?;
         // Every registered entity that declares a write policy needs its row
         // provider, checked before any dependent is selected or locked.
@@ -701,11 +761,10 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
             .map_err(|_| refusal())?;
         let root = self.entities.get(table).ok_or_else(refusal)?;
         root.ensure_rls_context(ctx)?;
-        let mut rows = root
-            .select(&mut tx, root.metadata().primary_key, key, 2)
-            .await?;
+        let root_key = declared_column_sql(B::DIALECT, root.metadata().primary_key);
+        let mut rows = root.select(&mut tx, &root_key, key, 2).await?;
         if rows.is_empty() {
-            return Ok((Some("Entity not found".to_owned()), Vec::new()));
+            return Ok((Some(StaticRejection::not_found()), Vec::new()));
         }
         if rows.len() != 1 {
             return Err(refusal());
@@ -769,10 +828,11 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                     {
                         return Err(refusal());
                     }
+                    let source_column = physical_column_sql(B::DIALECT, &pair.source_column);
                     let found = adapter
                         .select(
                             &mut tx,
-                            &pair.source_column,
+                            &source_column,
                             source_key.clone(),
                             self.limits.max_rows() + 1,
                         )
@@ -998,13 +1058,10 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                             .entities
                             .get(source.table_name.as_str())
                             .ok_or_else(refusal)?;
+                        let source_column =
+                            physical_column_sql(B::DIALECT, &fk.column_pairs[0].source_column);
                         if !adapter
-                            .select(
-                                &mut tx,
-                                &fk.column_pairs[0].source_column,
-                                node.row.key.clone(),
-                                1,
-                            )
+                            .select(&mut tx, &source_column, node.row.key.clone(), 1)
                             .await
                             .map_err(|_| refusal())?
                             .is_empty()
@@ -1078,6 +1135,79 @@ mod ownership_identity_tests {
         assert_eq!(
             ownership.tables().collect::<Vec<_>>(),
             ["mixeddeletechildren", "mixeddeleteparents"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod column_sql_tests {
+    use super::{declared_column_sql, physical_column_sql};
+    use crate::graphql::orm::DatabaseBackend;
+
+    /// A dependent's foreign-key column comes from the catalogue: a literal
+    /// dotted name is one column and is never shortened to its last part,
+    /// so discovery and the pre-delete recheck read the same column (#782).
+    #[test]
+    fn catalogue_columns_are_one_name_and_declared_keys_keep_their_column_part() {
+        for (backend, dotted, qualified, column) in [
+            (
+                DatabaseBackend::Sqlite,
+                "\"parent.ref\"",
+                "\"t\".\"id\"",
+                "\"id\"",
+            ),
+            (
+                DatabaseBackend::Postgres,
+                "\"parent.ref\"",
+                "\"t\".\"id\"",
+                "\"id\"",
+            ),
+            (DatabaseBackend::Mssql, "[parent.ref]", "[t].[id]", "[id]"),
+        ] {
+            assert_eq!(
+                physical_column_sql(backend, "parent.ref"),
+                dotted,
+                "{backend:?}"
+            );
+            assert_eq!(
+                physical_column_sql(backend, "ref"),
+                column.replace("id", "ref")
+            );
+            assert_eq!(
+                declared_column_sql(backend, qualified),
+                column,
+                "{backend:?}"
+            );
+            assert_eq!(declared_column_sql(backend, "id"), column, "{backend:?}");
+        }
+        // SQLite and PostgreSQL report raw names: a name that looks
+        // delimited is still one literal name.
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            assert_eq!(
+                physical_column_sql(backend, "\"x\""),
+                "\"\"\"x\"\"\"",
+                "{backend:?}"
+            );
+            assert_eq!(
+                physical_column_sql(backend, "[x]"),
+                "\"[x]\"",
+                "{backend:?}"
+            );
+            assert_eq!(
+                physical_column_sql(backend, "`x`"),
+                "\"`x`\"",
+                "{backend:?}"
+            );
+        }
+        // SQL Server's pinned model reports catalogue names already
+        // delimited; they pass through as the same column.
+        assert_eq!(
+            physical_column_sql(DatabaseBackend::Mssql, "[parent.ref]"),
+            "[parent.ref]"
+        );
+        assert_eq!(
+            physical_column_sql(DatabaseBackend::Mssql, "[[x]]]"),
+            "[[x]]]"
         );
     }
 }

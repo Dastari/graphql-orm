@@ -101,6 +101,14 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     refuse_oversized_limit: bool,
     expose_uncoded_callback_messages: bool,
     max_page_offset: Option<i64>,
+    /// Opt-in `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an unstreamable selection.
+    subscription_selection_unsupported_code: bool,
+    /// Opt-in `extensions.outcome` on generated mutation root errors.
+    mutation_error_outcome: bool,
+    /// Opt-in narrowing of GraphQL bulk-write targets by read visibility.
+    narrow_bulk_writes_to_read_visibility: bool,
+    /// Opt-in SQL Server snapshot target selection for narrowed bulk writes.
+    mssql_snapshot_bulk_write_targets: bool,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
@@ -128,6 +136,10 @@ impl<B: OrmBackend> Clone for Database<B> {
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
             expose_uncoded_callback_messages: self.expose_uncoded_callback_messages,
+            subscription_selection_unsupported_code: self.subscription_selection_unsupported_code,
+            mutation_error_outcome: self.mutation_error_outcome,
+            narrow_bulk_writes_to_read_visibility: self.narrow_bulk_writes_to_read_visibility,
+            mssql_snapshot_bulk_write_targets: self.mssql_snapshot_bulk_write_targets,
             max_page_offset: self.max_page_offset,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
@@ -207,6 +219,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -241,6 +257,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -272,6 +292,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -303,6 +327,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -334,6 +362,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -368,6 +400,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -409,6 +445,10 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
             expose_uncoded_callback_messages: false,
+            subscription_selection_unsupported_code: false,
+            mutation_error_outcome: false,
+            narrow_bulk_writes_to_read_visibility: false,
+            mssql_snapshot_bulk_write_targets: false,
             max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
@@ -475,6 +515,63 @@ impl<B: OrmBackend> Database<B> {
     /// `INTERNAL_ERROR` with the default message.
     pub fn with_uncoded_callback_messages_exposed(mut self, expose: bool) -> Self {
         self.expose_uncoded_callback_messages = expose;
+        self
+    }
+
+    /// Whether an unstreamable generated subscription selection is refused
+    /// with `SUBSCRIPTION_SELECTION_UNSUPPORTED`; see
+    /// [`DatabaseBuilder::subscription_selection_unsupported_code`].
+    pub fn subscription_selection_unsupported_code_enabled(&self) -> bool {
+        self.subscription_selection_unsupported_code
+    }
+
+    /// Return a copy of this handle that refuses an unstreamable generated
+    /// subscription selection with `SUBSCRIPTION_SELECTION_UNSUPPORTED`; see
+    /// [`DatabaseBuilder::subscription_selection_unsupported_code`].
+    pub fn with_subscription_selection_unsupported_code(mut self, enabled: bool) -> Self {
+        self.subscription_selection_unsupported_code = enabled;
+        self
+    }
+
+    /// Whether generated mutation root errors carry `extensions.outcome`; see
+    /// [`DatabaseBuilder::mutation_error_outcome`].
+    pub fn mutation_error_outcome_enabled(&self) -> bool {
+        self.mutation_error_outcome
+    }
+
+    /// Return a copy of this handle whose generated mutation root errors
+    /// carry `extensions.outcome`; see [`DatabaseBuilder::mutation_error_outcome`].
+    pub fn with_mutation_error_outcome(mut self, enabled: bool) -> Self {
+        self.mutation_error_outcome = enabled;
+        self
+    }
+
+    /// Whether generated GraphQL bulk writes narrow their targets by read
+    /// visibility; see [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`].
+    pub fn narrow_bulk_writes_to_read_visibility_enabled(&self) -> bool {
+        self.narrow_bulk_writes_to_read_visibility
+    }
+
+    /// Return a copy of this handle whose generated GraphQL bulk writes narrow
+    /// their targets by read visibility; see
+    /// [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`].
+    pub fn with_narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
+        self.narrow_bulk_writes_to_read_visibility = enabled;
+        self
+    }
+
+    /// Whether narrowed SQL Server bulk writes select their targets from
+    /// snapshots instead of the serializable locking read; see
+    /// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`].
+    pub fn mssql_snapshot_bulk_write_targets_enabled(&self) -> bool {
+        self.mssql_snapshot_bulk_write_targets
+    }
+
+    /// Return a copy of this handle whose narrowed SQL Server bulk writes
+    /// select their targets from snapshots; see
+    /// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`].
+    pub fn with_mssql_snapshot_bulk_write_targets(mut self, enabled: bool) -> Self {
+        self.mssql_snapshot_bulk_write_targets = enabled;
         self
     }
 
@@ -1669,7 +1766,10 @@ impl<B: OrmBackend> Database<B> {
         }
         fn after_commit(error: async_graphql::Error) -> async_graphql::Error {
             error.extend_with(|_, extensions| {
-                extensions.set("outcome", "committed");
+                extensions.set(
+                    "outcome",
+                    crate::graphql::errors::MutationOutcome::Committed.as_str(),
+                );
                 extensions.set("retryable", false);
             })
         }
@@ -2341,6 +2441,100 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     ) -> Self {
         self.database
             .set_subscription_authority_recheck_interval(interval);
+        self
+    }
+
+    /// Refuse a generated `Changed` subscription whose selection can never be
+    /// streamed (a relation, a computed field or an unavailable key) with
+    /// `extensions.code` `SUBSCRIPTION_SELECTION_UNSUPPORTED` instead of
+    /// `INVALID_INPUT`. Off by default, so clients that match
+    /// `INVALID_INPUT` keep working; the message is the same either way.
+    /// Other invalid stream input, such as a `Keys` list over its bound,
+    /// stays `INVALID_INPUT`.
+    pub fn subscription_selection_unsupported_code(mut self, enabled: bool) -> Self {
+        self.database.subscription_selection_unsupported_code = enabled;
+        self
+    }
+
+    /// Add `extensions.outcome` to every error a generated create, upsert,
+    /// update, delete, `updateMany` or `deleteMany` root raises: `refused`
+    /// (nothing was attempted), `failed` (attempted and rolled back),
+    /// `committed`, or `unknown` (for example a failed commit). Off by
+    /// default, so responses are unchanged; see
+    /// [`MutationOutcome`](crate::graphql::errors::MutationOutcome).
+    ///
+    /// With this set, a generated bulk write whose commit fails raises a
+    /// top-level error with `outcome: "unknown"` instead of returning
+    /// `success: false`, so `success: false` always means nothing was written.
+    pub fn mutation_error_outcome(mut self, enabled: bool) -> Self {
+        self.database.mutation_error_outcome = enabled;
+        self
+    }
+
+    /// Narrow the target rows of generated GraphQL `updateMany` and
+    /// `deleteMany` to the caller's read visibility. Off by default, so bulk
+    /// writes select the same rows as before.
+    ///
+    /// When on and the row policy declares no
+    /// [`write_target_prefilter`](crate::graphql::orm::RowPolicy::write_target_prefilter),
+    /// a `Prefilter` or `Complete` predicate from
+    /// [`RowPolicy::read_visibility`](crate::graphql::orm::RowPolicy::read_visibility)
+    /// on the `GraphqlMutation` surface is added to the bulk write's locking
+    /// read. Rows outside it are not passed to a row callback or counted
+    /// against the bulk bound or scan budget, and on PostgreSQL they are not
+    /// locked. On SQL Server the read stays the single serializable
+    /// `UPDLOCK, HOLDLOCK` read, which may lock rows a scan reads outside the
+    /// predicate, unless
+    /// [`mssql_snapshot_bulk_write_targets`](Self::mssql_snapshot_bulk_write_targets)
+    /// is also on.
+    /// Every selected row is still classified by the row callbacks, so visible
+    /// rows give the same payload and writes.
+    ///
+    /// A row the caller may write but not read is then left out, as a missing
+    /// row is; a declared `write_target_prefilter` takes precedence in both
+    /// modes and keeps such rows targets. With this on, an error from
+    /// `read_visibility` on the `GraphqlMutation` surface refuses the bulk
+    /// write, so a policy that returns `Err` for some callers (for example
+    /// write-only ones) must return `CallbackOnly` instead to keep their bulk
+    /// writes working. Single-row and repository writes are unaffected.
+    pub fn narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
+        self.database.narrow_bulk_writes_to_read_visibility = enabled;
+        self
+    }
+
+    /// SQL Server only: let a narrowed bulk write select its targets from
+    /// snapshots instead of the serializable locking read, so it never locks
+    /// or waits on a row outside its candidates, except through lock
+    /// escalation (see below). Off by default, and
+    /// independent of
+    /// [`narrow_bulk_writes_to_read_visibility`](Self::narrow_bulk_writes_to_read_visibility),
+    /// which it requires. **It weakens the bulk write's transaction from
+    /// serializable.**
+    ///
+    /// It applies to a generated GraphQL `updateMany` or `deleteMany` with a
+    /// SQL predicate (read visibility or a `write_target_prefilter`), when the
+    /// database has `READ_COMMITTED_SNAPSHOT` on and the target is a base
+    /// table whose key has an enabled, unfiltered unique single-column index, of type
+    /// `uniqueidentifier`, `nvarchar`/`nchar` or an integer, with row locks
+    /// allowed on every index. Otherwise the serializable locking read is
+    /// used. The write reads its candidates in one snapshot without a lock,
+    /// locks only those keys exclusively by a forced key seek and checks them
+    /// again, then reads the candidates again in a new snapshot and refuses
+    /// the write with a retryable `SERVICE_UNAVAILABLE` if they are not
+    /// exactly the locked rows that still match.
+    ///
+    /// The guarantee is exactly this: the target set equals the rows that
+    /// match at the validation snapshot, and they cannot change before the
+    /// write commits. No range is locked, so another transaction can commit a
+    /// row that starts to match after the validation snapshot, together with
+    /// other changes, without waiting for the write; later reads in the same
+    /// bulk write (before-update hooks, field authorizers, triggers) can see
+    /// those other changes while the row itself is not written. The
+    /// strict-authorization reference lists what else remains, including that
+    /// SQL Server can escalate the write's row locks to a table lock, which
+    /// covers hidden rows.
+    pub fn mssql_snapshot_bulk_write_targets(mut self, enabled: bool) -> Self {
+        self.database.mssql_snapshot_bulk_write_targets = enabled;
         self
     }
 

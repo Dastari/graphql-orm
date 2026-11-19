@@ -926,6 +926,7 @@ mod sys {
         Ok(Info {
             kind,
             len: metadata.len(),
+            // Modification time is optional on filesystems that cannot supply it.
             modified: metadata.modified().ok(),
             links,
             identity: (volume, index),
@@ -991,6 +992,7 @@ mod sys {
             .open(&path)?;
         if let Err(err) = check_intact(dir) {
             drop(file);
+            // Best-effort cleanup of the writability probe.
             let _ = std::fs::remove_file(&path);
             return Err(err);
         }

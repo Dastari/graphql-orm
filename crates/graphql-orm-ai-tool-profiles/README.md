@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+Version 0.26.0 reuses compiled plan and argument validators. See the
+[migration guide](MIGRATION.md#0250-to-0260).
+
+Version 0.25.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 `graphql-orm-ai-tool-profiles` compiles reviewed static profiles and automatic,
 least-disclosure GraphQL query capabilities against a finished SDL. It emits
 closed provider schemas, exact server-owned documents, disclosure contracts,
@@ -134,9 +140,14 @@ authorization policies. No downstream catalogue filtering is needed.
 
 ## Install
 
+Find the package manifest in the
+[workspace package inventory](../../docs/reference/workspace-packages.md)
+and the released version and source revision in the
+[workspace release manifest](../../docs/operations/release/process.md#release-identities).
+
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.20.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>" }
 serde_json = "1"
 ```
 

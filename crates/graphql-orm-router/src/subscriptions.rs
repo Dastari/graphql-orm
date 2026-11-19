@@ -715,11 +715,11 @@ async fn handle_text(
         "pong" => None,
         "subscribe" => {
             let refusal_outcome = state.borrow().gateway.refusal_outcome;
-            forward_subscribe(message, text, state)
+            forward_subscribe(message, state)
                 .await
                 .map(|reply| mark_subscribe_refusal(reply, refusal_outcome))
         }
-        "complete" => forward_complete(message, text, state).await,
+        "complete" => forward_complete(message, state).await,
         _ => state
             .borrow_mut()
             .terminate_with_public_close(4400, "Invalid client message"),
@@ -828,6 +828,7 @@ fn connection_init_authorization(message: &Value) -> Option<&str> {
 // select a query from a document that also contains a subscription or fragments.
 fn selected_subscription(message: &Value) -> Option<bool> {
     let payload = message.get("payload")?;
+    // The execution path handles malformed queries.
     let document = cynic_parser::parse_executable_document(payload.get("query")?.as_str()?).ok()?;
     let name = match payload.get("operationName") {
         None | Some(Value::Null) => None,
@@ -855,7 +856,12 @@ impl BridgeFrame {
     /// would drop it later.
     fn parse(frame: ws::Frame) -> Option<Self> {
         match frame {
-            ws::Frame::Text(bytes) => serde_json::from_slice(&bytes).ok().map(Self::Message),
+            ws::Frame::Text(bytes) => serde_json::from_slice(&bytes)
+                .inspect_err(|_| {
+                    tracing::warn!("private subscription endpoint sent malformed JSON")
+                })
+                .ok()
+                .map(Self::Message),
             frame => Some(Self::Control(frame)),
         }
     }
@@ -1119,7 +1125,6 @@ fn public_server_message(mut message: Value, state: &SharedConnectionState) -> O
 
 async fn forward_subscribe(
     mut message: Value,
-    _raw: &str,
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::Ready {
@@ -1205,20 +1210,14 @@ async fn forward_subscribe(
         state.gateway.add_operation();
     }
     let persisted = state.borrow().gateway.persisted_documents.is_some();
-    if persisted {
-        inject_operation_variables_inner(
-            &mut message,
-            crate::persisted::INTERNAL_FRAME_BYTES,
-            true,
-        );
+    let internal_max_bytes = if persisted {
+        crate::persisted::INTERNAL_FRAME_BYTES
     } else {
-        let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
-        inject_operation_variables(&mut message, internal_max_bytes);
-    }
-    // Measure the exact JSON bytes sent to Hive, after document expansion,
-    // internal id assignment, and the complete bounded authorization projection.
-    // The codec limit counts the frame payload, excluding its header and mask.
-    let encoded = message.to_string();
+        state.borrow().gateway.config.max_client_message_bytes
+    };
+    // The codec counts the exact JSON bytes sent to Hive, excluding the frame
+    // header and mask. This includes any expanded document and projection.
+    let encoded = encode_operation_variables(&mut message, internal_max_bytes, persisted);
     if persisted && encoded.len() > crate::persisted::INTERNAL_FRAME_BYTES {
         state.borrow_mut().remove_operation(&id);
         return Some(ws::Message::Text(
@@ -1265,17 +1264,13 @@ fn mark_subscribe_refusal(reply: ws::Message, refusal_outcome: bool) -> ws::Mess
     ws::Message::Text(message.to_string().into())
 }
 
-fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
-    inject_operation_variables_inner(message, internal_max_bytes, false);
-}
-
-fn inject_operation_variables_inner(
+fn encode_operation_variables(
     message: &mut Value,
     internal_max_bytes: usize,
     exact_budget: bool,
-) {
+) -> String {
     let Some(payload) = message.get_mut("payload").and_then(Value::as_object_mut) else {
-        return;
+        return message.to_string();
     };
     let mut candidates = payload
         .get("variables")
@@ -1314,7 +1309,7 @@ fn inject_operation_variables_inner(
 
     let extensions = payload.entry("extensions").or_insert_with(|| json!({}));
     let Some(extensions) = extensions.as_object_mut() else {
-        return;
+        return message.to_string();
     };
     // The public gateway is the only writer trusted by the private Hive
     // endpoint. Replace client-supplied reserved metadata with a small scalar
@@ -1325,73 +1320,42 @@ fn inject_operation_variables_inner(
         Value::Object(projected),
     );
 
-    if exact_budget {
-        // Persisted forwarding refuses an oversized operation as a whole. Never
-        // strip authorization projection to make room for the document.
-        return;
+    let encoded = message.to_string();
+    // Persisted forwarding refuses oversized operations as a whole and keeps
+    // the entire authorization projection.
+    if exact_budget || encoded.len() <= internal_max_bytes {
+        return encoded;
     }
 
-    // Trim with exact compact-JSON size arithmetic rather than re-serialising
-    // the whole message per removed entry. An object entry costs its encoded
-    // key, a colon and its encoded value, plus one comma unless it is alone.
-    let mut encoded_len = message.to_string().len();
+    let extensions = message["payload"]["extensions"]
+        .as_object_mut()
+        .expect("extensions object installed above");
+    let projected = extensions
+        .get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION)
+        .and_then(Value::as_object_mut)
+        .expect("projection object installed above");
+
+    // Compact JSON charges the encoded key, colon and encoded value for each
+    // entry, plus a comma when another entry remains. Use those exact sizes
+    // to choose the trim point before re-encoding the message.
+    let mut encoded_len = encoded.len();
     while encoded_len > internal_max_bytes {
-        let Some(projected) = message
-            .get_mut("payload")
-            .and_then(Value::as_object_mut)
-            .and_then(|payload| payload.get_mut("extensions"))
-            .and_then(Value::as_object_mut)
-            .and_then(|extensions| extensions.get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION))
-            .and_then(Value::as_object_mut)
-        else {
-            break;
-        };
         let Some(name) = projected.keys().next_back().cloned() else {
+            extensions.remove(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION);
             break;
         };
-        let Some(value) = projected.remove(&name) else {
-            break;
-        };
+        let value = projected.remove(&name).expect("key selected above");
         let entry = serde_json::to_string(&name)
             .expect("JSON variable name")
             .len()
             + 1
             + value.to_string().len();
-        let separator = usize::from(!projected.is_empty());
-        encoded_len = encoded_len.saturating_sub(entry + separator);
+        encoded_len -= entry + usize::from(!projected.is_empty());
     }
-
-    // Confirm with one real serialization; this also removes an emptied
-    // projection when the message is still too large.
-    while message.to_string().len() > internal_max_bytes {
-        let Some(projected) = message
-            .get_mut("payload")
-            .and_then(Value::as_object_mut)
-            .and_then(|payload| payload.get_mut("extensions"))
-            .and_then(Value::as_object_mut)
-            .and_then(|extensions| extensions.get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION))
-            .and_then(Value::as_object_mut)
-        else {
-            break;
-        };
-        let Some(name) = projected.keys().next_back().cloned() else {
-            message
-                .get_mut("payload")
-                .and_then(Value::as_object_mut)
-                .and_then(|payload| payload.get_mut("extensions"))
-                .and_then(Value::as_object_mut)
-                .map(|extensions| extensions.remove(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION));
-            break;
-        };
-        projected.remove(&name);
-    }
+    message.to_string()
 }
 
-async fn forward_complete(
-    mut message: Value,
-    _raw: &str,
-    state: SharedConnectionState,
-) -> Option<ws::Message> {
+async fn forward_complete(mut message: Value, state: SharedConnectionState) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::Ready {
         return state
             .borrow_mut()
@@ -1652,6 +1616,7 @@ mod tests {
 
     /// The pre-parse test entry point: frames arrive as text.
     fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
+        // Malformed fixture payloads have no translatable message.
         super::public_server_message(serde_json::from_slice(bytes).ok()?, state)
     }
 
@@ -1760,8 +1725,7 @@ mod tests {
             if let Some(query) = query {
                 duplicate["payload"]["query"] = json!(query);
             }
-            let result =
-                futures::executor::block_on(forward_subscribe(duplicate, "", state.clone()));
+            let result = futures::executor::block_on(forward_subscribe(duplicate, state.clone()));
             let Some(ws::Message::Close(Some(reason))) = result else {
                 panic!("duplicate must close with 4409, even for {query:?}: {result:?}");
             };
@@ -2109,7 +2073,7 @@ mod tests {
         // The old algorithm: re-serialise after every removed entry.
         let reference = |limit: usize| {
             let mut value = message();
-            inject_operation_variables(&mut value, usize::MAX);
+            encode_operation_variables(&mut value, usize::MAX, false);
             while value.to_string().len() > limit {
                 let extensions = value["payload"]["extensions"].as_object_mut().unwrap();
                 let Some(projected) = extensions
@@ -2128,17 +2092,16 @@ mod tests {
         };
         let full = {
             let mut value = message();
-            inject_operation_variables(&mut value, usize::MAX);
-            value.to_string().len()
+            encode_operation_variables(&mut value, usize::MAX, false).len()
         };
         for limit in (0..=full + 2).step_by(7).chain([full, full - 1, 1]) {
             let mut trimmed = message();
-            inject_operation_variables(&mut trimmed, limit);
+            let encoded = encode_operation_variables(&mut trimmed, limit, false);
             let expected = reference(limit);
             assert_eq!(trimmed, expected, "limit {limit}");
             // Compare the exact serialized bytes sent to the private endpoint.
             assert_eq!(
-                trimmed.to_string().into_bytes(),
+                encoded.into_bytes(),
                 expected.to_string().into_bytes(),
                 "limit {limit}"
             );
@@ -2160,7 +2123,7 @@ mod tests {
             }
         });
 
-        inject_operation_variables(&mut message, 64 * 1024);
+        encode_operation_variables(&mut message, 64 * 1024, false);
 
         assert_eq!(message["payload"]["variables"], json!({"Id": "actual"}));
         assert_eq!(
@@ -2185,7 +2148,7 @@ mod tests {
         });
         let public_size = message.to_string().len();
 
-        inject_operation_variables(&mut message, 64 * 1024);
+        encode_operation_variables(&mut message, 64 * 1024, false);
 
         let internal_size = message.to_string().len();
         assert!(public_size < 64 * 1024);

@@ -60,6 +60,39 @@ Part of the single breaking release; see the root [migration guide](../../MIGRAT
 - **Breaking (approvals, #465):** `AiApprovalServiceLimits::new` refuses a `maximum_approval_lifetime` above `AI_APPROVAL_LIFETIME_CEILING` (7 days). The default is the new constant `AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME` (24 hours, unchanged). `AiApprovalServiceLimits::maximum_approval_lifetime()` reads the configured cap.
 - **Persistence (#532):** apply AI schema module `0.82.0`. It adds unique indexes on approvals `tool_call_id`, run attempts `(run_id, lease_generation)` and context checkpoints `(session_id, through_sequence)`. The ORM refuses the migration with `UniqueIndexDuplicates` before any DDL if existing rows repeat one of these keys; duplicates are not merged for you. Tool-call `idempotency_key` gets no separate index: every non-null value is derived from the already-unique `provider_call_key`.
 - **Documentation (#532):** the [security guide](docs/security.md#database-trust-boundary) states the database trust boundary: integrity hashes are unkeyed and lifecycle columns are not authenticated, so the AI tables must be a trusted store.
+## Unreleased - 0.150.2
+
+- Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
+
+## Unreleased - 0.150.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- The PostgreSQL parity test starts its disposable container with a hard
+  `--memory 4g --memory-swap 4g` limit. Library code, API, approval digests,
+  stored state and the schema are unchanged.
+
+## Unreleased - 0.150.0
+
+- Reuse compiled registered-tool argument validators and share ORM conversion
+  helpers, lifecycle state handling and SSE framing. Approval digests, stored
+  state strings, API errors and the database schema are unchanged.
+- Emit a content-free ORM error code at debug level when a shared mapper returns
+  a persistence failure.
+
+## Unreleased - 0.149.0
+
+- **Providers (OpenAI Responses, also xAI and OpenAI-compatible routes):** a streamed `response.incomplete` with `incomplete_details.reason = "max_output_tokens"` completes the turn with exact usage and a visible notice that the response may be incomplete, instead of ending the stream with no usage after the tokens were spent. Function-call events are held until the response finishes; a request in a turn cut off this way is dropped and never dispatched, including one whose arguments had finished, and the notice says no tool was run. The notice counts against the visible-text bound. Other incomplete reasons, and a provider-run built-in call that did not finish, stay refused. Fixes #749.
+- **Providers (Ollama):** a final chunk with `done_reason = "length"` completes the turn with the same notice instead of silently as if the answer were whole. Tool requests are held until the final chunk and dropped by a `length` stop. Visible text, including the notice, is bounded by the 16 MiB stream bound (#749).
+- **Stored responses:** an output-limit stop now returns a result, so a response stored with `store: true` is recorded in the stored-response ledger and deleted with its session; before, the failed stream left it unrecorded. Such a response may hold a cut-off function call. No later turn continues from it: the turn has no tool calls, so no `AiAgentContinuation` can follow it, and stateless replay never persists the call. See [OpenAI output-limit stops](docs/read-only-tool-loop.md#openai-output-limit-stops) (#749).
+- **Fixed (conversation bootstrap):** the tool-call window is read whole, up to the requested `tool_call_limit` (at most 500), in pages no larger than the database's maximum page limit. It used to be clamped to that maximum (100 by default), so a conversation with more tool calls than the maximum always returned `reset_required = true`. `reset_required` from tool calls now means only that the selected runs hold more calls than the requested window. Fixes #754.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`. See the [migration guide](MIGRATION.md#01480-to-01490-output-limit-stops-and-the-bootstrap-tool-call-window).
+
+## Unreleased - 0.148.0
+
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## Unreleased - 0.147.0
 
 - **Changed (leases):** `AiRunServiceLimits::new` now sets a lease-recovery clock-skew grace of a quarter of the lease TTL in whole seconds, at most 30 seconds (15 seconds for a one-minute lease). `recover_expired_leases` waits that long past a lease's stamped expiry, so a recovering process whose clock runs ahead of the lease holder's by less than the grace can no longer close a live lease. Recovery of a dead lease is delayed by the same amount; `with_lease_recovery_grace(Duration::ZERO)` restores the previous timing. The approval half of #536 (approvals closed with their run, decisions refused once the run leaves `WaitingApproval`, the lease renewed during tool execution) shipped in 0.138.0. Fixes #536.
