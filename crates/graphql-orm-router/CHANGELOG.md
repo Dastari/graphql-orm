@@ -10,7 +10,15 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.16.7
+## Unreleased - 0.16.8
+
+- Document the scoped startup hand-off of prepared runtimes into the Hive
+  plugin and why the process-wide registry stays until Hive supports state
+  injection. Clarify comments on the trimmed-frame size arithmetic, the
+  infallible lookups beside it, and the 304 handling in `BoundedResponse`.
+  No behaviour changes.
+
+## 0.16.7 (unreleased)
 
 - Install from a reviewed Git revision using the package inventory and release manifest. Direct Auth dependency guidance follows the selected revision's workspace manifest.
 

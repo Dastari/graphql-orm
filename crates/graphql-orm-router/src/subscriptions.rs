@@ -1295,6 +1295,8 @@ fn encode_operation_variables(
         return encoded;
     }
 
+    // These lookups cannot fail: the `extensions` object was checked and the
+    // projection object inserted a few lines above, and nothing replaced them.
     let extensions = message["payload"]["extensions"]
         .as_object_mut()
         .expect("extensions object installed above");
@@ -1312,12 +1314,19 @@ fn encode_operation_variables(
             extensions.remove(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION);
             break;
         };
+        // The key was just read from this map, so the removal cannot miss.
         let value = projected.remove(&name).expect("key selected above");
         let entry = serde_json::to_string(&name)
             .expect("JSON variable name")
             .len()
             + 1
             + value.to_string().len();
+        // Plain subtraction cannot underflow: `encoded_len` starts as the size
+        // of the whole message, which contains every entry removed here and
+        // each entry's separating comma, so the running total never drops
+        // below the size of what is left. Saturating arithmetic would only
+        // hide a broken size computation, and the loop ends as soon as the
+        // map is empty.
         encoded_len -= entry + usize::from(!projected.is_empty());
     }
     message.to_string()
