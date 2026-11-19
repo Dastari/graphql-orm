@@ -10,6 +10,36 @@ supersedes: []
 
 # Migration Guide
 
+## 0.179.1 to 0.180.0: opt-in SQL Server snapshot bulk-write targets
+
+Upgrade ORM and macros together and recompile entities: generated bulk writes
+pass the runtime a key accessor. No data migration is needed.
+
+- **SQL Server snapshot bulk-write targets (#752). No action** (opt-in).
+  `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` is new and off
+  by default; with it off, every bulk write behaves as before, including
+  narrowed SQL Server bulk writes, which keep the serializable
+  `UPDLOCK, HOLDLOCK` read. With it and
+  `narrow_bulk_writes_to_read_visibility` on, generated GraphQL
+  `updateMany`/`deleteMany` on SQL Server read their candidates in a snapshot
+  without a lock, lock only those keys exclusively, and validate the
+  candidates in a second snapshot, so they no longer lock or wait on hidden
+  rows. This applies where the database has `READ_COMMITTED_SNAPSHOT` on and
+  the target is a base table with a unique index on the key alone, row locks
+  allowed on every index, and a `uniqueidentifier`, `nvarchar`/`nchar` or
+  integer key. Before you turn it on:
+  - the bulk write's transaction is then **not serializable**. The target set
+    equals the rows that match at the validation snapshot, but another
+    transaction can commit a row that starts to match, with other changes,
+    without waiting; later reads in the same bulk write (hooks, field
+    authorizers, triggers) can see those changes while the row is not written;
+  - a concurrent change to the candidates refuses the write with
+    `errorCode = "SERVICE_UNAVAILABLE"` (marked retryable); retry the mutation;
+  - the candidates are locked exclusively until the write ends; readers that
+    hold their locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
+
+  See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+
 ## 0.179.0 to 0.179.1: test-owned PostgreSQL memory cap
 
 **No action.** Upgrade ORM and macros together. Test-owned PostgreSQL containers
