@@ -10,10 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.180.0 pairs with the runtime's SQL Server closure read predicates. Generated where inputs
+Version 0.181.0 pairs with the runtime's SQL Server closure read predicates. Generated where inputs
 render their nested `and`, `or` and `not` lists as balanced parenthesised pairs, which keeps long
 lists shallow for the SQL parser with the same meaning and bind order. Generated where-input and
 ordering preparation share one per-statement relation-policy budget.
+
+Version 0.180.0 passes the runtime a key accessor from generated `updateMany` and `deleteMany`,
+which the opt-in SQL Server snapshot bulk-write target selection uses to lock its targets by key (#752).
+Upgrade ORM and macros together; see the
+[migration guide](../../MIGRATION.md#01791-to-01800-opt-in-sql-server-snapshot-bulk-write-targets).
 
 Version 0.179.1 changes no macro output; it keeps the version line aligned with the ORM, whose test-owned PostgreSQL containers are now memory-capped.
 

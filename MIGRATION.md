@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.1 to 0.180.0: closure read predicates on SQL Server
+## 0.180.0 to 0.181.0: closure read predicates on SQL Server
 
 Upgrade ORM and macros together and recompile entities: generated where
 inputs render their nested lists as balanced pairs and share a
@@ -53,7 +53,13 @@ per-statement relation budget. No data migration is needed. See
     `READ_PREDICATE_MAX_STATEMENT_RELATIONS`,
     `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`). Each count ordering
     counts at least one. A client request with more relation filters or count
-    orderings than that is refused;
+    orderings than that is refused. **On SQL Server in particular**, a target
+    that clients filter by (a generated relation filter) or count-order by
+    must keep its own policy to **4 relations or fewer**, closures counting
+    1 each: a relation filter or a count ordering costs its target's policy
+    plus one, against a statement budget of 5. Otherwise every such filter or
+    ordering is refused with `AUTHORIZATION_MISCONFIGURED`, and several in
+    one request share the same 5;
   - more than 16 terms in a generated `orderBy` list (`MAX_ORDER_BY_TERMS`),
     refused as `INVALID_INPUT`.
 
@@ -74,6 +80,36 @@ per-statement relation budget. No data migration is needed. See
   pairs. The rendered SQL groups operands differently but means the same, and
   bind order is unchanged. Long generated `or` lists that SQLite refused past
   its 1,000-deep expression limit now run.
+
+## 0.179.1 to 0.180.0: opt-in SQL Server snapshot bulk-write targets
+
+Upgrade ORM and macros together and recompile entities: generated bulk writes
+pass the runtime a key accessor. No data migration is needed.
+
+- **SQL Server snapshot bulk-write targets (#752). No action** (opt-in).
+  `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` is new and off
+  by default; with it off, every bulk write behaves as before, including
+  narrowed SQL Server bulk writes, which keep the serializable
+  `UPDLOCK, HOLDLOCK` read. With it and
+  `narrow_bulk_writes_to_read_visibility` on, generated GraphQL
+  `updateMany`/`deleteMany` on SQL Server read their candidates in a snapshot
+  without a lock, lock only those keys exclusively, and validate the
+  candidates in a second snapshot, so they no longer lock or wait on hidden
+  rows. This applies where the database has `READ_COMMITTED_SNAPSHOT` on and
+  the target is a base table with a unique index on the key alone, row locks
+  allowed on every index, and a `uniqueidentifier`, `nvarchar`/`nchar` or
+  integer key. Before you turn it on:
+  - the bulk write's transaction is then **not serializable**. The target set
+    equals the rows that match at the validation snapshot, but another
+    transaction can commit a row that starts to match, with other changes,
+    without waiting; later reads in the same bulk write (hooks, field
+    authorizers, triggers) can see those changes while the row is not written;
+  - a concurrent change to the candidates refuses the write with
+    `errorCode = "SERVICE_UNAVAILABLE"` (marked retryable); retry the mutation;
+  - the candidates are locked exclusively until the write ends; readers that
+    hold their locks (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`) wait.
+
+  See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
 ## 0.179.0 to 0.179.1: test-owned PostgreSQL memory cap
 

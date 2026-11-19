@@ -1044,7 +1044,7 @@ fn not_related_chains_stop_at_the_case_and_relation_limits() {
                 &|_| true,
             );
             // Two CASE levels each: at most five within the CASE limit of 10.
-            // SQL Server's six-relation total stops it at two.
+            // SQL Server's nine-relation total stops it at two.
             assert_eq!(levels, if cfg!(feature = "mssql") { 2 } else { 5 });
             let failures = run_statement_paths(&db, "deepest not_related chain", &deepest).await;
             let _keep = owned;

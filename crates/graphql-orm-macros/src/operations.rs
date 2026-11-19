@@ -11157,6 +11157,7 @@ fn generate_graphql_operations_unfiltered(
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
+                    |entity: &Self| #pk_bind_value_for_entity,
                 ))
                 .await?;
 
@@ -11610,6 +11611,7 @@ fn generate_graphql_operations_unfiltered(
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
+                    |entity: &Self| #pk_bind_value_for_entity,
                 ))
                 .await?;
 

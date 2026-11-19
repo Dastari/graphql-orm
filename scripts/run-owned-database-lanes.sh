@@ -239,7 +239,7 @@ case "${lane}" in
   bulk-write-targets)
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
-        --test bulk_write_targets --test transaction_scope_backends --test ordered_sort -- --include-ignored --test-threads=1
+        --test bulk_write_targets --test mssql_bulk_write_key_paths --test transaction_scope_backends --test ordered_sort -- --include-ignored --test-threads=1
     done
     ;;
   query-loader-batch)

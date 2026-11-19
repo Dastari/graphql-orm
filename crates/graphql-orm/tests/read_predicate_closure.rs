@@ -596,7 +596,7 @@ mod portable {
         }
         // Each level adds two nested CASE expressions: the CASE limit stops
         // the chain at five levels, before its doubled target grows large.
-        // SQL Server's six-relation total stops it at two.
+        // SQL Server's nine-relation total stops it at two.
         assert_eq!(READ_PREDICATE_MAX_CASE_NESTING, 10);
         assert_eq!(
             built,

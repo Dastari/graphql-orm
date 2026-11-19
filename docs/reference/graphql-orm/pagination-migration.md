@@ -404,8 +404,9 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     as one relation. The limit of 14 per statement leaves twice that
     margin. Every shape probed within the limits (145, on fetch, count,
     keyset pages and GraphQL lists) ran or was refused when the request was
-    prepared. The slowest took about 2 s, and the 3 GB-capped server peaked
-    at 1.3 GB.
+    prepared. In an independent re-check at the exact limits, the slowest
+    admitted shape took about 4.5 s (a policy of nine closures, with closures
+    nested inside them), and the 3 GB-capped server peaked at 1.49 GB.
   - **PostgreSQL memory and time.** PostgreSQL plans nested relations
     together, and its memory grows steeply with their depth and total: a
     chain of 128 nested relations peaked at 2.5 GB on a server capped at
