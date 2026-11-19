@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.150.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- The PostgreSQL parity test starts its disposable container with a hard
+  `--memory 4g --memory-swap 4g` limit. Library code, API, approval digests,
+  stored state and the schema are unchanged.
+
 ## Unreleased - 0.150.0
 
 - Reuse compiled registered-tool argument validators and share ORM conversion

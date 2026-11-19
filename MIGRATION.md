@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.179.0 to 0.180.0: SQL identifier quoting
+## 0.179.1 to 0.180.0: SQL identifier quoting
 
 Upgrade ORM and macros together. Generated code and statement text are
 unchanged for every name that rendered as exactly one identifier before,
@@ -82,6 +82,12 @@ except for the per-backend path splitting below.
     table or none, so a plan could see a spurious foreign-key change.
   - SQLite `PRAGMA` introspection and the PostgreSQL search-metadata read
     delimit the raw names they address.
+
+## 0.179.0 to 0.179.1: test-owned PostgreSQL memory cap
+
+**No action.** Upgrade ORM and macros together. Test-owned PostgreSQL containers
+are memory-capped (`--memory 4g --memory-swap 4g`); the library, generated code,
+stored data and configuration are unchanged.
 
 ## 0.177.0 to 0.179.0: identifier quoting and canonical JSON properties
 

@@ -33,6 +33,8 @@ then prove the container is absent. The runner rejects `DATABASE_URL`,
 `TEST_DATABASE_URL`, and `MSSQL_TEST_DATABASE_URL` so an ambient endpoint cannot
 silently replace the owned resource.
 
+Every owned PostgreSQL container is started with a hard `--memory 4g --memory-swap 4g` limit (no swap), matching the SQL Server launcher, so a runaway backend is killed inside its container instead of exhausting the host.
+
 Docker must be available to the invoking user. A required owned lane that
 cannot start Docker fails; it does not report a skipped parity result. The
 containers run sequentially and must never share state.

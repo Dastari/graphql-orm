@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.180.0
 
-SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issues/782), [#783](https://github.com/Dastari/graphql-orm/issues/783)), found by the identifier-quoting property suite. See the [migration guide](MIGRATION.md#01790-to-01800-sql-identifier-quoting).
+SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issues/782), [#783](https://github.com/Dastari/graphql-orm/issues/783)), found by the identifier-quoting property suite. See the [migration guide](MIGRATION.md#01791-to-01800-sql-identifier-quoting).
 
 - **Fix (SQL rendering): only one well-formed delimited identifier is passed through (#782).** `SqlDialect::quote_identifier`, `DatabaseBackend::render_identifier`, `quote_identifier_path`, `render_identifier_path` and the derive macros returned any input unchanged that merely started and ended with a delimiter, so text such as `"a"b"`, `"`, `[a]]` or `[a] , [b]` reached SQL as an unterminated identifier or as more than one token. Input is now passed through only when it is exactly one well-formed, non-empty delimited identifier for the dialect (every inner closing delimiter doubled; SQLite `[...]` with no `]` inside). Any other input is delimited as one literal name with the closing delimiter doubled, so the result always reads back as exactly one identifier. Well-formed delimited names and paths, and every undelimited name, render byte-identically.
 - **Declared names that start and end with a delimiter but are not one well-formed delimited identifier are refused at compile time (#782).** A `#[graphql_orm(table = "...")]` or `db_column = "..."` path part such as `"a"b"` or `[a] , [b]` now fails the derive with a spanned error that names the part, instead of generating malformed SQL.
@@ -28,6 +28,15 @@ SQL identifier quoting fixes ([#782](https://github.com/Dastari/graphql-orm/issu
 - **Catalogue names round-trip.** SQL Server introspection reports bracketed or dotted index, index-column and foreign-key constraint names delimited, so dropping or recreating them names the same object; PostgreSQL reports foreign-key targets and table names that bare SQL would fold or split delimited (`"Archive"."Parent"`, `"local.parent"`), so they resolve to the referenced table. Ordinary names are reported as before.
 - **NUL in PostgreSQL row-level security columns.** The policy column helper no longer passes through a quoted name containing NUL.
 - New tests: a seeded property suite (`identifier_quoting_properties`) checks that every input quotes to exactly one identifier naming it, that bare renderings are plain and unreserved, and that each rendering round-trips through `CREATE TABLE`, `INSERT`, `SELECT` and `DROP` on in-memory SQLite and owned PostgreSQL and SQL Server, with the minimized cases from both issues retained. An owned SQL Server test compares the generated tables with the server for every non-ASCII Basic Multilingual Plane character, and another introspects tables named `ledger` and `[ledger]` side by side. Path properties round-trip `schema.table` paths in every delimited form through each database, and a group-page test covers a table-qualified column on SQLite and owned PostgreSQL. The shared runtime/derive cases gain the minimized malformed inputs, and a derive unit test covers the compile-time refusal.
+
+## Unreleased - ORM/macros 0.179.1
+
+Test-owned PostgreSQL containers are memory-capped; no runtime change.
+
+- Every PostgreSQL container started by the ORM, backup and AI test harnesses now
+  runs with a hard `--memory 4g --memory-swap 4g` limit, matching the SQL Server
+  harness, so a runaway test backend cannot exhaust the build host. Library code,
+  public API, generated SQL and stored data are unchanged.
 
 ## Unreleased - ORM/macros 0.179.0
 

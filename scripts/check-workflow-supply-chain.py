@@ -449,7 +449,7 @@ def literal_run_images(text):
     # Options with a separate value must not be mistaken for image names.
     value_options = {'--name', '--env', '-e', '--publish', '-p', '--volume', '-v',
                      '--label', '-l', '--network', '--user', '-u', '--workdir', '-w',
-                     '--hostname', '-h', '--entrypoint', '--add-host', '--memory', '-m',
+                     '--hostname', '-h', '--entrypoint', '--add-host', '--memory', '--memory-swap', '-m',
                      '--cpus', '--pull', '--health-cmd', '--health-interval',
                      '--health-timeout', '--health-retries', '--platform', '--shm-size'}
     calls = []

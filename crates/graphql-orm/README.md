@@ -13,7 +13,9 @@ supersedes: []
 Version 0.180.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
 is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server
 writes a name bare only under its regular-identifier rule (#783).
-See the [migration guide](../../MIGRATION.md#01790-to-01800-sql-identifier-quoting).
+See the [migration guide](../../MIGRATION.md#01791-to-01800-sql-identifier-quoting).
+
+Version 0.179.1 memory-caps test-owned PostgreSQL containers (test harness only; no runtime change).
 
 Version 0.179.0 delimits a SQLite name that starts with U+FEFF, which SQLite would otherwise
 read as whitespace, and adds seeded property suites for identifier quoting on every backend
