@@ -14,9 +14,9 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.184.0
+## Unreleased - ORM/macros 0.186.0
 
-Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01830-to-01840-read-predicate-columns-bound-to-their-row).
+Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01850-to-01860-read-predicate-columns-bound-to-their-row).
 
 - **Fix (authorization): read-predicate columns no longer resolve against an outer row (#796).** `ReadPredicate::column`, `is_null` and `is_not_null` rendered an unqualified column. Several constructs evaluate their target's predicate inside a correlated subquery: relation, `not_related` and closure predicates (the closure CTE on SQLite and PostgreSQL, and the SQL Server walk), generated related-row filters and relation-count orderings. When a column was declared in the entity's metadata but missing from its physical table, for example after schema drift or before a migration was applied, SQLite, PostgreSQL and SQL Server resolved the name against an outer query's table. The policy was then evaluated against another row and could admit it.
 - **Each row has its own alias.** Inside a predicate, "the row this predicate governs" is a value of its own, not text, which each place the predicate is rendered binds:
@@ -39,6 +39,15 @@ Read predicates bind every column they render to their own row ([#796](https://g
   - **Names.** A physical table named `__gom_closure_1`, read by hand-written policy SQL, is not shadowed by a closure; a column named `__gom_self` beside one named `__gom_row_1` is read as itself; reserved table names are refused at compile time and for hand-built entities.
   - **Lexer.** Each construct is unit-tested per dialect, and hand-written filters with comments, strings and unreadable SQL run or are refused on every backend.
   - **Budget tests** are resized for the longer terms.
+
+## Unreleased - ORM/macros 0.185.0
+
+- SQL Server migrations render closed-set filtered-index string values as
+  Unicode literals (for example, `N'状態'`). Rebuilding an index preserves
+  values outside the database code page. ASCII values also gain the `N`
+  prefix. Opaque filters read from SQL Server are emitted verbatim. See the
+  [migration guide](MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
+  ([#795](https://github.com/Dastari/graphql-orm/issues/795)).
 
 ## Unreleased - ORM/macros 0.183.0 and operation catalog 0.9.1
 

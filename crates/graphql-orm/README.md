@@ -10,12 +10,17 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.184.0 binds every column a read predicate renders to its own row: through the entity's
+Version 0.186.0 binds every column a read predicate renders to its own row: through the entity's
 table path at the root of a statement, and through an alias no other scope uses inside a relation,
 `not_related`, closure or count subquery. A column missing from a target table then fails the read
 instead of resolving against an outer row (#796). Table names starting with `__gom_` are reserved
 for those aliases, and hand-written policy SQL is read with the backend's lexical rules.
-See the [migration guide](../../MIGRATION.md#01830-to-01840-read-predicate-columns-bound-to-their-row).
+See the [migration guide](../../MIGRATION.md#01850-to-01860-read-predicate-columns-bound-to-their-row).
+
+Version 0.185.0 renders SQL Server filtered-index strings as Unicode literals,
+including ASCII values. Filters introspected as opaque SQL are replayed
+verbatim. See the
+[migration guide](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).
 
 Version 0.182.0 fixes SQL identifier quoting: only exactly one well-formed delimited identifier
 is passed through unchanged, and anything else is quoted as one literal name (#782); SQL Server

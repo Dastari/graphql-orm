@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.183.0 to 0.184.0: read-predicate columns bound to their row
+## 0.185.0 to 0.186.0: read-predicate columns bound to their row
 
 Upgrade ORM and macros together. Read predicates now bind every column to
 the row it describes (#796):
@@ -109,6 +109,23 @@ the same rows.
   Placeholder counting now closes a SQLite `[...]` name at its first `]`,
   as SQLite does; it used to read `]]` as an escaped bracket, which only
   SQL Server has. Fragments without `]]` count the same.
+
+## 0.183.0 to 0.185.0: SQL Server filtered-index literals
+
+**Action needed** if your code compares or pins rendered SQL Server
+filtered-index DDL text or you have an index with a lossy predicate.
+Regenerate the expected DDL and review pending plans.
+Closed-set string predicates now render ASCII literals as `N'open'` instead
+of `'open'`, with the same value. The same prefix preserves non-ASCII values
+outside the database code page when a migration recreates an index. Opaque
+predicates read from `sys.indexes.filter_definition` are emitted verbatim.
+The upgrade itself changes no existing indexes. If a declared filter used
+non-ASCII values outside the database collation's code page, SQL Server
+may have stored a replacement value such as `'??'`. The next migration
+plan for that declaration rebuilds the index once with the correct `N'…'`
+filter. For a unique filtered index, check for duplicate keys among rows
+that match the corrected filter before applying the plan, and apply the
+plan inside a transaction.
 
 ## 0.182.0 to 0.183.0: install documentation
 
