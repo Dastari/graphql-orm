@@ -11,6 +11,8 @@ use super::*;
 
 /// Rewrites a plan sealed for the fixture's mock provider as one for a
 /// local-process adapter, which registers as [`ProviderKind::LocalHarness`].
+/// The Grok tests seal their own plan with the registration's tools.
+#[cfg(any(feature = "local-harness", feature = "provider-codex-app-server"))]
 fn for_local_process(mut plan: AiProviderCallPlan) -> AiProviderCallPlan {
     plan.provider_kind = ProviderKind::LocalHarness;
     plan.budget.provider_kind = ProviderKind::LocalHarness;
@@ -20,34 +22,52 @@ fn for_local_process(mut plan: AiProviderCallPlan) -> AiProviderCallPlan {
     plan
 }
 
-/// Every text and blob column of every table of the fixture database, so a
-/// resolved value persisted anywhere, by any service, is found.
+/// Every row of every AI table that a session, a run, a provider call, a
+/// tool call, a checkpoint, an egress decision or a usage entry is written
+/// to, read through the ORM and serialized. Protected content is stored as
+/// plain JSON by the fixture's protector, so a resolved value persisted in
+/// any of these rows is found.
 async fn persisted_state(fixture: &Fixture) -> String {
-    use graphql_orm::sqlx::{self, Row};
     let pool = fixture.database.pool();
-    let tables: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .fetch_all(pool)
-            .await
-            .expect("tables should list");
-    assert!(tables.len() > 10, "the scan covers the AI schema");
     let mut state = String::new();
-    for table in tables {
-        let rows = sqlx::query(&format!(r#"SELECT * FROM "{table}""#))
-            .fetch_all(pool)
-            .await
-            .expect("table should read");
-        for row in rows {
-            for column in 0..row.len() {
-                if let Ok(Some(text)) = row.try_get::<Option<String>, _>(column) {
-                    state.push_str(&text);
-                } else if let Ok(Some(bytes)) = row.try_get::<Option<Vec<u8>>, _>(column) {
-                    state.push_str(&String::from_utf8_lossy(&bytes));
-                }
-                state.push('\n');
-            }
-        }
+    macro_rules! scan {
+        ($($record:ty),+ $(,)?) => {$(
+            let rows = <$record>::query(pool)
+                .limit(100)
+                .fetch_all()
+                .await
+                .expect("records should load");
+            assert!(rows.len() < 100, "the scan reads every row");
+            state.push_str(&serde_json::to_string(&rows).expect("records serialize"));
+            state.push('\n');
+        )+};
     }
+    scan!(
+        AiSessionRecord,
+        AiMessageRecord,
+        AiMessageBlockRecord,
+        AiSessionEventRecord,
+        AiRunRecord,
+        AiRunStepRecord,
+        AiRunAttemptRecord,
+        AiRunAttemptOutcomeRecord,
+        AiRunCheckpointRecord,
+        AiContextCheckpointRecord,
+        AiToolCallRecord,
+        AiToolResultSourceRecord,
+        AiEgressEventRecord,
+        AiAuditEventRecord,
+        AiUsageEntryRecord,
+        AiBudgetReservationRecord,
+        AiInboxEventRecord,
+        AiProviderBackgroundSubmissionRecord,
+        AiStoredProviderResponseRecord,
+        AiApprovalRecord,
+        AiProposalRecord,
+        AiProposalItemRecord,
+        AiNativeApprovalCandidateRecord,
+        AiSubscriptionWaiterRecord,
+    );
     state
 }
 
