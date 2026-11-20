@@ -199,6 +199,8 @@ def check_orm_split(old, new):
                          "--features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback ")
                 .replace("--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations ",
                          "--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback ")
+                # The two SQLite runtime query binaries now share one harness.
+                .replace("--test runtime_queries --test runtime_relations", "--test sqlite_runtime_queries")
                 for line in expected]
     # Backend target coverage is deliberately stronger than the qualified job.
     old_check = "cargo check -p graphql-orm --no-default-features --features postgres --locked"

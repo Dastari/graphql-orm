@@ -50,7 +50,7 @@ run_sqlite() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal \
     --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
-    --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
+    --lib --test runtime_graphql --test runtime_strings --test sqlite_runtime_queries \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
@@ -303,8 +303,8 @@ case "${lane}" in
     ;;
   runtime-live)
     cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
-      --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_queries \
-      --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes \
+      --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test sqlite_runtime_queries \
+      --test runtime_live --test runtime_search_graphql --test runtime_search_writes \
       --test runtime_operation_assurance --test runtime_graphql_formats -- --test-threads=1
     cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
       --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_live \
