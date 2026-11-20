@@ -75,8 +75,8 @@ run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test authorized_pagination_postgres --test bounded_mutation_sentinels \
     --test bulk_refusals --test delete_propagation --test denied_relations \
-    --test host_primary_keys --test postgres_constraint_index_idempotency --test repository_only_postgres \
-    --test runtime_records_postgres --test runtime_relations_postgres --test single_row_refusals \
+    --test host_primary_keys --test postgres_constraint_index_idempotency --test postgres_runtime_repository \
+    --test single_row_refusals \
     -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test temporal_bind_compatibility --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \

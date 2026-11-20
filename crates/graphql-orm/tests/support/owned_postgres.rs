@@ -1,6 +1,6 @@
 use std::process::Command;
 
-const POSTGRES_IMAGE: &str =
+pub(crate) const POSTGRES_IMAGE: &str =
     "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065";
 
 pub(crate) struct OwnedPostgres {
@@ -11,11 +11,66 @@ pub(crate) struct OwnedPostgres {
 }
 
 impl OwnedPostgres {
+    #[allow(dead_code)] // The grouped runtime and repository tests use start_ready.
     pub(crate) fn start(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         Self::start_image(label, POSTGRES_IMAGE)
     }
 
     fn start_image(label: &str, image: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let (mut owned, password, database) = Self::launch(label, image)?;
+        for _ in 0..120 {
+            let ready = Command::new("docker")
+                .args([
+                    "exec",
+                    &owned.container_id,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "graphql_orm_owner",
+                    "-d",
+                    &database,
+                ])
+                .output()?;
+            if ready.status.success() {
+                owned.url = owned.loopback_url(&password, &database)?;
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                return Ok(owned);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        Err("owned PostgreSQL did not become ready".into())
+    }
+
+    /// Wait for an authenticated connection through Docker's published port.
+    #[allow(dead_code)] // The other integration binaries use the synchronous fixture API.
+    pub(crate) async fn start_ready(
+        label: &str,
+        image: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        use graphql_orm::sqlx::{Connection, PgConnection};
+        use std::time::Duration;
+
+        let (mut owned, password, database) = Self::launch(label, image)?;
+        owned.url = owned.loopback_url(&password, &database)?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut retry = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                retry.tick().await;
+                if let Ok(connection) = PgConnection::connect(&owned.url).await {
+                    return connection.close().await;
+                }
+            }
+        })
+        .await
+        .map_err(|_| "owned PostgreSQL did not accept a connection on its published port")??;
+        Ok(owned)
+    }
+
+    fn launch(
+        label: &str,
+        image: &str,
+    ) -> Result<(Self, String, String), Box<dyn std::error::Error>> {
         for variable in [
             "DATABASE_URL",
             "TEST_DATABASE_URL",
@@ -66,43 +121,31 @@ impl OwnedPostgres {
         if container_id.is_empty() {
             return Err("docker did not return the owned PostgreSQL container ID".into());
         }
-        let mut owned = Self {
+        let owned = Self {
             container_id,
             owner_token,
             url: String::new(),
             cleaned: false,
         };
-        for _ in 0..120 {
-            let ready = Command::new("docker")
-                .args([
-                    "exec",
-                    &owned.container_id,
-                    "pg_isready",
-                    "-h",
-                    "127.0.0.1",
-                    "-U",
-                    "graphql_orm_owner",
-                    "-d",
-                    &database,
-                ])
-                .output()?;
-            if ready.status.success() {
-                let port_output = Command::new("docker")
-                    .args(["port", &owned.container_id, "5432/tcp"])
-                    .output()?;
-                let ports = String::from_utf8(port_output.stdout)?;
-                let port = ports
-                    .lines()
-                    .find_map(|line| line.strip_prefix("127.0.0.1:"))
-                    .ok_or("owned PostgreSQL was not loopback-published")?;
-                owned.url =
-                    format!("postgres://graphql_orm_owner:{password}@127.0.0.1:{port}/{database}");
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                return Ok(owned);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        Err("owned PostgreSQL did not become ready".into())
+        Ok((owned, password, database))
+    }
+
+    fn loopback_url(
+        &self,
+        password: &str,
+        database: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let port_output = Command::new("docker")
+            .args(["port", &self.container_id, "5432/tcp"])
+            .output()?;
+        let ports = String::from_utf8(port_output.stdout)?;
+        let port = ports
+            .lines()
+            .find_map(|line| line.strip_prefix("127.0.0.1:"))
+            .ok_or("owned PostgreSQL was not loopback-published")?;
+        Ok(format!(
+            "postgres://graphql_orm_owner:{password}@127.0.0.1:{port}/{database}"
+        ))
     }
 
     /// Keep the exact owned container alive as long as any pool clone exists.
