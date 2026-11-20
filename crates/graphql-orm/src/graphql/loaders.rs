@@ -408,6 +408,35 @@ pub struct RelationLoadResult<T> {
     pub offset: i64,
 }
 
+impl<T> RelationLoadResult<T> {
+    /// Convert an already filtered and counted page to an offset connection.
+    #[doc(hidden)]
+    pub fn into_offset_connection(self) -> crate::graphql::pagination::Connection<T> {
+        use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
+
+        let offset = self.offset.max(0) as usize;
+        let edges: Vec<_> = self
+            .entities
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| Edge {
+                cursor: encode_cursor((offset + index) as i64),
+                node,
+            })
+            .collect();
+        Connection {
+            page_info: PageInfo {
+                has_next_page: (offset as i64 + edges.len() as i64) < self.total_count,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                total_count: Some(self.total_count),
+            },
+            edges,
+        }
+    }
+}
+
 /// Generated resolver support. Sanitize policy errors at a relationship
 /// boundary with the callback classification every generated path uses.
 ///

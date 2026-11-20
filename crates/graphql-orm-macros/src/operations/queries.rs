@@ -1351,40 +1351,16 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                         db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await?;
-                    let total = authorized_page.total_count;
-                    let offset = authorized_page.offset.max(0) as usize;
-                    let paged_rows = authorized_page.entities;
-
-                    let has_next_page = (offset as i64 + paged_rows.len() as i64) < total;
-                    let has_previous_page = offset > 0;
-
-                    let mut generic_conn = ::graphql_orm::graphql::pagination::Connection {
-                        edges: paged_rows.into_iter().enumerate().map(|(index, node)| {
-                            ::graphql_orm::graphql::pagination::Edge {
-                                cursor: ::graphql_orm::graphql::pagination::encode_cursor((offset + index) as i64),
-                                node,
-                            }
-                        }).collect(),
-                        page_info: ::graphql_orm::graphql::pagination::PageInfo {
-                            has_next_page,
-                            has_previous_page,
-                            start_cursor: ::std::option::Option::None,
-                            end_cursor: ::std::option::Option::None,
-                            total_count: ::std::option::Option::Some(total),
-                        },
-                    };
-
-                    generic_conn.page_info.start_cursor = generic_conn.edges.first().map(|edge| edge.cursor.clone());
-                    generic_conn.page_info.end_cursor = generic_conn.edges.last().map(|edge| edge.cursor.clone());
-
-                    return ::std::result::Result::Ok(#connection_type::from_generic(generic_conn));
+                    return ::std::result::Result::Ok(#connection_type::from_generic(
+                        authorized_page.into_offset_connection(),
+                    ));
                 }
 
                 query = query.with_read_visibility(&visibility)?;
                 // Client page semantics: reduce, or refuse when the host opted in,
                 // before the exact host connection read.
-                if let ::std::option::Option::Some(ref p) = page {
-                    let resolved_page = db.client_pagination_config().resolve_client_page(::std::option::Option::Some(p), true).map_err(|error| error.into_graphql_error())?;
+                if page.is_some() {
+                    let resolved_page = db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                     query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
                         limit: resolved_page.limit,
                         offset: ::std::option::Option::Some(resolved_page.offset),
@@ -1427,14 +1403,12 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 // The same row authority as generated list reads.
-                let entity = ::graphql_orm::graphql::orm::fetch_authorized_point_row(
+                ::graphql_orm::graphql::orm::fetch_authorized_point_row(
                     db,
                     ctx,
                     EntityQuery::<#struct_name, #backend_marker>::new()
                         .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key)),
-                ).await?;
-
-                ::std::result::Result::Ok(entity)
+                ).await
             }
 
             #federation_entity_resolvers
