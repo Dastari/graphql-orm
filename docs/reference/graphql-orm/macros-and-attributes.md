@@ -566,6 +566,10 @@ Rules for the impl:
   entity must declare `object_fields`. The impl is written in the entity's
   module, before or after the struct, or names the entity by path
   (`impl models::Ticket`). The attribute takes no arguments.
+- Beside the attribute, the impl may carry only `allow`, `warn`, `deny`,
+  `forbid`, `expect` and a whole-impl `cfg`. Any other attribute, `cfg_attr`
+  included, is a compile error: it would be applied to the generated object
+  after its resolvers were given their field check.
 - A field is an `async fn` taking `&self` and returning
   `async_graphql::Result<T>` (or `FieldResult<T>`), so that a refused read is a
   field error. A `Context` parameter and arguments are optional.
@@ -596,11 +600,19 @@ also its own: the ORM does not authorize rows it loads or objects it builds.
 
 A refusal is the field's error and the body does not run. A field declared
 `Option<T>` then resolves to an explicit `null`: its key stays in the response
-and the error carries the field's path. Any other field returns the error;
-async-graphql reports it at the field's path and leaves the key out of the
-parent object, as it does for a refused non-null generated field. Declare a
-field that carries a read policy as `Option<T>` (spelled so, not through a type
-alias) when clients should see the key.
+and the error carries the field's path. Any other field returns the error,
+which async-graphql reports at the field's path. async-graphql 7.2.1 then
+leaves the key out of the parent object when another selected field of that
+object resolves, and resolves the parent object to `null` when none does, as
+it does for a refused non-null generated field. Declare a field that carries a
+read policy as `Option<T>` (spelled so, not through a type alias) when clients
+should see the key.
+
+Through a generated relation the decision is made earlier. The relation's
+preflight asks the field decision for every selected field of the target row,
+handwritten fields included, with the selected field's context. A denial
+refuses the relation, exactly as a denied column of the target does, so no
+part of the target object is released.
 
 Subscriptions. A handwritten field is not available in generated `Changed`
 subscriptions: selecting it refuses the stream at admission, like any computed

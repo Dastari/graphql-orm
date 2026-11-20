@@ -552,10 +552,20 @@ where
     for row in rows {
         for selection in selected {
             // Key-less fields are asked too: the field read decision is the
-            // same on every generated path.
-            let Some(field) = T::repository_field_policies()
+            // same on every generated path. A handwritten field of the
+            // target's generated object is asked like a column, with its
+            // declared key, so both refuse the relation alike.
+            let name = selection.node.name.node.as_str();
+            let Some((api_name, read_policy)) = T::repository_field_policies()
                 .iter()
-                .find(|field| field.api_name == selection.node.name.node.as_str())
+                .find(|field| field.api_name == name)
+                .map(|field| (field.api_name, field.read_policy))
+                .or_else(|| {
+                    T::computed_object_fields()
+                        .iter()
+                        .find(|field| field.api_name == name)
+                        .map(|field| (field.api_name, field.read_policy))
+                })
             else {
                 continue;
             };
@@ -563,8 +573,8 @@ where
             db.ensure_readable_field(
                 &field_ctx,
                 T::entity_name(),
-                field.api_name,
-                field.read_policy,
+                api_name,
+                read_policy,
                 Some(row),
             )
             .await

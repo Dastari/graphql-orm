@@ -97,6 +97,31 @@ pub(crate) fn host_tokens(
     }
 }
 
+/// Refuse every attribute of the handwritten impl that is not inert.
+///
+/// The impl's attributes are placed on the generated `#[Object] impl`, ahead
+/// of `#[Object]`. An attribute macro there would run on the finished impl,
+/// after every resolver was wrapped, and could add a resolver without the
+/// field check. Only lint levels and a whole-impl `cfg` are forwarded; a doc
+/// comment is dropped, and `cfg_attr` is refused because what it expands to
+/// is not known here.
+fn inert_impl_attributes(item_impl: &ItemImpl) -> syn::Result<()> {
+    for attribute in &item_impl.attrs {
+        let path = attribute.path();
+        if ["doc", "allow", "warn", "deny", "forbid", "expect", "cfg"]
+            .iter()
+            .any(|inert| path.is_ident(inert))
+        {
+            continue;
+        }
+        return Err(syn::Error::new_spanned(
+            attribute,
+            "graphql_object_fields accepts only `allow`, `warn`, `deny`, `forbid`, `expect` and `cfg` beside it on the impl: any other attribute would run on the generated object after its resolvers were given their field check",
+        ));
+    }
+    Ok(())
+}
+
 /// `#[graphql_object_fields]`: hand the impl to the entity's callback macro.
 pub(crate) fn attribute(args: TokenStream, mut item_impl: ItemImpl) -> syn::Result<TokenStream> {
     if item_impl.trait_.is_some() {
@@ -139,15 +164,21 @@ pub(crate) fn attribute(args: TokenStream, mut item_impl: ItemImpl) -> syn::Resu
     last.ident = callback_ident(&last.ident);
     // Reported beside an object without handwritten fields, so that the one
     // mistake is the only error.
-    let unsupported_arguments = if args.is_empty() {
-        quote! {}
-    } else {
-        item_impl.items.clear();
-        syn::Error::new_spanned(
+    let refusal = if !args.is_empty() {
+        Some(syn::Error::new_spanned(
             args,
             "graphql_object_fields takes no arguments; the generated object keeps the entity's own naming and description",
-        )
-        .to_compile_error()
+        ))
+    } else {
+        inert_impl_attributes(&item_impl).err()
+    };
+    let unsupported_arguments = match refusal {
+        Some(error) => {
+            item_impl.items.clear();
+            item_impl.attrs.clear();
+            error.to_compile_error()
+        }
+        None => quote! {},
     };
     let self_ty = &item_impl.self_ty;
     Ok(quote! {
@@ -380,17 +411,22 @@ pub(crate) fn wrap(input: TokenStream) -> syn::Result<TokenStream> {
 
     // A refused handwritten field is reported beside the generated object
     // alone, so that the one mistake is the only error.
-    let (definitions, refusal) = match handwritten_fields(
-        &mut handwritten,
-        &entity,
-        &backend,
-        graphql_rename_fields.as_deref(),
-        serde_rename_all.as_deref(),
-        &generated_names,
-    ) {
+    // The attribute checks the impl's attributes first; a direct call of this
+    // macro is held to the same rule.
+    let (definitions, refusal) = match inert_impl_attributes(&handwritten).and_then(|()| {
+        handwritten_fields(
+            &mut handwritten,
+            &entity,
+            &backend,
+            graphql_rename_fields.as_deref(),
+            serde_rename_all.as_deref(),
+            &generated_names,
+        )
+    }) {
         Ok(definitions) => (definitions, quote! {}),
         Err(error) => {
             handwritten.items.clear();
+            handwritten.attrs.clear();
             (Vec::new(), error.to_compile_error())
         }
     };
@@ -778,6 +814,57 @@ mod tests {
             assert!(
                 !expanded.contains("authorize_computed_object_field"),
                 "{expanded}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_inert_impl_attributes_reach_the_generated_object() {
+        let forwarded = composed(
+            "",
+            quote! {
+                /// Dropped: the type description is the entity's.
+                #[allow(clippy::unused_async)]
+                #[cfg(feature = "extra")]
+                impl Record {
+                    async fn one(&self) -> async_graphql::Result<i32> { Ok(1) }
+                }
+            },
+        )
+        .unwrap();
+        assert!(
+            forwarded
+                .contains("{ # [allow (clippy :: unused_async)] # [cfg (feature = \"extra\")] }"),
+            "{forwarded}"
+        );
+        for attribute in [
+            quote! { #[appends_a_resolver] },
+            quote! { #[some_crate::appends_a_resolver(argument)] },
+            quote! { #[cfg_attr(feature = "extra", appends_a_resolver)] },
+            quote! { #[cfg_attr(all(), allow(unused))] },
+            quote! { #[derive(Debug)] },
+        ] {
+            let refused = composed(
+                "",
+                quote! {
+                    #[allow(unused)]
+                    #attribute
+                    impl Record {
+                        async fn one(&self) -> async_graphql::Result<i32> { Ok(1) }
+                    }
+                },
+            )
+            .unwrap();
+            assert!(refused.contains("compile_error"), "{attribute}: {refused}");
+            assert!(refused.contains("accepts only"), "{attribute}: {refused}");
+            // Nothing of the impl is forwarded: no attribute and no resolver.
+            assert!(
+                refused.contains("@ object { Record } { } { } }"),
+                "{attribute}: {refused}"
+            );
+            assert!(
+                !refused.contains("appends_a_resolver ]"),
+                "{attribute}: {refused}"
             );
         }
     }

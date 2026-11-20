@@ -595,8 +595,15 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
 /// `#[graphql_orm(read_policy = "key")]` or none. A refusal is the field's
 /// error. A field declared `Option<T>` then resolves to an explicit `null`,
 /// with its key in the response and the error at its path. Any other field
-/// returns the error, and async-graphql leaves its key out of the parent
-/// object, as for a refused non-null generated field. `subscribe` requires a
+/// returns the error. async-graphql 7.2.1 then leaves its key out of the
+/// parent object when another selected field of that object resolves, and
+/// resolves the parent object to `null` when none does, as for a refused
+/// non-null generated field.
+///
+/// Beside this attribute the impl may carry only `allow`, `warn`, `deny`,
+/// `forbid`, `expect` and `cfg`. Any other attribute, `cfg_attr` included, is
+/// a compile error: it would run on the generated object after the resolvers
+/// were given their field check. `subscribe` requires a
 /// scalar or enum output type, or an `Option` or list of those.
 ///
 /// As with generated column fields, no entity or row decision is asked at the

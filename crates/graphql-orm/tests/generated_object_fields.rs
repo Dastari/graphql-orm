@@ -603,6 +603,62 @@ async fn a_handwritten_field_asks_exactly_what_a_generated_field_asks() {
 }
 
 #[tokio::test]
+async fn a_relation_preflight_asks_handwritten_fields_like_columns() {
+    let (_, schema, _) = fixture().await;
+    // `score` and `doubledScore` both declare `tickets.score`. Selected
+    // through the relation, a denial of either refuses the relation: nothing
+    // of the ticket is released, and the two outcomes are the same.
+    let mut denied = Vec::new();
+    for field in ["score", "doubledScore"] {
+        let response = schema
+            .execute(request(
+                &format!("{{ remark(id: \"r1\") {{ id ticket {{ id {field} }} }} }}"),
+                "ada",
+                false,
+            ))
+            .await;
+        assert_eq!(response.errors.len(), 1, "{field}: {:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        assert_eq!(data["remark"]["id"], "r1", "{field}: {data}");
+        assert!(!data.to_string().contains("mine"), "{field}: {data}");
+        denied.push((
+            data,
+            response.errors[0].message.clone(),
+            response.errors[0].extensions.clone(),
+            response.errors[0].path.len(),
+        ));
+    }
+    assert_eq!(denied[0], denied[1]);
+
+    // Allowed, both resolve through the relation.
+    for (field, value) in [("score", 4), ("doubledScore", 8)] {
+        let response = schema
+            .execute(request(
+                &format!("{{ remark(id: \"r1\") {{ ticket {{ id {field} }} }} }}"),
+                "ada",
+                true,
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{field}: {:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        assert_eq!(data["remark"]["ticket"]["id"], "mine");
+        assert_eq!(data["remark"]["ticket"][field], value);
+    }
+
+    // A callback failure in the preflight is not exposed either.
+    let response = schema
+        .execute(request(
+            "{ remark(id: \"r1\") { ticket { id audited } } }",
+            "ada",
+            true,
+        ))
+        .await;
+    let exposed = format!("{:?} {}", response.errors, response.data);
+    assert!(!response.errors.is_empty(), "{exposed}");
+    assert!(!exposed.contains("pg-internal-7"), "{exposed}");
+}
+
+#[tokio::test]
 async fn a_policy_callback_failure_is_not_exposed() {
     let (_, schema, _) = fixture().await;
     let response = schema
@@ -730,10 +786,27 @@ async fn changed_subscriptions_refuse_unavailable_fields_and_resolve_available_o
         refusal.errors
     );
 
+    // An unavailable handwritten scalar is refused at admission as well.
+    let mut refused = Box::pin(schema.execute_stream(request(
+        "subscription { ticketChanged(key: \"mine\") { id ticket { title doubledScore } } }",
+        "ada",
+        true,
+    )));
+    let refusal = timeout(Duration::from_secs(2), refused.next())
+        .await
+        .expect("refused before any event")
+        .unwrap();
+    assert_eq!(refusal.errors.len(), 1, "{:?}", refusal.errors);
+    assert!(
+        refusal.errors[0].message.contains("computed fields"),
+        "{:?}",
+        refusal.errors
+    );
+
     // Through a relation of the subscribed entity, a handwritten field of the
     // related entity is refused at admission too, available or not: the event
     // payload admits leaves of the subscribed entity only.
-    for nested in ["outcome { label }", "titleLength"] {
+    for nested in ["outcome { label }", "titleLength", "doubledScore"] {
         let mut refused = Box::pin(schema.execute_stream(request(
             &format!(
                 "subscription {{ remarkChanged(key: \"r1\") {{ id remark {{ id ticket {{ {nested} }} }} }} }}"

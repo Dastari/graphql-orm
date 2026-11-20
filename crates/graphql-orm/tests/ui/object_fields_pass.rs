@@ -40,6 +40,8 @@ mod records {
 }
 
 #[graphql_object_fields]
+#[allow(clippy::unused_async)]
+#[cfg(all())]
 impl records::Record {
     /// A borrowed value, a context and an argument.
     #[graphql_orm(read_policy = "records.label", subscribe = true)]
