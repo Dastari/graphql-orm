@@ -210,21 +210,35 @@ same rows. Hand-written filters are restricted, as described below.
   `__graphql_orm_order_relation`, so a table of that name is an ordinary
   table. An ordering that was never authorized renders
   `(SELECT COUNT(*) FROM <table> WHERE 1 = 0)`.
-- **Clauses and bind values must pair up. Action needed** only if code adds
-  a clause with a different number of placeholders than bind values:
-  `EntityQuery::where_clause` or `where_values`, or a hand-written
-  `DatabaseFilter` whose `to_sql_conditions` returns more or fewer values
-  than its conditions have placeholders. Clauses and values are kept in
-  flat lists that a statement numbers together, and the list was divided
-  by placeholder count with any surplus silently dropped or handed to the
-  next clause, a read policy's included. Such a query is now refused with
-  `AUTHORIZATION_MISCONFIGURED` when it is rendered (list, count,
-  aggregate, projection, search and write-target statements), and
-  `DatabaseFilter::to_filter_expression_checked` refuses such a filter.
-  Where no error can be returned, the default
-  `DatabaseFilter::to_filter_expression` yields a clause that matches no
-  row. `ReadPredicate::from_filter` calls a hand-written filter once and
-  builds the predicate from that one answer.
+- **Caller SQL beside a read policy. Action needed** only if a query that
+  a read policy is attached to (a row policy with a SQL predicate, or
+  `EntityQuery::with_read_visibility`) also carries caller SQL that:
+  - has a different number of placeholders than bind values:
+    `EntityQuery::where_clause` or `where_values`, the public
+    `where_clauses` and `values` lists, or a hand-written `DatabaseFilter`
+    whose `to_sql_conditions` returns more or fewer values than its
+    conditions have placeholders; or
+  - on SQLite, writes a numbered or named placeholder (`?1`, `:name`,
+    `@name`, `$name`), or on SQL Server an `@name` variable, or on
+    PostgreSQL `$name`. Write the anonymous `?`.
+
+  Such a query is now refused with `AUTHORIZATION_MISCONFIGURED` when it
+  is rendered (list, count, aggregate, projection, search, delete and
+  write-target statements). The policy and its bind values are kept apart
+  from the caller's clauses and values and composed only at render, after
+  the caller's are validated on their own. Before, the lists were flat and
+  shared: a clause `status = ?` with two values handed its second value to
+  the policy's placeholder after it, and on SQLite a caller's `?1` left the
+  policy's `?` reading the caller's first argument. PostgreSQL `$N` and SQL
+  Server `@pN` stay accepted: every one is renumbered in order when the
+  statement is rendered, and generated filters write them.
+
+  A query with no read policy is unchanged: its SQL is passed through as
+  written, so `status = ?1 OR previous_status = ?1` with one value still
+  works on SQLite. `ReadPredicate::from_filter` calls a hand-written filter
+  once, counts its placeholders with the lexer of the backend the predicate
+  is for (not the build's default backend, which differed in a build with
+  two backends), and builds the predicate from that one answer.
 - **SQLite bracketed names in trusted SQL. Action needed** only if a
   trusted SQL fragment for SQLite holds `]]` inside a bracketed name.
   Placeholder counting now closes a SQLite `[...]` name at its first `]`,

@@ -1453,6 +1453,81 @@ async fn a_miscounted_caller_filter_never_shifts_the_policy_binds() {
             refused(query.count(&db).await, &context);
         }
     }
+    // The caller's lists are public. Whatever is done to them before and
+    // after the policy is attached, the policy keeps its own bind value:
+    // here the first clause is given a second value and a later clause
+    // none, so the totals agree. The caller's clauses share the caller's
+    // two values; the policy still tests `score <= 4`.
+    let mut shifted = EntityQuery::<NamedNode>::new();
+    shifted.where_clauses.push("score >= ?".to_owned());
+    shifted.values.push(SqlValue::Int(1));
+    shifted.values.push(SqlValue::String("n9".into()));
+    let mut shifted = shifted.with_read_visibility(&policy()).unwrap();
+    shifted.where_clauses.push("id <> ?".to_owned());
+    let (sql, binds) = shifted.try_build_delete_sql().unwrap();
+    assert_eq!(
+        binds,
+        vec![
+            SqlValue::Int(1),
+            SqlValue::String("n9".into()),
+            SqlValue::Int(4)
+        ],
+        "{sql}"
+    );
+    let rows = shifted.clone().fetch_all(&db).await.unwrap();
+    assert_eq!(
+        rows.into_iter().map(|row| row.id).collect::<Vec<_>>(),
+        ["n2"]
+    );
+    assert_eq!(shifted.count(&db).await.unwrap(), 1);
+    // The same lists with one value too many for the caller's clauses are
+    // refused: validated on their own, apart from the policy.
+    let mut surplus = EntityQuery::<NamedNode>::new()
+        .with_read_visibility(&policy())
+        .unwrap();
+    surplus.where_clauses.push("score >= ?".to_owned());
+    surplus.values.extend([SqlValue::Int(1), SqlValue::Int(42)]);
+    refused(surplus.try_build_delete_sql(), "direct surplus");
+    refused(surplus.clone().fetch_all(&db).await, "direct surplus");
+
+    // A placeholder the statement does not number itself cannot stand
+    // beside a policy. SQLite sends `?1`, `:name`, `@name` and `$name` as
+    // written and does not advance its anonymous counter past them, so the
+    // policy's `?` would read the caller's argument. PostgreSQL and SQL
+    // Server renumber every `$N` and `@pN`, as generated filters write
+    // them; a named variable is refused there too.
+    let named: &[&str] = match B::DIALECT {
+        DatabaseBackend::Sqlite => &[
+            "score >= ?1",
+            "score >= :low",
+            "score >= @low",
+            "score >= $low",
+        ],
+        DatabaseBackend::Postgres => &["score >= $low"],
+        _ => &["score >= @low"],
+    };
+    for clause in named {
+        for policy_first in [false, true] {
+            let query = query(&[(clause, ints(&[1]))], policy_first);
+            let context = format!("{clause} (policy first: {policy_first})");
+            refused(query.try_build_delete_sql(), &context);
+            refused(query.clone().fetch_all(&db).await, &context);
+            refused(query.count(&db).await, &context);
+        }
+    }
+    // With no policy the caller's SQL is passed through as written: SQLite
+    // binds the one value to both uses of `?1`.
+    if B::DIALECT == DatabaseBackend::Sqlite {
+        let unpoliced = EntityQuery::<NamedNode>::new()
+            .where_values("score = ?1 OR score + 4 = ?1", ints(&[5]));
+        let rows = unpoliced.clone().fetch_all(&db).await.unwrap();
+        assert_eq!(
+            rows.into_iter().map(|row| row.id).collect::<Vec<_>>(),
+            ["n1", "n2", "n3"]
+        );
+        assert_eq!(unpoliced.count(&db).await.unwrap(), 3);
+    }
+
     // Clauses that pair up render in order and return the policy's rows.
     for policy_first in [false, true] {
         let query = query(

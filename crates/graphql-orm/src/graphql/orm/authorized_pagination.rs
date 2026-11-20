@@ -752,11 +752,6 @@ fn handwritten_sql(
     clause: &str,
     binds: usize,
 ) -> Result<(RowBoundSql, bool), PolicySqlRefusal> {
-    // The checked splitter's report of conditions and bind values that do
-    // not pair up.
-    if clause == super::query::BIND_COUNT_MISMATCH {
-        return Err(PolicySqlRefusal::PlaceholderCount);
-    }
     let mut tokens = Vec::new();
     let readable = scan_sql(backend, clause, |token| tokens.push(token));
     if tokens
@@ -1087,12 +1082,17 @@ fn filter_policy<F: ReadVisibilityFilter>(
         return Ok((generated.policy(backend), true));
     }
     // One call into the filter: everything below reads this one result.
-    // The default adapter behind it divides the filter's flat bind list
-    // with the checked splitter, and reports a list that does not pair up
-    // as a clause `handwritten_sql` refuses.
+    // It is a checked call for this dialect, so the default adapter counts
+    // placeholders as `backend` reads them, whatever the build's default
+    // backend is, and refuses a flat bind list that does not pair up. A
+    // filter that returns an expression of its own is validated leaf by
+    // leaf below.
+    let expression = super::query::checked_filter_expression(backend, || {
+        filter.to_row_bound_filter_expression()
+    })
+    .map_err(|_| PolicySqlRefusal::PlaceholderCount)?;
     let mut bound = true;
-    let policy = filter
-        .to_row_bound_filter_expression()
+    let policy = expression
         .map(|expression| handwritten_policy(backend, &expression, &mut bound))
         .transpose()?;
     Ok((policy, bound))
@@ -3528,16 +3528,10 @@ where
     ) -> async_graphql::Result<Self> {
         visibility.validate::<T, B>()?;
         if let ReadVisibility::Complete(p) | ReadVisibility::Prefilter(p) = visibility {
-            let mut values = Vec::new();
-            // EntityQuery stores neutral placeholders; final rendering numbers
-            // them together with the caller's filters and ordering parameters.
-            let clause = render_filter_expression(
-                DatabaseBackend::Sqlite,
-                &p.root_expression(),
-                &mut 1,
-                &mut values,
-            );
-            self = self.where_values(&format!("({clause})"), values);
+            // The policy keeps its own bind values, apart from the caller's
+            // clauses and values. A statement composes them when it is
+            // rendered, after validating the caller's on their own.
+            self.attach_policy(p.root_expression());
         }
         Ok(self)
     }
@@ -4618,7 +4612,7 @@ mod predicate_tests {
     #[test]
     fn the_bind_splitter_fails_closed() {
         use super::super::query::{
-            BIND_COUNT_MISMATCH, filter_expression_from_raw_parts, split_filter_binds,
+            checked_filter_expression, ensure_composable_sql, split_filter_binds,
         };
         let conditions = [
             "tenant_id = ?".to_owned(),
@@ -4631,6 +4625,8 @@ mod predicate_tests {
                 .map(SqlValue::Int)
                 .collect::<Vec<_>>()
         };
+        let refused =
+            |error: sqlx::Error| code(&crate::graphql::errors::graphql_error_from_sqlx(error));
         for backend in BACKENDS {
             // Each condition takes exactly its own values.
             assert_eq!(
@@ -4656,30 +4652,75 @@ mod predicate_tests {
                 (&conditions[..], ints(&[])),
                 (&[][..], ints(&[1])),
             ] {
-                let error = split_filter_binds(backend, conditions, &values).unwrap_err();
                 assert_eq!(
-                    code(&crate::graphql::errors::graphql_error_from_sqlx(error)),
+                    refused(split_filter_binds(backend, conditions, &values).unwrap_err()),
                     "\"AUTHORIZATION_MISCONFIGURED\"",
                     "{backend:?}: {values:?}"
                 );
-                // Where no error can be returned, the filter matches no row
-                // and binds nothing.
-                assert_eq!(
-                    filter_expression_from_raw_parts(backend, conditions, &values),
-                    Some(FilterExpression::Raw {
-                        clause: BIND_COUNT_MISMATCH.to_owned(),
-                        values: Vec::new(),
-                    }),
-                    "{backend:?}: {values:?}"
-                );
             }
-            // A read predicate refuses that clause by its reason.
+        }
+        // Placeholders a statement does not number itself cannot be
+        // composed with a policy. PostgreSQL and SQL Server renumber every
+        // `$N` and `@pN`, as generated filters write them; SQLite sends the
+        // text as written.
+        use DatabaseBackend::{Mssql, Postgres, Sqlite};
+        for (backend, clause, composable) in [
+            (Sqlite, "status = ?", true),
+            (Sqlite, "status = ?1", false),
+            (Sqlite, "status = ?1 OR previous = ?1", false),
+            (Sqlite, "status = :status", false),
+            (Sqlite, "status = @status", false),
+            (Sqlite, "status = $status", false),
+            (Sqlite, "status = $1", false),
+            (Sqlite, "status = '?1' AND \":name\" = ?", true),
+            (Postgres, "status = $1 AND other = $2", true),
+            (Postgres, "status = ? AND other @> ?", true),
+            (Postgres, "status = $name", false),
+            (Mssql, "[status] = @P1 AND [other] = @p2", true),
+            (Mssql, "[status] = @status", false),
+            (Mssql, "[label]]?] = ?", true),
+        ] {
             assert_eq!(
-                handwritten_sql(backend, BIND_COUNT_MISMATCH, 0).map(|_| ()),
-                Err(PolicySqlRefusal::PlaceholderCount),
-                "{backend:?}"
+                ensure_composable_sql(backend, clause).is_ok(),
+                composable,
+                "{backend:?}: {clause}"
             );
         }
+        assert_eq!(
+            refused(ensure_composable_sql(Sqlite, "status = ?1").unwrap_err()),
+            "\"AUTHORIZATION_MISCONFIGURED\""
+        );
+        // The default adapter counts with the dialect of the checked call,
+        // not the build's default backend: `]]` is an escaped bracket in a
+        // SQL Server name, and SQLite closes the name at its first `]`.
+        struct Labelled;
+        impl DatabaseFilter for Labelled {
+            fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+                (vec!["[label]]?] = ?".to_owned()], vec![SqlValue::Int(1)])
+            }
+            fn is_empty(&self) -> bool {
+                false
+            }
+        }
+        assert_eq!(
+            checked_filter_expression(Mssql, || Labelled.to_filter_expression()).unwrap(),
+            Some(FilterExpression::Raw {
+                clause: "[label]]?] = ?".to_owned(),
+                values: ints(&[1]),
+            })
+        );
+        assert_eq!(
+            refused(
+                checked_filter_expression(Sqlite, || Labelled.to_filter_expression()).unwrap_err()
+            ),
+            "\"AUTHORIZATION_MISCONFIGURED\""
+        );
+        // A filter that returns an expression of its own is returned as is.
+        let own = Some(FilterExpression::trusted_fragment("1 = 1", Vec::new()));
+        assert_eq!(
+            checked_filter_expression(Mssql, || own.clone()).unwrap(),
+            own
+        );
     }
 
     #[test]
