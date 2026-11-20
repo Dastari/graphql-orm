@@ -14,7 +14,16 @@ use graphql_orm::prelude::*;
     PartialEq,
 )]
 #[graphql(complex)]
-#[graphql_entity(table = "users", plural = "Users", default_sort = "name ASC")]
+#[graphql_entity(
+    table = "users",
+    plural = "Users",
+    default_sort = "name ASC",
+    keyset = "name asc, id asc",
+    aggregate = true,
+    aggregate_source = true,
+    federation_key(fields = ["id"]),
+    node_id
+)]
 pub struct User {
     #[primary_key]
     pub id: String,
@@ -60,6 +69,7 @@ pub struct Post {
 
     #[filterable(type = "string")]
     #[sortable]
+    #[graphql_orm(searchable(weight = "A"))]
     pub title: String,
 
     #[filterable(type = "boolean")]
@@ -76,9 +86,23 @@ pub struct Post {
     pub author: Option<User>,
 }
 
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    table = "editions",
+    plural = "Editions",
+    keyset = "title asc, number asc"
+)]
+pub struct Edition {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    pub title: String,
+    #[primary_key]
+    pub number: i64,
+}
+
 schema_roots! {
     query_custom_ops: [],
-    entities: [User, Post],
+    entities: [User, Post, Edition],
 }
 
 /// Build SDL without a database or executing any resolver.
