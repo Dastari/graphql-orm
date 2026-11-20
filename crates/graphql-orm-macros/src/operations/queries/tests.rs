@@ -80,3 +80,10 @@ fn list_resolver_uses_qualified_standard_library_names() {
         assert_resolver(&generated(composite), "list");
     }
 }
+
+#[test]
+fn point_resolver_uses_qualified_standard_library_names() {
+    for composite in [false, true] {
+        assert_resolver(&generated(composite), "get_by_id");
+    }
+}

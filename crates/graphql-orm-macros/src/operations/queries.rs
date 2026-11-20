@@ -1121,7 +1121,7 @@ pub(super) fn repository_key_methods(
             pub async fn find_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
-            ) -> ::graphql_orm::Result<Option<Self>> {
+            ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                 Self::find_by_key(db, id).await
             }
         }
@@ -1130,7 +1130,7 @@ pub(super) fn repository_key_methods(
         quote! {}
     } else {
         quote! {
-            pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> ::graphql_orm::Result<Option<Self>> {
+            pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                 Self::get_by_key(pool, id).await
             }
         }
@@ -1141,9 +1141,9 @@ pub(super) fn repository_key_methods(
         pub async fn find_by_key(
             db: &::graphql_orm::db::Database<#backend_marker>,
             key: &#key_type,
-        ) -> ::graphql_orm::Result<Option<Self>> {
+        ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
             db.ensure_entity_access(
-                None,
+                ::std::option::Option::None,
                 #entity_name_lit,
                 <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                 ::graphql_orm::graphql::orm::EntityAccessKind::Read,
@@ -1161,33 +1161,33 @@ pub(super) fn repository_key_methods(
             .fetch_one(db)
             .await?;
 
-            if let Some(ref loaded) = entity {
+            if let ::std::option::Option::Some(ref loaded) = entity {
                 if !db.can_read_row(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    loaded as &(dyn ::std::any::Any + Send + Sync),
+                    loaded as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                    return Ok(None);
+                    return ::std::result::Result::Ok(::std::option::Option::None);
                 }
                 for field in <Self as ::graphql_orm::graphql::orm::Entity>::repository_field_policies() {
                     db.ensure_repository_readable_field(
-                        None,
+                        ::std::option::Option::None,
                         #entity_name_lit,
                         field.api_name,
                         field.read_policy,
-                        Some(loaded as &(dyn ::std::any::Any + Send + Sync)),
+                        ::std::option::Option::Some(loaded as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 }
             }
 
-            Ok(entity)
+            ::std::result::Result::Ok(entity)
         }
 
         #get_by_id_method
 
-        pub async fn get_by_key(pool: &#pool_type, key: &#key_type) -> ::graphql_orm::Result<Option<Self>> {
+        pub async fn get_by_key(pool: &#pool_type, key: &#key_type) -> ::graphql_orm::Result<::std::option::Option<Self>> {
             ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                 .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
                 .fetch_one(pool)
@@ -1214,7 +1214,6 @@ pub(super) struct RootInput<'a> {
     pub(super) single_query_args: &'a [TokenStream],
     pub(super) single_read_scope_enforcement: &'a TokenStream,
     pub(super) single_query_key_init: &'a TokenStream,
-    pub(super) relation_preload_single: &'a TokenStream,
     pub(super) federation_entity_resolvers: &'a TokenStream,
     pub(super) node_id_entity_resolver: &'a TokenStream,
     pub(super) full_write_surface: bool,
@@ -1239,7 +1238,6 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
         single_query_args,
         single_read_scope_enforcement,
         single_query_key_init,
-        relation_preload_single,
         federation_entity_resolvers,
         node_id_entity_resolver,
         full_write_surface,
@@ -1262,18 +1260,13 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
         ref filter_read_authorization,
         ..
     } = *context;
-    let (query_docs, single_imports) = if full_write_surface {
-        (
-            quote! { /// Generated queries for this entity
-            },
-            quote! { use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow}; },
-        )
+    let query_docs = if full_write_surface {
+        quote! { /// Generated queries for this entity
+        }
     } else {
-        (
-            quote! {},
-            quote! { use ::graphql_orm::graphql::orm::EntityQuery; },
-        )
+        quote! {}
     };
+
     // Ordering reveals field values, and relation count ordering reveals
     // related-row counts. Authorize each scalar term with the field's read
     // policy, and each count against the target's access, operation scopes
@@ -1419,8 +1412,8 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #(#single_query_args)*
-            ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
-                #single_imports
+            ) -> ::graphql_orm::async_graphql::Result<::std::option::Option<#struct_name>> {
+                use ::graphql_orm::graphql::orm::EntityQuery;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #single_read_scope_enforcement
                 #single_query_key_init
@@ -1428,13 +1421,9 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
-                let pool = db.pool();
-                let auth_context = ctx
-                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
-                    .cloned();
+                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
@@ -1442,16 +1431,14 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 // The same row authority as generated list reads.
-                let mut entity = ::graphql_orm::graphql::orm::fetch_authorized_point_row(
+                let entity = ::graphql_orm::graphql::orm::fetch_authorized_point_row(
                     db,
                     ctx,
                     EntityQuery::<#struct_name, #backend_marker>::new()
                         .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key)),
                 ).await?;
 
-                #relation_preload_single
-
-                Ok(entity)
+                ::std::result::Result::Ok(entity)
             }
 
             #federation_entity_resolvers

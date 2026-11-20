@@ -39,6 +39,11 @@ async fn assert_missing_database(field: &str) {
 }
 
 #[tokio::test]
+async fn point_read_returns_a_missing_database_error() {
+    assert_missing_database(r#"missingDatabaseRecord(id: "a") { id }"#).await;
+}
+
+#[tokio::test]
 async fn list_returns_a_missing_database_error() {
     assert_missing_database("missingDatabaseRecords { edges { cursor } }").await;
 }

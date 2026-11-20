@@ -7511,6 +7511,7 @@ fn generate_graphql_operations_unfiltered(
                       field_name: &str,
                       description: &str,
                       rust_result_type: proc_macro2::TokenStream,
+                      catalogue_result_type: Option<proc_macro2::TokenStream>,
                       operation_authorization: &proc_macro2::TokenStream| {
         let kind_tokens = match kind {
             RootKind::Query => quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
@@ -7525,6 +7526,7 @@ fn generate_graphql_operations_unfiltered(
             .borrow_mut()
             .push((kind, field_name.to_owned()));
         let arguments = root_arguments(kind, field_name);
+        let catalogue_result_type = catalogue_result_type.as_ref().unwrap_or(&rust_result_type);
         quote! {
             ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_description(
                 #entity_identity,
@@ -7536,7 +7538,7 @@ fn generate_graphql_operations_unfiltered(
                 #field_name,
                 #description,
                 #arguments,
-                stringify!(#rust_result_type),
+                stringify!(#catalogue_result_type),
                 <#rust_result_type as ::graphql_orm::async_graphql::OutputType>
                     ::qualified_type_name(),
                 #resolver_schema_signature,
@@ -7601,6 +7603,7 @@ fn generate_graphql_operations_unfiltered(
             &list_query_name,
             &list_operation_description,
             quote! { #connection_type },
+            None,
             &list_operation_authorization,
         ),
         quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::List },
@@ -7613,6 +7616,7 @@ fn generate_graphql_operations_unfiltered(
                 &aggregate_query_name,
                 &aggregate_operation_description,
                 quote! { Vec<#aggregate_row_type> },
+                None,
                 &aggregate_operation_authorization,
             ),
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Aggregate },
@@ -7626,6 +7630,7 @@ fn generate_graphql_operations_unfiltered(
                 &search_query_name,
                 &search_operation_description,
                 quote! { #search_connection_type },
+                None,
                 &search_operation_authorization,
             ),
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Search },
@@ -7639,6 +7644,7 @@ fn generate_graphql_operations_unfiltered(
                 &keyset_query_name,
                 &keyset_operation_description,
                 quote! { #connection_type },
+                None,
                 &keyset_list_operation_authorization,
             ),
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Keyset },
@@ -7650,6 +7656,7 @@ fn generate_graphql_operations_unfiltered(
                 &scan_query_name,
                 scan_operation_description,
                 quote! { #scan_connection_type },
+                None,
                 &keyset_list_operation_authorization,
             ),
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Scan },
@@ -7661,7 +7668,8 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::SingleRead },
             &single_query_name,
             &single_operation_description,
-            quote! { Option<#struct_name> },
+            quote! { ::std::option::Option<#struct_name> },
+            Some(quote! { Option<#struct_name> }),
             &single_read_operation_authorization,
         ),
         quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Single },
@@ -7684,6 +7692,7 @@ fn generate_graphql_operations_unfiltered(
             &subscription_name,
             &subscription_operation_description,
             quote! { #changed_payload_type },
+            None,
             &subscription_operation_authorization,
         )
     };
@@ -8232,7 +8241,6 @@ fn generate_graphql_operations_unfiltered(
             single_query_args: &single_query_args,
             single_read_scope_enforcement: &single_read_scope_enforcement,
             single_query_key_init: &single_query_key_init,
-            relation_preload_single: &relation_preload_single,
             federation_entity_resolvers: &federation_entity_resolvers,
             node_id_entity_resolver: &node_id_entity_resolver,
             full_write_surface,
