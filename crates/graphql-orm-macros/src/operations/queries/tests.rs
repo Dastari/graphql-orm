@@ -7,7 +7,7 @@ use crate::operations::generate_graphql_operations;
 fn generated(composite: bool) -> syn::File {
     let input = if composite {
         parse_quote! {
-            #[graphql_entity(table = "records", query_shapes = "list,single")]
+            #[graphql_entity(table = "records", query_shapes = "list,single", auth = "none")]
             struct Record {
                 #[primary_key]
                 id: String,
@@ -42,7 +42,7 @@ fn assert_qualified(tokens: TokenStream) {
                 let name = ident.to_string();
                 if matches!(
                     name.as_str(),
-                    "Option" | "Vec" | "Box" | "Some" | "None" | "Ok" | "Err" | "vec"
+                    "Option" | "Vec" | "Box" | "Some" | "None" | "Ok" | "Err" | "vec" | "std"
                 ) {
                     assert!(colons >= 2, "unqualified emitted name: {name}");
                 }

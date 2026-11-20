@@ -4567,10 +4567,16 @@ fn generate_graphql_operations_unfiltered(
         serde_rename_all,
         auto_generated_pk,
     )?;
+    let query_resolver_auth_mode = if let Some(auth) = entity_meta.auth.as_deref() {
+        let mode = crate::entity::resolver_auth_mode_value_tokens(auth, struct_name.span())?;
+        quote! { ::std::option::Option::Some(#mode) }
+    } else {
+        quote! { ::std::option::Option::None }
+    };
     let query_context = queries::QueryContext {
         struct_name,
         backend_marker: &backend_marker,
-        resolver_auth_mode: &resolver_auth_mode,
+        resolver_auth_mode: &query_resolver_auth_mode,
         authenticated_directive: &authenticated_directive,
         rls_request_guard: &rls_request_guard,
         entity_name_lit: &entity_name_lit,
@@ -7818,7 +7824,7 @@ fn generate_graphql_operations_unfiltered(
         struct_name,
         &entity_name_lit,
         &backend_marker,
-        &resolver_auth_mode,
+        &query_resolver_auth_mode,
         &federation_keys,
         &federation_scope_enforcements,
         &single_query_name,
@@ -7856,7 +7862,7 @@ fn generate_graphql_operations_unfiltered(
                 struct_name,
                 &entity_name_lit,
                 &backend_marker,
-                &resolver_auth_mode,
+                &query_resolver_auth_mode,
                 &parts,
                 &scope_enforcement,
                 &single_query_name,
