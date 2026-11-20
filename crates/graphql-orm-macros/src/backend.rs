@@ -621,19 +621,36 @@ pub(crate) fn backend_render_identifier_path(backend: BackendKind, identifier: &
         .join(".")
 }
 
-/// Whether a declared table path's own name starts with `__gom_`, compared
-/// without ASCII case and with or without delimiters. Read-policy SQL
-/// renders row aliases and common table expressions with that prefix, and a
-/// table of the same name could take an alias's place or be shadowed by an
-/// expression (#796).
+/// Whether a declared table path's own name, compared without ASCII case and
+/// with or without delimiters, is one that read-policy SQL generates:
+/// `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>`, `__gom_closure_<n>`
+/// or `__gom_closure_<n>_<suffix>`. A table of such a name could take a row
+/// alias's place or be shadowed by a closure's expression (#796). Other
+/// names starting with `__gom_` are allowed: aliases are allocated around
+/// them.
 pub(crate) fn backend_table_name_is_reserved(backend: BackendKind, table: &str) -> bool {
+    let numbered = |rest: &str| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit());
     identifier_path_parts(backend, table)
         .filter(|part| !part.is_empty())
         .last()
         .is_some_and(|part| {
-            part.trim_start_matches(['"', '[', '`'])
-                .to_ascii_lowercase()
-                .starts_with("__gom_")
+            let name = part
+                .trim_start_matches(['"', '[', '`'])
+                .trim_end_matches(['"', ']', '`'])
+                .to_ascii_lowercase();
+            if name == "__gom_self" {
+                return true;
+            }
+            if let Some(rest) = name
+                .strip_prefix("__gom_row_")
+                .or_else(|| name.strip_prefix("__gom_visibility_"))
+            {
+                return numbered(rest);
+            }
+            name.strip_prefix("__gom_closure_").is_some_and(|rest| {
+                let (level, suffix) = rest.split_once('_').unwrap_or((rest, "x"));
+                numbered(level) && !suffix.is_empty()
+            })
         })
 }
 

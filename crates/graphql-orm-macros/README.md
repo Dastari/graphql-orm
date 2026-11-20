@@ -14,8 +14,10 @@ Version 0.186.0 generates `ReadVisibilityFilter::row_bound_filter` and `table_na
 inputs. The first renders each filter column as `row.<column>` for the row it is given, the column
 delimited as generated DDL and DML address it, so read predicates and related-row filters bind to
 the row they describe without substituting a row name into SQL (#796). Related-row filter keys are
-bound the same way. The entity derive refuses a table whose name starts with `__gom_`, which is
-reserved for the aliases read-policy SQL renders. Other generated SQL is unchanged.
+bound the same way. The entity derive refuses a table named like a generated alias (`__gom_self`,
+`__gom_row_<n>`, `__gom_visibility_<n>`, `__gom_closure_<n>`). Relation-count orderings pass
+their key columns to the runtime, which allocates the count's aliases. Other generated SQL is
+unchanged.
 
 Version 0.185.0 aligns with the runtime's
 [SQL Server filtered-index fix](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).

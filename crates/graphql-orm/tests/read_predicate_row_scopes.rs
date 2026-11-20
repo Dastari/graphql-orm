@@ -157,14 +157,91 @@ struct MarkedRow {
     decoy: Option<i32>,
 }
 
+/// The nodes a policy lists.
+#[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(table = "listed_nodes", plural = "ListedNodes")
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(backend = "postgres", table = "listed_nodes", plural = "ListedNodes")
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "listed_nodes",
+        plural = "ListedNodes"
+    )
+)]
+struct ListedNode {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+}
+
+/// Declares a physical column with the name of SQLite's implicit row id.
+#[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(table = "oid_rows", plural = "OidRows")
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(backend = "postgres", table = "oid_rows", plural = "OidRows")
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "oid_rows",
+        plural = "OidRows"
+    )
+)]
+struct OidRow {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    oid: Option<i32>,
+}
+
+/// `OwnerId` declared without quotes, which PostgreSQL folds to `ownerid`,
+/// beside a column declared as `"OwnerId"`.
+#[cfg(feature = "postgres")]
+#[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(backend = "postgres", table = "case_rows", plural = "CaseRows")]
+struct CaseRow {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    #[graphql_orm(db_column = "OwnerId")]
+    folded: Option<i32>,
+    #[graphql_orm(db_column = "\"OwnerId\"")]
+    exact: Option<i32>,
+}
+
 /// A hand-built entity over a table `TABLE` names, with the node columns.
+#[derive(Clone)]
 struct HandBuilt<const TABLE: usize>;
-const RESERVED_TABLES: [&str; 5] = [
+impl<const TABLE: usize> FromSqlRow<B> for HandBuilt<TABLE> {
+    fn from_row(_: &<B as OrmBackend>::Row) -> graphql_orm::Result<Self> {
+        Ok(Self)
+    }
+}
+const RESERVED_TABLES: [&str; 6] = [
     "__gom_closure_1",
     "__gom_row_1",
     "main.__GOM_Visibility_2",
-    "\"__gom_closure_1\"",
-    "__gom_anything",
+    "\"__gom_closure_2_t\"",
+    "__gom_self",
+    // Not a generated name: an ordinary table.
+    "__gom_orders",
 ];
 impl<const TABLE: usize> DatabaseEntity for HandBuilt<TABLE> {
     const TABLE_NAME: &'static str = RESERVED_TABLES[TABLE];
@@ -264,7 +341,8 @@ fn missing_column(error: &str, column: &str) -> bool {
     #[cfg(feature = "sqlite")]
     let refused = error.contains("no such column") && error.contains(column);
     #[cfg(feature = "postgres")]
-    let refused = error.contains("42703") && error.contains(column);
+    let refused =
+        (error.contains("42703") || error.contains("does not exist")) && error.contains(column);
     #[cfg(feature = "mssql")]
     let refused = error.contains("Invalid column name") && error.contains(column);
     refused
@@ -515,8 +593,8 @@ fn misconfigured<T: std::fmt::Debug>(result: async_graphql::Result<T>) {
     );
 }
 
-/// Every read predicate over a hand-built entity whose table name is
-/// reserved for generated aliases is refused, whichever side it is on.
+/// Every read predicate over a hand-built entity whose table carries a name
+/// read predicates generate is refused, whichever side it is on.
 fn reserved_table_is_refused<const TABLE: usize>() {
     let node = || ReadPredicate::is_not_null::<B, NamedNode>("id").unwrap();
     misconfigured(ReadPredicate::is_not_null::<B, HandBuilt<TABLE>>("id"));
@@ -537,110 +615,107 @@ fn reserved_table_is_refused<const TABLE: usize>() {
         node(),
     ));
     misconfigured(ReadPredicate::not_related::<B, HandBuilt<TABLE>, NamedNode>(UP, node()));
-    // As the target, with a predicate that never named the table: a legacy
-    // hand-written filter.
-    let legacy =
-        || ReadPredicate::from_filter::<B, _>(&unbound::<HandBuilt<TABLE>>("score = 1")).unwrap();
-    misconfigured(ReadPredicate::related::<B, NamedNode, HandBuilt<TABLE>>(
-        UP,
-        legacy(),
-    ));
-    misconfigured(ReadPredicate::related_closure::<B, HandBuilt<TABLE>>(
-        UP,
-        legacy(),
-    ));
-    misconfigured(ReadPredicate::related_closure_all::<B, HandBuilt<TABLE>>(
-        UP,
-        legacy(),
-    ));
+    // A filter that names no table builds, since it never names the row.
+    // Attaching its predicate to a statement over the entity is refused.
+    let unnamed =
+        ReadPredicate::from_filter::<B, _>(&unbound::<HandBuilt<TABLE>>("score = 1")).unwrap();
+    misconfigured(
+        EntityQuery::<HandBuilt<TABLE>>::new()
+            .with_read_visibility(&ReadVisibility::Complete(unnamed))
+            .map(|_| ()),
+    );
 }
 
 #[test]
-fn table_names_reserved_for_generated_aliases_are_refused() {
+fn table_names_read_predicates_generate_are_refused() {
     reserved_table_is_refused::<0>();
     reserved_table_is_refused::<1>();
     reserved_table_is_refused::<2>();
     reserved_table_is_refused::<3>();
     reserved_table_is_refused::<4>();
-    assert!(RESERVED_TABLES.iter().all(|table| {
-        table
-            .to_ascii_lowercase()
-            .contains(READ_PREDICATE_RESERVED_TABLE_PREFIX)
-    }));
+    // Any other name starting with `__gom_` is an ordinary table: aliases
+    // are allocated around it.
+    type Orders = HandBuilt<5>;
+    assert_eq!(Orders::TABLE_NAME, "__gom_orders");
+    let scored = || {
+        ReadPredicate::column::<B, Orders>("score", ReadPredicateOp::Eq, SqlValue::Int(1)).unwrap()
+    };
+    let written =
+        ReadPredicate::from_filter::<B, _>(&written::<Orders>("__gom_self.score = 1")).unwrap();
+    ReadPredicate::related::<B, Orders, Orders>(UP, scored().and(written).unwrap()).unwrap();
+    ReadPredicate::not_related::<B, NamedNode, Orders>(UP, scored()).unwrap();
+    let closure = ReadPredicate::related_closure::<B, Orders>(UP, scored()).unwrap();
+    EntityQuery::<Orders>::new()
+        .with_read_visibility(&ReadVisibility::Complete(closure))
+        .unwrap();
 }
 
-/// Nodes (`up`, score): n1 (root, 5), n2 (n1, 1), n3 (n2, 5).
+/// Nodes (`up`, score): n1 (root, 5), n2 (n1, 1), n3 (n2, 5). Listed: n2.
 async fn nodes() -> (Database<B>, Owned) {
     let (db, owned) = database().await;
-    execute(
-        &db,
-        &format!(
+    for statement in [
+        format!(
             "CREATE TABLE named_nodes (id {TEXT} NOT NULL PRIMARY KEY, up {TEXT} NULL, score INT NULL)"
         ),
-    )
-    .await;
-    execute(
-        &db,
-        "INSERT INTO named_nodes (id, up, score) VALUES ('n1', NULL, 5), ('n2', 'n1', 1), ('n3', 'n2', 5)",
-    )
-    .await;
+        "INSERT INTO named_nodes (id, up, score) VALUES ('n1', NULL, 5), ('n2', 'n1', 1), ('n3', 'n2', 5)"
+            .to_owned(),
+        format!("CREATE TABLE listed_nodes (id {TEXT} NOT NULL PRIMARY KEY)"),
+        "INSERT INTO listed_nodes (id) VALUES ('n2')".to_owned(),
+    ] {
+        execute(&db, &statement).await;
+    }
     (db, owned)
 }
 
-/// A physical table with the exact name the first closure's common table
-/// expression would take, read by hand-written policy SQL.
-#[cfg(feature = "mssql")]
-const LISTED: &str =
-    "EXISTS (SELECT 1 FROM [__gom_closure_1] AS listed WHERE listed.id = __gom_self.id)";
-#[cfg(not(feature = "mssql"))]
-const LISTED: &str =
-    "EXISTS (SELECT 1 FROM \"__gom_closure_1\" AS listed WHERE listed.id = __gom_self.id)";
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_table_named_like_a_closure_expression_is_never_shadowed() {
-    let (db, _owned) = nodes().await;
-    #[cfg(feature = "mssql")]
-    let table = "[__gom_closure_1]";
-    #[cfg(not(feature = "mssql"))]
-    let table = "\"__gom_closure_1\"";
-    execute(
-        &db,
-        &format!("CREATE TABLE {table} (id {TEXT} NOT NULL PRIMARY KEY)"),
+/// The node is listed: a policy over another table, built with `related`.
+fn listed() -> ReadPredicate {
+    ReadPredicate::related::<B, NamedNode, ListedNode>(
+        &[("id", "id")],
+        ReadPredicate::is_not_null::<B, ListedNode>("id").unwrap(),
     )
-    .await;
-    execute(&db, &format!("INSERT INTO {table} (id) VALUES ('n2')")).await;
+    .unwrap()
+}
 
-    let listed = || ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(LISTED)).unwrap();
+fn score_at_least(value: i64) -> ReadPredicate {
+    ReadPredicate::column::<B, NamedNode>("score", ReadPredicateOp::Gte, SqlValue::Int(value))
+        .unwrap()
+}
+
+/// A hand-written filter cannot read another table or name a row of its
+/// own; the structured builders express the same policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn policies_over_another_table_use_the_structured_builders() {
+    for clause in [
+        // An alias spelled like a generated row alias.
+        "EXISTS (SELECT 1 FROM listed_nodes AS '__gom_row_1' WHERE '__gom_row_1'.id = __gom_self.id)",
+        // An alias spelled like the root table, which would capture the
+        // name the governed row has at the root of a statement.
+        "EXISTS (SELECT 1 FROM listed_nodes AS named_nodes WHERE named_nodes.id = __gom_self.id)",
+        // A table with the name of a closure's common table expression.
+        "EXISTS (SELECT 1 FROM \"__gom_closure_1\" AS listed WHERE listed.id = __gom_self.id)",
+        "__gom_self.id IN (SELECT id FROM listed_nodes)",
+        "__gom_self.score >= 5 UNION SELECT 1",
+    ] {
+        misconfigured(ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
+            clause,
+        )));
+        misconfigured(ReadPredicate::from_filter::<B, _>(&unbound::<NamedNode>(
+            clause,
+        )));
+    }
+
+    let (db, _owned) = nodes().await;
     // Some node on the way up is listed.
     let any = || ReadPredicate::related_closure::<B, NamedNode>(UP, listed()).unwrap();
-    let sql = |predicate: &ReadPredicate| {
-        EntityQuery::<NamedNode>::new()
-            .with_read_visibility(&ReadVisibility::Complete(predicate.clone()))
-            .unwrap()
-            .build_delete_sql()
-            .0
-    };
-    let opening = |level: usize| {
-        if B::DIALECT == DatabaseBackend::Mssql {
-            format!(") AS __gom_closure_{level}_g ")
-        } else {
-            format!("WITH RECURSIVE __gom_closure_{level} (")
-        }
-    };
-    // The closure does not take the table's name: the first free level is 2.
-    let rendered = sql(&any());
-    assert!(!rendered.contains(&opening(1)), "{rendered}");
-    assert_eq!(rendered.matches(&opening(2)).count(), 1, "{rendered}");
     let mut shapes = vec![
         ("listed", listed(), &["n2"][..]),
         ("closure", any(), &["n2", "n3"]),
     ];
-    // SQL Server renders no common table expression, and its relation
-    // budget has no room for these hand-written subqueries nested twice.
+    // SQL Server's relation budget has no room for a relation inside two
+    // nested closures, each of which renders its target four times.
     if B::DIALECT != DatabaseBackend::Mssql {
         // No node on the way up is listed, inside a second closure: two
-        // closures nested inside one another are the most allowed, and
-        // skipping the table's name does not count as a third.
+        // closures nested inside one another are the most allowed.
         let nested = ReadPredicate::related_closure::<B, NamedNode>(
             UP,
             ReadPredicate::related_closure_all::<B, NamedNode>(UP, listed().not().unwrap())
@@ -651,29 +726,46 @@ async fn a_table_named_like_a_closure_expression_is_never_shadowed() {
             UP,
             nested.clone(),
         ));
-        let rendered = sql(&nested);
-        assert!(!rendered.contains(&opening(1)), "{rendered}");
-        assert_eq!(rendered.matches(&opening(2)).count(), 4, "{rendered}");
-        assert_eq!(rendered.matches(&opening(3)).count(), 1, "{rendered}");
         shapes.push(("nested closures", nested, &["n1", "n2", "n3"]));
-        // Three closures in one policy: two nested ones that never mention
-        // the table keep levels 1 and 2, beside the one that does.
-        let score =
-            ReadPredicate::column::<B, NamedNode>("score", ReadPredicateOp::Gte, SqlValue::Int(5))
-                .unwrap();
-        let three = ReadPredicate::related_closure::<B, NamedNode>(
-            UP,
-            ReadPredicate::related_closure_all::<B, NamedNode>(UP, score).unwrap(),
-        )
-        .unwrap()
-        .and(any())
-        .unwrap();
-        let rendered = sql(&three);
-        assert_eq!(rendered.matches(&opening(1)).count(), 4, "{rendered}");
-        assert_eq!(rendered.matches(&opening(2)).count(), 2, "{rendered}");
-        shapes.push(("three closures", three, &["n2", "n3"]));
     }
     for (name, predicate, expected) in shapes {
+        let (list, count) = reads::<NamedNode>(&db, &predicate, |row| row.id).await;
+        assert_eq!(list.unwrap(), expected, "{name}");
+        assert_eq!(count.unwrap(), expected.len() as i64, "{name}");
+    }
+    #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}
+
+/// Closures beside one another do not count as nested, whatever wraps them.
+#[tokio::test(flavor = "multi_thread")]
+async fn sibling_closures_are_not_nested_closures() {
+    let (db, _owned) = nodes().await;
+    let up = |target| ReadPredicate::related_closure::<B, NamedNode>(UP, target).unwrap();
+    let all = |target| ReadPredicate::related_closure_all::<B, NamedNode>(UP, target).unwrap();
+    // Three sibling closures, negated: every node has an ancestor-or-self
+    // scoring 5 or more, so only the rest of the conjunction decides.
+    let three = up(score_at_least(5))
+        .and(all(score_at_least(1)))
+        .unwrap()
+        .and(up(score_at_least(9)))
+        .unwrap();
+    let negated = three.clone().not().unwrap();
+    // Two closures nested inside one another are allowed, a third refused,
+    // also under a negation.
+    let nested = up(up(score_at_least(5)).not().unwrap());
+    misconfigured(ReadPredicate::related_closure::<B, NamedNode>(
+        UP,
+        nested.clone(),
+    ));
+    misconfigured(ReadPredicate::related_closure_all::<B, NamedNode>(
+        UP,
+        nested.not().unwrap(),
+    ));
+    for (name, predicate, expected) in [
+        ("three siblings", three, &[][..]),
+        ("negated siblings", negated, &["n1", "n2", "n3"]),
+    ] {
         let (list, count) = reads::<NamedNode>(&db, &predicate, |row| row.id).await;
         assert_eq!(list.unwrap(), expected, "{name}");
         assert_eq!(count.unwrap(), expected.len() as i64, "{name}");
@@ -744,40 +836,46 @@ async fn a_column_named_like_the_row_qualifier_is_still_that_column() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn hand_written_policy_sql_is_read_with_the_backend_lexer() {
+async fn hand_written_filters_are_single_row_expressions() {
     let (db, _owned) = nodes().await;
-    // An apostrophe in a comment hides neither the qualifier after it ...
-    let commented = || {
+    let high = || {
+        ReadPredicate::from_filter::<B, _>(&written::<NamedNode>("__gom_self.score >= 5")).unwrap()
+    };
+    // Text in a string is not the qualifier, and a backslash in one is a
+    // character on every backend, as the generated `ESCAPE '\'` needs.
+    let quoted = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
+        "__gom_self.id <> '__gom_self.id' AND __gom_self.id <> 'a\\' AND __gom_self.score >= 5",
+    ))
+    .unwrap();
+    // A filter that names no row is read as before at the root of a
+    // statement, where no enclosing row exists.
+    let unqualified =
+        || ReadPredicate::from_filter::<B, _>(&unbound::<NamedNode>("score >= 5")).unwrap();
+    // One column through the qualifier does not bind the other.
+    let mixed = || {
         ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
-            "1 = 1 /* it's fine */ AND __gom_self.score >= 5",
+            "__gom_self.score >= 5 AND up IS NOT NULL",
         ))
         .unwrap()
     };
-    // ... nor does a line comment that ends inside the clause.
-    let line = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
-        "1 = 1 -- it's fine\n AND __gom_self.score < 5",
-    ))
-    .unwrap();
-    // Text in a string is not the qualifier.
-    let quoted = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
-        "__gom_self.id <> '__gom_self.id' AND __gom_self.score >= 5",
-    ))
-    .unwrap();
-    // A filter that names no row is unchanged.
-    let legacy = ReadPredicate::from_filter::<B, _>(&unbound::<NamedNode>("score >= 5")).unwrap();
     for (name, predicate, expected) in [
-        ("comment", commented(), &["n1", "n3"][..]),
-        ("line comment", line, &["n2"]),
+        ("qualified", high(), &["n1", "n3"][..]),
         ("string", quoted, &["n1", "n3"]),
-        ("unqualified", legacy, &["n1", "n3"]),
+        ("unqualified at the root", unqualified(), &["n1", "n3"]),
+        ("mixed at the root", mixed(), &["n3"]),
         (
-            "comment in a relation",
-            ReadPredicate::related::<B, NamedNode, NamedNode>(UP, commented()).unwrap(),
+            "unqualified, negated and combined at the root",
+            unqualified().not().unwrap().or(high()).unwrap(),
+            &["n1", "n2", "n3"],
+        ),
+        (
+            "qualified in a relation",
+            ReadPredicate::related::<B, NamedNode, NamedNode>(UP, high()).unwrap(),
             &["n2"],
         ),
         (
-            "comment in a closure",
-            ReadPredicate::related_closure_all::<B, NamedNode>(UP, commented()).unwrap(),
+            "qualified in a closure",
+            ReadPredicate::related_closure_all::<B, NamedNode>(UP, high()).unwrap(),
             &["n1"],
         ),
     ] {
@@ -786,32 +884,211 @@ async fn hand_written_policy_sql_is_read_with_the_backend_lexer() {
         assert_eq!(count.unwrap(), expected.len() as i64, "{name}");
     }
 
-    // The qualifier needs the filter's table, wherever it stands.
+    // In a correlated subquery every column must go through the qualifier:
+    // an unqualified column could resolve against an outer row.
+    let targets: [&dyn Fn() -> ReadPredicate; 6] = [
+        &unqualified,
+        &mixed,
+        &|| unqualified().not().unwrap(),
+        &|| unqualified().and(score_at_least(1)).unwrap(),
+        &|| score_at_least(1).or(mixed()).unwrap(),
+        &|| {
+            ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
+                "named_nodes.score >= 5 AND __gom_self.up IS NULL",
+            ))
+            .unwrap()
+        },
+    ];
+    for target in targets {
+        misconfigured(ReadPredicate::related::<B, NamedNode, NamedNode>(
+            UP,
+            target(),
+        ));
+        misconfigured(ReadPredicate::not_related::<B, NamedNode, NamedNode>(
+            UP,
+            target(),
+        ));
+        misconfigured(ReadPredicate::related_closure::<B, NamedNode>(UP, target()));
+        misconfigured(ReadPredicate::related_closure_all::<B, NamedNode>(
+            UP,
+            target(),
+        ));
+    }
+
+    // The qualifier needs the filter's table.
     misconfigured(ReadPredicate::from_filter::<B, _>(&unbound::<NamedNode>(
-        "1 = 1 /* it's fine */ AND __gom_self.score >= 5",
+        "__gom_self.score >= 5",
     )));
     for clause in [
         // Not the qualifier of a column: a column, or the whole row.
         "__gom_self = 1",
-        "score >= 5 AND f(__gom_self) = 1",
-        // SQL that cannot be read with certainty.
-        "__gom_self.score >= 5 AND id <> 'open",
-        "__gom_self.score >= 5 AND \"open = 1",
-        "__gom_self.score >= 5 /* open",
+        "__gom_self.score >= 5 AND f(__gom_self) = 1",
+        // A delimited spelling of the qualifier or of a generated alias.
+        "\"__gom_self\".score >= 5",
+        "\"__gom_row_1\".score >= 5",
+        // Comments.
+        "__gom_self.score >= 5 /* it's fine */",
+        "__gom_self.score >= 5 -- it's fine\n AND __gom_self.up IS NULL",
         "__gom_self.score >= 5 -- to the end",
+        // String continuation.
+        "__gom_self.id <> 'a' 'b'",
+        "__gom_self.id <> 'a'\n'b'",
+        // Unclosed text.
+        "__gom_self.score >= 5 AND __gom_self.id <> 'open",
+        "__gom_self.score >= 5 AND \"open = 1",
     ] {
         misconfigured(ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
             clause,
         )));
     }
-    // A backslash in an ordinary string is a character on every backend,
-    // as the generated `ESCAPE '\'` needs.
-    let backslash = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
-        "__gom_self.id <> 'a\\' AND __gom_self.score >= 5",
-    ))
-    .unwrap();
-    let (list, _) = reads::<NamedNode>(&db, &backslash, |row| row.id).await;
-    assert_eq!(list.unwrap(), ["n1", "n3"]);
+    // PostgreSQL: Unicode-escape strings and identifiers.
+    for clause in ["__gom_self.id <> U&'\\0061'", "U&\"score\" >= 5"] {
+        let predicate = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(clause));
+        if B::DIALECT == DatabaseBackend::Postgres {
+            misconfigured(predicate);
+        }
+    }
     #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}
+
+/// `oid` is a declared, physical column here (r1: 7, r2: 1), so a policy
+/// may test it. On SQLite an undeclared `rowid`, `_rowid_` or `oid` would
+/// silently name the implicit row id of whatever table is in scope.
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_implicit_row_ids_are_not_policy_columns() {
+    for column in ["rowid", "_rowid_", "oid", "ROWID"] {
+        misconfigured(ReadPredicate::column::<B, NamedNode>(
+            column,
+            ReadPredicateOp::Eq,
+            SqlValue::Int(1),
+        ));
+        misconfigured(ReadPredicate::is_null::<B, NamedNode>(column));
+        misconfigured(ReadPredicate::related::<B, NamedNode, NamedNode>(
+            &[(column, "id")],
+            score_at_least(1),
+        ));
+        let written = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(match column {
+            "rowid" => "__gom_self.rowid = 1",
+            "_rowid_" => "__gom_self._rowid_ = 1",
+            "oid" => "__gom_self.\"oid\" = 1",
+            _ => "ROWID = 1",
+        }));
+        if B::DIALECT == DatabaseBackend::Sqlite {
+            misconfigured(written);
+        }
+    }
+
+    let (db, _owned) = database().await;
+    execute(
+        &db,
+        &format!("CREATE TABLE oid_rows (id {TEXT} NOT NULL PRIMARY KEY, oid INT NULL)"),
+    )
+    .await;
+    execute(
+        &db,
+        "INSERT INTO oid_rows (id, oid) VALUES ('r1', 7), ('r2', 1)",
+    )
+    .await;
+    let declared =
+        ReadPredicate::column::<B, OidRow>("oid", ReadPredicateOp::Eq, SqlValue::Int(7)).unwrap();
+    let related =
+        ReadPredicate::related::<B, OidRow, OidRow>(&[("id", "id")], declared.clone()).unwrap();
+    for predicate in [declared, related] {
+        let (list, count) = reads::<OidRow>(&db, &predicate, |row| row.id).await;
+        assert_eq!(list.unwrap(), ["r1"]);
+        assert_eq!(count.unwrap(), 1);
+    }
+    #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}
+
+/// PostgreSQL folds a column declared without quotes to lower case, and a
+/// table may hold `"OwnerId"` beside it. Rows (`ownerid`, `"OwnerId"`):
+/// c1 (1, 5), c2 (7, 7). Nodes score 5, 1, 5.
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_predicates_address_the_column_generated_ddl_creates() {
+    let (db, _owned) = nodes().await;
+    execute(
+        &db,
+        "CREATE TABLE case_rows (id TEXT NOT NULL PRIMARY KEY, OwnerId INT NULL, \"OwnerId\" INT NULL)",
+    )
+    .await;
+    execute(
+        &db,
+        "INSERT INTO case_rows (id, ownerid, \"OwnerId\") VALUES ('c1', 1, 5), ('c2', 7, 7)",
+    )
+    .await;
+    let count = |predicate: ReadPredicate| {
+        let db = db.clone();
+        async move {
+            EntityQuery::<CaseRow>::new()
+                .with_read_visibility(&ReadVisibility::Complete(predicate))
+                .unwrap()
+                .count(&db)
+                .await
+                .unwrap()
+        }
+    };
+    let id = |id: &str| {
+        ReadPredicate::column::<B, CaseRow>("id", ReadPredicateOp::Eq, SqlValue::String(id.into()))
+            .unwrap()
+    };
+    let folded = |value| {
+        ReadPredicate::column::<B, CaseRow>("OwnerId", ReadPredicateOp::Eq, SqlValue::Int(value))
+            .unwrap()
+    };
+    let exact = |value| {
+        ReadPredicate::column::<B, CaseRow>(
+            "\"OwnerId\"",
+            ReadPredicateOp::Eq,
+            SqlValue::Int(value),
+        )
+        .unwrap()
+    };
+    // The unquoted declaration tests `ownerid`, the quoted one `"OwnerId"`.
+    assert_eq!(count(folded(1).and(id("c1")).unwrap()).await, 1);
+    assert_eq!(count(folded(5)).await, 0);
+    assert_eq!(count(exact(5).and(id("c1")).unwrap()).await, 1);
+    assert_eq!(count(exact(1)).await, 0);
+    assert_eq!(
+        count(ReadPredicate::is_not_null::<B, CaseRow>("OwnerId").unwrap()).await,
+        2
+    );
+    // Relation keys and closure pointers address the same columns.
+    let keyed = |column: &'static str| {
+        ReadPredicate::related::<B, NamedNode, CaseRow>(
+            &[("score", column)],
+            ReadPredicate::is_not_null::<B, CaseRow>("id").unwrap(),
+        )
+        .unwrap()
+    };
+    for (name, predicate, expected) in [
+        ("folded key", keyed("OwnerId"), &["n2"][..]),
+        ("exact key", keyed("\"OwnerId\""), &["n1", "n3"]),
+        (
+            "folded source key",
+            ReadPredicate::related::<B, CaseRow, CaseRow>(&[("OwnerId", "\"OwnerId\"")], id("c2"))
+                .unwrap(),
+            &[][..],
+        ),
+    ] {
+        if name == "folded source key" {
+            // c2's `ownerid` (7) equals c2's `"OwnerId"` (7); c1's (1) no row's.
+            assert_eq!(count(predicate).await, 1, "{name}");
+            continue;
+        }
+        let (list, _) = reads::<NamedNode>(&db, &predicate, |row| row.id).await;
+        assert_eq!(list.unwrap(), expected, "{name}");
+    }
+    assert_eq!(
+        count(
+            ReadPredicate::related_closure::<B, CaseRow>(&[("OwnerId", "\"OwnerId\"")], id("c2"))
+                .unwrap()
+        )
+        .await,
+        1
+    );
     db.pool().close().await;
 }

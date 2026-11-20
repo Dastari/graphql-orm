@@ -13,8 +13,9 @@ supersedes: []
 Version 0.186.0 binds every column a read predicate renders to its own row: through the entity's
 table path at the root of a statement, and through an alias no other scope uses inside a relation,
 `not_related`, closure or count subquery. A column missing from a target table then fails the read
-instead of resolving against an outer row (#796). Table names starting with `__gom_` are reserved
-for those aliases, and hand-written policy SQL is read with the backend's lexical rules.
+instead of resolving against an outer row (#796). The generated alias names are
+reserved as table names, and a hand-written `ReadVisibilityFilter` may only hold single-row
+expressions, with every column written through `__gom_self` where it is evaluated in a subquery.
 See the [migration guide](../../MIGRATION.md#01850-to-01860-read-predicate-columns-bound-to-their-row).
 
 Version 0.185.0 renders SQL Server filtered-index strings as Unicode literals,

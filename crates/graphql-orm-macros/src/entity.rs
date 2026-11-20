@@ -4037,7 +4037,7 @@ fn generate_entity_tokens(
         return Err(syn::Error::new_spanned(
             struct_name,
             format!(
-                "table `{raw_table_name}` is not allowed: table names starting with `__gom_` are reserved for the row aliases and common table expressions that generated read-policy SQL renders"
+                "table `{raw_table_name}` is not allowed: `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` and `__gom_closure_<n>` (with any `_<suffix>`) are the row aliases and common table expressions that generated read-policy SQL renders"
             ),
         ));
     }
@@ -4853,9 +4853,11 @@ fn generate_entity_tokens(
                         ));
                     }
                     let target_type = syn::Ident::new(&target_type, field.span());
-                    let relation_alias = "__graphql_orm_order_relation";
                     let dialect = backend_dialect_tokens(backend);
-                    let predicates = source_columns
+                    // `(target column, source column)` pairs as generated
+                    // SQL renders them. The count joins them through an
+                    // alias allocated at run time (#796).
+                    let count_keys = source_columns
                         .iter()
                         .zip(target_columns.iter())
                         .map(|(source_column, target_column)| {
@@ -4871,20 +4873,15 @@ fn generate_entity_tokens(
                                 .expect("relation source columns were validated above");
                             let source_physical =
                                 source.meta.db_column.as_deref().unwrap_or(source_column);
-                            format!(
-                                "{relation_alias}.{} = {}.{}",
-                                backend_render_identifier_path(backend, target_column),
-                                backend_render_identifier_path(backend, raw_table_name),
-                                backend_render_identifier_path(backend, source_physical),
-                            )
+                            let target_key = backend_render_identifier_path(backend, target_column);
+                            let source_key =
+                                backend_render_identifier_path(backend, source_physical);
+                            quote! { (#target_key, #source_key) }
                         })
-                        .collect::<Vec<_>>()
-                        .join(" AND ");
+                        .collect::<Vec<_>>();
                     // Unprepared inputs render a count that matches no rows and
                     // fail `validate_order`, so no builder executes them.
-                    let unauthorized_format = format!(
-                        "(SELECT COUNT(*) FROM {{}} AS {relation_alias} WHERE {predicates} AND 1 = 0) {{}}"
-                    );
+                    let unauthorized_format = "(SELECT COUNT(*) FROM {} WHERE 1 = 0) {}";
                     relation_order_match_arms.push(quote! {
                         if let Some(dir) = &self.#order_field_name {
                             match self.__gom_relation_counts.get(#aggregate_name) {
@@ -4930,8 +4927,7 @@ fn generate_entity_tokens(
                             >(
                                 ctx,
                                 <#struct_name as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
-                                #relation_alias,
-                                #predicates,
+                                &[#(#count_keys),*],
                                 budget,
                             ).await?;
                             self.__gom_relation_counts.insert(#aggregate_name.to_owned(), prepared);

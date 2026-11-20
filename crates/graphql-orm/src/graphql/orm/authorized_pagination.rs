@@ -33,26 +33,45 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// each column for the row they are given, with no row name in their
     /// SQL text (#796).
     ///
-    /// The default returns [`DatabaseFilter::to_filter_expression`], whose
-    /// columns stay unbound: inside a correlated subquery, a column the
-    /// table does not physically have resolves against an outer row. To
-    /// bind a hand-written filter, write each column as
-    /// `__gom_self.<column>` ([`READ_PREDICATE_ROW`], a bare word followed
-    /// by a dot) and return the entity's table from [`Self::table_name`].
-    /// The qualifier is then bound to the row the predicate governs
-    /// wherever it is rendered: the entity's table at the root of a
-    /// statement, and a row alias no other scope uses inside a relation,
-    /// `not_related`, closure or count subquery.
+    /// **What a hand-written filter may hold.** Each clause must be a
+    /// single-row boolean expression over the entity's own columns and
+    /// bound parameters. A filter is refused with
+    /// `AUTHORIZATION_MISCONFIGURED` when a clause holds, outside string
+    /// constants:
     ///
-    /// The SQL is read with the backend's own lexical rules, so the
-    /// qualifier is never recognised inside a string, a delimited
-    /// identifier, a comment or a PostgreSQL dollar-quoted string, or after
-    /// a dot. A filter is refused with `AUTHORIZATION_MISCONFIGURED` when it
-    /// writes the qualifier without a table, writes `__gom_self` where no
-    /// dot follows, or holds SQL that cannot be read with certainty (an
-    /// unterminated string, identifier or comment, or a line comment that
-    /// runs to the end of a clause). An ordinary PostgreSQL string is read
-    /// with `standard_conforming_strings` on, as generated SQL requires.
+    /// - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT` or
+    ///   `EXCEPT`. A policy that reads another table is built with
+    ///   [`ReadPredicate::related`], [`ReadPredicate::not_related`] or the
+    ///   closure constructors, which bind every row structurally;
+    /// - a comment, a PostgreSQL `U&'...'` string or `U&"..."` identifier,
+    ///   or two string constants separated only by whitespace;
+    /// - a delimited identifier that names the row qualifier or a
+    ///   generated alias (`"__gom_self"`, `"__gom_row_1"`, ...);
+    /// - on SQLite, `rowid`, `_rowid_` or `oid`;
+    /// - the bare word `__gom_self` with no dot after it, or an unclosed
+    ///   string, identifier or dollar quote.
+    ///
+    /// **Binding its columns.** Write each column as `__gom_self.<column>`
+    /// ([`READ_PREDICATE_ROW`], a bare word followed by a dot) and return
+    /// the entity's table from [`Self::table_name`]. The qualifier is then
+    /// bound to the row the predicate governs wherever it is rendered: the
+    /// entity's table at the root of a statement, and a row alias that no
+    /// table or alias in scope has inside a relation, `not_related`,
+    /// closure or count subquery. The qualifier without a table is refused.
+    ///
+    /// The default returns [`DatabaseFilter::to_filter_expression`], whose
+    /// columns are unqualified. Such a filter, and any filter that names a
+    /// column other than through the qualifier, is accepted only for the
+    /// root of a statement, where no enclosing row exists. It is refused
+    /// with `AUTHORIZATION_MISCONFIGURED` wherever its predicate would be
+    /// evaluated in a correlated subquery: as a relation, `not_related` or
+    /// closure target, and as the policy of an entity that a generated
+    /// related-row filter or relation-count ordering targets. There a
+    /// column the table lacks would resolve against an outer row.
+    ///
+    /// The SQL is read with the backend's own lexical rules. An ordinary
+    /// PostgreSQL string is read with `standard_conforming_strings` on, as
+    /// generated SQL requires.
     fn to_row_bound_filter_expression(&self) -> Option<FilterExpression> {
         self.to_filter_expression()
     }
@@ -80,23 +99,18 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
 /// never hold this word in their SQL (#796).
 pub const READ_PREDICATE_ROW: &str = "__gom_self";
 
-/// Table names that start with this prefix, compared without ASCII case, are
-/// reserved for the aliases and common table expressions read predicates
-/// render (`__gom_row_N`, `__gom_visibility_N`, `__gom_closure_N` and names
-/// derived from them). The entity macro refuses such a table at compile
-/// time; a hand-built entity over one is refused by every read predicate
-/// constructor, generated related-row filter and relation-count ordering
-/// with `AUTHORIZATION_MISCONFIGURED`.
-pub const READ_PREDICATE_RESERVED_TABLE_PREFIX: &str = "__gom_";
-
-/// `Err` when `table`'s own name is reserved: see
-/// [`READ_PREDICATE_RESERVED_TABLE_PREFIX`].
+/// `Err` when `table`'s own name, compared without ASCII case, is one read
+/// predicates generate: `__gom_self`, `__gom_row_<n>`,
+/// `__gom_visibility_<n>`, `__gom_closure_<n>` or a name derived from it
+/// (`__gom_closure_<n>_<suffix>`). A table of such a name could take a row
+/// alias's place for a column the aliased table lacks, or be shadowed by a
+/// closure's common table expression. The entity derive refuses it at
+/// compile time; for a hand-built entity every read-predicate constructor,
+/// related-row filter and count ordering refuses it, as does attaching a
+/// predicate to a statement over the entity. Other names starting with
+/// `__gom_` are allowed: aliases are allocated around them.
 fn ensure_table_name(backend: DatabaseBackend, table: &str) -> async_graphql::Result<()> {
-    if backend
-        .table_name_part(table)
-        .to_ascii_lowercase()
-        .starts_with(READ_PREDICATE_RESERVED_TABLE_PREFIX)
-    {
+    if generated_name(&backend.table_name_part(table).to_ascii_lowercase()) {
         return Err(invalid());
     }
     Ok(())
@@ -405,79 +419,323 @@ fn sql_tokens(backend: DatabaseBackend, sql: &str) -> async_graphql::Result<Vec<
     Ok(tokens)
 }
 
-/// One clause of a hand-written filter as SQL over the governed row: each
-/// [`READ_PREDICATE_ROW`] qualifier (the bare word, without ASCII case,
-/// followed by a dot and not itself after a dot) becomes a row reference.
-/// The word after a dot is a column or member with that name and is kept.
-/// Anywhere else it is ambiguous (a column, or the whole row), so the
-/// clause is refused, as is SQL that cannot be read with certainty.
-fn handwritten_sql(backend: DatabaseBackend, clause: &str) -> async_graphql::Result<RowBoundSql> {
-    let tokens = sql_tokens(backend, clause)?;
-    let dot = |token: Option<&SqlToken>| {
+/// Why hand-written policy SQL was refused. The reason is reported with the
+/// `AUTHORIZATION_MISCONFIGURED` error as its server-side diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicySqlRefusal {
+    /// A string, identifier or dollar quote is not closed.
+    Unreadable,
+    /// `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT` or `EXCEPT`.
+    Keyword,
+    /// A comment.
+    Comment,
+    /// A PostgreSQL `U&'...'` string or `U&"..."` identifier.
+    UnicodeEscape,
+    /// Two string constants separated only by whitespace.
+    StringContinuation,
+    /// A delimited identifier that names a generated alias or the row
+    /// qualifier.
+    ReservedName,
+    /// The bare word `__gom_self` with no dot after it.
+    AmbiguousRow,
+    /// SQLite's implicit `rowid`, `_rowid_` or `oid`.
+    ImplicitRowid,
+    /// The row qualifier in a filter that names no table.
+    MissingTable,
+    /// A column that is not written through the row qualifier, where the
+    /// predicate is evaluated in a correlated subquery.
+    UnboundColumn,
+}
+
+impl PolicySqlRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Unreadable => {
+                "hand-written policy SQL holds an unclosed string, identifier or dollar quote"
+            }
+            Self::Keyword => {
+                "hand-written policy SQL holds SELECT, FROM, JOIN, WITH, UNION, INTERSECT or EXCEPT; use the related, not_related or closure builders to read another table"
+            }
+            Self::Comment => "hand-written policy SQL holds a comment",
+            Self::UnicodeEscape => "hand-written policy SQL holds a U& string or identifier",
+            Self::StringContinuation => "hand-written policy SQL holds adjacent string constants",
+            Self::ReservedName => {
+                "hand-written policy SQL holds a delimited identifier reserved for generated names"
+            }
+            Self::AmbiguousRow => {
+                "hand-written policy SQL writes __gom_self without a column after it"
+            }
+            Self::ImplicitRowid => {
+                "hand-written policy SQL names SQLite's implicit rowid, _rowid_ or oid"
+            }
+            Self::MissingTable => {
+                "a hand-written filter writes the __gom_self qualifier but returns no table_name"
+            }
+            Self::UnboundColumn => {
+                "a hand-written filter evaluated in a correlated subquery must write every column as __gom_self.<column>"
+            }
+        }
+    }
+}
+
+impl From<PolicySqlRefusal> for async_graphql::Error {
+    fn from(refusal: PolicySqlRefusal) -> Self {
+        OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+            .with_internal(refusal.reason())
+            .into_graphql_error()
+    }
+}
+
+/// The name inside a delimited identifier token, a doubled closing
+/// delimiter read as one, in lower case.
+fn delimited_name(text: &str) -> String {
+    let close = match text.as_bytes().first() {
+        Some(b'[') => ']',
+        Some(open) => *open as char,
+        None => return String::new(),
+    };
+    text.get(1..text.len().saturating_sub(1))
+        .unwrap_or("")
+        .replace(&format!("{close}{close}"), &close.to_string())
+        .to_ascii_lowercase()
+}
+
+/// Whether `name`, in lower case, is a name read predicates generate: the
+/// row qualifier `__gom_self`, a row alias `__gom_row_<n>` or
+/// `__gom_visibility_<n>`, a closure name `__gom_closure_<n>`, or a name
+/// derived from one, `__gom_closure_<n>_<suffix>`.
+fn generated_name(name: &str) -> bool {
+    let numbered = |rest: &str| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit());
+    if name == READ_PREDICATE_ROW {
+        return true;
+    }
+    if let Some(rest) = ROW_ALIASES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+    {
+        return numbered(rest);
+    }
+    name.strip_prefix(CLOSURE_ALIASES[0]).is_some_and(|rest| {
+        let (level, suffix) = rest.split_once('_').unwrap_or((rest, "x"));
+        numbered(level) && !suffix.is_empty()
+    })
+}
+
+/// Words a single-row boolean expression is written with, besides column
+/// references, numbers, parameters and function calls.
+const POLICY_SQL_WORDS: &[&str] = &[
+    "all", "and", "any", "as", "between", "case", "cast", "collate", "else", "end", "escape",
+    "false", "glob", "ilike", "in", "is", "isnull", "like", "not", "notnull", "null", "or",
+    "regexp", "similar", "some", "then", "to", "true", "unknown", "when",
+];
+
+/// One clause of a hand-written filter as SQL over the governed row, and
+/// whether every column it tests is written through the row qualifier.
+///
+/// A hand-written clause may only be a single-row boolean expression over
+/// the governed row's own columns and bound parameters. It is refused when,
+/// outside string constants, it holds:
+///
+/// - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT` or `EXCEPT`: no
+///   subquery and no alias of its own, so no name in it can capture a
+///   generated alias or the root table. Policies over another table use the
+///   structured builders;
+/// - a comment, a PostgreSQL `U&` string or identifier, or two string
+///   constants separated only by whitespace;
+/// - a delimited identifier that names a generated alias or the qualifier;
+/// - on SQLite, `rowid`, `_rowid_` or `oid`, which every table has
+///   implicitly;
+/// - the bare word `__gom_self` with no dot after it, or SQL with an
+///   unclosed string, identifier or dollar quote.
+///
+/// Each [`READ_PREDICATE_ROW`] qualifier (the bare word, without ASCII
+/// case, followed by a dot and not itself after a dot) becomes a row
+/// reference. A column is bound when it follows the qualifier. Any other
+/// name the clause could resolve as a column makes it unbound: a bare or
+/// delimited identifier that is not a keyword of a boolean expression, a
+/// number, a parameter, a function call, a type after `AS` or `::`, a
+/// collation after `COLLATE` or a string prefix, and any name qualified by
+/// something other than the row.
+fn handwritten_sql(
+    backend: DatabaseBackend,
+    clause: &str,
+) -> Result<(RowBoundSql, bool), PolicySqlRefusal> {
+    let mut tokens = Vec::new();
+    let readable = scan_sql(backend, clause, |token| tokens.push(token));
+    if tokens
+        .iter()
+        .any(|token| token.kind == SqlTokenKind::Comment)
+    {
+        return Err(PolicySqlRefusal::Comment);
+    }
+    readable.map_err(|_| PolicySqlRefusal::Unreadable)?;
+    let text = |token: &SqlToken| &clause[token.start..token.end];
+    let at = |index: Option<usize>| index.and_then(|index| tokens.get(index));
+    let symbol = |token: Option<&SqlToken>, symbol: &str| {
+        token.is_some_and(|token| token.kind == SqlTokenKind::Symbol && text(token) == symbol)
+    };
+    let word = |token: Option<&SqlToken>, word: &str| {
         token.is_some_and(|token| {
-            token.kind == SqlTokenKind::Symbol && &clause[token.start..token.end] == "."
+            token.kind == SqlTokenKind::Word && text(token).eq_ignore_ascii_case(word)
         })
+    };
+    // The qualifier: the bare word, not after a dot.
+    let qualifier = |index: Option<usize>| {
+        word(at(index), READ_PREDICATE_ROW)
+            && !symbol(at(index.and_then(|i| i.checked_sub(1))), ".")
+    };
+    let implicit_rowid = |name: &str| {
+        backend == DatabaseBackend::Sqlite && matches!(name, "rowid" | "_rowid_" | "oid")
     };
     let mut sql = RowBoundSql::default();
     let mut copied = 0;
+    let mut bound = true;
     for (index, token) in tokens.iter().enumerate() {
-        if token.kind != SqlTokenKind::Word
-            || !clause[token.start..token.end].eq_ignore_ascii_case(READ_PREDICATE_ROW)
-            || (index > 0 && dot(tokens.get(index - 1)))
-        {
-            continue;
+        let before = at(index.checked_sub(1));
+        let after = at(Some(index + 1));
+        let after_dot = symbol(before, ".");
+        // Whether this name is a column of the governed row.
+        let of_row = after_dot && qualifier(index.checked_sub(2));
+        match token.kind {
+            SqlTokenKind::Word => {
+                let lower = text(token).to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "select" | "from" | "join" | "with" | "union" | "intersect" | "except"
+                ) {
+                    return Err(PolicySqlRefusal::Keyword);
+                }
+                if implicit_rowid(&lower) {
+                    return Err(PolicySqlRefusal::ImplicitRowid);
+                }
+                let adjacent = |left: &SqlToken, right: Option<&SqlToken>| {
+                    right.is_some_and(|right| right.start == left.end)
+                };
+                let quoted = |token: Option<&SqlToken>| {
+                    token.is_some_and(|token| {
+                        matches!(
+                            token.kind,
+                            SqlTokenKind::StringLiteral | SqlTokenKind::QuotedIdentifier
+                        )
+                    })
+                };
+                if backend == DatabaseBackend::Postgres
+                    && lower == "u"
+                    && symbol(after, "&")
+                    && adjacent(token, after)
+                    && quoted(at(Some(index + 2)))
+                    && after.is_some_and(|ampersand| adjacent(ampersand, at(Some(index + 2))))
+                {
+                    return Err(PolicySqlRefusal::UnicodeEscape);
+                }
+                if qualifier(Some(index)) {
+                    if !symbol(after, ".") {
+                        return Err(PolicySqlRefusal::AmbiguousRow);
+                    }
+                    sql.push_str(&clause[copied..token.start]);
+                    sql.push_row();
+                    copied = token.end;
+                    continue;
+                }
+                let number = lower.as_bytes()[0].is_ascii_digit();
+                let allowed = if after_dot {
+                    // A column of the row, or the fraction of a number.
+                    of_row
+                        || (number
+                            && at(index.checked_sub(2)).is_some_and(|whole| {
+                                whole.kind == SqlTokenKind::Word
+                                    && text(whole).as_bytes()[0].is_ascii_digit()
+                            }))
+                } else {
+                    number
+                        || matches!(lower.as_bytes()[0], b'@' | b':' | b'$' | b'#')
+                        || symbol(after, "(")
+                        || POLICY_SQL_WORDS.binary_search(&lower.as_str()).is_ok()
+                        || word(before, "as")
+                        || word(before, "collate")
+                        || (symbol(before, ":") && symbol(at(index.checked_sub(2)), ":"))
+                        || (after.is_some_and(|next| next.kind == SqlTokenKind::StringLiteral)
+                            && adjacent(token, after))
+                };
+                bound &= allowed;
+            }
+            SqlTokenKind::QuotedIdentifier => {
+                let name = delimited_name(text(token));
+                if generated_name(&name) {
+                    return Err(PolicySqlRefusal::ReservedName);
+                }
+                if implicit_rowid(&name) {
+                    return Err(PolicySqlRefusal::ImplicitRowid);
+                }
+                bound &= of_row;
+            }
+            SqlTokenKind::StringLiteral => {
+                if after.is_some_and(|next| next.kind == SqlTokenKind::StringLiteral) {
+                    return Err(PolicySqlRefusal::StringContinuation);
+                }
+            }
+            SqlTokenKind::Symbol => {
+                // MySQL reads `#` to the end of the line as a comment.
+                if backend == DatabaseBackend::Mysql && text(token) == "#" {
+                    return Err(PolicySqlRefusal::Comment);
+                }
+            }
+            SqlTokenKind::Comment | SqlTokenKind::Placeholder => {}
         }
-        if !dot(tokens.get(index + 1)) {
-            return Err(invalid());
-        }
-        sql.push_str(&clause[copied..token.start]);
-        sql.push_row();
-        copied = token.end;
     }
     sql.push_str(&clause[copied..]);
-    Ok(sql)
+    Ok((sql, bound))
 }
 
-/// A hand-written filter expression as a policy: see [`handwritten_sql`].
+/// A hand-written filter expression as a policy, and whether every column
+/// it tests is written through the row qualifier: see [`handwritten_sql`].
 fn handwritten_policy(
     backend: DatabaseBackend,
     expression: &FilterExpression,
-) -> async_graphql::Result<Policy> {
+    bound: &mut bool,
+) -> Result<Policy, PolicySqlRefusal> {
     Ok(match expression {
         FilterExpression::Raw { clause, values }
-        | FilterExpression::TrustedFragment { clause, values } => Policy::Sql {
-            sql: handwritten_sql(backend, clause)?,
-            values: values.clone(),
-        },
+        | FilterExpression::TrustedFragment { clause, values } => {
+            let (sql, clause_bound) = handwritten_sql(backend, clause)?;
+            *bound &= clause_bound;
+            Policy::Sql {
+                sql,
+                values: values.clone(),
+            }
+        }
         FilterExpression::And(children) => Policy::And(
             children
                 .iter()
-                .map(|child| handwritten_policy(backend, child))
-                .collect::<async_graphql::Result<_>>()?,
+                .map(|child| handwritten_policy(backend, child, bound))
+                .collect::<Result<_, _>>()?,
         ),
         FilterExpression::Or(children) => Policy::Or(
             children
                 .iter()
-                .map(|child| handwritten_policy(backend, child))
-                .collect::<async_graphql::Result<_>>()?,
+                .map(|child| handwritten_policy(backend, child, bound))
+                .collect::<Result<_, _>>()?,
         ),
     })
 }
 
-/// `filter` as a policy over the governed row, or `None` when it is empty.
-/// A generated filter renders itself for the row; any other filter's SQL is
-/// read by [`handwritten_policy`].
+/// `filter` as a policy over the governed row, or `None` when it is empty,
+/// and whether every column it tests is bound to the row. A generated
+/// filter renders itself for the row; any other filter's SQL is read by
+/// [`handwritten_policy`].
 fn filter_policy<F: ReadVisibilityFilter>(
     backend: DatabaseBackend,
     filter: &F,
-) -> async_graphql::Result<Option<Policy>> {
+) -> async_graphql::Result<(Option<Policy>, bool)> {
     if let Some(generated) = filter.row_bound_filter() {
-        return Ok(generated.policy(backend));
+        return Ok((generated.policy(backend), true));
     }
-    filter
+    let mut bound = true;
+    let policy = filter
         .to_row_bound_filter_expression()
-        .map(|expression| handwritten_policy(backend, &expression))
-        .transpose()
+        .map(|expression| handwritten_policy(backend, &expression, &mut bound))
+        .transpose()?;
+    Ok((policy, bound))
 }
 
 /// The name the governed row has at the root of a statement over `table`.
@@ -492,7 +750,7 @@ fn root_row(backend: DatabaseBackend, table: Option<&str>) -> String {
 fn row_bound_column(backend: DatabaseBackend, column: &str) -> RowBoundSql {
     let mut sql = RowBoundSql::default();
     sql.push_row();
-    sql.push_str(&format!(".{}", backend.quote_column_identifier(column)));
+    sql.push_str(&format!(".{}", backend.delimited_column_identifier(column)));
     sql
 }
 
@@ -518,21 +776,10 @@ impl Scope {
             let text = &sql[token.start..token.end];
             let name = match token.kind {
                 SqlTokenKind::Word => text.to_ascii_lowercase(),
-                SqlTokenKind::QuotedIdentifier => {
-                    // The name inside the delimiters, a doubled closing
-                    // delimiter read as one.
-                    let close = match text.as_bytes()[0] {
-                        b'[' => ']',
-                        open => open as char,
-                    };
-                    let inner = text.get(1..text.len().saturating_sub(1)).unwrap_or("");
-                    inner
-                        .replace(&format!("{close}{close}"), &close.to_string())
-                        .to_ascii_lowercase()
-                }
+                SqlTokenKind::QuotedIdentifier => delimited_name(text),
                 _ => continue,
             };
-            if name.starts_with(READ_PREDICATE_RESERVED_TABLE_PREFIX) {
+            if name.starts_with("__gom_") {
                 names.insert(name);
             }
         }
@@ -543,12 +790,6 @@ impl Scope {
     fn table(mut self, backend: DatabaseBackend, table: &str) -> Self {
         self.names
             .insert(backend.table_name_part(table).to_ascii_lowercase());
-        self
-    }
-
-    /// Also avoid the alias `name`.
-    fn alias(mut self, name: &str) -> Self {
-        self.names.insert(name.to_ascii_lowercase());
         self
     }
 
@@ -639,6 +880,10 @@ pub struct ReadPredicate {
     table: Option<&'static str>,
     /// The predicate over the governed row.
     policy: Policy,
+    /// Whether a hand-written clause names a column other than through the
+    /// row qualifier. Such a predicate is refused wherever it would be
+    /// evaluated in a correlated subquery.
+    unbound: bool,
     cost: Cost,
 }
 /// A persisted physical column of `T`. A table-qualified column is accepted
@@ -1081,7 +1326,7 @@ fn render_mssql_closure(
             &|index, pointer, _| {
                 format!(
                     "{row}.{} AS __gom_p{index}",
-                    dialect.quote_column_identifier(pointer)
+                    dialect.delimited_column_identifier(pointer)
                 )
             },
             ", ",
@@ -1094,7 +1339,7 @@ fn render_mssql_closure(
             &|index, _, key| {
                 format!(
                     "{row}.{} = {alias}.__gom_p{index}",
-                    dialect.quote_column_identifier(key)
+                    dialect.delimited_column_identifier(key)
                 )
             },
             " AND ",
@@ -1117,7 +1362,7 @@ fn render_mssql_closure(
         walk.push_row();
         walk.push_str(&format!(
             ".{} AS __gom_p{index}",
-            dialect.quote_column_identifier(pointer)
+            dialect.delimited_column_identifier(pointer)
         ));
     }
     walk.push_str(&format!(", 0 AS __gom_depth) AS {}", level(0)));
@@ -1236,6 +1481,11 @@ impl Relation {
         if keys.is_empty() || target.entity != TypeId::of::<T>() || target.backend != B::DIALECT {
             return Err(invalid());
         }
+        // The target is evaluated in a correlated subquery: a column it
+        // does not write through the row could resolve against an outer row.
+        if target.unbound {
+            return Err(PolicySqlRefusal::UnboundColumn.into());
+        }
         ensure_table_name(B::DIALECT, S::TABLE_NAME)?;
         ensure_table_name(B::DIALECT, T::TABLE_NAME)?;
         let mut pairs = Vec::new();
@@ -1246,8 +1496,8 @@ impl Relation {
                 return Err(invalid());
             }
             pairs.push((
-                B::DIALECT.quote_column_identifier(destination),
-                B::DIALECT.quote_column_identifier(source),
+                B::DIALECT.delimited_column_identifier(destination),
+                B::DIALECT.delimited_column_identifier(source),
             ));
         }
         let (predicate, values) = target.policy.flatten();
@@ -1305,6 +1555,7 @@ impl ReadPredicate {
             backend,
             table,
             policy,
+            unbound: false,
             cost,
         })
     }
@@ -1319,13 +1570,21 @@ impl ReadPredicate {
         table: Option<&'static str>,
         sql: RowBoundSql,
         values: Vec<SqlValue>,
+        closures: u32,
     ) -> async_graphql::Result<Self> {
-        let cost = Cost::of(backend, &sql.bind(&root_row(backend, table)))?.check(backend)?;
+        let cost = Cost {
+            // How deep closures nest is known from how the predicate was
+            // built; the rendered text gives the rest.
+            closures,
+            ..Cost::of(backend, &sql.bind(&root_row(backend, table)))?
+        }
+        .check(backend)?;
         Ok(Self {
             entity,
             backend,
             table,
             policy: Policy::Sql { sql, values },
+            unbound: false,
             cost,
         })
     }
@@ -1360,6 +1619,7 @@ impl ReadPredicate {
             Some(T::TABLE_NAME),
             row_bound_column(B::DIALECT, column).wrapped("", &format!(" {operator} ?")),
             vec![value],
+            0,
         )
     }
 
@@ -1397,6 +1657,7 @@ impl ReadPredicate {
             Some(T::TABLE_NAME),
             row_bound_column(B::DIALECT, column).wrapped("", &format!(" {test}")),
             Vec::new(),
+            0,
         )
     }
 
@@ -1445,7 +1706,12 @@ impl ReadPredicate {
             self.table,
             clause.wrapped("NOT (", ")"),
             values,
+            self.cost.closures,
         )
+        .map(|negated| Self {
+            unbound: self.unbound,
+            ..negated
+        })
     }
 
     /// Reject filters requiring residual Rust matching on this backend. A partial
@@ -1456,15 +1722,19 @@ impl ReadPredicate {
         if F::backend() != B::DIALECT || filter.requires_in_memory_filtering(B::DIALECT) {
             return Err(invalid());
         }
-        let policy = filter_policy(B::DIALECT, filter)?.ok_or_else(invalid)?;
+        let (policy, bound) = filter_policy(B::DIALECT, filter)?;
+        let policy = policy.ok_or_else(invalid)?;
         match F::table_name() {
             Some(table) => ensure_table_name(B::DIALECT, table)?,
             // The governed row is the entity's table at the root; without
             // the table it could not be named.
-            None if policy.holds_row() => return Err(invalid()),
+            None if policy.holds_row() => return Err(PolicySqlRefusal::MissingTable.into()),
             None => {}
         }
-        Self::measured(F::entity_type_id(), B::DIALECT, F::table_name(), policy)
+        Ok(Self {
+            unbound: !bound,
+            ..Self::measured(F::entity_type_id(), B::DIALECT, F::table_name(), policy)?
+        })
     }
 
     /// A parameterized EXISTS join over validated persisted columns. `keys`
@@ -1480,6 +1750,7 @@ impl ReadPredicate {
         T: Entity + 'static,
     {
         reserve(target.cost.bytes, 1, 1024)?;
+        let closures = target.cost.closures;
         let relation = Relation::new::<B, S, T>(keys, &target)?;
         let clause = relation.exists(&relation.predicate);
         Self::fragment(
@@ -1488,6 +1759,7 @@ impl ReadPredicate {
             Some(S::TABLE_NAME),
             clause,
             relation.values,
+            closures,
         )
     }
 
@@ -1529,6 +1801,7 @@ impl ReadPredicate {
             return Err(invalid());
         }
         reserve(target.cost.bytes, 2, 2048)?;
+        let closures = target.cost.closures;
         let relation = Relation::new::<B, S, T>(keys, &target)?;
         let rendered = relation.predicate.bind(READ_PREDICATE_ROW);
         if rendered.trim().is_empty() || contains_match_nothing(&rendered) {
@@ -1561,6 +1834,7 @@ impl ReadPredicate {
             Some(S::TABLE_NAME),
             clause,
             values,
+            closures,
         )
     }
 
@@ -1738,6 +2012,7 @@ impl ReadPredicate {
             0
         };
         reserve(target.cost.bytes, 4, 4096 + walk)?;
+        let closures = target.cost.closures;
         let relation = Relation::new::<B, T, T>(keys, &target)?;
         if relation
             .predicate
@@ -1777,6 +2052,7 @@ impl ReadPredicate {
                 Some(T::TABLE_NAME),
                 clause,
                 values,
+                closures + 1,
             );
         }
         let join = |items: Vec<String>, separator: &str| items.join(separator);
@@ -1797,7 +2073,7 @@ impl ReadPredicate {
             indexed(&|index, _, key| {
                 format!(
                     "{reached}.{} = {cte}.__gom_p{index}",
-                    dialect.quote_column_identifier(key)
+                    dialect.delimited_column_identifier(key)
                 )
             }),
             " AND ",
@@ -1824,7 +2100,7 @@ impl ReadPredicate {
             indexed(&|index, _, key| {
                 format!(
                     "{named}.{} = {node}.__gom_p{index}",
-                    dialect.quote_column_identifier(key)
+                    dialect.delimited_column_identifier(key)
                 )
             }),
             " AND ",
@@ -1855,7 +2131,10 @@ impl ReadPredicate {
                 clause.push_str(", ");
             }
             clause.push_row();
-            clause.push_str(&format!(".{}", dialect.quote_column_identifier(pointer)));
+            clause.push_str(&format!(
+                ".{}",
+                dialect.delimited_column_identifier(pointer)
+            ));
         }
         clause.push_str(", 0, ");
         clause.push(&truth(&relation.predicate));
@@ -1866,7 +2145,7 @@ impl ReadPredicate {
              SELECT {verdict} FROM {cte}) = 1",
             reached_pointers = join(
                 indexed(&|_, pointer, _| {
-                    format!("{reached}.{}", dialect.quote_column_identifier(pointer))
+                    format!("{reached}.{}", dialect.delimited_column_identifier(pointer))
                 }),
                 ", ",
             ),
@@ -1878,6 +2157,7 @@ impl ReadPredicate {
             Some(T::TABLE_NAME),
             clause,
             values,
+            closures + 1,
         )
     }
 
@@ -1895,6 +2175,7 @@ impl ReadPredicate {
         // any length stays one level deep: `(a) OR (b) OR (c)`. Its rendered
         // depth is its deepest child plus one, plus the grouping levels a long
         // chain is rendered with.
+        let unbound = self.unbound || other.unbound;
         let mut children = Vec::new();
         let (mut inner, mut inner_units) = (0, 0);
         for (policy, cost) in [(self.policy, self.cost), (other.policy, other.cost)] {
@@ -1947,6 +2228,7 @@ impl ReadPredicate {
             // One entity has one table; a side without it refers to no
             // governed row.
             table: self.table.or(other.table),
+            unbound,
             policy: if and {
                 Policy::And(children)
             } else {
@@ -2102,15 +2384,23 @@ where
             return Err(input_error());
         }
         super::authorize_read_fields::<T, B>(db, ctx, filter.referenced_fields()).await?;
-        policies.push(filter_policy(B::DIALECT, filter)?.unwrap_or_else(|| Policy::sql("1 = 1")));
+        let (policy, bound) = filter_policy(B::DIALECT, filter)?;
+        if !bound {
+            return Err(PolicySqlRefusal::UnboundColumn.into());
+        }
+        policies.push(policy.unwrap_or_else(|| Policy::sql("1 = 1")));
     }
     let mut policy = if policies.is_empty() {
         Policy::sql("1 = 0")
     } else {
         Policy::Or(policies)
     };
-    if let Some(target) = visibility.row_policy() {
-        policy = Policy::And(vec![policy, target.clone()]);
+    if let Some(target) = visibility.row_predicate() {
+        // The target's own policy is evaluated in the relation's subquery.
+        if target.unbound {
+            return Err(PolicySqlRefusal::UnboundColumn.into());
+        }
+        policy = Policy::And(vec![policy, target.policy.clone()]);
     }
     let predicate = ReadPredicate::related::<B, S, T>(
         keys,
@@ -2139,16 +2429,16 @@ where
 /// (residual) policies cannot be expressed in one SQL count and fail closed
 /// with the sanitized authorization error, as relation filters do.
 ///
-/// `join` is generated, identifier-quoted SQL that correlates `alias` with the
-/// source table; it must not contain bind placeholders. `source` is the
-/// source entity's declared table, which the statement reads unaliased, so
-/// the counted row's alias must differ from it.
+/// `source` is the source entity's declared table, which the statement
+/// reads unaliased. `keys` are `(target column, source column)` pairs as
+/// generated SQL renders them; the counted rows are joined to the source row
+/// through an alias allocated here, which differs from every table and
+/// alias in scope.
 #[doc(hidden)]
 pub async fn prepare_relation_count_order<B, T>(
     ctx: &async_graphql::Context<'_>,
     source: &str,
-    alias: &str,
-    join: &str,
+    keys: &[(&str, &str)],
     budget: &mut RelationFilterBudget,
 ) -> async_graphql::Result<(String, Vec<SqlValue>)>
 where
@@ -2180,44 +2470,68 @@ where
         B::DIALECT,
         source,
         T::TABLE_NAME,
-        alias,
-        join,
-        visibility.row_policy(),
+        keys,
+        visibility.row_predicate(),
     )?;
     budget.charge_with::<B>(&count, 1)?;
     Ok((count, values))
 }
 
 /// The correlated `COUNT(*)` over the rows of `target` that `policy` admits,
-/// for a statement that reads `source` unaliased. `alias` names the counted
-/// rows in `join`.
+/// for a statement that reads `source` unaliased. `keys` are
+/// `(target column, source column)` pairs as generated SQL renders them.
 fn relation_count_sql(
     backend: DatabaseBackend,
     source: &str,
     target: &str,
-    alias: &str,
-    join: &str,
-    policy: Option<&Policy>,
+    keys: &[(&str, &str)],
+    policy: Option<&ReadPredicate>,
 ) -> async_graphql::Result<(String, Vec<SqlValue>)> {
-    // A column the counted table lacks must fail the statement, so no
-    // table in scope may carry the derived table's alias either.
     ensure_table_name(backend, source)?;
     ensure_table_name(backend, target)?;
-    let named = |table: &str| backend.table_name_part(table).eq_ignore_ascii_case(alias);
-    if named(source) || named(target) {
+    if keys.is_empty() {
         return Err(invalid());
     }
     let table = backend.render_identifier_path(target);
+    let source_row = backend.render_identifier_path(source);
+    // The counted rows and, under a policy, the row the policy governs
+    // each get an alias that no table or alias in scope has: not the
+    // source table the statement reads, the counted table, or any name
+    // inside the policy. A key or policy column the counted table lacks
+    // then fails the statement (#796).
+    let count = |scope: Scope, from: &dyn Fn(&str) -> String| {
+        let level = scope
+            .table(backend, source)
+            .table(backend, target)
+            .level(ROW_ALIASES);
+        let counted = format!("{}{level}", ROW_ALIASES[1]);
+        let join = keys
+            .iter()
+            .map(|(target_key, source_key)| {
+                format!("{counted}.{target_key} = {source_row}.{source_key}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        format!(
+            "(SELECT COUNT(*) FROM {} AS {counted} WHERE {join})",
+            from(&format!("{}{level}", ROW_ALIASES[0]))
+        )
+    };
     let Some(policy) = policy else {
         // Unrestricted target: the count subquery still costs a relation.
         return Ok((
-            format!("(SELECT COUNT(*) FROM {table} AS {alias} WHERE {join})"),
+            count(Scope::of(backend, "")?, &|_| table.to_string()),
             Vec::new(),
         ));
     };
+    // The policy is evaluated in the count's subquery, correlated with the
+    // source row.
+    if policy.unbound {
+        return Err(PolicySqlRefusal::UnboundColumn.into());
+    }
     // Anonymous placeholders: the sort renderer renumbers them per dialect
     // after the WHERE binds, as for contextual order expressions.
-    let (predicate, values) = policy.flatten();
+    let (predicate, values) = policy.policy.flatten();
     let rendered = predicate.bind(READ_PREDICATE_ROW);
     if rendered.trim().is_empty() {
         return Err(invalid());
@@ -2228,20 +2542,13 @@ fn relation_count_sql(
     // The count wraps the policy in two more subquery levels: check the
     // wrapped expression, as for a relation filter.
     reserve(rendered.len(), 1, 1024)?;
-    // The counted row has an alias that no table or alias in scope has:
-    // not the source table the statement reads, the counted table, the
-    // derived table's alias, or any name inside the policy. A policy column
-    // the counted table lacks then fails the statement (#796).
-    let scope = Scope::of(backend, &rendered)?
-        .table(backend, source)
-        .table(backend, target)
-        .alias(alias);
-    let row = format!("{}{}", ROW_ALIASES[0], scope.level(ROW_ALIASES));
-    let predicate = predicate.bind(&row);
     Ok((
-        format!(
-            "(SELECT COUNT(*) FROM (SELECT * FROM {table} AS {row} WHERE {predicate}) AS {alias} WHERE {join})"
-        ),
+        count(Scope::of(backend, &rendered)?, &|row| {
+            format!(
+                "(SELECT * FROM {table} AS {row} WHERE {})",
+                predicate.bind(row)
+            )
+        }),
         values,
     ))
 }
@@ -2271,9 +2578,9 @@ impl ReadVisibility {
     }
     /// The SQL predicate over the governed row, to be embedded where a
     /// subquery binds the row.
-    fn row_policy(&self) -> Option<&Policy> {
+    fn row_predicate(&self) -> Option<&ReadPredicate> {
         match self {
-            Self::Prefilter(predicate) | Self::Complete(predicate) => Some(&predicate.policy),
+            Self::Prefilter(predicate) | Self::Complete(predicate) => Some(predicate),
             _ => None,
         }
     }
@@ -2281,6 +2588,12 @@ impl ReadVisibility {
         matches!(self, Self::CallbackOnly | Self::Prefilter(_))
     }
     pub(crate) fn validate<T: Entity + 'static, B: OrmBackend>(&self) -> async_graphql::Result<()> {
+        // A predicate attached to a statement over `T` names its rows by
+        // `T`'s table: a hand-built entity over a generated name is refused
+        // here too, whatever built the predicate.
+        if matches!(self, Self::Prefilter(_) | Self::Complete(_)) {
+            ensure_table_name(B::DIALECT, T::TABLE_NAME)?;
+        }
         self.validate_identity(Some(TypeId::of::<T>()), B::DIALECT)
     }
     pub(crate) fn validate_identity(
@@ -3410,95 +3723,268 @@ mod predicate_tests {
         Cost::of(DatabaseBackend::Sqlite, clause).unwrap()
     }
 
+    /// A policy over trusted clauses that are not read as hand-written SQL.
+    fn raw_policy(expression: &FilterExpression) -> Policy {
+        match expression {
+            FilterExpression::Raw { clause, values }
+            | FilterExpression::TrustedFragment { clause, values } => Policy::Sql {
+                sql: RowBoundSql::sql(clause.as_str()),
+                values: values.clone(),
+            },
+            FilterExpression::And(children) => {
+                Policy::And(children.iter().map(raw_policy).collect())
+            }
+            FilterExpression::Or(children) => Policy::Or(children.iter().map(raw_policy).collect()),
+        }
+    }
+
+    const BACKENDS: [DatabaseBackend; 3] = [
+        DatabaseBackend::Sqlite,
+        DatabaseBackend::Postgres,
+        DatabaseBackend::Mssql,
+    ];
+
+    /// The public code of a refusal.
+    fn code(error: &async_graphql::Error) -> String {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
+
     #[test]
     fn hand_written_qualifiers_become_row_references() {
         use DatabaseBackend::{Mssql, Postgres, Sqlite};
+        // The clause bound to the row `R`, and whether every column in it
+        // is written through the qualifier.
         let bind = |backend, clause: &str| {
-            handwritten_sql(backend, clause).map(|sql| (sql.bind("R"), sql.holds_row()))
+            handwritten_sql(backend, clause).map(|(sql, bound)| (sql.bind("R"), bound))
         };
-        let bound = |backend, clause: &str| bind(backend, clause).unwrap().0;
-        for backend in [Sqlite, Postgres, Mssql] {
-            // Only the bare word before a dot is the qualifier: not a column
-            // of that name after a dot, a delimited name, a string or a
-            // comment. It is matched without ASCII case.
+        for backend in BACKENDS {
+            // Only the bare word before a dot is the qualifier, matched
+            // without ASCII case: not text in a string.
             assert_eq!(
-                bound(
+                bind(
                     backend,
-                    "__gom_self.a = ? AND t.__gom_self = 1 AND \"__gom_self\".b = '__gom_self.c' \
-                     /* __gom_self.d */ AND __GOM_SELF . e = 2"
+                    "__gom_self.a = ? AND __GOM_SELF . b <> '__gom_self.c' AND __gom_self.d IS NOT NULL"
                 ),
-                "R.a = ? AND t.__gom_self = 1 AND \"__gom_self\".b = '__gom_self.c' \
-                 /* __gom_self.d */ AND R . e = 2",
+                Ok((
+                    "R.a = ? AND R . b <> '__gom_self.c' AND R.d IS NOT NULL".to_owned(),
+                    true
+                )),
                 "{backend:?}"
             );
             // A physical column named like the qualifier keeps its name.
             assert_eq!(
-                bound(backend, "__gom_self.__gom_self = 1"),
-                "R.__gom_self = 1",
+                bind(backend, "__gom_self.__gom_self = 1"),
+                Ok(("R.__gom_self = 1".to_owned(), true)),
                 "{backend:?}"
             );
-            // An apostrophe in a comment hides no qualifier after it.
-            assert_eq!(
-                bind(backend, "a = 1 -- it's\n AND __gom_self.b = 2").unwrap(),
-                ("a = 1 -- it's\n AND R.b = 2".to_owned(), true),
-                "{backend:?}"
-            );
-            assert_eq!(
-                bind(backend, "a = 1 /* it's */ AND __gom_self.b = 2").unwrap(),
-                ("a = 1 /* it's */ AND R.b = 2".to_owned(), true),
-                "{backend:?}"
-            );
-            assert_eq!(
-                bind(backend, "a = '__gom_self.b'").unwrap(),
-                ("a = '__gom_self.b'".to_owned(), false),
-                "{backend:?}"
-            );
-            // The bare word where no dot follows is ambiguous: refused.
-            assert!(bind(backend, "__gom_self = 1").is_err(), "{backend:?}");
-            assert!(bind(backend, "f(__gom_self)").is_err(), "{backend:?}");
-            // SQL that cannot be read with certainty is refused.
+            // The expression forms a single-row test is written with.
             for clause in [
-                "__gom_self.a = 'open",
-                "__gom_self.a = \"open",
-                "__gom_self.a = 1 /* open",
-                "__gom_self.a = 1 -- to the end",
+                "__gom_self.a IN (?, ?) OR NOT (__gom_self.b BETWEEN 1 AND 2.5)",
+                "LOWER(__gom_self.a) LIKE ? ESCAPE '\\' AND __gom_self.b IS NULL",
+                "CASE WHEN __gom_self.a > 0 THEN TRUE ELSE FALSE END",
+                "CAST(__gom_self.a AS INTEGER) = 1 AND COALESCE(__gom_self.b, 0) = 0",
+                "1 = 1",
             ] {
-                assert!(bind(backend, clause).is_err(), "{backend:?}: {clause}");
+                assert_eq!(
+                    bind(backend, clause).map(|(_, bound)| bound),
+                    Ok(true),
+                    "{backend:?}: {clause}"
+                );
             }
+            // A column not written through the qualifier leaves the clause
+            // unbound: bare, delimited, or qualified by anything else.
+            for clause in [
+                "a = 1",
+                "__gom_self.a = b",
+                "\"a\" = 1",
+                "t.a = 1",
+                "sources.a = __gom_self.a",
+                "t.__gom_self = 1",
+                "__gom_self.a = 1 AND x.y.z = 2",
+            ] {
+                assert_eq!(
+                    bind(backend, clause).map(|(_, bound)| bound),
+                    Ok(false),
+                    "{backend:?}: {clause}"
+                );
+            }
+            // Refused whatever the context.
+            for (clause, refusal) in [
+                // A subquery, or an alias of its own: the reviewer's probes.
+                (
+                    "EXISTS (SELECT 1 FROM lookup AS '__gom_row_1' WHERE '__gom_row_1'.id = __gom_self.id)",
+                    PolicySqlRefusal::Keyword,
+                ),
+                (
+                    "EXISTS (SELECT 1 FROM lookup AS sources WHERE sources.id = __gom_self.id)",
+                    PolicySqlRefusal::Keyword,
+                ),
+                ("__gom_self.a IN (select 1)", PolicySqlRefusal::Keyword),
+                ("__gom_self.a IS DISTINCT FROM 1", PolicySqlRefusal::Keyword),
+                ("__gom_self.a = 1 JOIN t", PolicySqlRefusal::Keyword),
+                ("WITH c AS (x) y", PolicySqlRefusal::Keyword),
+                ("__gom_self.a = 1 UNION x", PolicySqlRefusal::Keyword),
+                ("__gom_self.a = 1 INTERSECT x", PolicySqlRefusal::Keyword),
+                ("__gom_self.a = 1 EXCEPT x", PolicySqlRefusal::Keyword),
+                // Comments, closed or not.
+                ("__gom_self.a = 1 /* it's */", PolicySqlRefusal::Comment),
+                (
+                    "__gom_self.a = 1 -- it's\n AND __gom_self.b = 2",
+                    PolicySqlRefusal::Comment,
+                ),
+                ("__gom_self.a = 1 -- to the end", PolicySqlRefusal::Comment),
+                ("__gom_self.a = 1 /* open", PolicySqlRefusal::Comment),
+                // String continuation.
+                (
+                    "__gom_self.a = 'x' 'y'",
+                    PolicySqlRefusal::StringContinuation,
+                ),
+                (
+                    "__gom_self.a = 'x'\n  'y'",
+                    PolicySqlRefusal::StringContinuation,
+                ),
+                // Delimited spellings of generated names.
+                ("\"__gom_self\".a = 1", PolicySqlRefusal::ReservedName),
+                ("\"__GOM_ROW_1\".a = 1", PolicySqlRefusal::ReservedName),
+                (
+                    "\"__gom_closure_2_t\".a = 1",
+                    PolicySqlRefusal::ReservedName,
+                ),
+                // The qualifier with no column after it.
+                ("__gom_self = 1", PolicySqlRefusal::AmbiguousRow),
+                ("f(__gom_self)", PolicySqlRefusal::AmbiguousRow),
+                // Unreadable SQL.
+                ("__gom_self.a = 'open", PolicySqlRefusal::Unreadable),
+                ("__gom_self.a = \"open", PolicySqlRefusal::Unreadable),
+            ] {
+                assert_eq!(bind(backend, clause), Err(refusal), "{backend:?}: {clause}");
+            }
+            // Keywords inside a string are text.
+            assert_eq!(
+                bind(backend, "__gom_self.a = 'SELECT x FROM y -- z'").map(|(_, bound)| bound),
+                Ok(true),
+                "{backend:?}"
+            );
         }
-        // PostgreSQL: dollar-quoted and escape strings are text, and an
-        // array subscript is code.
+        // PostgreSQL: `U&` strings and identifiers, and an unclosed dollar
+        // quote; dollar-quoted and escape strings are text, an array
+        // subscript is code.
+        for clause in ["__gom_self.a = U&'\\0061'", "u&\"\\0061\" = 1"] {
+            assert_eq!(
+                bind(Postgres, clause),
+                Err(PolicySqlRefusal::UnicodeEscape),
+                "{clause}"
+            );
+        }
         assert_eq!(
-            bound(
+            bind(Postgres, "__gom_self.a = $q$ open"),
+            Err(PolicySqlRefusal::Unreadable)
+        );
+        assert_eq!(
+            bind(
                 Postgres,
-                "__gom_self.a = $q$ __gom_self.b $q$ AND c = E'\\'__gom_self.d' AND tags[__gom_self.i] = 1"
+                "__gom_self.a = $q$ __gom_self.b $q$ AND __gom_self.c = E'\\'__gom_self.d' AND __gom_self.tags[1] = __gom_self.i::text"
             ),
-            "R.a = $q$ __gom_self.b $q$ AND c = E'\\'__gom_self.d' AND tags[R.i] = 1"
+            Ok((
+                "R.a = $q$ __gom_self.b $q$ AND R.c = E'\\'__gom_self.d' AND R.tags[1] = R.i::text"
+                    .to_owned(),
+                true
+            ))
         );
-        // A backslash in an ordinary string is a character, as generated
-        // `ESCAPE '\'` needs.
-        assert_eq!(
-            bound(Postgres, "c LIKE 'x' ESCAPE '\\' AND __gom_self.a = 'y'"),
-            "c LIKE 'x' ESCAPE '\\' AND R.a = 'y'"
-        );
-        assert!(bind(Postgres, "__gom_self.a = $q$ open").is_err());
         // SQL Server and SQLite: brackets delimit a name.
         for backend in [Mssql, Sqlite] {
             assert_eq!(
-                bound(backend, "[__gom_self.i] = __gom_self.[j]"),
-                "[__gom_self.i] = R.[j]",
+                bind(backend, "__gom_self.[j] = 1 AND [k] = 2"),
+                Ok(("R.[j] = 1 AND [k] = 2".to_owned(), false)),
+                "{backend:?}"
+            );
+            assert_eq!(
+                bind(backend, "[__gom_row_1].j = 1"),
+                Err(PolicySqlRefusal::ReservedName),
                 "{backend:?}"
             );
         }
         assert_eq!(
-            bound(Mssql, "[a]]__gom_self.b] = @__gom_self.c"),
-            "[a]]__gom_self.b] = @__gom_self.c"
+            bind(Mssql, "__gom_self.a = @__gom_self AND __gom_self.b = N'x'"),
+            Ok(("R.a = @__gom_self AND R.b = N'x'".to_owned(), true))
         );
-        // SQLite: backticks delimit a name and a named parameter is a word.
+        // SQLite: backticks delimit a name, a named parameter is a word,
+        // and the implicit row id columns are refused however written.
         assert_eq!(
-            bound(Sqlite, "`__gom_self.a` = :__gom_self AND __gom_self.b = 1"),
-            "`__gom_self.a` = :__gom_self AND R.b = 1"
+            bind(Sqlite, "__gom_self.a = :__gom_self AND `b` = 1"),
+            Ok(("R.a = :__gom_self AND `b` = 1".to_owned(), false))
         );
+        for clause in [
+            "rowid = 1",
+            "__gom_self.ROWID = 1",
+            "__gom_self._rowid_ = 1",
+            "__gom_self.\"oid\" = 1",
+            "[oid] = 1",
+        ] {
+            assert_eq!(
+                bind(Sqlite, clause),
+                Err(PolicySqlRefusal::ImplicitRowid),
+                "{clause}"
+            );
+        }
+        // Elsewhere those are ordinary column names.
+        assert_eq!(
+            bind(Postgres, "__gom_self.oid = 1").map(|(_, bound)| bound),
+            Ok(true)
+        );
+        // Every refusal is AUTHORIZATION_MISCONFIGURED.
+        let error = async_graphql::Error::from(PolicySqlRefusal::Keyword);
+        assert_eq!(code(&error), "\"AUTHORIZATION_MISCONFIGURED\"");
+    }
+
+    #[test]
+    fn generated_names_are_exactly_the_reserved_ones() {
+        for name in [
+            "__gom_self",
+            "__gom_row_1",
+            "__gom_row_27",
+            "__gom_visibility_3",
+            "__gom_closure_1",
+            "__gom_closure_2_t",
+            "__gom_closure_2_h64",
+            "__gom_closure_10_anything",
+        ] {
+            assert!(generated_name(name), "{name}");
+            assert_eq!(
+                code(&ensure_table_name(DatabaseBackend::Sqlite, name).unwrap_err()),
+                "\"AUTHORIZATION_MISCONFIGURED\"",
+                "{name}"
+            );
+        }
+        for name in [
+            "__gom_orders",
+            "__gom_",
+            "__gom_row_",
+            "__gom_row_x",
+            "__gom_row_1_x",
+            "__gom_rows_1",
+            "__gom_closure_",
+            "__gom_closure_x",
+            "__gom_closure_1_",
+            "__gom_self_service",
+            "gom_row_1",
+        ] {
+            assert!(!generated_name(name), "{name}");
+            assert!(
+                ensure_table_name(DatabaseBackend::Sqlite, name).is_ok(),
+                "{name}"
+            );
+        }
+        // The table's own name decides, in any case, delimited or not.
+        for backend in BACKENDS {
+            assert!(ensure_table_name(backend, "main.\"__GOM_Row_1\"").is_err());
+            assert!(ensure_table_name(backend, "__gom_row_1.orders").is_ok());
+        }
     }
 
     #[test]
@@ -3556,11 +4042,10 @@ mod predicate_tests {
                 "{backend:?}"
             );
         }
-        // The tables and aliases the caller knows to be visible.
+        // The tables the caller knows to be visible.
         assert_eq!(
-            scope(Sqlite, "x = 1")
+            scope(Sqlite, "FROM t AS __gom_row_2")
                 .table(Sqlite, "main.__GOM_row_1")
-                .alias("__gom_row_2")
                 .level(ROW_ALIASES),
             3
         );
@@ -3575,59 +4060,82 @@ mod predicate_tests {
     }
 
     #[test]
-    fn a_count_ordering_row_alias_differs_from_every_table_in_scope() {
+    fn a_count_ordering_allocates_both_of_its_aliases() {
         use DatabaseBackend::Sqlite;
-        let policy = |clause: &str| Policy::Sql {
-            sql: handwritten_sql(Sqlite, clause).unwrap(),
-            values: Vec::new(),
+        let policy = |clause: &str, unbound: bool| ReadPredicate {
+            entity: TypeId::of::<()>(),
+            backend: Sqlite,
+            table: Some("targets"),
+            policy: Policy::Sql {
+                sql: handwritten_sql(Sqlite, clause).unwrap().0,
+                values: Vec::new(),
+            },
+            unbound,
+            cost: Cost::default(),
         };
-        let count = |source: &str, target: &str, policy: Option<&Policy>| {
-            relation_count_sql(
-                Sqlite,
-                source,
-                target,
-                "counted",
-                "counted.s = sources.id",
-                policy,
-            )
-            .map(|(sql, _)| sql)
+        let count = |source: &str, target: &str, policy: Option<&ReadPredicate>| {
+            relation_count_sql(Sqlite, source, target, &[("s", "id")], policy).map(|(sql, _)| sql)
         };
+        let flag = policy("__gom_self.flag = 1", false);
         assert_eq!(
-            count("sources", "targets", Some(&policy("__gom_self.flag = 1"))).unwrap(),
+            count("sources", "targets", Some(&flag)).unwrap(),
             "(SELECT COUNT(*) FROM (SELECT * FROM targets AS __gom_row_1 WHERE \
-             __gom_row_1.flag = 1) AS counted WHERE counted.s = sources.id)"
+             __gom_row_1.flag = 1) AS __gom_visibility_1 WHERE __gom_visibility_1.s = sources.id)"
         );
-        // A source or target table named like a row alias never reaches
-        // the statement: SQLite would fall back to it for a column the
-        // counted table lacks.
-        for source in [
+        assert_eq!(
+            count("sources", "targets", None).unwrap(),
+            "(SELECT COUNT(*) FROM targets AS __gom_visibility_1 WHERE __gom_visibility_1.s = sources.id)"
+        );
+        // A table once named like the fixed alias is an ordinary table now.
+        assert_eq!(
+            count("__graphql_orm_order_relation", "targets", None).unwrap(),
+            "(SELECT COUNT(*) FROM targets AS __gom_visibility_1 WHERE \
+             __gom_visibility_1.s = __graphql_orm_order_relation.id)"
+        );
+        // A source or target table named like a row alias never reaches the
+        // statement: SQLite would fall back to it for a column the counted
+        // table lacks.
+        for table in [
             "__gom_row_1",
             "main.\"__GOM_ROW_1\"",
             "[__gom_visibility_1]",
         ] {
-            assert!(
-                count(source, "targets", Some(&policy("__gom_self.flag = 1"))).is_err(),
-                "{source}"
-            );
-            assert!(count(source, "targets", None).is_err(), "{source}");
-            assert!(count("sources", source, None).is_err(), "{source}");
+            for result in [
+                count(table, "targets", Some(&flag)),
+                count(table, "targets", None),
+                count("sources", table, None),
+            ] {
+                assert_eq!(
+                    code(&result.unwrap_err()),
+                    "\"AUTHORIZATION_MISCONFIGURED\"",
+                    "{table}"
+                );
+            }
         }
-        // Nor does a table carrying the derived table's own alias.
-        assert!(count("COUNTED", "targets", None).is_err());
-        assert!(count("sources", "main.counted", None).is_err());
-        // A table of that name read by the policy's own SQL moves the alias.
+        // A name inside the policy that an alias would collide with moves
+        // both aliases.
+        let nested = ReadPredicate {
+            policy: Policy::sql(
+                "EXISTS (SELECT 1 FROM (SELECT * FROM o AS __gom_row_1 WHERE 1 = 1) AS \
+                 __gom_visibility_1 WHERE 1 = 1)",
+            ),
+            ..policy("1 = 1", false)
+        };
+        assert!(
+            count("sources", "targets", Some(&nested))
+                .unwrap()
+                .starts_with("(SELECT COUNT(*) FROM (SELECT * FROM targets AS __gom_row_2 WHERE ")
+        );
+        assert!(
+            count("sources", "targets", Some(&nested))
+                .unwrap()
+                .ends_with(" AS __gom_visibility_2 WHERE __gom_visibility_2.s = sources.id)")
+        );
+        // A policy with a column that is not written through the row is
+        // refused: the count evaluates it in a correlated subquery.
         assert_eq!(
-            count(
-                "sources",
-                "targets",
-                Some(&policy(
-                    "__gom_self.flag = 1 AND EXISTS (SELECT 1 FROM \"__gom_row_1\" AS o WHERE o.id = __gom_self.id)"
-                ))
-            )
-            .unwrap(),
-            "(SELECT COUNT(*) FROM (SELECT * FROM targets AS __gom_row_2 WHERE \
-             __gom_row_2.flag = 1 AND EXISTS (SELECT 1 FROM \"__gom_row_1\" AS o WHERE \
-             o.id = __gom_row_2.id)) AS counted WHERE counted.s = sources.id)"
+            code(&count("sources", "targets", Some(&policy("flag = 1", true))).unwrap_err()),
+            "\"AUTHORIZATION_MISCONFIGURED\""
         );
     }
 
@@ -3642,7 +4150,8 @@ mod predicate_tests {
                 entity: TypeId::of::<()>(),
                 backend: DatabaseBackend::Sqlite,
                 table: None,
-                policy: handwritten_policy(DatabaseBackend::Sqlite, &expression).unwrap(),
+                policy: raw_policy(&expression),
+                unbound: false,
                 cost: Cost::default(),
             };
             assert!(predicate.not().is_err());
@@ -3655,9 +4164,10 @@ mod predicate_tests {
             backend: DatabaseBackend::Sqlite,
             table: None,
             policy: Policy::Sql {
-                sql: handwritten_sql(DatabaseBackend::Sqlite, clause).unwrap(),
+                sql: RowBoundSql::sql(clause),
                 values,
             },
+            unbound: false,
             cost: Cost::of(DatabaseBackend::Sqlite, clause).unwrap(),
         }
     }
@@ -3894,7 +4404,8 @@ mod predicate_tests {
                 entity: TypeId::of::<()>(),
                 backend: DatabaseBackend::Sqlite,
                 table: None,
-                policy: handwritten_policy(DatabaseBackend::Sqlite, &expression).unwrap(),
+                policy: raw_policy(&expression),
+                unbound: false,
                 cost: Cost::default(),
             };
             assert!(predicate.clone().not().is_err(), "{predicate:?}");

@@ -481,19 +481,60 @@ fn missing_flag(error: &str) -> bool {
     #[cfg(feature = "sqlite")]
     let refused = error.contains("no such column") && error.contains("flag");
     #[cfg(feature = "postgres")]
-    let refused = error.contains("42703") && error.contains("flag");
+    let refused =
+        (error.contains("42703") || error.contains("does not exist")) && error.contains("flag");
     #[cfg(feature = "mssql")]
     let refused = error.contains("Invalid column name") && error.contains("flag");
     refused
 }
 
-/// Whether a GraphQL read failed as a statement the database refused, which
-/// is reported as the sanitized internal error, and not as a denial or a
-/// policy refusal.
+/// The server-side diagnostics of the errors GraphQL reports as sanitized
+/// codes: the `detail` of each `graphql_orm::internal_error` event.
+static DIAGNOSTICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+struct Diagnostics;
+impl tracing::Subscriber for Diagnostics {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "graphql_orm::internal_error"
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Detail(Option<String>);
+        impl tracing::field::Visit for Detail {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "detail" {
+                    self.0 = Some(value.to_owned());
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "detail" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+        let mut detail = Detail(None);
+        event.record(&mut detail);
+        DIAGNOSTICS.lock().unwrap().extend(detail.0);
+    }
+}
+
+/// `outcome` of a GraphQL operation, a failure followed by the server-side
+/// diagnostics recorded while it ran.
+fn with_cause(outcome: Result<String, String>) -> Result<String, String> {
+    let causes = std::mem::take(&mut *DIAGNOSTICS.lock().unwrap());
+    outcome.map_err(|error| format!("{error} caused by {causes:?}"))
+}
+
+/// Whether a GraphQL read failed with the sanitized internal error, and its
+/// server-side diagnostic is the database refusing the missing column.
 fn database_refusal(errors: &str) -> bool {
-    errors.contains("INTERNAL_ERROR")
-        && !errors.contains("AUTHORIZATION_MISCONFIGURED")
-        && !errors.contains("FORBIDDEN")
+    errors.contains("\"INTERNAL_ERROR\"") && missing_flag(errors)
 }
 
 /// How many sources the aggregate root's row count admits under the policy
@@ -633,6 +674,11 @@ fn target_policy_reads() -> [String; 2] {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn policy_columns_bind_to_their_own_row() {
+    // Record the server-side diagnostics behind sanitized GraphQL errors.
+    // SAFETY: this binary's only test sets the variable before it starts
+    // any other thread that reads the environment.
+    unsafe { std::env::set_var("GRAPHQL_ORM_LOG_INTERNAL_ERRORS", "1") };
+    tracing::subscriber::set_global_default(Diagnostics).unwrap();
     let (db, _owned) = fixture().await;
     let schema = schema(&db);
 
@@ -666,9 +712,10 @@ async fn policy_columns_bind_to_their_own_row() {
         );
         SHAPE.store(index, Ordering::SeqCst);
         for query in graphql_reads() {
+            DIAGNOSTICS.lock().unwrap().clear();
             check(
                 format!("{name}: {query}"),
-                graphql_admitted(&schema, &query).await.map(shown),
+                with_cause(graphql_admitted(&schema, &query).await.map(shown)),
                 database_refusal,
             );
         }
@@ -679,29 +726,31 @@ async fn policy_columns_bind_to_their_own_row() {
             aggregate_count(&db).await.map(|count| count.to_string()),
             missing_flag,
         );
+        DIAGNOSTICS.lock().unwrap().clear();
         check(
             format!("{name}: relation loader"),
-            loaded_sources(&schema).await.map(shown),
+            with_cause(loaded_sources(&schema).await.map(shown)),
             database_refusal,
         );
         for delete in [false, true] {
+            DIAGNOSTICS.lock().unwrap().clear();
             check(
                 format!("{name}: bulk write (delete: {delete})"),
-                bulk_write(&schema, delete)
-                    .await
-                    .map(|count| count.to_string()),
-                |code| {
-                    (code.contains("DATABASE") || code.contains("INTERNAL"))
-                        && !code.contains("FORBIDDEN")
-                },
+                with_cause(
+                    bulk_write(&schema, delete)
+                        .await
+                        .map(|count| count.to_string()),
+                ),
+                |outcome| outcome.starts_with("\"INTERNAL_ERROR\" ") && missing_flag(outcome),
             );
         }
     }
     SHAPE.store(usize::MAX, Ordering::SeqCst);
     for query in target_policy_reads() {
+        DIAGNOSTICS.lock().unwrap().clear();
         check(
             query.clone(),
-            graphql_admitted(&schema, &query).await.map(shown),
+            with_cause(graphql_admitted(&schema, &query).await.map(shown)),
             database_refusal,
         );
     }

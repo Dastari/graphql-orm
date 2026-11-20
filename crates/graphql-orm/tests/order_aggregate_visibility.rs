@@ -495,7 +495,7 @@ async fn unauthorized_count_order_is_refused_by_query_builders() {
     };
     assert!(order.validate_order().is_err());
     // Even the rendered fallback counts nothing.
-    assert!(order.to_sql_order().unwrap().contains("AND 1 = 0"));
+    assert!(order.to_sql_order().unwrap().contains("WHERE 1 = 0"));
     let result = EntityQuery::<CountParent, Backend>::new()
         .order_by(&order)
         .fetch_all(&db)

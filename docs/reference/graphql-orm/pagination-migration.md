@@ -172,22 +172,24 @@ another table exposing the same name (#796). The metadata check only covers
 The governed row is a value inside the predicate, not text. Generated where
 inputs render `row.<column>` for the row they are given, with the column
 delimited as generated DDL and DML address it, so a column may have any
-name. Aliases and closure names differ from every name the policy mentions.
-Table names starting with `__gom_` are reserved for them: the entity derive
-refuses such a table, and read predicates refuse a hand-built entity over
-one.
+name. Aliases and closure names differ from every name in scope. The names
+themselves (`__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>`,
+`__gom_closure_<n>` and its suffixed forms) are reserved as table names:
+the entity derive refuses such a table, and read predicates refuse a
+hand-built entity over one.
 
-A hand-written `ReadVisibilityFilter` renders unqualified columns by
-default, which keep that hazard wherever its predicate is evaluated in a
-subquery: as a relation, `not_related` or closure target, or as a target
-entity's own policy under a generated related-row filter or relation-count
-ordering. Use the generated where input, or write each column as
-`__gom_self.<column>` (`READ_PREDICATE_ROW`) and return the table from
-`table_name`. Hand-written SQL is read with the backend's lexical rules:
-the qualifier is a bare word followed by a dot, outside strings, delimited
-identifiers and comments. SQL that cannot be read with certainty, such as
-an unclosed string or a line comment that runs to the end of a clause, is
-refused with `AUTHORIZATION_MISCONFIGURED`.
+A hand-written `ReadVisibilityFilter` may only hold single-row boolean
+expressions over the entity's own columns and bound parameters: no
+`SELECT`, `FROM`, `JOIN`, `WITH` or set operator, no comment, no
+PostgreSQL `U&` form, no adjacent string constants, no delimited spelling
+of a generated name, and on SQLite no `rowid`, `_rowid_` or `oid`. Build a
+policy over another table with `related`, `not_related` or a closure.
+Write each column as `__gom_self.<column>` (`READ_PREDICATE_ROW`) and
+return the table from `table_name`. A filter that names a column any other
+way is accepted only at the root of a statement; it is refused with
+`AUTHORIZATION_MISCONFIGURED` as a relation, `not_related` or closure
+target, and as the policy of an entity that a generated related-row filter
+or relation-count ordering targets.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
 
