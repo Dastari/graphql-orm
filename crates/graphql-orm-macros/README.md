@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.191.0 groups selected ORM integration tests. The
+[migration guide](../../MIGRATION.md#ormmacros-01910-unreleased) records the
+developer-facing change.
+
 Version 0.190.0 is the **breaking release**; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
 in upgrade order. For the macros:

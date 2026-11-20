@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## ORM/macros 0.191.0 (unreleased)
+
+**No action** for application consumers. Developers who select individual
+integration targets can find the grouped selectors in the
+[test lanes](docs/development/testing.md).
+
 ## Breaking release (unreleased)
 
 This release collects every change that breaks hosts or invalidates stored

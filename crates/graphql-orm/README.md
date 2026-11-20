@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.191.0 groups selected ORM integration tests. The
+[migration guide](../../MIGRATION.md#ormmacros-01910-unreleased) records the
+developer-facing change.
+
 Version 0.190.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the

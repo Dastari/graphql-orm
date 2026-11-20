@@ -14,6 +14,11 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.191.0
+
+- Consolidated selected PostgreSQL, SQL Server, and SQLite integration test binaries.
+  See the [test lanes](docs/development/testing.md) for the grouped targets.
+
 ## Unreleased - breaking release: ORM/macros 0.190.0, operation catalogue 0.10.0, AI tool profiles 0.27.0, AI 0.151.0, backup 0.28.0, router 0.17.0
 
 Every change that breaks hosts or invalidates stored fingerprints, bindings,
