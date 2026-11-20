@@ -2094,13 +2094,9 @@ fn generate_graphql_operations_unfiltered(
     let keyset_parts: Option<Vec<queries::KeysetPart>> = if let Some(config) =
         entity_meta.keyset.as_deref()
     {
-        let keyset_span = input
-            .attrs
-            .iter()
-            .find(|attr| {
-                attr.path().is_ident("graphql_entity") || attr.path().is_ident("repository_entity")
-            })
-            .map_or_else(|| struct_name.span(), syn::spanned::Spanned::span);
+        let keyset_span = entity_meta
+            .keyset_span
+            .unwrap_or_else(|| struct_name.span());
         let mut parts = Vec::new();
         for raw in config.split(',') {
             let tokens = raw.split_whitespace().collect::<Vec<_>>();
@@ -6069,11 +6065,7 @@ fn generate_graphql_operations_unfiltered(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,
                     )?;
-                    let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>().map_err(|_| {
-                        ::graphql_orm::async_graphql::Error::new(
-                            "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",
-                        )
-                    })?;
+                    let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                     db.ensure_entity_access(
                         Some(ctx),
                         #entity_name_lit,
@@ -8080,11 +8072,7 @@ fn generate_graphql_operations_unfiltered(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>().map_err(|_| {
-                    ::graphql_orm::async_graphql::Error::new(
-                        "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",
-                    )
-                })?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,

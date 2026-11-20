@@ -1,7 +1,12 @@
 #![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 
 use graphql_orm::graphql::input_validation::GeneratedInputValidation;
+use graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission;
 use graphql_orm::prelude::*;
+
+const DATABASE_ERROR: &str = "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data";
+const LOADER_ERROR: &str =
+    "graphql-orm Federation loader not registered; build the schema with schema_builder(database)";
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
@@ -34,7 +39,7 @@ async fn assert_missing_database(field: &str) {
     let response = schema.execute(format!("{{ {field} }}")).await;
     assert_eq!(response.errors.len(), 1, "{field}: {response:?}");
     let error = &response.errors[0];
-    assert!(error.message.contains("Database"), "{field}: {error:?}");
+    assert_eq!(error.message, DATABASE_ERROR, "{field}: {error:?}");
     assert_eq!(error.path.len(), 1, "{field}: {error:?}");
 }
 
@@ -91,17 +96,63 @@ async fn federation_reads_report_missing_database_and_loader() {
         }
         let schema = builder.finish();
         let expected = if register_database {
-            "FederationKeyLoader"
+            LOADER_ERROR
         } else {
-            "Database"
+            DATABASE_ERROR
         };
         for query in &queries {
             let response = schema.execute(query).await;
             assert_eq!(response.errors.len(), 1, "{query}: {response:?}");
-            assert!(
-                response.errors[0].message.contains(expected),
+            assert_eq!(
+                response.errors[0].message, expected,
                 "{query}: {response:?}"
             );
         }
     }
+}
+
+#[tokio::test]
+async fn changed_subscription_uses_the_same_curated_database_error() {
+    use graphql_orm::futures::StreamExt;
+
+    let schema = async_graphql::Schema::build(
+        MissingDatabaseRecordQueries,
+        async_graphql::EmptyMutation,
+        MissingDatabaseRecordSubscriptions,
+    )
+    .extension(GeneratedInputValidation)
+    .extension(GeneratedSubscriptionAdmission(vec![
+        MissingDatabaseRecord::__GOM_CHANGED_ROOT_NAME,
+    ]))
+    .finish();
+    let mut stream =
+        schema.execute_stream("subscription { missingDatabaseRecordChanged { action } }");
+    let response = stream.next().await.expect("missing database response");
+    assert_eq!(response.errors.len(), 1, "{response:?}");
+    assert_eq!(response.errors[0].message, DATABASE_ERROR);
+}
+
+struct DirectRecordQuery;
+
+#[async_graphql::Object]
+impl DirectRecordQuery {
+    async fn record(&self) -> MissingDatabaseRecord {
+        MissingDatabaseRecord {
+            id: "a".into(),
+            title: "Record".into(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn node_id_object_field_reports_the_curated_database_error() {
+    let schema = async_graphql::Schema::build(
+        DirectRecordQuery,
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .finish();
+    let response = schema.execute("{ record { NodeId } }").await;
+    assert_eq!(response.errors.len(), 1, "{response:?}");
+    assert_eq!(response.errors[0].message, DATABASE_ERROR);
 }

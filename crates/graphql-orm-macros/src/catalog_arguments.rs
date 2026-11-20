@@ -89,34 +89,9 @@ fn has_flag(metas: &[syn::Meta], flag: &str) -> bool {
         .any(|meta| matches!(meta, syn::Meta::Path(path) if path.is_ident(flag)))
 }
 
-// Query emitters qualify the containers used in their own signatures. Keep
-// the original spelling in the catalogue, where it contributes to fingerprints.
-struct QueryArgumentSpelling;
-
-impl VisitMut for QueryArgumentSpelling {
-    fn visit_type_path_mut(&mut self, ty: &mut syn::TypePath) {
-        syn::visit_mut::visit_type_path_mut(self, ty);
-        if ty.qself.is_some() || ty.path.leading_colon.is_none() || ty.path.segments.len() != 3 {
-            return;
-        }
-        let root = &ty.path.segments[0];
-        let module = &ty.path.segments[1];
-        let item = &ty.path.segments[2];
-        if root.ident == "std"
-            && ((module.ident == "option" && item.ident == "Option")
-                || (module.ident == "vec" && item.ident == "Vec"))
-        {
-            ty.path = syn::Path {
-                leading_colon: None,
-                segments: std::iter::once(item.clone()).collect(),
-            };
-        }
-    }
-}
-
-fn resolver_arguments(method: &syn::ImplItemFn, kind: RootKind) -> syn::Result<Vec<TokenStream>> {
+fn resolver_arguments(method: &mut syn::ImplItemFn) -> syn::Result<Vec<TokenStream>> {
     let mut arguments = Vec::new();
-    for input in &method.sig.inputs {
+    for input in &mut method.sig.inputs {
         let syn::FnArg::Typed(argument) = input else {
             continue;
         };
@@ -138,11 +113,15 @@ fn resolver_arguments(method: &syn::ImplItemFn, kind: RootKind) -> syn::Result<V
             )
         })?;
         let ty = &argument.ty;
-        let mut catalogue_type = (**ty).clone();
-        // Point-read parameters come from the entity's declared key types.
-        if kind == RootKind::Query && method.sig.ident != "get_by_id" {
-            QueryArgumentSpelling.visit_type_mut(&mut catalogue_type);
-        }
+        // Consume the generator-only attribute before async-graphql sees the
+        // signature. User-supplied Rust types retain their original spelling.
+        let catalogue_type = argument
+            .attrs
+            .iter()
+            .position(|attr| attr.path().is_ident("__gom_catalogue_type"))
+            .map(|index| argument.attrs.remove(index).parse_args::<syn::Type>())
+            .transpose()?;
+        let catalogue_type = catalogue_type.as_ref().unwrap_or(ty);
         arguments.push(quote! {
             ::graphql_orm::graphql::orm::GraphqlOperationArgumentDescriptor::generated_with_description(
                 #name,
@@ -181,18 +160,18 @@ fn root_kind_of(implementation: &syn::ItemImpl, entity: &str) -> Option<RootKind
 }
 
 fn collect_resolvers(
-    file: &syn::File,
+    file: &mut syn::File,
     entity: &str,
 ) -> syn::Result<BTreeMap<(RootKind, String), Resolver>> {
     let mut resolvers = BTreeMap::new();
-    for item in &file.items {
+    for item in &mut file.items {
         let syn::Item::Impl(implementation) = item else {
             continue;
         };
         let Some(kind) = root_kind_of(implementation, entity) else {
             continue;
         };
-        for item in &implementation.items {
+        for item in &mut implementation.items {
             let syn::ImplItem::Fn(method) = item else {
                 continue;
             };
@@ -212,7 +191,7 @@ fn collect_resolvers(
             // or not: routers exempt only the federation `_entities` and
             // `_service` fields, which these objects never define.
             let resolver = Resolver {
-                arguments: resolver_arguments(method, kind)?,
+                arguments: resolver_arguments(method)?,
                 span: method.sig.span(),
             };
             // Two resolvers share a name when, for example, `plural` equals the
@@ -310,27 +289,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_catalogue_keeps_container_spelling_and_preserves_user_key_types() {
-        let method = |name: syn::Ident| {
-            syn::parse_quote! {
-                async fn #name(#[graphql(name = "arg", desc = "Arg")] arg: ::std::option::Option<::std::vec::Vec<Value>>) {}
-            }
+    fn explicit_catalogue_spelling_does_not_change_the_rust_parameter_type() {
+        let mut method: syn::ImplItemFn = syn::parse_quote! {
+            async fn list(
+                #[__gom_catalogue_type(Option<Vec<Value>>)]
+                #[graphql(name = "arg", desc = "Arg")]
+                arg: ::std::option::Option<::std::vec::Vec<Value>>,
+            ) {}
         };
-        let generated =
-            resolver_arguments(&method(syn::parse_quote!(list)), RootKind::Query).unwrap();
-        let point =
-            resolver_arguments(&method(syn::parse_quote!(get_by_id)), RootKind::Query).unwrap();
+        let generated = resolver_arguments(&mut method).unwrap();
         assert!(
             generated[0]
                 .to_string()
                 .contains("stringify ! (Option < Vec < Value > >)")
         );
-        assert!(
-            generated[0]
-                .to_string()
-                .contains("< :: std :: option :: Option < :: std :: vec :: Vec < Value > > as")
-        );
-        assert!(point[0].to_string().contains(
+        assert!(!quote!(#method).to_string().contains("__gom_catalogue_type"));
+        let unmarked = resolver_arguments(&mut method).unwrap();
+        assert!(unmarked[0].to_string().contains(
             "stringify ! (:: std :: option :: Option < :: std :: vec :: Vec < Value > >)"
         ));
     }

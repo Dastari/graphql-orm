@@ -647,6 +647,7 @@ pub(super) fn keyset(
         keyset_generated;
     let runtime_keyset_argument = if runtime_keyset_available {
         quote! {
+            #[__gom_catalogue_type(Option<Vec<#keyset_order_input>>)]
             #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: ::std::option::Option<::std::vec::Vec<#keyset_order_input>>,
         }
     } else {
@@ -675,6 +676,7 @@ pub(super) fn keyset(
             async fn keyset(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[__gom_catalogue_type(Option<#where_input>)]
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
                 #runtime_keyset_argument
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
@@ -686,7 +688,7 @@ pub(super) fn keyset(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
                 #filter_read_authorization
                 let filter = where_input.unwrap_or_default();
@@ -702,6 +704,7 @@ pub(super) fn keyset(
             async fn authorized_scan(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[__gom_catalogue_type(Option<#where_input>)]
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
             ) -> ::graphql_orm::async_graphql::Result<#scan_connection_type> {
@@ -711,7 +714,7 @@ pub(super) fn keyset(
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
                 #filter_read_authorization
                 let result = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
@@ -827,7 +830,9 @@ pub(super) fn search(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #search_arg_name, desc = #search_arg_description)] search: ::graphql_orm::graphql::filters::SearchInput,
+                #[__gom_catalogue_type(Option<#where_input>)]
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
+                #[__gom_catalogue_type(Option<::graphql_orm::graphql::orm::PageInput>)]
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::std::option::Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
@@ -837,7 +842,7 @@ pub(super) fn search(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let pool = db.pool();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -1029,8 +1034,11 @@ pub(super) fn aggregate(
             async fn aggregate(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[__gom_catalogue_type(Option<#where_input>)]
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
+                #[__gom_catalogue_type(Vec<#aggregate_field>)]
                 #[graphql(name = #group_by_arg_name, desc = #group_by_arg_description)] group_by: ::std::vec::Vec<#aggregate_field>,
+                #[__gom_catalogue_type(Vec<#aggregate_metric_input>)]
                 #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: ::std::vec::Vec<#aggregate_metric_input>,
                 #[graphql(name = #group_limit_arg_name, desc = #group_limit_arg_description)] group_limit: i32,
             ) -> ::graphql_orm::async_graphql::Result<::std::vec::Vec<#aggregate_row_type>> {
@@ -1041,7 +1049,7 @@ pub(super) fn aggregate(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
@@ -1300,8 +1308,11 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
             async fn list(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[__gom_catalogue_type(Option<#where_input>)]
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
+                #[__gom_catalogue_type(Option<Vec<#order_by_input>>)]
                 #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: ::std::option::Option<::std::vec::Vec<#order_by_input>>,
+                #[__gom_catalogue_type(Option<::graphql_orm::graphql::orm::PageInput>)]
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::std::option::Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
@@ -1312,7 +1323,7 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
@@ -1393,7 +1404,7 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 db.ensure_entity_access(
                     ::std::option::Option::Some(ctx),
                     #entity_name_lit,

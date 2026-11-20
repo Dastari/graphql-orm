@@ -164,3 +164,30 @@ mod export_tests {
         let _ = ExportRecord::find_all(&db).await;
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+#[test]
+fn query_argument_spelling_preserves_catalogue_fingerprints() {
+    // The artifact was captured with the default naming rules.
+    if [
+        option_env!("GRAPHQL_ORM_RESOLVER_CASE"),
+        option_env!("GRAPHQL_ORM_ARGUMENT_CASE"),
+        option_env!("GRAPHQL_ORM_FIELD_CASE"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|rule| !matches!(rule, "" | "camelCase"))
+    {
+        return;
+    }
+    let catalog = graphql_orm_operation_catalog();
+    let actual = [
+        catalog.fingerprint(),
+        catalog.authorization_fingerprint(),
+        catalog.router_export_fingerprint(),
+    ];
+    let expected: Vec<_> = include_str!("../catalogue-fingerprints-sqlite.txt")
+        .lines()
+        .collect();
+    assert_eq!(actual.as_slice(), expected.as_slice());
+}

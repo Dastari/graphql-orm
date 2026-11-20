@@ -571,7 +571,7 @@ fn entity_read_body(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
         )?;
-        let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+        let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
         let auth_context = ctx
             .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
             .cloned();
@@ -594,7 +594,9 @@ fn entity_read_body(
                     #backend_marker,
                 >,
             >,
-        >()?;
+        >().map_err(|_| ::graphql_orm::async_graphql::Error::new(
+            "graphql-orm Federation loader not registered; build the schema with schema_builder(database)",
+        ))?;
         // Loaded with its own outcome: another caller's failing key
         // group in the same batch does not fail this one.
         let __gom_federation_loaded = __gom_federation_loader
@@ -771,17 +773,17 @@ pub(crate) fn node_id_field_tokens(
             &self,
             ctx: &::graphql_orm::async_graphql::Context<'_>,
         ) -> ::graphql_orm::async_graphql::Result<::graphql_orm::async_graphql::ID> {
-            let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+            let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
             ::graphql_orm::graphql::federation::authorize_node_id_fields(
                 db,
                 ctx,
                 #entity_name,
                 &[#(#disclosed),*],
-                #record as &(dyn ::std::any::Any + Send + Sync),
+                #record as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
             ).await?;
-            Ok(::graphql_orm::graphql::federation::encode_node_id(
+            ::std::result::Result::Ok(::graphql_orm::graphql::federation::encode_node_id(
                 #struct_name_str,
-                vec![#(#values),*],
+                ::std::vec![#(#values),*],
             ))
         }
     }

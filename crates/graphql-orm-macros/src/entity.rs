@@ -31,6 +31,7 @@ pub(crate) struct EntityMetadata {
     /// Explicit AI execution policy by generated mutation category.
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
+    pub(crate) keyset_span: Option<proc_macro2::Span>,
     pub(crate) query_shapes: Option<Vec<String>>,
     /// Selected generated mutation categories; `None` keeps every mutation.
     pub(crate) mutation_shapes: Option<Vec<String>>,
@@ -430,6 +431,7 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
+                    metadata.keyset_span = Some(lit.span());
                     metadata.keyset = Some(lit.value());
                 } else if meta.path.is_ident("backup") {
                     let value = meta.value()?;
