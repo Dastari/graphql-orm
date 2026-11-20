@@ -68,7 +68,11 @@ same rows. Hand-written filters are restricted, as described below.
   - a numbered or named placeholder (`?1`, `$1`, `@p1`, `:name`, `@name`,
     `$name`), or a clause whose anonymous `?` placeholders and bind values
     differ in number. Only `?` composes, because the statement numbers
-    placeholders in order across every predicate in it;
+    placeholders in order across every predicate in it. A filter's
+    conditions share one flat list of bind values
+    (`DatabaseFilter::to_sql_conditions`); the total number of placeholders
+    across all of them must equal the number of values. A surplus value
+    used to be dropped silently;
   - the bare word `__gom_self` with no dot after it, or an unclosed string,
     identifier or dollar quote.
 

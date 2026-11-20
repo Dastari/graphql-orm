@@ -84,7 +84,10 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// - a numbered or named placeholder (`?1`, `$1`, `@p1`, `:name`,
     ///   `@name`, `$name`), or a clause whose anonymous `?` placeholders
     ///   and bind values differ in number. Only `?` composes: the statement
-    ///   numbers placeholders in order across every predicate in it;
+    ///   numbers placeholders in order across every predicate in it. The
+    ///   conditions of [`DatabaseFilter::to_sql_conditions`] share one flat
+    ///   list of values, so their placeholders in total must equal its
+    ///   length: none is dropped and none is missing;
     /// - the bare word `__gom_self` with no dot after it, or an unclosed
     ///   string, identifier or dollar quote.
     ///
@@ -777,13 +780,25 @@ fn handwritten_sql(
         backend == DatabaseBackend::Sqlite && matches!(name, "rowid" | "_rowid_" | "oid")
     };
     // Whether an operand ends at `token`, so that an operator may follow.
-    let ends_operand = |token: Option<&SqlToken>| {
-        token.is_some_and(|token| match token.kind {
+    // Whether the token at `index` is a word that reads as a keyword
+    // expecting an operand. A word directly after a dot is the last part of
+    // a qualified name: always an identifier, whatever it spells.
+    let expects_operand = |index: Option<usize>| {
+        at(index).is_some_and(|token| {
+            token.kind == SqlTokenKind::Word
+                && !symbol(at(index.and_then(|index| index.checked_sub(1))), ".")
+                && policy_sql_expects_operand(&text(token).to_ascii_lowercase())
+        })
+    };
+    // Whether an operand ends at the token at `index`, so that an operator
+    // may follow.
+    let ends_operand = |index: Option<usize>| {
+        at(index).is_some_and(|token| match token.kind {
             SqlTokenKind::StringLiteral
             | SqlTokenKind::QuotedIdentifier
             | SqlTokenKind::Placeholder => true,
             SqlTokenKind::Symbol => matches!(text(token), ")" | "]"),
-            SqlTokenKind::Word => !policy_sql_expects_operand(&text(token).to_ascii_lowercase()),
+            SqlTokenKind::Word => !expects_operand(index),
             SqlTokenKind::Comment => false,
         })
     };
@@ -909,9 +924,8 @@ fn handwritten_sql(
                             && before.is_some_and(|dot| dot.end == token.start)
                             && at(index.checked_sub(2)).is_none_or(|whole| match whole.kind {
                                 SqlTokenKind::Word => {
-                                    let whole = text(whole).to_ascii_lowercase();
-                                    whole.as_bytes()[0].is_ascii_digit()
-                                        || policy_sql_expects_operand(&whole)
+                                    text(whole).as_bytes()[0].is_ascii_digit()
+                                        || expects_operand(index.checked_sub(2))
                                 }
                                 SqlTokenKind::Symbol => !matches!(text(whole), ")" | "]"),
                                 SqlTokenKind::Placeholder => true,
@@ -924,9 +938,9 @@ fn handwritten_sql(
                         // An operator, after an operand or after the `NOT`
                         // that negates it.
                         || (policy_sql_operator(backend, &lower)
-                            && (ends_operand(before)
+                            && (ends_operand(index.checked_sub(1))
                                 || (word(before, "not")
-                                    && ends_operand(at(index.checked_sub(2)))
+                                    && ends_operand(index.checked_sub(2))
                                     && matches!(
                                         lower.as_str(),
                                         "between"
@@ -1030,6 +1044,30 @@ fn handwritten_policy(
     })
 }
 
+/// `Err` unless `conditions`, read with the backend's lexer so that text in
+/// strings, delimited names and comments is not counted, hold exactly
+/// `binds` placeholders in total. A filter's conditions share one flat list
+/// of bind values, which is divided among them by their placeholder counts:
+/// a surplus value would be dropped silently and a missing one would shift
+/// the values of the conditions after it.
+fn ensure_bind_count(
+    backend: DatabaseBackend,
+    conditions: &[String],
+    binds: usize,
+) -> Result<(), PolicySqlRefusal> {
+    let mut placeholders = 0;
+    for condition in conditions {
+        scan_sql(backend, condition, |token| {
+            placeholders += usize::from(token.kind == SqlTokenKind::Placeholder);
+        })
+        .map_err(|_| PolicySqlRefusal::Unreadable)?;
+    }
+    if placeholders != binds {
+        return Err(PolicySqlRefusal::PlaceholderCount);
+    }
+    Ok(())
+}
+
 /// `filter` as a policy over the governed row, or `None` when it is empty,
 /// and whether every column it tests is bound to the row. A generated
 /// filter renders itself for the row; any other filter's SQL is read by
@@ -1039,8 +1077,15 @@ fn filter_policy<F: ReadVisibilityFilter>(
     filter: &F,
 ) -> async_graphql::Result<(Option<Policy>, bool)> {
     if let Some(generated) = filter.__gom_row_bound_filter() {
+        let (conditions, values) = generated.conditions(READ_PREDICATE_ROW);
+        ensure_bind_count(backend, &conditions, values.len())?;
         return Ok((generated.policy(backend), true));
     }
+    // The default `to_filter_expression` hands each condition as many of
+    // the filter's flat bind values as it has placeholders and drops any
+    // left over, so the whole list is checked before that split.
+    let (conditions, values) = filter.to_sql_conditions();
+    ensure_bind_count(backend, &conditions, values.len())?;
     let mut bound = true;
     let policy = filter
         .to_row_bound_filter_expression()
@@ -4299,6 +4344,22 @@ mod predicate_tests {
             (&BACKENDS, "__gom_self.a = ANY (?)", true),
             (&BACKENDS, "__gom_self.a = any", false),
             (&BACKENDS, "cast = 1", false),
+            // The last part of a qualified name is an identifier, whatever
+            // it spells: an operator may follow it, and no number starts
+            // after it.
+            (&[Sqlite], "__gom_self.glob GLOB ?", true),
+            (
+                &BACKENDS,
+                "__gom_self.like = ? AND __gom_self.in IN (1) AND __gom_self.not LIKE ?",
+                true,
+            ),
+            (
+                &BACKENDS,
+                "__gom_self.between BETWEEN 1 AND 2 AND __gom_self.escape NOT IN (3)",
+                true,
+            ),
+            (&BACKENDS, "__gom_self.like.5 > 1", false),
+            (&BACKENDS, "__gom_self.a > t.between.5", false),
             // The ordinary positions.
             (
                 &BACKENDS,
@@ -4368,6 +4429,31 @@ mod predicate_tests {
                 handwritten_sql(backend, "__gom_self.a = '?' AND __gom_self.\"b?\" = ?", 1)
                     .map(|(sql, bound)| (sql.bind("R"), bound)),
                 Ok(("R.a = '?' AND R.\"b?\" = ?".to_owned(), true)),
+                "{backend:?}"
+            );
+        }
+        // A filter's conditions share one flat bind list: its total must
+        // match before the list is divided among them.
+        for backend in BACKENDS {
+            let conditions = [
+                "__gom_self.tenant_id = ?".to_owned(),
+                "__gom_self.owner_id = ? AND __gom_self.note <> '?' AND \"a?\" IS NULL".to_owned(),
+            ];
+            assert_eq!(
+                ensure_bind_count(backend, &conditions, 2),
+                Ok(()),
+                "{backend:?}"
+            );
+            for binds in [0, 1, 3] {
+                assert_eq!(
+                    ensure_bind_count(backend, &conditions, binds),
+                    Err(PolicySqlRefusal::PlaceholderCount),
+                    "{backend:?}: {binds}"
+                );
+            }
+            assert_eq!(
+                ensure_bind_count(backend, &["a = 'open".to_owned()], 0),
+                Err(PolicySqlRefusal::Unreadable),
                 "{backend:?}"
             );
         }

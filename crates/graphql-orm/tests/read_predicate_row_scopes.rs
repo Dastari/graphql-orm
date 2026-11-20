@@ -303,6 +303,34 @@ impl<E, const BOUND: bool> DatabaseFilter for Written<E, BOUND> {
         false
     }
 }
+/// A hand-written filter over the nodes with several conditions, which
+/// share one flat list of bind values. It keeps the default
+/// `to_filter_expression`, which divides that list among the conditions.
+#[derive(Clone)]
+struct Conditions(Vec<&'static str>, Vec<SqlValue>);
+impl DatabaseFilter for Conditions {
+    fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+        (
+            self.0.iter().map(|clause| (*clause).to_owned()).collect(),
+            self.1.clone(),
+        )
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+impl ReadVisibilityFilter for Conditions {
+    fn entity_type_id() -> std::any::TypeId {
+        std::any::TypeId::of::<NamedNode>()
+    }
+    fn backend() -> DatabaseBackend {
+        B::DIALECT
+    }
+    fn table_name() -> Option<&'static str> {
+        Some(NamedNode::TABLE_NAME)
+    }
+}
+
 impl<E: Entity + 'static, const BOUND: bool> ReadVisibilityFilter for Written<E, BOUND> {
     fn entity_type_id() -> std::any::TypeId {
         std::any::TypeId::of::<E>()
@@ -1069,6 +1097,62 @@ async fn hand_written_filters_are_single_row_expressions() {
     let (list, count) = reads::<NamedNode>(&db, &composed, |row| row.id).await;
     assert_eq!(list.unwrap(), ["n1", "n3"]);
     assert_eq!(count.unwrap(), 2);
+
+    // Several conditions share one flat bind list, which the default
+    // adapter divides by placeholder count. A surplus value would be
+    // dropped silently and a missing one would shift the rest, so the
+    // total is checked first.
+    let conditions = || {
+        vec![
+            "__gom_self.score >= ?",
+            "__gom_self.score <= ? AND __gom_self.id <> '?'",
+        ]
+    };
+    for values in [
+        // Surplus: the third value belongs to no placeholder.
+        vec![SqlValue::Int(2), SqlValue::Int(9), SqlValue::Int(42)],
+        // Deficit.
+        vec![SqlValue::Int(2)],
+        vec![],
+    ] {
+        let filter = Conditions(conditions(), values);
+        misconfigured(ReadPredicate::from_filter::<B, _>(&filter));
+        misconfigured(
+            ReadPredicate::from_filter::<B, _>(&filter)
+                .and_then(|written| tenant.clone().and(written)),
+        );
+    }
+    let matching = ReadPredicate::from_filter::<B, _>(&Conditions(
+        conditions(),
+        vec![SqlValue::Int(2), SqlValue::Int(9)],
+    ))
+    .unwrap();
+    let composed = score_at_least(1).and(matching).unwrap();
+    let (sql, binds) = EntityQuery::<NamedNode>::new()
+        .with_read_visibility(&ReadVisibility::Complete(composed.clone()))
+        .unwrap()
+        .build_delete_sql();
+    assert_eq!(binds, [1, 2, 9].map(SqlValue::Int).to_vec(), "{sql}");
+    if B::DIALECT != DatabaseBackend::Sqlite {
+        let positions = (1..=3)
+            .map(|index| {
+                sql.find(&numbered(index))
+                    .unwrap_or_else(|| panic!("{sql}"))
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{sql}");
+        assert!(!sql.contains(&numbered(4)), "{sql}");
+    }
+    let (list, count) = reads::<NamedNode>(&db, &composed, |row| row.id).await;
+    assert_eq!(list.unwrap(), ["n1", "n3"]);
+    assert_eq!(count.unwrap(), 2);
+    // A column named like an operator is an identifier after its dot.
+    let named = ReadPredicate::from_filter::<B, _>(&written_with::<NamedNode>(
+        "__gom_self.like = ?",
+        vec![SqlValue::Int(1)],
+    ))
+    .unwrap();
+    ReadPredicate::related::<B, NamedNode, NamedNode>(UP, named).unwrap();
 
     // PostgreSQL: Unicode-escape strings and identifiers.
     for clause in ["__gom_self.id <> U&'\\0061'", "U&\"score\" >= 5"] {
