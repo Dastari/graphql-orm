@@ -10,15 +10,18 @@ supersedes: []
 
 # Migration Guide
 
-## 0.152.0 skill content protection diagnostics
+## 0.151.1 skill content protection diagnostics
 
-**No action.** At debug level, the skill service emits an
-`AI skill content protection failed` event with a `code` of
-`key_unavailable`, `validation_failed` or `unsupported`. Each event contains
+**No action.** Skill protection diagnostics have a stable debug event target
+of `graphql_orm_ai::orm_skills` and a fixed message of
+`AI skill content protection failed`. The stable `code` values are
+`key_unavailable`, `validation_failed` and `unsupported`. Each event contains
 only that fixed message and code. The service still returns the same public
 errors. Stored skill versions continue to use the existing read validation,
 including versions published before the new-schema depth and pattern bounds.
-No schema or data migration is needed.
+The proposal registry now reuses its validators. Malformed registered
+schemas still fail when a proposal is validated. No schema or data migration
+is needed.
 
 ## Breaking release (unreleased)
 

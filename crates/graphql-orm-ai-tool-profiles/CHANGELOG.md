@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.28.0 (next minor after the breaking release)
+## Unreleased - 0.27.1 (next patch after the breaking release)
 
 - Replayable subscriptions reuse compiled plan and condition validators
   across closed and compact plans. Plan schemas, accepted conditions and

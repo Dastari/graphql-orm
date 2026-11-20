@@ -120,8 +120,8 @@ Also unreleased on main, before the breaking release:
 
 Following the breaking release:
 
-- **No action** — AI tool profiles 0.28.0: replayable subscriptions reuse compiled plan and condition validators (#543). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0280-subscription-validator-reuse)
-- **No action** — AI 0.152.0: skill content protection emits fixed debug reason codes (#543). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-skill-content-protection-diagnostics)
+- **No action** — AI tool profiles 0.27.1: replayable subscriptions reuse compiled plan and condition validators (#543). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0271-subscription-validator-reuse)
+- **No action** — AI 0.151.1: skill content protection emits fixed debug reason codes and the proposal registry reuses validators (#543). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01511-skill-content-protection-diagnostics)
 
 ### workspace-2026.11.19.2
 

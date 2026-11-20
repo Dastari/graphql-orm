@@ -1258,7 +1258,7 @@ fn map_protection(error: crate::ContentProtectionError) -> AiError {
         ContentProtectionError::ValidationFailed => "validation_failed",
         ContentProtectionError::Unsupported => "unsupported",
     };
-    tracing::debug!(code, "AI skill content protection failed");
+    tracing::debug!(target: "graphql_orm_ai::orm_skills", code, "AI skill content protection failed");
     AiError::PersistenceFailed
 }
 
@@ -1350,6 +1350,7 @@ mod protection_diagnostic_tests {
             }
 
             assert_eq!(*event.metadata().level(), tracing::Level::DEBUG);
+            assert_eq!(event.metadata().target(), "graphql_orm_ai::orm_skills");
             let mut fields = Fields::default();
             event.record(&mut fields);
             fields.0.sort_unstable();

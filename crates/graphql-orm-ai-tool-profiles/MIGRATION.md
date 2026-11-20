@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.28.0 subscription validator reuse
+## 0.27.1 subscription validator reuse
 
 **No action.** Existing subscription plans and capability bindings remain
 compatible. No schema or data migration is needed.

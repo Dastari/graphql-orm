@@ -1,8 +1,8 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-ai"
-# next minor after the breaking release
-version = "0.152.0"
+# next patch after the breaking release
+version = "0.151.1"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"

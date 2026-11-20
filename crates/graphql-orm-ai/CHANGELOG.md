@@ -10,11 +10,13 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.152.0 (next minor after the breaking release)
+## Unreleased - 0.151.1 (next patch after the breaking release)
 
 - The skill service emits fixed debug codes for unavailable keys, failed
   envelope validation and unsupported protection. Legacy stored skill schemas
   retain their existing read validation (#543).
+- The proposal registry reuses one validator per registered proposal schema
+  across repeated validations and catalog clones (#543).
 
 ## Unreleased - 0.151.0 (breaking release)
 
