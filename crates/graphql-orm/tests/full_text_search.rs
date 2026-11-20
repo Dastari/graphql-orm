@@ -1091,7 +1091,7 @@ struct BinaryNote {
 }
 
 /// A handwritten filter whose clause names two placeholders and supplies one
-/// value (#458).
+/// value (#458, #796).
 #[derive(Clone)]
 struct LopsidedFilter;
 impl DatabaseFilter for LopsidedFilter {
@@ -1183,17 +1183,26 @@ async fn native_search_finds_entities_with_binary_keys() -> Result<(), Box<dyn s
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].entity.digest, [0x00, 0x01, 0x02, 0x03]);
 
-    // A clause with more placeholders than values reaches the database as
-    // written instead of panicking while the statement is assembled. SQLite
-    // reads the unbound parameter as NULL; PostgreSQL refuses the statement.
+    // A clause with more placeholders than values is refused before any
+    // statement is assembled: its missing value would shift the binds of
+    // every clause after it (#796). It neither panics (#458) nor reaches
+    // the database.
     let lopsided =
         EntitySearchQuery::<BinaryNote, LopsidedFilter, DefaultBackend>::new(db.pool(), search())
             .filter(LopsidedFilter)
             .fetch_all()
             .await;
-    #[cfg(feature = "sqlite")]
-    assert!(lopsided?.is_empty());
-    #[cfg(feature = "postgres")]
-    assert!(lopsided.is_err());
+    let refusal = graphql_orm::graphql::errors::graphql_error_from_sqlx(
+        lopsided.expect_err("a miscounted clause is refused"),
+    );
+    assert_eq!(
+        refusal
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("\"AUTHORIZATION_MISCONFIGURED\"")
+    );
     Ok(())
 }
