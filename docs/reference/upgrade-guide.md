@@ -116,6 +116,7 @@ No action:
 
 Also unreleased on main, before the breaking release:
 
+- **No action** — ORM/macros 0.186.0: the owned PostgreSQL test harness waits for TCP readiness before connecting. [Migration](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness)
 - **Action needed** — ORM/macros 0.185.0: if you compare generated SQL Server filtered-index DDL, update expected string literals to include the `N` prefix, even for ASCII values. [Migration](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
 
 ### workspace-2026.11.19.2

@@ -1,8 +1,6 @@
 #![cfg(feature = "postgres")]
 //! Owned disposable PostgreSQL conformance for runtime-row decoding.
 
-use std::process::Command;
-
 use graphql_orm::graphql::orm::{
     CollectionId, FieldId, PostgresBackend, RuntimeCollection, RuntimeDateTime, RuntimeField,
     RuntimeNullPlacement, RuntimeOrderDirection, RuntimeOrderInput, RuntimeOrderTerm,
@@ -11,6 +9,11 @@ use graphql_orm::graphql::orm::{
     RuntimeValueKind, ValidatedRuntimeSchema,
 };
 use graphql_orm::sqlx::Connection;
+
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
+use owned_postgres::OwnedPostgres;
 
 const _: () = assert!(<PostgresBackend as RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED);
 
@@ -112,95 +115,6 @@ fn projection(schema: &ValidatedRuntimeSchema) -> RuntimeProjection {
         .expect("valid projection")
 }
 
-struct OwnedPostgres {
-    name: String,
-    url: String,
-}
-
-impl Drop for OwnedPostgres {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "--force", &self.name])
-            .output();
-    }
-}
-
-impl OwnedPostgres {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let name = format!("graphql-orm-runtime-record-{suffix}");
-        let password = format!("runtime_{suffix}");
-        let database = format!("runtime_{suffix}");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--name",
-                &name,
-                "--memory",
-                "4g",
-                "--memory-swap",
-                "4g",
-                "--publish",
-                "127.0.0.1::5432",
-                "--env",
-                "POSTGRES_USER=runtime_owner",
-                "--env",
-                &format!("POSTGRES_PASSWORD={password}"),
-                "--env",
-                &format!("POSTGRES_DB={database}"),
-                "postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to start disposable PostgreSQL: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        let mut owned = Self {
-            name,
-            url: String::new(),
-        };
-        for _ in 0..120 {
-            let ready = Command::new("docker")
-                .args(["exec", &owned.name, "pg_isready", "-U", "runtime_owner"])
-                .output()?;
-            if ready.status.success() {
-                let port_output = Command::new("docker")
-                    .args(["port", &owned.name, "5432/tcp"])
-                    .output()?;
-                let ports = String::from_utf8(port_output.stdout)?;
-                let port = ports
-                    .lines()
-                    .find_map(|line| line.strip_prefix("127.0.0.1:"))
-                    .ok_or("Docker did not publish PostgreSQL on loopback")?;
-                owned.url =
-                    format!("postgres://runtime_owner:{password}@127.0.0.1:{port}/{database}");
-                // `pg_isready` runs inside the container. Give Docker's
-                // loopback-published proxy a short settling window as well,
-                // especially while the full PostgreSQL matrix is under load.
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                return Ok(owned);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        Err("disposable PostgreSQL did not become ready".into())
-    }
-
-    async fn connect(&self) -> Result<graphql_orm::sqlx::PgConnection, Box<dyn std::error::Error>> {
-        for _ in 0..40 {
-            match graphql_orm::sqlx::PgConnection::connect(&self.url).await {
-                Ok(connection) => return Ok(connection),
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
-            }
-        }
-        Err("disposable PostgreSQL refused connections after readiness".into())
-    }
-}
-
 async fn decode_postgres(
     connection: &mut graphql_orm::sqlx::PgConnection,
     projection: &RuntimeProjection,
@@ -247,8 +161,8 @@ async fn decode_postgres(
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_closed()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
-    let mut connection = owned.connect().await?;
+    let owned = OwnedPostgres::start_postgres_16("runtime-record")?;
+    let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
     let schema = schema();
     let projection = projection(&schema);
     let postgres_record = decode_postgres(&mut connection, &projection).await?;
@@ -304,10 +218,7 @@ async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_clo
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
-    // The image restarts once after initialization; wait until a connection
-    // succeeds, as the other cases do, before the pool connects.
-    drop(owned.connect().await?);
+    let owned = OwnedPostgres::start_postgres_16("runtime-record")?;
     let database = graphql_orm::db::Database::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_customers (
@@ -384,8 +295,8 @@ async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_out_of_range_timestamps_are_typed_errors()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
-    let mut connection = owned.connect().await?;
+    let owned = OwnedPostgres::start_postgres_16("runtime-record")?;
+    let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
     let schema = schema();
     let projection = schema.resolve_projection_ids(&cid("customers"), &[fid("happened_at")])?;
     for literal in ["infinity", "-infinity", "294276-12-31 23:59:59+00"] {

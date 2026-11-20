@@ -69,6 +69,12 @@ Added, opt-in or no action:
 - **Fixed (AI tool profiles, AI):** runtime live key inputs compile under the ORM's default `RuntimeInt64` identities as well as `with_legacy_int_identities()`. A UUID-keyed runtime collection with live subscriptions and a node identity no longer fails every capability catalogue with `InvalidConfiguration`.
 - **Tests:** the 40 trybuild compile-contract binaries of `graphql-orm` are one `compile_ui` test binary with a module each (#508).
 
+## Unreleased - ORM/macros 0.186.0
+
+- Owned PostgreSQL tests wait for the server to accept TCP connections before
+  connecting. Startup reports the container name if readiness exceeds 30 seconds.
+  [#806](https://github.com/Dastari/graphql-orm/issues/806)
+
 ## Unreleased - ORM/macros 0.185.0
 
 - SQL Server migrations render closed-set filtered-index string values as

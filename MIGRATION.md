@@ -1016,6 +1016,11 @@ under the new default identities (`InvalidConfiguration("generated input
 profiles accept the default `RuntimeInt64` and the legacy `Int`
 identity alike, and AI adopts them.
 
+## 0.185.0 to 0.186.0: Owned PostgreSQL test readiness
+
+**No action.** Upgrade ORM and macros together. The readiness check runs in the
+owned PostgreSQL test harness. No data migration is needed.
+
 ## 0.183.0 to 0.185.0: SQL Server filtered-index literals
 
 **Action needed** if your code compares or pins rendered SQL Server
