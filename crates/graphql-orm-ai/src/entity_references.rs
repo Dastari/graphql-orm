@@ -674,6 +674,13 @@ fn is_envelope(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some(AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE)
 }
 
+/// Whether a JSON input value is an entity-reference envelope: a handle, a
+/// marker or a resolved reference.
+#[cfg(feature = "provider-codex-app-server")]
+pub(crate) fn is_entity_reference_envelope(value: &Value) -> bool {
+    is_envelope(value)
+}
+
 /// Bytes an envelope reserves for resolved data, as recorded in the block.
 fn envelope_reserved_bytes(value: &Value) -> u64 {
     value
@@ -1028,6 +1035,22 @@ impl ModelDispatchRequest {
     /// transport write, for example one that hands the request to another
     /// component. The result holds no reference data.
     pub fn into_unavailable_request(self) -> ModelRequest {
+        self.into_unavailable_parts().0
+    }
+
+    /// Splits the value into a plain request in which every entity reference
+    /// is the unavailable marker, and what the references resolved to.
+    ///
+    /// The request holds no reference data and may be validated, cloned and
+    /// logged. An adapter for a local process uses it for everything except
+    /// the one write that delivers the turn, where it passes each marker
+    /// block through [`ModelDispatchReferences::wire_json`], which accepts a
+    /// marker as well as a handle.
+    #[cfg_attr(
+        not(any(feature = "provider-codex-app-server", feature = "provider-grok-acp")),
+        allow(dead_code)
+    )]
+    pub(crate) fn into_unavailable_parts(self) -> (ModelRequest, ModelDispatchReferences) {
         let mut request = self.request;
         let mark = |blocks: &mut [ModelInputBlock]| {
             for block in blocks {
@@ -1051,7 +1074,54 @@ impl ModelDispatchRequest {
             }
         }
         mark(&mut request.input);
-        request
+        (request, self.references)
+    }
+}
+
+/// Carries one dispatch's resolutions through a cloneable turn value to the
+/// single write that delivers the turn to a local agent process.
+///
+/// The Codex app-server process seam takes a cloneable turn input by value,
+/// so the resolutions cannot travel beside it. They travel inside it, in a
+/// slot that every clone of the turn shares and that is emptied by the first
+/// reader. Cloning the turn therefore copies no resolved data and cannot make
+/// it readable twice: whichever copy is encoded first takes the resolutions,
+/// and every later encoding, of that copy or of any other, finds the slot
+/// empty and writes the unavailable marker. The slot is not `Serialize`, its
+/// `Debug` output prints nothing it holds, and it compares equal to any other
+/// slot, so equality of two turns is decided by their handle-only content.
+#[cfg(feature = "provider-codex-app-server")]
+#[derive(Clone, Default)]
+pub(crate) struct OneUseDispatchReferences(Arc<std::sync::Mutex<Option<ModelDispatchReferences>>>);
+
+#[cfg(feature = "provider-codex-app-server")]
+impl OneUseDispatchReferences {
+    /// A slot holding `references` until the first [`Self::take`].
+    pub(crate) fn new(references: ModelDispatchReferences) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(references))))
+    }
+
+    /// Removes and returns the resolutions. Every later call, on this value
+    /// or on any clone of it, returns `None`.
+    pub(crate) fn take(&self) -> Option<ModelDispatchReferences> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+#[cfg(feature = "provider-codex-app-server")]
+impl std::fmt::Debug for OneUseDispatchReferences {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OneUseDispatchReferences(<redacted>)")
+    }
+}
+
+#[cfg(feature = "provider-codex-app-server")]
+impl PartialEq for OneUseDispatchReferences {
+    fn eq(&self, _other: &Self) -> bool {
+        true
     }
 }
 

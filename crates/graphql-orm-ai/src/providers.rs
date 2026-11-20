@@ -66,7 +66,9 @@ pub use codex_version_readiness::{
 mod codex_app_server;
 
 #[cfg(all(test, feature = "provider-codex-app-server", feature = "sqlite"))]
-pub(crate) use codex_app_server::tests::canonical_dynamic_tool_catalog;
+pub(crate) use codex_app_server::tests::{
+    ExecutorActorCapture, ExecutorActorFactory, canonical_dynamic_tool_catalog,
+};
 
 #[cfg(all(test, feature = "provider-openai-core"))]
 pub(crate) use mock::MockBackgroundRetrievalFailure;
@@ -127,8 +129,8 @@ pub use grok_acp::{AiGrokAcpSdkBroker, AiGrokAcpSdkInbound, AiGrokAcpUsage};
 mod grok_acp_provider;
 #[cfg(feature = "provider-grok-acp")]
 pub use grok_acp_provider::{
-    AiGrokAcpDeletionService, AiGrokAcpLaunchedProcess, AiGrokAcpProcessFactory, AiGrokAcpProvider,
-    AiGrokAcpRegistration, AiGrokAcpRunProcess,
+    AiGrokAcpDeletionService, AiGrokAcpLaunchedProcess, AiGrokAcpProcessFactory,
+    AiGrokAcpPromptInput, AiGrokAcpProvider, AiGrokAcpRegistration, AiGrokAcpRunProcess,
 };
 
 #[cfg(feature = "provider-grok-acp")]
@@ -137,4 +139,4 @@ mod grok_acp_wire;
 pub use grok_acp_wire::{AiGrokAcpWireProcess, AiGrokAcpWireTransport};
 
 #[cfg(all(test, feature = "provider-grok-acp", feature = "sqlite"))]
-pub(crate) use grok_acp_wire::tests::ExecutorWireFactory;
+pub(crate) use grok_acp_wire::tests::{ExecutorWireFactory, ReferenceWireFactory};

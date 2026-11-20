@@ -3,12 +3,51 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-20
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.151.0 to 0.152.0: entity references on local-process adapters
+
+**No action** for most hosts. The version is a placeholder for the next minor
+after the breaking release. No public signature changed, and there is no
+GraphQL SDL, persistent schema, AI schema module or data migration change.
+
+What changes without any host step:
+
+- A deployment that has an `AiEntityReferenceRegistry` installed and runs
+  turns through `AiProviderCallExecutor` on the built-in local-harness driver,
+  Grok ACP wire process or Codex app-server protocol actor now sends resolved
+  reference data to that local process, where it sent the unavailable marker
+  before. Resolution uses the same hook and the same rehydrated run principal
+  as every other adapter. **Action needed** only if a deployment relied on
+  these adapters never receiving reference data: do not install the registry
+  in that runtime, or have the hook return `None` for it.
+- The sealed egress estimate and budget of a plan already reserved the bytes
+  a handle may resolve to, on these adapters too. Nothing changes there.
+- Codex and Grok sessions are provider-retained. Data a turn sent stays in the
+  agent's thread until the session is deleted; see
+  [entity references](docs/entity-references.md#what-the-crate-cannot-recall).
+
+Host-written process code keeps sending the marker until it opts in:
+
+- `AiLocalHarnessDriver` has a new defaulted method `stream_dispatch`. A
+  driver that wants resolved data overrides it, serializes each JSON input
+  block through `ModelDispatchReferences::wire_json` into its one write to the
+  process, and drops the dispatch value.
+- `AiGrokAcpRunProcess` has a new defaulted method `prompt_dispatch`. A
+  process that wants resolved data overrides it and passes
+  `AiGrokAcpPromptInput::into_wire_text` to its one `session/prompt` write.
+- An `AiCodexAppServerRunProcess` gets resolved data by encoding `turn/start`
+  with `AiCodexAppServerProtocolActor::start_turn`, once per turn.
+  `AiCodexAppServerTurnInput::input` always returns marker text.
+
+The direct runtime dispatch methods (`AiRuntime::dispatch_provider`,
+`stream_provider`, their dynamic-tool variants, `submit_provider_background`)
+are unchanged and send the marker permanently.
 
 ## Breaking release (unreleased)
 

@@ -3,7 +3,7 @@ title: "Per-Message Entity References"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -211,6 +211,61 @@ What a provider receives for a resolved reference is
 `OrmAiOpenAiBackgroundSubmissionService::submit` runs the same step before it
 submits.
 
+### Adapters for a local process
+
+The Codex app-server, Grok ACP and local-harness adapters deliver a request to
+a local process instead of an HTTP endpoint. Each sends resolved data in
+exactly one write, the one that delivers the turn, and everything the adapter
+validates, queues, compares, clones or logs before that write holds the
+unavailable marker.
+
+| Adapter | The one write | How resolved data reaches it |
+| --- | --- | --- |
+| Local harness (`AiJsonLinesLocalHarnessDriver`) | the stdin request frame | `AiLocalHarnessProvider` moves the `ModelDispatchRequest` to `AiLocalHarnessDriver::stream_dispatch`. The driver encodes the frame through `wire_json`, drops the resolutions, then launches the process and writes the frame once. |
+| Grok ACP (`AiGrokAcpWireProcess`) | the `session/prompt` frame | `AiGrokAcpProvider` admits the request in marker form and moves an `AiGrokAcpPromptInput` to `AiGrokAcpRunProcess::prompt_dispatch`. The value is not `Clone` or `Serialize`, prints a block count in `Debug`, and gives up its resolved text only by being consumed. |
+| Codex app-server (`AiCodexAppServerProtocolActor`) | the `turn/start` frame | `AiCodexAppServerProvider` builds the turn from the marker form. The resolutions ride in a one-use slot of `AiCodexAppServerTurnInput` that all clones of the turn share. The first `start_turn` encoding empties it; any later encoding, of that turn or of a clone, writes the marker. |
+
+The Codex process seam takes a cloneable turn by value, which is why its
+resolutions travel in a shared slot and not beside the turn. Cloning the turn
+copies no resolved data and cannot make it readable twice.
+`AiCodexAppServerTurnInput::input` and the turn's `Debug` output always show
+the marker.
+
+All three follow the same rules as every other adapter:
+
+- The executor resolves for the run's rehydrated principal at this dispatch. A
+  retry or a later turn is a new dispatch and resolves again.
+- If the resolved form would exceed a size bound the adapter enforces on the
+  request (the harness `maximum_request_bytes`, the Grok registration's
+  `maximum_input_bytes`, the Codex text and frame bounds), every reference of
+  that request is sent as the marker. The request is not refused and no value
+  is truncated.
+- The executor resolves before the adapter launches, resumes or queues for
+  its process, so the write can follow the resolution by up to the adapter's
+  startup timeout. Access revoked inside that window still reaches that one
+  write; the next dispatch resolves again.
+- A tool-free Codex turn now accepts entity-reference blocks. Any other JSON
+  block in a tool-free Codex turn is still `Unsupported`.
+
+**Host-written process code.** The built-in driver, wire process and protocol
+actor above are the parts that write resolved data. A host that implements
+the seam itself keeps sending the marker until it opts in:
+
+- an `AiLocalHarnessDriver` that does not override `stream_dispatch` receives
+  a plain request with markers;
+- an `AiGrokAcpRunProcess` that does not override `prompt_dispatch` receives
+  marker text;
+- an `AiCodexAppServerRunProcess` that reads `AiCodexAppServerTurnInput::input`
+  instead of encoding `turn/start` with the protocol actor reads marker text.
+
+**What the process keeps.** Codex and Grok sessions are provider-retained: the
+agent process holds the thread, including any reference data a turn sent it,
+and later turns of that thread continue from it. Revoking access stops the
+crate from sending the data again; it does not remove it from a thread that
+already has it. See [What the crate cannot recall](#what-the-crate-cannot-recall).
+The local harness is stateless: each request launches a process, and a
+stateless continuation resolves its replayed handles again.
+
 ### Dispatch paths that send the marker
 
 These paths never take resolved data. Every reference they send is the
@@ -218,18 +273,21 @@ unavailable marker:
 
 - `AiRuntime::dispatch_provider`, `stream_provider`,
   `dispatch_provider_with_dynamic_tools`, `stream_provider_with_dynamic_tools`
-  and `submit_provider_background` called directly. They have no rehydrated
-  principal. Use the executor or the background-submission service.
-- The Codex app-server, Grok ACP and local-harness adapters. Each turns a
-  request into a cloneable turn that is queued for, or handed to, a local
-  process, so resolved data could not be confined to one transport write. The
-  executor still resolves on these paths; the adapter discards the result with
-  `ModelDispatchRequest::into_unavailable_request`. The built-in adapters that
-  send resolved data are OpenAI, xAI, OpenAI-compatible, chat-completions,
-  Anthropic and Ollama.
+  and `submit_provider_background` called directly. This is permanent. These
+  methods take no principal, and a reference may be resolved only for a
+  principal the crate has just rehydrated and re-authorized for the run, which
+  is what `AiProviderCallExecutor` and
+  `OrmAiOpenAiBackgroundSubmissionService` do. Accepting a caller-supplied
+  principal here would let a host resolve references outside that check. Use
+  the executor or the background-submission service.
 - A custom `AiProvider` that does not call
   `ModelDispatchReferences::wire_json` sends the handle block as it stands,
   which carries no data.
+- A host-written local-process seam that has not opted in, as listed above.
+
+The built-in adapters that send resolved data are OpenAI, xAI,
+OpenAI-compatible, chat-completions, Anthropic, Ollama, the local harness,
+Grok ACP and the Codex app-server.
 
 ### Egress estimate and budget
 
@@ -297,6 +355,9 @@ Data that was already sent to a provider stays with that provider.
 - The model's own earlier output, and tool results, may repeat reference data
   it was given. Those are stored as assistant and tool content under their own
   rules.
+- A **Codex app-server or Grok ACP session** is a thread held by the local
+  agent process. Reference data a turn sent to it stays in that thread, and in
+  whatever session files the agent keeps, until the session is deleted.
 - A provider's own logs and abuse-monitoring retention are outside the crate.
 
 A deployment that must stop disclosure on revocation within a running tool

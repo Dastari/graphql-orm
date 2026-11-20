@@ -530,6 +530,102 @@ impl AiGrokAcpWireProcess {
     }
 }
 
+impl AiGrokAcpWireProcess {
+    /// Writes the one `session/prompt` frame and normalizes the turn.
+    async fn send_prompt(
+        &self,
+        prompt: Vec<Value>,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let mut state = self.state.clone().lock_owned().await;
+        if state.prompted {
+            return Err(rejected());
+        }
+        state.prompted = true;
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| rejected())?
+            .clone()
+            .ok_or_else(rejected)?;
+        let id = Self::next_id(&mut state)?;
+        let response_id = format!("grok-{}", uuid::Uuid::new_v4());
+        state.broker.bind_prompt(response_id.clone())?;
+        Self::send(self.transport.as_ref(),json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}})).await?;
+        let transport = self.transport.clone();
+        let registration = self.registration.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            yield ProviderEvent::ResponseStarted{response_id:Some(response_id.clone())};
+            let mut tool_ids=ToolNotifications::default();
+            let mut retry_notifications=0;
+            loop {
+                let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
+                if value.get("method").is_none(){
+                    if Self::internal_reload(&value,&mut state)? {continue;}
+                    if value["id"]!=id||value.get("error").is_some(){Err(classified(Failure::ProtocolResponse))?;}
+                    let result=&value["result"];
+                    if state.broker.has_pending_calls() || !tool_ids.awaiting_rejection.is_empty(){Err(classified(Failure::ProtocolToolLifecycle))?;}
+                    let category=result["_meta"]["cancellationCategory"].as_str();
+                    if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
+                        if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
+                    }
+                    let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
+                    // Native stationarity is a metered EndTurn. Decode usage first,
+                    // then preserve the provider stream's text-before-usage ordering.
+                    let stationary = result["stopReason"]=="end_turn" && category==Some("action_stationarity");
+                    if stationary && result["_meta"].get("completionKind").is_none() {
+                        yield ProviderEvent::TextDelta{text:STATIONARITY_EXPLANATION.to_owned()};
+                    }
+                    yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
+                    if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
+                    if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
+                    if result["stopReason"]!="end_turn"||(!stationary && result["_meta"].get("cancellationCategory").is_some())||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
+                    yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;
+                }
+                if value["method"]=="_x.ai/mcp/sdk_call" {
+                    let response=match state.broker.accept(&bytes).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))? {
+                        AiGrokAcpSdkInbound::Response(response)=>response,
+                        AiGrokAcpSdkInbound::InvalidToolCall(call)=>{
+                            let call_id=call.call_id().to_owned();
+                            let arguments=call.rejected_arguments().clone();
+                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
+                            let result=responder.reject_invalid_arguments(call).await?;
+                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
+                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
+                            response
+                        }
+                        AiGrokAcpSdkInbound::ToolCall(call)=>{
+                            let call_id=call.call_id().to_owned();
+                            let arguments=call.arguments().clone();
+                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
+                            let result=responder.respond(call).await?;
+                            responder.authorize_delivery(&result).await?;
+                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
+                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
+                            response
+                        }
+                    };
+                    transport.write_frame(response).await?;
+                } else {
+                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="retry_state" {
+                        Self::retry_notification(&value,&session,&mut retry_notifications,MAX_RETRY_NOTIFICATIONS)?;
+                        continue;
+                    }
+                    if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
+                        let update=&value["params"]["update"];
+                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(classified(Failure::ProtocolModelMismatch))?;}
+                        continue;
+                    }
+                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="model_changed" {
+                        let update=&value["params"]["update"];
+                        if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(classified(Failure::ProtocolModelMismatch))?;}
+                    }
+                    if let Some(text)=Self::notification(&value,Some(&session),false,&mut tool_ids)? { yield ProviderEvent::TextDelta{text}; }
+                }
+            }
+        }))
+    }
+}
 #[async_trait]
 impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
     async fn create_empty_session(&self) -> Result<AiProviderSessionCursor, ProviderError> {
@@ -618,93 +714,22 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let prompt = Self::literal_prompt(input, self.registration.maximum_input_bytes())?;
-        let mut state = self.state.clone().lock_owned().await;
-        if state.prompted {
-            return Err(rejected());
-        }
-        state.prompted = true;
-        let session = self
-            .session
-            .lock()
-            .map_err(|_| rejected())?
-            .clone()
-            .ok_or_else(rejected)?;
-        let id = Self::next_id(&mut state)?;
-        let response_id = format!("grok-{}", uuid::Uuid::new_v4());
-        state.broker.bind_prompt(response_id.clone())?;
-        Self::send(self.transport.as_ref(),json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}})).await?;
-        let transport = self.transport.clone();
-        let registration = self.registration.clone();
-        Ok(Box::pin(async_stream::try_stream! {
-            yield ProviderEvent::ResponseStarted{response_id:Some(response_id.clone())};
-            let mut tool_ids=ToolNotifications::default();
-            let mut retry_notifications=0;
-            loop {
-                let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
-                if value.get("method").is_none(){
-                    if Self::internal_reload(&value,&mut state)? {continue;}
-                    if value["id"]!=id||value.get("error").is_some(){Err(classified(Failure::ProtocolResponse))?;}
-                    let result=&value["result"];
-                    if state.broker.has_pending_calls() || !tool_ids.awaiting_rejection.is_empty(){Err(classified(Failure::ProtocolToolLifecycle))?;}
-                    let category=result["_meta"]["cancellationCategory"].as_str();
-                    if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
-                        if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
-                    }
-                    let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
-                    // Native stationarity is a metered EndTurn. Decode usage first,
-                    // then preserve the provider stream's text-before-usage ordering.
-                    let stationary = result["stopReason"]=="end_turn" && category==Some("action_stationarity");
-                    if stationary && result["_meta"].get("completionKind").is_none() {
-                        yield ProviderEvent::TextDelta{text:STATIONARITY_EXPLANATION.to_owned()};
-                    }
-                    yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
-                    if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
-                    if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
-                    if result["stopReason"]!="end_turn"||(!stationary && result["_meta"].get("cancellationCategory").is_some())||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
-                    yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;
-                }
-                if value["method"]=="_x.ai/mcp/sdk_call" {
-                    let response=match state.broker.accept(&bytes).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))? {
-                        AiGrokAcpSdkInbound::Response(response)=>response,
-                        AiGrokAcpSdkInbound::InvalidToolCall(call)=>{
-                            let call_id=call.call_id().to_owned();
-                            let arguments=call.rejected_arguments().clone();
-                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
-                            let result=responder.reject_invalid_arguments(call).await?;
-                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
-                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
-                            response
-                        }
-                        AiGrokAcpSdkInbound::ToolCall(call)=>{
-                            let call_id=call.call_id().to_owned();
-                            let arguments=call.arguments().clone();
-                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
-                            let result=responder.respond(call).await?;
-                            responder.authorize_delivery(&result).await?;
-                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
-                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
-                            response
-                        }
-                    };
-                    transport.write_frame(response).await?;
-                } else {
-                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="retry_state" {
-                        Self::retry_notification(&value,&session,&mut retry_notifications,MAX_RETRY_NOTIFICATIONS)?;
-                        continue;
-                    }
-                    if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
-                        let update=&value["params"]["update"];
-                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(classified(Failure::ProtocolModelMismatch))?;}
-                        continue;
-                    }
-                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="model_changed" {
-                        let update=&value["params"]["update"];
-                        if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(classified(Failure::ProtocolModelMismatch))?;}
-                    }
-                    if let Some(text)=Self::notification(&value,Some(&session),false,&mut tool_ids)? { yield ProviderEvent::TextDelta{text}; }
-                }
-            }
-        }))
+        self.send_prompt(prompt, responder).await
+    }
+    async fn prompt_dispatch(
+        &self,
+        input: super::grok_acp_provider::AiGrokAcpPromptInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        // The one place resolved reference text is read: it is encoded into
+        // the `session/prompt` frame and moved into that single write. A
+        // prompt whose resolved form exceeds the registered input ceiling is
+        // sent with every reference as the unavailable marker instead.
+        let maximum = self.registration.maximum_input_bytes();
+        let text = input
+            .into_wire_text(|candidate| Self::literal_prompt(candidate.to_vec(), maximum).is_ok());
+        let prompt = Self::literal_prompt(text, maximum)?;
+        self.send_prompt(prompt, responder).await
     }
     async fn cancel(&self) -> Result<(), ProviderError> {
         let session = self
@@ -808,6 +833,82 @@ pub(crate) mod tests {
                 reads: SyncMutex::new(reads.into()),
                 writes: SyncMutex::new(vec![]),
             });
+            let process = AiGrokAcpWireProcess::new(registration, wire, "/private/empty".into())?;
+            Ok(
+                super::super::grok_acp_provider::AiGrokAcpLaunchedProcess::new(
+                    Arc::new(process),
+                    || {},
+                ),
+            )
+        }
+    }
+    /// Launches real wire processes that answer one prompt with a text-free
+    /// terminal, and keeps every transport so a test can read the
+    /// `session/prompt` frames that were written.
+    #[cfg(feature = "sqlite")]
+    #[derive(Default)]
+    pub(crate) struct ReferenceWireFactory {
+        wires: SyncMutex<Vec<Arc<Wire>>>,
+    }
+    #[cfg(feature = "sqlite")]
+    impl ReferenceWireFactory {
+        /// The decoded text of every `session/prompt` frame written so far,
+        /// one entry per frame.
+        pub(crate) fn prompts(&self) -> Vec<String> {
+            self.wires
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|wire| wire.writes.lock().unwrap().clone())
+                .filter(|frame| frame["method"] == "session/prompt")
+                .map(|frame| {
+                    frame["params"]["prompt"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|block| {
+                            let literal = block["text"].as_str().unwrap();
+                            serde_json::from_str::<String>(literal.split_once('\n').unwrap().1)
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .collect()
+        }
+        /// Every frame written so far, as text.
+        pub(crate) fn frames(&self) -> String {
+            self.wires
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|wire| wire.writes.lock().unwrap().clone())
+                .map(|frame| frame.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+    #[async_trait]
+    #[cfg(feature = "sqlite")]
+    impl super::super::grok_acp_provider::AiGrokAcpProcessFactory for ReferenceWireFactory {
+        fn admits(&self, _: &AiGrokAcpRegistration) -> bool {
+            true
+        }
+        async fn launch(
+            &self,
+            registration: Arc<AiGrokAcpRegistration>,
+        ) -> Result<super::super::grok_acp_provider::AiGrokAcpLaunchedProcess, ProviderError>
+        {
+            let mut reads = new_session_reads();
+            reads.push(response(
+                9,
+                json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+            ));
+            let wire = Arc::new(Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            });
+            self.wires.lock().unwrap().push(wire.clone());
             let process = AiGrokAcpWireProcess::new(registration, wire, "/private/empty".into())?;
             Ok(
                 super::super::grok_acp_provider::AiGrokAcpLaunchedProcess::new(

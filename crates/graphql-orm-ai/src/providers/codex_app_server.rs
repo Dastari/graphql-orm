@@ -809,6 +809,16 @@ pub struct AiCodexAppServerTurnInput {
     instructions: Vec<String>,
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
+    /// For each entity-reference block of the request: its index in `input`
+    /// and its unavailable-marker JSON. `input` holds the marker text for
+    /// these blocks, so everything that reads, validates, compares or clones
+    /// the turn sees no reference data.
+    reference_blocks: Vec<(usize, Value)>,
+    /// What those blocks resolved to for the dispatch this turn was built
+    /// for. The slot is shared by every clone of the turn and emptied by the
+    /// first `turn/start` encoding; see
+    /// [`crate::entity_references::OneUseDispatchReferences`].
+    dispatch_references: crate::entity_references::OneUseDispatchReferences,
     tool_images: Vec<crate::AiResolvedToolImage>,
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
@@ -861,6 +871,8 @@ impl AiCodexAppServerTurnInput {
             instructions,
             retained_bootstrap_fingerprint: None,
             input,
+            reference_blocks: Vec::new(),
+            dispatch_references: crate::entity_references::OneUseDispatchReferences::default(),
             tool_images: Vec::new(),
             #[cfg(any(feature = "sqlite", feature = "postgres"))]
             source_delivery: None,
@@ -900,10 +912,67 @@ impl AiCodexAppServerTurnInput {
         }
         Ok(())
     }
+    /// Installs what the turn's entity references resolved to for the
+    /// dispatch that built it.
+    ///
+    /// The resolutions are not copied into the turn's text. They are held in
+    /// a slot that the first `turn/start` encoding of this turn, or of any
+    /// clone of it, empties ([`Self::take_protocol_input`]). A turn without
+    /// reference blocks keeps nothing.
+    fn with_dispatch_references(mut self, references: crate::ModelDispatchReferences) -> Self {
+        if !self.reference_blocks.is_empty() {
+            self.dispatch_references =
+                crate::entity_references::OneUseDispatchReferences::new(references);
+        }
+        self
+    }
+
+    /// The `turn/start` input with every entity reference as the unavailable
+    /// marker. It holds no reference data and may be built any number of
+    /// times.
     fn protocol_input(&self) -> Result<Vec<Value>, ProviderError> {
-        let mut input = self
-            .input
+        self.protocol_input_from(self.input.iter().map(String::as_str))
+    }
+
+    /// The `turn/start` input for the one transport write.
+    ///
+    /// The first call, on this turn or on any clone of it, takes what the
+    /// turn's entity references resolved to and returns input in which each
+    /// reference block carries its resolution. Every later call finds nothing
+    /// to take and returns the marker form. The marker form is also returned
+    /// when the resolved input would exceed a text or frame bound the marker
+    /// form was admitted under, so a resolution never fails a turn.
+    fn take_protocol_input(&self) -> Result<Vec<Value>, ProviderError> {
+        let Some(references) = self.dispatch_references.take() else {
+            return self.protocol_input();
+        };
+        // `texts` starts as the marker text, which holds no reference data,
+        // and is dropped when this call returns.
+        let mut texts = self.input.clone();
+        for (index, marker) in &self.reference_blocks {
+            let wire = references.wire_json(marker);
+            if let (Some(slot), Ok(text)) = (texts.get_mut(*index), serde_json::to_string(wire)) {
+                *slot = text;
+            }
+        }
+        drop(references);
+        let text_bytes = self
+            .instructions
             .iter()
+            .chain(&texts)
+            .fold(0_usize, |total, text| total.saturating_add(text.len()));
+        if text_bytes > MAXIMUM_TEXT_BYTES || texts.iter().any(|text| text.contains('\0')) {
+            return self.protocol_input();
+        }
+        self.protocol_input_from(texts.iter().map(String::as_str))
+            .or_else(|_| self.protocol_input())
+    }
+
+    fn protocol_input_from<'a>(
+        &self,
+        texts: impl Iterator<Item = &'a str>,
+    ) -> Result<Vec<Value>, ProviderError> {
+        let mut input = texts
             .map(|text| json!({"type":"text","text":text}))
             .collect::<Vec<_>>();
         for image in &self.tool_images {
@@ -1083,11 +1152,19 @@ impl AiCodexAppServerTurnInput {
         {
             return Err(ProviderError::Unsupported);
         }
+        // A tool-free turn is text, plus entity-reference blocks. Any other
+        // JSON block stays unsupported.
+        let reference_blocks = entity_reference_markers(&request.input);
         let input = request
             .input
             .into_iter()
             .map(|block| match block {
                 ModelInputBlock::Text { text } => Ok(text),
+                ModelInputBlock::Json { value }
+                    if crate::entity_references::is_entity_reference_envelope(&value) =>
+                {
+                    serde_json::to_string(&value).map_err(|_| ProviderError::InvalidRequest)
+                }
                 ModelInputBlock::Json { .. }
                 | ModelInputBlock::ToolResult { .. }
                 | ModelInputBlock::Attachment { .. } => Err(ProviderError::Unsupported),
@@ -1102,6 +1179,7 @@ impl AiCodexAppServerTurnInput {
                 .maximum_output_tokens
                 .ok_or(ProviderError::InvalidRequest)?,
         )?;
+        turn.reference_blocks = reference_blocks;
         turn.web_search = web_search;
         turn.validate()?;
         Ok(turn)
@@ -1118,6 +1196,7 @@ impl AiCodexAppServerTurnInput {
         {
             return Err(ProviderError::Unsupported);
         }
+        let reference_blocks = entity_reference_markers(&request.input);
         let input = request
             .input
             .iter()
@@ -1140,6 +1219,7 @@ impl AiCodexAppServerTurnInput {
                 .maximum_output_tokens
                 .ok_or(ProviderError::InvalidRequest)?,
         )?;
+        turn.reference_blocks = reference_blocks;
         turn.tools = request.tools;
         turn.web_search = web_search;
         turn.validate()?;
@@ -1164,6 +1244,24 @@ impl AiCodexAppServerTurnInput {
                 .to_owned(),
         )
     }
+}
+
+/// The entity-reference blocks of a request's input: each block's index and
+/// its JSON as the request carries it. The provider builds turns from the
+/// marker form of a request, so the JSON kept here holds no reference data.
+fn entity_reference_markers(input: &[ModelInputBlock]) -> Vec<(usize, Value)> {
+    input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            ModelInputBlock::Json { value }
+                if crate::entity_references::is_entity_reference_envelope(value) =>
+            {
+                Some((index, value.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn codex_web_search_turn_config(
@@ -1514,10 +1612,12 @@ impl AiProvider for AiCodexAppServerProvider {
         dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // This adapter turns a request into a cloneable, queued turn for a
-        // local agent process, so it never takes resolved reference data:
-        // every entity reference is sent as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
+        // The turn is built from the marker form of the request, which holds
+        // no reference data: validation, queueing, comparison and every clone
+        // of the turn see markers. What the references resolved to rides in
+        // the turn's one-use slot and is read once, when the protocol actor
+        // encodes `turn/start`.
+        let (request, references) = dispatch.into_unavailable_parts();
         self.capabilities()
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         context.validate_request(&ProviderKind::LocalHarness, &request)?;
@@ -1542,7 +1642,8 @@ impl AiProvider for AiCodexAppServerProvider {
         } else {
             AiCodexAppServerTurnInput::try_from_model_request(request)?
         }
-        .with_tool_result_context(&context)?;
+        .with_tool_result_context(&context)?
+        .with_dispatch_references(references);
         context.authorize_tool_source_delivery().await?;
         if let Some(session) = retained {
             match session.activation() {
@@ -1581,10 +1682,12 @@ impl AiProvider for AiCodexAppServerProvider {
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // This adapter turns a request into a cloneable, queued turn for a
-        // local agent process, so it never takes resolved reference data:
-        // every entity reference is sent as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
+        // The turn is built from the marker form of the request, which holds
+        // no reference data: validation, queueing, comparison and every clone
+        // of the turn see markers. What the references resolved to rides in
+        // the turn's one-use slot and is read once, when the protocol actor
+        // encodes `turn/start`.
+        let (request, references) = dispatch.into_unavailable_parts();
         if !self.registration.experimental_dynamic_tools()
             || !self
                 .pool
@@ -1624,7 +1727,8 @@ impl AiProvider for AiCodexAppServerProvider {
         } else {
             AiCodexAppServerTurnInput::try_from_dynamic_request(request)?
         }
-        .with_tool_result_context(&context)?;
+        .with_tool_result_context(&context)?
+        .with_dispatch_references(references);
         context.authorize_tool_source_delivery().await?;
         if let Some(session) = retained {
             match session.activation() {
@@ -4692,7 +4796,10 @@ impl AiCodexAppServerProtocolActor {
         }
         let mut params = json!({
             "threadId": thread_id,
-            "input": input.protocol_input()?,
+            // The one read of what the turn's entity references resolved
+            // to. A second `turn/start` for the same turn, or for a clone of
+            // it, encodes the unavailable marker.
+            "input": input.take_protocol_input()?,
             "summary": "none",
         });
         if let Some(effort) = input.reasoning_effort().wire_value() {
@@ -18268,5 +18375,108 @@ pub(crate) mod tests {
         }
         assert!(turn_completed);
         assert!(completed_searches > 0);
+    }
+
+    /// What the real protocol actor encoded for the turns the provider-call
+    /// executor dispatched to an [`ExecutorActorFactory`] process.
+    #[cfg(feature = "sqlite")]
+    #[derive(Default)]
+    pub(crate) struct ExecutorActorCapture {
+        /// The input text of each first `turn/start` frame, one per turn.
+        pub frames: std::sync::Mutex<Vec<String>>,
+        /// The input text of a second `turn/start` encoding of the same turn
+        /// and of a clone taken before the first encoding, two per turn.
+        pub replays: std::sync::Mutex<Vec<String>>,
+        /// `Debug` output and public input text of each turn before its
+        /// first encoding.
+        pub observed: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// Launches processes that encode each fresh turn with the real
+    /// [`AiCodexAppServerProtocolActor`] and answer with one fixed text turn.
+    #[cfg(feature = "sqlite")]
+    pub(crate) struct ExecutorActorFactory(pub Arc<ExecutorActorCapture>);
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait]
+    impl AiCodexAppServerRunProcessFactory for ExecutorActorFactory {
+        async fn launch(
+            &self,
+            _registration: Arc<AiCodexAppServerRegistration>,
+        ) -> Result<AiCodexAppServerLaunchedProcess, ProviderError> {
+            Ok(AiCodexAppServerLaunchedProcess::new(
+                Arc::new(ExecutorActorProcess(self.0.clone())),
+                Arc::new(|| {}),
+            ))
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    struct ExecutorActorProcess(Arc<ExecutorActorCapture>);
+
+    #[cfg(feature = "sqlite")]
+    impl ExecutorActorProcess {
+        /// Runs the real actor up to `turn/start` and returns the text of the
+        /// frame's input items.
+        fn encode_turn(input: &AiCodexAppServerTurnInput) -> Result<String, ProviderError> {
+            let mut actor = initialized_protocol_actor();
+            actor.start_fresh_thread(input)?;
+            actor.accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)?;
+            actor.accept(&thread_started_notification("thread-1"))?;
+            let frame = actor.start_turn("thread-1", input)?;
+            let frame: Value =
+                serde_json::from_slice(&frame).map_err(|_| ProviderError::Rejected)?;
+            Ok(frame["params"]["input"]
+                .as_array()
+                .ok_or(ProviderError::Rejected)?
+                .iter()
+                .filter_map(|item| item["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[async_trait]
+    impl AiCodexAppServerRunProcess for ExecutorActorProcess {
+        async fn start_fresh_turn(
+            &self,
+            input: AiCodexAppServerTurnInput,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            let lock = |mutex: &std::sync::Mutex<Vec<String>>, value: String| {
+                mutex
+                    .lock()
+                    .expect("capture should not be poisoned")
+                    .push(value);
+            };
+            let clone = input.clone();
+            lock(
+                &self.0.observed,
+                format!("{input:?} {clone:?} {:?}", input.input()),
+            );
+            lock(&self.0.frames, Self::encode_turn(&input)?);
+            lock(&self.0.replays, Self::encode_turn(&input)?);
+            lock(&self.0.replays, Self::encode_turn(&clone)?);
+            Ok(Box::pin(stream::iter([
+                Ok(ProviderEvent::ResponseStarted { response_id: None }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "answered".to_owned(),
+                }),
+                Ok(ProviderEvent::Usage {
+                    input_tokens: 9,
+                    output_tokens: 2,
+                    cached_input_tokens: 0,
+                }),
+                Ok(ProviderEvent::ResponseCompleted { response_id: None }),
+            ])))
+        }
+
+        async fn interrupt(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self, _reason: AiProviderRunCloseReason) -> Result<(), ProviderError> {
+            Ok(())
+        }
     }
 }

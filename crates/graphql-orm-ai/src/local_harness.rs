@@ -527,6 +527,35 @@ pub trait AiLocalHarnessDriver: Send + Sync {
         registration: Arc<AiLocalHarnessRegistration>,
         request: ModelRequest,
     ) -> Result<ProviderEventStream, ProviderError>;
+
+    /// Starts one already-authorized request and consumes what its entity
+    /// references resolved to for this one dispatch.
+    ///
+    /// [`AiLocalHarnessProvider`] calls this method, never [`Self::stream`].
+    /// The default discards everything resolved and calls [`Self::stream`]
+    /// with a plain request in which every entity reference is the
+    /// unavailable marker, so a driver written before this method existed
+    /// keeps sending markers.
+    ///
+    /// A driver that overrides it must move `dispatch` into the one write
+    /// that delivers the request to the harness process: serialize each JSON
+    /// input block through [`crate::ModelDispatchReferences::wire_json`],
+    /// write those bytes once, and drop them. It must not copy what
+    /// `wire_json` returns into anything that is cloned, stored, logged,
+    /// queued or retried. [`crate::ModelDispatchRequest`] is not `Clone`, so
+    /// a second write needs a second dispatch, which resolves again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] for the same failures as [`Self::stream`].
+    async fn stream_dispatch(
+        &self,
+        registration: Arc<AiLocalHarnessRegistration>,
+        dispatch: crate::ModelDispatchRequest,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.stream(registration, dispatch.into_unavailable_request())
+            .await
+    }
 }
 
 /// Bounded JSON-lines driver over a trusted process launcher.
@@ -563,6 +592,24 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
         registration: Arc<AiLocalHarnessRegistration>,
         request: ModelRequest,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // A plain request carries no resolutions: every entity reference in
+        // it is written as the unavailable marker.
+        self.stream_dispatch(
+            registration,
+            crate::ModelDispatchRequest::withholding(request),
+        )
+        .await
+    }
+
+    async fn stream_dispatch(
+        &self,
+        registration: Arc<AiLocalHarnessRegistration>,
+        dispatch: crate::ModelDispatchRequest,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        // `request` holds handles only. `references` is what they resolved to
+        // for this dispatch; it is read while the one stdin frame is encoded
+        // and dropped before the process is launched.
+        let (request, references) = dispatch.into_parts();
         validate_registered_request(&registration, &request)?;
         let limits = registration.limits();
         let offered_tool_ids = request
@@ -570,24 +617,24 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             .iter()
             .map(|tool| tool.tool_id.clone())
             .collect::<BTreeSet<_>>();
-        let mut encoded = serde_json::to_vec(&json!({
-            "protocol": "graphql-orm-ai/local-harness-jsonl/v2",
-            "type": "request",
-            "model": request.model,
-            "instructions": request.instructions,
-            "input": request.input,
-            "continuation_mode": request.continuation_mode,
-            "continuation": request.continuation,
-            "tools": request.tools,
-            "output_schema": request.output_schema,
-            "maximum_output_tokens": request.maximum_output_tokens,
-        }))
-        .map_err(|_| ProviderError::InvalidRequest)?;
-        encoded.push(b'\n');
-        if encoded.len() > limits.maximum_request_bytes()
-            || encoded.len() > limits.maximum_frame_bytes()
-        {
-            return Err(ProviderError::InvalidRequest);
+        let maximum_output_tokens = request
+            .maximum_output_tokens
+            .expect("validated local-harness output ceiling");
+        let fits = |frame: &[u8]| {
+            frame.len() <= limits.maximum_request_bytes()
+                && frame.len() <= limits.maximum_frame_bytes()
+        };
+        let mut encoded = encode_request_frame(&request, &references)?;
+        drop(references);
+        if !fits(&encoded) {
+            // The frame with resolved reference data exceeds the registered
+            // request ceiling. Send every reference as the marker instead,
+            // and refuse the request only if that does not fit either.
+            let (request, markers) = crate::ModelDispatchRequest::withholding(request).into_parts();
+            encoded = encode_request_frame(&request, &markers)?;
+            if !fits(&encoded) {
+                return Err(ProviderError::InvalidRequest);
+            }
         }
 
         let startup_deadline = tokio::time::Instant::now() + limits.startup_timeout();
@@ -608,9 +655,6 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             .capabilities()
             .maximum_context_tokens
             .expect("validated local-harness context ceiling");
-        let maximum_output_tokens = request
-            .maximum_output_tokens
-            .expect("validated local-harness output ceiling");
         Ok(normalized_process_stream(
             process,
             limits,
@@ -664,17 +708,18 @@ impl AiProvider for AiLocalHarnessProvider {
         dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // Everything is validated against the handle-only request. The
+        // dispatch value, which alone holds what the request's entity
+        // references resolved to, is moved to the driver unsplit: the driver
+        // either consumes it in its one write to the harness process or, by
+        // default, discards it and sends the unavailable marker.
         context.validate_request(&ProviderKind::LocalHarness, dispatch.request())?;
-        // A harness driver receives a plain, cloneable request and runs a
-        // local process, so resolved reference data is never handed to it.
-        // Every entity reference reaches the driver as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
         let registration = self
             .registry
-            .registration(&request.model)
+            .registration(&dispatch.request().model)
             .ok_or(ProviderError::Unsupported)?;
-        validate_registered_request(&registration, &request)?;
-        self.driver.stream(registration, request).await
+        validate_registered_request(&registration, dispatch.request())?;
+        self.driver.stream_dispatch(registration, dispatch).await
     }
 }
 
@@ -864,6 +909,69 @@ impl HarnessEventState {
     const fn complete(&self) -> bool {
         self.started && self.usage && self.completed
     }
+}
+
+/// Encodes the one JSON-lines request frame written to a harness process.
+///
+/// `request` is the handle-only request. Each JSON input block, in the
+/// current input and in the replayed user messages of a stateless
+/// continuation, is written as [`crate::ModelDispatchReferences::wire_json`]
+/// returns it, so an entity-reference handle becomes what it resolved to for
+/// this dispatch or the unavailable marker. The returned bytes are the only
+/// copy of resolved data outside `references`.
+fn encode_request_frame(
+    request: &ModelRequest,
+    references: &crate::ModelDispatchReferences,
+) -> Result<Vec<u8>, ProviderError> {
+    fn rewrite(
+        blocks: Option<&mut serde_json::Value>,
+        references: &crate::ModelDispatchReferences,
+    ) {
+        let Some(blocks) = blocks.and_then(serde_json::Value::as_array_mut) else {
+            return;
+        };
+        for block in blocks {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("json") {
+                continue;
+            }
+            let Some(value) = block.get_mut("value") else {
+                continue;
+            };
+            let wire = references.wire_json(value);
+            if !std::ptr::eq(wire, &*value) {
+                *value = wire.clone();
+            }
+        }
+    }
+    let invalid = |_| ProviderError::InvalidRequest;
+    let mut input = serde_json::to_value(&request.input).map_err(invalid)?;
+    rewrite(Some(&mut input), references);
+    let mut continuation = serde_json::to_value(&request.continuation).map_err(invalid)?;
+    if let Some(messages) = continuation
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for message in messages {
+            if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                rewrite(message.get_mut("content"), references);
+            }
+        }
+    }
+    let mut encoded = serde_json::to_vec(&json!({
+        "protocol": "graphql-orm-ai/local-harness-jsonl/v2",
+        "type": "request",
+        "model": request.model,
+        "instructions": request.instructions,
+        "input": input,
+        "continuation_mode": request.continuation_mode,
+        "continuation": continuation,
+        "tools": request.tools,
+        "output_schema": request.output_schema,
+        "maximum_output_tokens": request.maximum_output_tokens,
+    }))
+    .map_err(invalid)?;
+    encoded.push(b'\n');
+    Ok(encoded)
 }
 
 fn validate_registered_request(

@@ -403,6 +403,84 @@ impl AiGrokAcpRegistration {
     }
 }
 
+/// The text of one admitted prompt, with what its entity references resolved
+/// to for this one dispatch.
+///
+/// The value is built by [`AiGrokAcpProvider`] from the dispatch the
+/// provider-call executor resolved for the run's current principal, and is
+/// moved to [`AiGrokAcpRunProcess::prompt_dispatch`]. It is neither `Clone`
+/// nor `Serialize` and its `Debug` output prints a block count only, so the
+/// resolved text can be read exactly once, by consuming the value. It proves
+/// nothing about access or egress; those were checked before it was built.
+pub struct AiGrokAcpPromptInput {
+    /// One entry per input block: the text to send when nothing resolved is
+    /// sent, and the resolved text when the block is an entity reference
+    /// that resolved.
+    blocks: Vec<(String, Option<String>)>,
+}
+
+impl std::fmt::Debug for AiGrokAcpPromptInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiGrokAcpPromptInput")
+            .field("blocks", &self.blocks.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AiGrokAcpPromptInput {
+    /// Builds the prompt from an already validated text/JSON request.
+    ///
+    /// `request` is the marker form of the dispatched request and
+    /// `references` what its references resolved to.
+    fn from_parts(request: ModelRequest, references: &crate::ModelDispatchReferences) -> Self {
+        let blocks = request
+            .input
+            .into_iter()
+            .map(|block| match block {
+                ModelInputBlock::Text { text } => (text, None),
+                ModelInputBlock::Json { value } => {
+                    let wire = references.wire_json(&value);
+                    let resolved = (!std::ptr::eq(wire, &value)).then(|| wire.to_string());
+                    (value.to_string(), resolved)
+                }
+                _ => unreachable!("validated text only"),
+            })
+            .collect();
+        Self { blocks }
+    }
+
+    /// Discards everything resolved and returns the prompt text with every
+    /// entity reference as the unavailable marker. The result holds no
+    /// reference data.
+    pub fn into_unavailable_text(self) -> Vec<String> {
+        self.blocks.into_iter().map(|(text, _)| text).collect()
+    }
+
+    /// Returns the prompt text for the one `session/prompt` write, with each
+    /// entity reference as what it resolved to for this dispatch.
+    ///
+    /// `fits` is asked once whether the resolved text is within the bound the
+    /// process enforces on a prompt. If it is not, nothing resolved is
+    /// returned and every reference is the unavailable marker instead, which
+    /// is the text the request was admitted with. Use the result for the one
+    /// transport write and drop it. `fits` must not keep what it is shown.
+    pub fn into_wire_text(self, fits: impl FnOnce(&[String]) -> bool) -> Vec<String> {
+        if self.blocks.iter().all(|(_, resolved)| resolved.is_none()) {
+            return self.into_unavailable_text();
+        }
+        let (unavailable, wire): (Vec<String>, Vec<String>) = self
+            .blocks
+            .into_iter()
+            .map(|(text, resolved)| match resolved {
+                Some(resolved) => (text, resolved),
+                None => (text.clone(), text),
+            })
+            .unzip();
+        if fits(&wire) { wire } else { unavailable }
+    }
+}
+
 /// Trusted deployment-owned, strictly typed Grok process operations.
 /// Implementations must use the upstream ACP codec/actor, never execute tools,
 /// disclose credentials, replay completed callbacks, or infer session absence
@@ -430,6 +508,28 @@ pub trait AiGrokAcpRunProcess: Send + Sync {
         input: Vec<String>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError>;
+    /// Starts one exact admitted prompt and consumes what its entity
+    /// references resolved to for this one dispatch.
+    ///
+    /// [`AiGrokAcpProvider`] calls this method, never [`Self::prompt`]. The
+    /// default discards everything resolved and calls [`Self::prompt`] with
+    /// text in which every entity reference is the unavailable marker, so a
+    /// process written before this method existed keeps sending markers.
+    ///
+    /// A process that overrides it must move `input` into the one
+    /// `session/prompt` write with [`AiGrokAcpPromptInput::into_wire_text`]
+    /// and must not copy that text into anything that is cloned, stored,
+    /// logged, queued or retried.
+    ///
+    /// # Errors
+    /// Rejects unsupported state, transport failures and uncertain terminals.
+    async fn prompt_dispatch(
+        &self,
+        input: AiGrokAcpPromptInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.prompt(input.into_unavailable_text(), responder).await
+    }
     /// Sends `session/cancel` for this exact live session. This is not settled
     /// cancellation proof and must not report partial context as reusable.
     ///
@@ -806,23 +906,19 @@ impl AiProvider for AiGrokAcpProvider {
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // This adapter turns a request into a cloneable, queued turn for a
-        // local agent process, so it never takes resolved reference data:
-        // every entity reference is sent as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
+        // The request is admitted in its marker form, which holds no
+        // reference data: validation, session binding and activation see
+        // nothing resolved. What the references resolved to stays in the
+        // non-`Clone` prompt input, which is moved to the process for its one
+        // `session/prompt` write. A process that does not take it sends the
+        // markers.
+        let (request, references) = dispatch.into_unavailable_parts();
         let binding = self.validate_context(&request, &context)?;
+        let input = AiGrokAcpPromptInput::from_parts(request, &references);
+        drop(references);
         let session = context.provider_session().ok_or_else(rejected)?;
         let guard = self.activate(binding, session).await?;
         let entry = guard.entry.clone();
-        let input = request
-            .input
-            .into_iter()
-            .map(|block| match block {
-                ModelInputBlock::Text { text } => text,
-                ModelInputBlock::Json { value } => value.to_string(),
-                _ => unreachable!("validated text only"),
-            })
-            .collect();
         let deadline = tokio::time::Instant::now() + self.turn_timeout;
         let responder = Arc::new(RejectionTrackingResponder {
             inner: responder,
@@ -830,7 +926,10 @@ impl AiProvider for AiGrokAcpProvider {
         });
         let mut stream = tokio::time::timeout_at(
             deadline,
-            entry.process.process.prompt(input, responder.clone()),
+            entry
+                .process
+                .process
+                .prompt_dispatch(input, responder.clone()),
         )
         .await
         .map_err(|_| timeout())??;
