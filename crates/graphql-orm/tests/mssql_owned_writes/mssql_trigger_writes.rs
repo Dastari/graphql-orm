@@ -1,4 +1,3 @@
-#![cfg(feature = "mssql")]
 //! Generated MSSQL writes against tables that carry enabled `AFTER` triggers.
 //!
 //! The triggers write audit rows without `SET NOCOUNT ON`, so they emit their
@@ -9,9 +8,7 @@
 use graphql_orm::graphql::orm::WriteBackend;
 use graphql_orm::prelude::*;
 
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
-use owned_mssql::{OwnedSqlServer, execute_batch};
+use super::owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[repository_entity(

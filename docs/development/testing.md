@@ -182,7 +182,7 @@ requires the skip list to be exactly the non-ignored tests of the binaries
 `cargo test -p graphql-orm` still runs everything.
 
 The existing `sqlserver-security` job executes `scripts/run-owned-database-lanes.sh mssql`,
-including `mssql_integration` (MONEY reads and two-parent paginated relation loading),
+including the `mssql_integration` module in `mssql_owned_queries` (MONEY reads and two-parent paginated relation loading),
 then the ignored owned TLS and query-notification tests. Both CI and release use
 the same lane script. SQLite/PostgreSQL SQLx fixtures are gated to their supported
 backends. Fixtures that select a backend through mutually exclusive feature
