@@ -1010,7 +1010,16 @@ async fn hand_written_filters_are_single_row_expressions() {
         ("__gom_self.score = ?1", vec![SqlValue::Int(5)]),
         ("__gom_self.score = $1", vec![SqlValue::Int(5)]),
         ("__gom_self.score = @p1", vec![SqlValue::Int(5)]),
-        ("__gom_self.score = @score", vec![]),
+        // `@name` is a variable on SQL Server and a parameter on SQLite; on
+        // PostgreSQL `@` is an operator, so `$name` stands in there.
+        (
+            if B::DIALECT == DatabaseBackend::Postgres {
+                "__gom_self.score = $other"
+            } else {
+                "__gom_self.score = @score"
+            },
+            vec![],
+        ),
         ("__gom_self.score = $score", vec![]),
         // A placeholder with no value for it.
         ("__gom_self.score = ?", vec![]),
