@@ -42,13 +42,15 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// guarantee. Known residuals:
     ///
     /// - SQLite reads the bare words `true` and `false` as a column of
-    ///   that name when the table has one. Do not write the bare literals
-    ///   in a policy over such a table.
-    /// - SQL Server compares identifiers with the catalog's collation. A
-    ///   table whose name differs from a generated alias only by accents or
-    ///   case under that collation (`__góm_visibility_1` under an
-    ///   accent-insensitive catalog) is not recognised as reserved. Do not
-    ///   name a table that way.
+    ///   that name when one is visible: in the governed table or, inside a
+    ///   subquery, in an enclosing one. Do not write the bare literals in a
+    ///   policy that such a table can reach; compare with `1` and `0`.
+    /// - SQL Server compares identifiers with the catalog's collation. The
+    ///   reserved-name check folds ASCII case only, so a table whose name
+    ///   equals a generated alias only under a wider collation equivalence
+    ///   (accent-insensitive, as `__góm_visibility_1`, or
+    ///   width-insensitive) is not recognised as reserved. Do not name a
+    ///   table that way.
     /// - A filter that overrides the macro-only `__gom_row_bound_filter`
     ///   hook is rendered as generated code and is not validated.
     ///
@@ -74,7 +76,15 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// - on SQL Server, a `#` name;
     /// - on SQLite, `rowid`, `_rowid_` or `oid`, and `IN` over anything but
     ///   a parenthesised list (a table, or a function SQLite could read as
-    ///   table-valued);
+    ///   table-valued). This is conservative: a call that opens the list is
+    ///   accepted only for common scalar functions, so a valid one such as
+    ///   `x IN (json_extract(...), 2)` is refused. Put a constant or
+    ///   parameter first, or wrap the call in parentheses:
+    ///   `x IN ((json_extract(...)), 2)`;
+    /// - a numbered or named placeholder (`?1`, `$1`, `@p1`, `:name`,
+    ///   `@name`, `$name`), or a clause whose anonymous `?` placeholders
+    ///   and bind values differ in number. Only `?` composes: the statement
+    ///   numbers placeholders in order across every predicate in it;
     /// - the bare word `__gom_self` with no dot after it, or an unclosed
     ///   string, identifier or dollar quote.
     ///
@@ -94,7 +104,12 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// evaluated in a correlated subquery: as a relation, `not_related` or
     /// closure target, and as the policy of an entity that a generated
     /// related-row filter or relation-count ordering targets. There a
-    /// column the table lacks would resolve against an outer row. Numbers,
+    /// column the table lacks would resolve against an outer row. A word is
+    /// read as a keyword only where its dialect reads it as one: `LIKE`,
+    /// `IN`, `BETWEEN`, `ESCAPE`, `COLLATE` and `END` after an operand,
+    /// `ILIKE`, `SIMILAR TO` and `IS [NOT] UNKNOWN` on PostgreSQL, `GLOB`
+    /// and `REGEXP` on SQLite. Anywhere else such a word counts as a column
+    /// (`unknown = 0` names a column on SQLite). Numbers,
     /// bound parameters, function calls, `NULL`, and the dialect's own
     /// constants (`TRUE`/`FALSE` except on SQL Server, `CURRENT_TIMESTAMP`,
     /// and `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_USER`, `LOCALTIMESTAMP`
@@ -493,6 +508,11 @@ enum PolicySqlRefusal {
     TableOperand,
     /// A byte-order mark or other non-ASCII whitespace outside a string.
     HiddenWhitespace,
+    /// A numbered or named placeholder: only the anonymous `?` composes.
+    NamedPlaceholder,
+    /// A clause whose anonymous placeholders and bind values differ in
+    /// number.
+    PlaceholderCount,
 }
 
 impl PolicySqlRefusal {
@@ -513,6 +533,12 @@ impl PolicySqlRefusal {
             Self::TemporaryName => "hand-written policy SQL holds a # name",
             Self::TableOperand => {
                 "hand-written policy SQL uses IN over a table or table-valued function"
+            }
+            Self::NamedPlaceholder => {
+                "hand-written policy SQL holds a numbered or named placeholder; write the anonymous ?"
+            }
+            Self::PlaceholderCount => {
+                "a hand-written policy clause has a different number of ? placeholders and bind values"
             }
             Self::HiddenWhitespace => {
                 "hand-written policy SQL holds a byte-order mark or non-ASCII whitespace outside a string"
@@ -582,13 +608,57 @@ fn generated_name(name: &str) -> bool {
     })
 }
 
-/// Words a single-row boolean expression is written with, besides column
-/// references, numbers, parameters and function calls.
-const POLICY_SQL_WORDS: &[&str] = &[
-    "all", "and", "any", "as", "between", "case", "cast", "collate", "else", "end", "escape",
-    "glob", "ilike", "in", "is", "isnull", "like", "not", "notnull", "null", "or", "regexp",
-    "similar", "some", "then", "to", "unknown", "when",
+/// Words that are reserved in every supported dialect wherever they stand
+/// in an expression, so they never name a column.
+const POLICY_SQL_RESERVED: &[&str] = &[
+    "and", "as", "case", "else", "is", "not", "null", "or", "then", "when",
 ];
+
+/// Words that are operators only after an operand. Elsewhere, or in a
+/// dialect that does not have them, a dialect may read them as a column
+/// name, so they are classified as one. The dialects that have each:
+/// every one for the first row, then PostgreSQL, then SQLite (and
+/// PostgreSQL for the postfix null tests).
+fn policy_sql_operator(backend: DatabaseBackend, word: &str) -> bool {
+    match word {
+        "between" | "collate" | "end" | "escape" | "in" | "like" => true,
+        "ilike" | "similar" => backend == DatabaseBackend::Postgres,
+        "glob" => backend == DatabaseBackend::Sqlite,
+        "regexp" => matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Mysql),
+        "isnull" | "notnull" => {
+            matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Postgres)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `word`, in lower case, could be a keyword that expects an operand
+/// after it: after such a word an operator cannot stand, and a number may
+/// start with its dot.
+fn policy_sql_expects_operand(word: &str) -> bool {
+    matches!(
+        word,
+        "and"
+            | "as"
+            | "between"
+            | "case"
+            | "collate"
+            | "else"
+            | "escape"
+            | "glob"
+            | "ilike"
+            | "in"
+            | "is"
+            | "like"
+            | "not"
+            | "or"
+            | "regexp"
+            | "similar"
+            | "then"
+            | "to"
+            | "when"
+    )
+}
 
 /// Whether `word`, in lower case, is a constant of `backend` that needs no
 /// row: a boolean literal where the dialect has one, or a scalar constant
@@ -677,6 +747,7 @@ const SQLITE_SCALAR_FUNCTIONS: &[&str] = &[
 fn handwritten_sql(
     backend: DatabaseBackend,
     clause: &str,
+    binds: usize,
 ) -> Result<(RowBoundSql, bool), PolicySqlRefusal> {
     let mut tokens = Vec::new();
     let readable = scan_sql(backend, clause, |token| tokens.push(token));
@@ -705,6 +776,34 @@ fn handwritten_sql(
     let implicit_rowid = |name: &str| {
         backend == DatabaseBackend::Sqlite && matches!(name, "rowid" | "_rowid_" | "oid")
     };
+    // Whether an operand ends at `token`, so that an operator may follow.
+    let ends_operand = |token: Option<&SqlToken>| {
+        token.is_some_and(|token| match token.kind {
+            SqlTokenKind::StringLiteral
+            | SqlTokenKind::QuotedIdentifier
+            | SqlTokenKind::Placeholder => true,
+            SqlTokenKind::Symbol => matches!(text(token), ")" | "]"),
+            SqlTokenKind::Word => !policy_sql_expects_operand(&text(token).to_ascii_lowercase()),
+            SqlTokenKind::Comment => false,
+        })
+    };
+    // Only anonymous placeholders compose: the statement numbers them in
+    // order after the binds before them. Each clause carries exactly its
+    // own values.
+    let mut placeholders = 0;
+    for token in &tokens {
+        match token.kind {
+            SqlTokenKind::Placeholder if text(token) == "?" => placeholders += 1,
+            SqlTokenKind::Placeholder => return Err(PolicySqlRefusal::NamedPlaceholder),
+            SqlTokenKind::Word if matches!(text(token).as_bytes()[0], b'@' | b':' | b'$') => {
+                return Err(PolicySqlRefusal::NamedPlaceholder);
+            }
+            _ => {}
+        }
+    }
+    if placeholders != binds {
+        return Err(PolicySqlRefusal::PlaceholderCount);
+    }
     let mut sql = RowBoundSql::default();
     let mut copied = 0;
     let mut bound = true;
@@ -802,21 +901,49 @@ fn handwritten_sql(
                 let number = lower.as_bytes()[0].is_ascii_digit();
                 let allowed = if after_dot {
                     // A column of the row, or the fraction of a number:
-                    // after its whole part, or with none (`.5`), which no
-                    // name, closing parenthesis or bracket precedes.
+                    // after its whole part, or with none (`.5`). A dot
+                    // directly before a digit starts a number unless a
+                    // name, a quote or a closing bracket precedes it.
                     of_row
                         || (number
+                            && before.is_some_and(|dot| dot.end == token.start)
                             && at(index.checked_sub(2)).is_none_or(|whole| match whole.kind {
-                                SqlTokenKind::Word => text(whole).as_bytes()[0].is_ascii_digit(),
+                                SqlTokenKind::Word => {
+                                    let whole = text(whole).to_ascii_lowercase();
+                                    whole.as_bytes()[0].is_ascii_digit()
+                                        || policy_sql_expects_operand(&whole)
+                                }
                                 SqlTokenKind::Symbol => !matches!(text(whole), ")" | "]"),
                                 SqlTokenKind::Placeholder => true,
                                 _ => false,
                             }))
                 } else {
                     number
-                        || matches!(lower.as_bytes()[0], b'@' | b':' | b'$')
                         || symbol(after, "(")
-                        || POLICY_SQL_WORDS.binary_search(&lower.as_str()).is_ok()
+                        || POLICY_SQL_RESERVED.binary_search(&lower.as_str()).is_ok()
+                        // An operator, after an operand or after the `NOT`
+                        // that negates it.
+                        || (policy_sql_operator(backend, &lower)
+                            && (ends_operand(before)
+                                || (word(before, "not")
+                                    && ends_operand(at(index.checked_sub(2)))
+                                    && matches!(
+                                        lower.as_str(),
+                                        "between"
+                                            | "glob"
+                                            | "ilike"
+                                            | "in"
+                                            | "like"
+                                            | "regexp"
+                                            | "similar"
+                                    ))))
+                        // PostgreSQL `SIMILAR TO` and `IS [NOT] UNKNOWN`.
+                        || (backend == DatabaseBackend::Postgres
+                            && ((lower == "to" && word(before, "similar"))
+                                || (lower == "unknown"
+                                    && (word(before, "is")
+                                        || (word(before, "not")
+                                            && word(at(index.checked_sub(2)), "is"))))))
                         || policy_sql_constant(backend, &lower)
                         || word(before, "as")
                         || word(before, "collate")
@@ -881,7 +1008,7 @@ fn handwritten_policy(
     Ok(match expression {
         FilterExpression::Raw { clause, values }
         | FilterExpression::TrustedFragment { clause, values } => {
-            let (sql, clause_bound) = handwritten_sql(backend, clause)?;
+            let (sql, clause_bound) = handwritten_sql(backend, clause, values.len())?;
             *bound &= clause_bound;
             Policy::Sql {
                 sql,
@@ -3993,7 +4120,8 @@ mod predicate_tests {
         // The clause bound to the row `R`, and whether every column in it
         // is written through the qualifier.
         let bind = |backend, clause: &str| {
-            handwritten_sql(backend, clause).map(|(sql, bound)| (sql.bind("R"), bound))
+            handwritten_sql(backend, clause, clause.matches('?').count())
+                .map(|(sql, bound)| (sql.bind("R"), bound))
         };
         for backend in BACKENDS {
             // Only the bare word before a dot is the qualifier, matched
@@ -4128,6 +4256,136 @@ mod predicate_tests {
                 "{backend:?}"
             );
         }
+        // A word is a keyword only where its dialect reads it as one, in
+        // the position it reads it as one. Anywhere else it could name a
+        // column, so it leaves the clause unbound.
+        for (backends, clause, bound) in [
+            // `UNKNOWN` is a PostgreSQL truth value after `IS [NOT]` only.
+            (
+                &BACKENDS[..],
+                "__gom_self.active = 1 AND unknown = 0",
+                false,
+            ),
+            (&[Postgres][..], "(__gom_self.a = 1) IS NOT UNKNOWN", true),
+            (&[Postgres], "(__gom_self.a = 1) IS UNKNOWN", true),
+            (&[Sqlite, Mssql], "(__gom_self.a = 1) IS UNKNOWN", false),
+            // Operators where no operand precedes them.
+            (&BACKENDS, "like = 1", false),
+            (&BACKENDS, "__gom_self.a = end", false),
+            (&BACKENDS, "__gom_self.a = 1 AND escape = 2", false),
+            (&BACKENDS, "between > 1", false),
+            (&BACKENDS, "NOT glob", false),
+            // Operators of another dialect.
+            (
+                &[Postgres],
+                "__gom_self.a ILIKE ? AND __gom_self.b SIMILAR TO 'x'",
+                true,
+            ),
+            (&[Sqlite, Mssql], "__gom_self.a ILIKE ?", false),
+            (&[Sqlite, Mssql], "__gom_self.b SIMILAR TO 'x'", false),
+            (
+                &[Sqlite],
+                "__gom_self.a GLOB ? OR __gom_self.b NOT REGEXP 'x'",
+                true,
+            ),
+            (&[Postgres, Mssql], "__gom_self.a GLOB ?", false),
+            (
+                &[Sqlite, Postgres],
+                "__gom_self.a ISNULL OR __gom_self.b NOTNULL",
+                true,
+            ),
+            (&[Mssql], "__gom_self.a NOTNULL", false),
+            // Quantifiers and casts are calls, never bare words.
+            (&BACKENDS, "__gom_self.a = ANY (?)", true),
+            (&BACKENDS, "__gom_self.a = any", false),
+            (&BACKENDS, "cast = 1", false),
+            // The ordinary positions.
+            (
+                &BACKENDS,
+                "__gom_self.a NOT LIKE ? ESCAPE '!' AND __gom_self.b NOT IN (1, 2) \
+                 AND __gom_self.c NOT BETWEEN 1 AND 2 AND (__gom_self.d) IN (3)",
+                true,
+            ),
+            (
+                &BACKENDS,
+                "CASE WHEN __gom_self.a IS NOT NULL THEN __gom_self.b ELSE 0 END IN (1) \
+                 AND 'x' LIKE ? AND ? BETWEEN 1 AND 2",
+                true,
+            ),
+            // A number may start with its dot after a keyword or operator.
+            (&BACKENDS, "__gom_self.score BETWEEN .5 AND .8", true),
+            (
+                &BACKENDS,
+                "__gom_self.score IN (.5, -.25) OR __gom_self.score > .1",
+                true,
+            ),
+            (
+                &BACKENDS,
+                "CASE WHEN __gom_self.a > 0 THEN .5 ELSE .25 END > __gom_self.b",
+                true,
+            ),
+            // Not after a name, and not across whitespace.
+            (&BACKENDS, "__gom_self.score > t.5", false),
+            (&BACKENDS, "__gom_self.score BETWEEN . 5 AND 1", false),
+        ] {
+            for backend in backends {
+                assert_eq!(
+                    bind(*backend, clause).map(|(_, bound)| bound),
+                    Ok(bound),
+                    "{backend:?}: {clause}"
+                );
+            }
+        }
+        // Placeholders: only the anonymous `?`, one per bind value.
+        for backend in BACKENDS {
+            for clause in [
+                "__gom_self.owner_id = ?1",
+                "__gom_self.owner_id = $1",
+                "__gom_self.owner_id = @p1",
+                "__gom_self.owner_id = @P2 AND __gom_self.a = ?",
+            ] {
+                assert_eq!(
+                    handwritten_sql(backend, clause, 1).map(|_| ()),
+                    Err(PolicySqlRefusal::NamedPlaceholder),
+                    "{backend:?}: {clause}"
+                );
+            }
+            // More placeholders than values, and fewer.
+            for (clause, binds) in [
+                ("__gom_self.owner_id = ?", 0),
+                ("__gom_self.owner_id = ? AND __gom_self.a = ?", 1),
+                ("__gom_self.owner_id = 1", 1),
+                ("__gom_self.owner_id = ?", 2),
+            ] {
+                assert_eq!(
+                    handwritten_sql(backend, clause, binds).map(|_| ()),
+                    Err(PolicySqlRefusal::PlaceholderCount),
+                    "{backend:?}: {clause} with {binds}"
+                );
+            }
+            // A `?` in a string or a delimited name is not a placeholder.
+            assert_eq!(
+                handwritten_sql(backend, "__gom_self.a = '?' AND __gom_self.\"b?\" = ?", 1)
+                    .map(|(sql, bound)| (sql.bind("R"), bound)),
+                Ok(("R.a = '?' AND R.\"b?\" = ?".to_owned(), true)),
+                "{backend:?}"
+            );
+        }
+        // Named parameters and variables, as each dialect spells them.
+        for (backend, clause) in [
+            (Sqlite, "__gom_self.owner_id = :owner"),
+            (Sqlite, "__gom_self.owner_id = @owner"),
+            (Sqlite, "__gom_self.owner_id = $owner"),
+            (Mssql, "__gom_self.owner_id = @owner"),
+            (Mssql, "__gom_self.owner_id = @@spid"),
+            (Postgres, "__gom_self.owner_id = $owner"),
+        ] {
+            assert_eq!(
+                handwritten_sql(backend, clause, 0).map(|_| ()),
+                Err(PolicySqlRefusal::NamedPlaceholder),
+                "{backend:?}: {clause}"
+            );
+        }
         // Non-ASCII text in a string is text.
         assert_eq!(
             bind(Sqlite, "__gom_self.a = '\u{feff}\u{a0}'").map(|(_, bound)| bound),
@@ -4232,14 +4490,17 @@ mod predicate_tests {
             );
         }
         assert_eq!(
-            bind(Mssql, "__gom_self.a = @__gom_self AND __gom_self.b = N'x'"),
-            Ok(("R.a = @__gom_self AND R.b = N'x'".to_owned(), true))
+            bind(
+                Mssql,
+                "__gom_self.a = N'__gom_self.b' AND __gom_self.b = N'x'"
+            ),
+            Ok(("R.a = N'__gom_self.b' AND R.b = N'x'".to_owned(), true))
         );
         // SQLite: backticks delimit a name, a named parameter is a word,
         // and the implicit row id columns are refused however written.
         assert_eq!(
-            bind(Sqlite, "__gom_self.a = :__gom_self AND `b` = 1"),
-            Ok(("R.a = :__gom_self AND `b` = 1".to_owned(), false))
+            bind(Sqlite, "__gom_self.a = 1 AND `b` = 1"),
+            Ok(("R.a = 1 AND `b` = 1".to_owned(), false))
         );
         for clause in [
             "rowid = 1",
@@ -4389,7 +4650,7 @@ mod predicate_tests {
             backend: Sqlite,
             table: Some("targets"),
             policy: Policy::Sql {
-                sql: handwritten_sql(Sqlite, clause).unwrap().0,
+                sql: handwritten_sql(Sqlite, clause, 0).unwrap().0,
                 values: Vec::new(),
             },
             unbound,

@@ -277,16 +277,27 @@ impl<const TABLE: usize> Entity for HandBuilt<TABLE> {
 /// A hand-written filter over `E`: one SQL clause. `BOUND` filters name
 /// their table, so the clause may write the `__gom_self` row qualifier.
 #[derive(Clone)]
-struct Written<E, const BOUND: bool>(&'static str, std::marker::PhantomData<fn() -> E>);
+struct Written<E, const BOUND: bool>(
+    &'static str,
+    Vec<SqlValue>,
+    std::marker::PhantomData<fn() -> E>,
+);
 fn written<E: Entity + 'static>(clause: &'static str) -> Written<E, true> {
-    Written(clause, std::marker::PhantomData)
+    Written(clause, Vec::new(), std::marker::PhantomData)
+}
+/// As [`written`], with the clause's bind values.
+fn written_with<E: Entity + 'static>(
+    clause: &'static str,
+    values: Vec<SqlValue>,
+) -> Written<E, true> {
+    Written(clause, values, std::marker::PhantomData)
 }
 fn unbound<E: Entity + 'static>(clause: &'static str) -> Written<E, false> {
-    Written(clause, std::marker::PhantomData)
+    Written(clause, Vec::new(), std::marker::PhantomData)
 }
 impl<E, const BOUND: bool> DatabaseFilter for Written<E, BOUND> {
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
-        (vec![self.0.to_owned()], Vec::new())
+        (vec![self.0.to_owned()], self.1.clone())
     }
     fn is_empty(&self) -> bool {
         false
@@ -964,6 +975,92 @@ async fn hand_written_filters_are_single_row_expressions() {
                 .and_then(|malformed| tenant.clone().and(malformed)),
         );
     }
+    // A word that is no keyword of the dialect, or not one where it stands,
+    // could name a column: accepted at the root, refused in a subquery.
+    for clause in [
+        "__gom_self.score >= 5 AND unknown = 0",
+        "__gom_self.score >= 5 AND escape = 0",
+        "__gom_self.score >= 5 AND __gom_self.up = end",
+    ] {
+        let predicate = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(clause)).unwrap();
+        misconfigured(ReadPredicate::related::<B, NamedNode, NamedNode>(
+            UP,
+            predicate.clone(),
+        ));
+        misconfigured(ReadPredicate::related_closure::<B, NamedNode>(
+            UP, predicate,
+        ));
+    }
+    // A number may start with its dot, also after a keyword.
+    let fraction = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
+        "__gom_self.score BETWEEN .5 AND 5.5 AND __gom_self.score > .25",
+    ))
+    .unwrap();
+    let (list, _) = reads::<NamedNode>(
+        &db,
+        &ReadPredicate::related::<B, NamedNode, NamedNode>(UP, fraction).unwrap(),
+        |row| row.id,
+    )
+    .await;
+    assert_eq!(list.unwrap(), ["n2", "n3"]);
+
+    // Placeholders: only the anonymous `?`, one per bind value, so that a
+    // clause composes with the binds of the predicates around it.
+    for (clause, values) in [
+        ("__gom_self.score = ?1", vec![SqlValue::Int(5)]),
+        ("__gom_self.score = $1", vec![SqlValue::Int(5)]),
+        ("__gom_self.score = @p1", vec![SqlValue::Int(5)]),
+        ("__gom_self.score = @score", vec![]),
+        ("__gom_self.score = $score", vec![]),
+        // A placeholder with no value for it.
+        ("__gom_self.score = ?", vec![]),
+        (
+            "__gom_self.score >= ? AND __gom_self.score <= ?",
+            vec![SqlValue::Int(1)],
+        ),
+    ] {
+        let built = ReadPredicate::from_filter::<B, _>(&written_with::<NamedNode>(clause, values))
+            .and_then(|written| tenant.clone().and(written));
+        misconfigured(built);
+    }
+    // With matching arity the clause's binds are numbered in order with
+    // those around it.
+    let ranged = ReadPredicate::from_filter::<B, _>(&written_with::<NamedNode>(
+        "__gom_self.score >= ? AND __gom_self.score <= ?",
+        vec![SqlValue::Int(2), SqlValue::Int(9)],
+    ))
+    .unwrap();
+    let composed = score_at_least(1)
+        .and(ranged)
+        .unwrap()
+        .and(score_at_least(5))
+        .unwrap();
+    let (sql, binds) = EntityQuery::<NamedNode>::new()
+        .with_read_visibility(&ReadVisibility::Complete(composed.clone()))
+        .unwrap()
+        .build_delete_sql();
+    assert_eq!(binds, [1, 2, 9, 5].map(SqlValue::Int).to_vec(), "{sql}");
+    let numbered = |index: usize| match B::DIALECT {
+        DatabaseBackend::Postgres => format!("${index}"),
+        DatabaseBackend::Mssql => format!("@P{index}"),
+        _ => "?".to_owned(),
+    };
+    let positions = (1..=4)
+        .map(|index| {
+            sql.find(&numbered(index))
+                .unwrap_or_else(|| panic!("{sql}"))
+        })
+        .collect::<Vec<_>>();
+    if B::DIALECT != DatabaseBackend::Sqlite {
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{sql}");
+        assert!(!sql.contains(&numbered(5)) && !sql.contains('?'), "{sql}");
+    } else {
+        assert_eq!(sql.matches('?').count(), 4, "{sql}");
+    }
+    let (list, count) = reads::<NamedNode>(&db, &composed, |row| row.id).await;
+    assert_eq!(list.unwrap(), ["n1", "n3"]);
+    assert_eq!(count.unwrap(), 2);
+
     // PostgreSQL: Unicode-escape strings and identifiers.
     for clause in ["__gom_self.id <> U&'\\0061'", "U&\"score\" >= 5"] {
         let predicate = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(clause));

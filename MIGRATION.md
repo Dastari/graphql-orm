@@ -61,7 +61,14 @@ same rows. Hand-written filters are restricted, as described below.
   - on SQL Server, a `#` name;
   - on SQLite, `rowid`, `_rowid_` or `oid`, and `IN` over anything but a
     parenthesised list (`x IN t`, or `x IN (f(...))` for a function outside
-    SQLite's common scalar ones);
+    SQLite's common scalar ones). This is conservative: a valid scalar call
+    such as `json_extract()` in the first list position is refused. Put a
+    constant or parameter first, or wrap the call in parentheses:
+    `x IN ((json_extract(doc, '$.a')), 2)`;
+  - a numbered or named placeholder (`?1`, `$1`, `@p1`, `:name`, `@name`,
+    `$name`), or a clause whose anonymous `?` placeholders and bind values
+    differ in number. Only `?` composes, because the statement numbers
+    placeholders in order across every predicate in it;
   - the bare word `__gom_self` with no dot after it, or an unclosed string,
     identifier or dollar quote.
 
@@ -72,12 +79,15 @@ same rows. Hand-written filters are restricted, as described below.
   SQL deliberately obfuscated to defeat that classification is outside the
   guarantee. Known residuals:
   - SQLite reads the bare words `true` and `false` as a column of that name
-    when the table has one; do not write the bare literals in a policy over
-    such a table.
-  - SQL Server compares identifiers with the catalog's collation. A table
-    whose name differs from a generated alias only by accents or case under
-    that collation, such as `__góm_visibility_1` in an accent-insensitive
-    catalog, is not recognised as reserved; do not name a table that way.
+    when one is visible: in the governed table or, inside a subquery, in an
+    enclosing one. Do not write the bare literals in a policy that such a
+    table can reach; compare with `1` and `0`.
+  - SQL Server compares identifiers with the catalog's collation. The
+    reserved-name check folds ASCII case only, so a table whose name equals
+    a generated alias only under a wider collation equivalence
+    (accent-insensitive, such as `__góm_visibility_1`, or
+    width-insensitive) is not recognised as reserved; do not name a table
+    that way.
   - A filter that overrides the macro-only `__gom_row_bound_filter` hook is
     rendered as generated code and is not validated.
 
@@ -138,7 +148,12 @@ same rows. Hand-written filters are restricted, as described below.
   column that could resolve against an outer row. Earlier revisions of this
   change documented that as a legacy fallback; it no longer exists. At the
   root of a statement, where no enclosing row exists, an unqualified column
-  is still accepted. Numbers, bound parameters, function calls, `NULL` and
+  is still accepted. A word is read as a keyword only where its dialect
+  reads it as one: `LIKE`, `IN`, `BETWEEN`, `ESCAPE`, `COLLATE` and `END`
+  after an operand, `ILIKE`, `SIMILAR TO` and `IS [NOT] UNKNOWN` on
+  PostgreSQL, `GLOB` and `REGEXP` on SQLite. Anywhere else it counts as a
+  column, so `unknown = 0` is unbound. Numbers (also `.5`), bound
+  parameters, function calls, `NULL` and
   the dialect's own constants (`TRUE`/`FALSE` except on SQL Server,
   `CURRENT_TIMESTAMP`, and `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_USER`,
   `LOCALTIMESTAMP` where the dialect has them) are not columns, so
