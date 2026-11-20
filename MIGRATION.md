@@ -211,8 +211,13 @@ same rows. Hand-written filters are restricted, as described below.
   table. An ordering that was never authorized renders
   `(SELECT COUNT(*) FROM <table> WHERE 1 = 0)`.
 - **Caller SQL beside a read policy. Action needed** only if a query that
-  a read policy is attached to (a row policy with a SQL predicate, or
-  `EntityQuery::with_read_visibility`) also carries caller SQL that:
+  a read policy is composed with also carries caller SQL as described
+  below. A policy is composed with a query when a row policy with a SQL
+  predicate applies to it, when `EntityQuery::with_read_visibility` is
+  called, and also when the query holds a generated related-row filter
+  (`where: { relation: [...] }`) or relation-count ordering, which embed
+  their target entity's policy in the query's own clause or ordering term.
+  The caller SQL concerned:
   - has a different number of placeholders than bind values:
     `EntityQuery::where_clause` or `where_values`, the public
     `where_clauses` and `values` lists, or a hand-written `DatabaseFilter`
@@ -220,7 +225,14 @@ same rows. Hand-written filters are restricted, as described below.
     conditions have placeholders; or
   - on SQLite, writes a numbered or named placeholder (`?1`, `:name`,
     `@name`, `$name`), or on SQL Server an `@name` variable, or on
-    PostgreSQL `$name`. Write the anonymous `?`.
+    PostgreSQL `$name`. Write the anonymous `?`. SQL Server `@@name`
+    system functions such as `@@SPID` are not parameters and stay
+    accepted.
+
+  The same holds for ordering terms, for a filter that returns an
+  expression of its own from `to_filter_expression` (each clause must hold
+  exactly its bind values), and for the filter of a `count()` inside a
+  transaction.
 
   Such a query is now refused with `AUTHORIZATION_MISCONFIGURED` when it
   is rendered (list, count, aggregate, projection, search, delete and

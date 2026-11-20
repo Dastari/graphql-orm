@@ -882,3 +882,154 @@ async fn policy_columns_bind_to_their_own_row() {
     #[cfg(not(feature = "mssql"))]
     db.pool().close().await;
 }
+
+/// A generated related-row filter and a relation-count ordering carry their
+/// target's read policy, and its bind values, inside the source query's own
+/// clause and ordering term. A query that holds one is checked as a policed
+/// query even with no policy of its own: caller SQL may not shift those
+/// binds. Targets here have `flag` from the start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_inside_a_filter_or_ordering_polices_the_query() {
+    let (db, _owned) = fixture().await;
+    execute(&db, ADD_FLAG).await;
+    execute(&db, "UPDATE bind_targets SET flag = 1 WHERE id = 't2'").await;
+    let text = |value: &str| SqlValue::String(value.into());
+    // A prepared related-row filter: targets the request may read
+    // (`flag = ?` with 1), as the resolver stores it after authorization.
+    let related = || {
+        let mut filter = BindSourceWhereInput {
+            targets: Some(vec![]),
+            ..Default::default()
+        };
+        filter.__gom_related.insert(
+            f("targets").into(),
+            (
+                vec![
+                    "EXISTS (SELECT 1 FROM bind_targets WHERE bind_targets.source_id = bind_sources.id AND bind_targets.flag = ?)"
+                        .into(),
+                ],
+                vec![SqlValue::Int(1)],
+            ),
+        );
+        filter
+    };
+    // A prepared relation-count ordering under the same policy.
+    let counted = || {
+        let mut order = BindSourceOrderByInput {
+            target_count: Some(OrderDirection::Desc),
+            ..Default::default()
+        };
+        order.__gom_relation_counts.insert(
+            "TargetCount".to_owned(),
+            (
+                "(SELECT COUNT(*) FROM bind_targets WHERE bind_targets.source_id = bind_sources.id AND bind_targets.flag = ?)"
+                    .to_owned(),
+                vec![SqlValue::Int(1)],
+            ),
+        );
+        order
+    };
+    let ids = |rows: Vec<BindSource>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    // A placeholder the statement does not number itself, per dialect.
+    let named = match B::DIALECT {
+        DatabaseBackend::Sqlite => "id <> ?1",
+        DatabaseBackend::Postgres => "id <> $other",
+        _ => "id <> @other",
+    };
+    let refused = |result: graphql_orm::Result<Vec<BindSource>>, context: &str| {
+        let error = result.expect_err(context);
+        let code = graphql_orm::graphql::errors::graphql_error_from_sqlx(error)
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string);
+        assert_eq!(
+            code.as_deref(),
+            Some("\"AUTHORIZATION_MISCONFIGURED\""),
+            "{context}"
+        );
+    };
+
+    // The related-row filter: with anonymous placeholders the caller's
+    // value and the policy's each reach their own clause.
+    let filtered = |clause: &str, values: Vec<SqlValue>| {
+        EntityQuery::<BindSource>::new()
+            .where_values(clause, values)
+            .filter(&related())
+    };
+    assert_eq!(
+        ids(filtered("id <> ?", vec![text("s9")])
+            .fetch_all(&db)
+            .await
+            .unwrap()),
+        ["s2"]
+    );
+    assert!(
+        ids(filtered("id <> ?", vec![text("s2")])
+            .fetch_all(&db)
+            .await
+            .unwrap())
+        .is_empty()
+    );
+    refused(
+        filtered(named, vec![text("s9")]).fetch_all(&db).await,
+        "related filter, named placeholder",
+    );
+    refused(
+        filtered("id <> ?", vec![text("s9"), SqlValue::Int(0)])
+            .fetch_all(&db)
+            .await,
+        "related filter, surplus value",
+    );
+
+    // The count ordering: `s2` has the one counted target.
+    let ordered = |clause: &str, values: Vec<SqlValue>| {
+        EntityQuery::<BindSource>::new()
+            .where_values(clause, values)
+            .order_by(&counted())
+    };
+    assert_eq!(
+        ids(ordered("id <> ?", vec![text("s4")])
+            .fetch_all(&db)
+            .await
+            .unwrap())[0],
+        "s2"
+    );
+    refused(
+        ordered(named, vec![text("s4")]).fetch_all(&db).await,
+        "count ordering, named placeholder",
+    );
+    refused(
+        ordered("id <> ?", vec![text("s4"), SqlValue::Int(0)])
+            .fetch_all(&db)
+            .await,
+        "count ordering, surplus value",
+    );
+    // An ordering term whose own binds do not pair up is refused too.
+    let mut lopsided = counted();
+    lopsided
+        .__gom_relation_counts
+        .get_mut("TargetCount")
+        .unwrap()
+        .1
+        .push(SqlValue::Int(9));
+    refused(
+        EntityQuery::<BindSource>::new()
+            .order_by(&lopsided)
+            .fetch_all(&db)
+            .await,
+        "count ordering, lopsided term",
+    );
+
+    // With no policy carried, the caller's SQL is passed through as written.
+    if B::DIALECT == DatabaseBackend::Sqlite {
+        let rows = EntityQuery::<BindSource>::new()
+            .where_values("id = ?1 OR id = ?1", vec![text("s4")])
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(ids(rows), ["s4"]);
+    }
+    #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}

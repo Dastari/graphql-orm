@@ -4721,6 +4721,67 @@ mod predicate_tests {
             checked_filter_expression(Mssql, || own.clone()).unwrap(),
             own
         );
+        // A filter that panics leaves no dialect behind on the thread.
+        assert!(super::super::query::checked_adapter_is_idle());
+        let panicked = std::panic::catch_unwind(|| {
+            checked_filter_expression(Mssql, || panic!("a host filter panicked"))
+        });
+        assert!(panicked.is_err());
+        assert!(super::super::query::checked_adapter_is_idle());
+        // SQL Server `@@name` system functions are not parameters.
+        assert!(ensure_composable_sql(Mssql, "[id] = @@SPID AND @@ROWCOUNT > 0").is_ok());
+        assert!(ensure_composable_sql(Sqlite, "id = @@x").is_err());
+    }
+
+    #[test]
+    fn a_filter_expression_override_is_checked_beside_a_policy() {
+        use super::super::query::composed_filter_expression;
+        /// A host filter that returns an expression of its own.
+        struct Override(&'static str, Vec<SqlValue>);
+        impl DatabaseFilter for Override {
+            fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+                (Vec::new(), Vec::new())
+            }
+            fn is_empty(&self) -> bool {
+                false
+            }
+            fn to_filter_expression(&self) -> Option<FilterExpression> {
+                Some(FilterExpression::Raw {
+                    clause: self.0.to_owned(),
+                    values: self.1.clone(),
+                })
+            }
+        }
+        type Backend = crate::graphql::orm::DefaultBackend;
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .map(SqlValue::Int)
+                .collect::<Vec<_>>()
+        };
+        let composed = |clause, values: &[i64], policed| {
+            composed_filter_expression::<_, Backend>(&Override(clause, ints(values)), policed)
+                .map_err(|error| code(&crate::graphql::errors::graphql_error_from_sqlx(error)))
+        };
+        // Beside a policy every leaf holds exactly its own values: a
+        // surplus would shift the policy's binds, a deficit takes them.
+        for values in [&[1, 99][..], &[]] {
+            assert_eq!(
+                composed("score >= ?", values, true),
+                Err("\"AUTHORIZATION_MISCONFIGURED\"".to_owned()),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            composed("score >= ?", &[1], true),
+            Ok(Some(FilterExpression::Raw {
+                clause: "score >= ?".to_owned(),
+                values: ints(&[1]),
+            }))
+        );
+        // With no policy the filter's expression is passed through.
+        assert!(composed("score >= ?", &[1, 99], false).is_ok());
     }
 
     #[test]

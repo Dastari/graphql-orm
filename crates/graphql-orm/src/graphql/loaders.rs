@@ -367,6 +367,13 @@ where
 {
     visibility.validate::<T, B>()?;
     if let Some(predicate) = visibility.predicate_expression() {
+        // The relation's own filter is composed with the policy: each of
+        // its clauses must hold exactly its bind values, and only
+        // placeholders the statement numbers itself.
+        if let Some(filter) = &key.filter {
+            crate::graphql::orm::ensure_composable_expression(B::DIALECT, filter)
+                .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+        }
         key.filter = Some(match key.filter {
             Some(filter) => crate::graphql::orm::FilterExpression::And(vec![filter, predicate]),
             None => predicate,
