@@ -1335,9 +1335,9 @@ where
             sql.push_str(" AND (");
             sql.push_str(&rendered);
             sql.push(')');
-            // A clause that names more placeholders than it was given values
-            // takes the values there are. The statement then fails at the
-            // driver with a bind-count error instead of panicking here.
+            // The callers refuse a query whose clauses and values do not
+            // pair up (`ensure_filter_valid`), so each clause takes exactly
+            // its own values here.
             values.extend(
                 self.query
                     .values

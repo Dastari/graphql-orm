@@ -752,6 +752,11 @@ fn handwritten_sql(
     clause: &str,
     binds: usize,
 ) -> Result<(RowBoundSql, bool), PolicySqlRefusal> {
+    // The checked splitter's report of conditions and bind values that do
+    // not pair up.
+    if clause == super::query::BIND_COUNT_MISMATCH {
+        return Err(PolicySqlRefusal::PlaceholderCount);
+    }
     let mut tokens = Vec::new();
     let readable = scan_sql(backend, clause, |token| tokens.push(token));
     if tokens
@@ -1081,11 +1086,10 @@ fn filter_policy<F: ReadVisibilityFilter>(
         ensure_bind_count(backend, &conditions, values.len())?;
         return Ok((generated.policy(backend), true));
     }
-    // The default `to_filter_expression` hands each condition as many of
-    // the filter's flat bind values as it has placeholders and drops any
-    // left over, so the whole list is checked before that split.
-    let (conditions, values) = filter.to_sql_conditions();
-    ensure_bind_count(backend, &conditions, values.len())?;
+    // One call into the filter: everything below reads this one result.
+    // The default adapter behind it divides the filter's flat bind list
+    // with the checked splitter, and reports a list that does not pair up
+    // as a clause `handwritten_sql` refuses.
     let mut bound = true;
     let policy = filter
         .to_row_bound_filter_expression()
@@ -4609,6 +4613,73 @@ mod predicate_tests {
         // Every refusal is AUTHORIZATION_MISCONFIGURED.
         let error = async_graphql::Error::from(PolicySqlRefusal::Keyword);
         assert_eq!(code(&error), "\"AUTHORIZATION_MISCONFIGURED\"");
+    }
+
+    #[test]
+    fn the_bind_splitter_fails_closed() {
+        use super::super::query::{
+            BIND_COUNT_MISMATCH, filter_expression_from_raw_parts, split_filter_binds,
+        };
+        let conditions = [
+            "tenant_id = ?".to_owned(),
+            "owner_id = ? AND note <> '?' AND \"a?\" IS NULL".to_owned(),
+        ];
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .map(SqlValue::Int)
+                .collect::<Vec<_>>()
+        };
+        for backend in BACKENDS {
+            // Each condition takes exactly its own values.
+            assert_eq!(
+                split_filter_binds(backend, &conditions, &ints(&[7, 42])).unwrap(),
+                Some(FilterExpression::And(vec![
+                    FilterExpression::Raw {
+                        clause: conditions[0].clone(),
+                        values: ints(&[7]),
+                    },
+                    FilterExpression::Raw {
+                        clause: conditions[1].clone(),
+                        values: ints(&[42]),
+                    },
+                ])),
+                "{backend:?}"
+            );
+            assert_eq!(split_filter_binds(backend, &[], &[]).unwrap(), None);
+            // A surplus, a deficit, and values with no condition at all:
+            // nothing is divided, dropped or moved.
+            for (conditions, values) in [
+                (&conditions[..], ints(&[7, 7, 42])),
+                (&conditions[..], ints(&[7])),
+                (&conditions[..], ints(&[])),
+                (&[][..], ints(&[1])),
+            ] {
+                let error = split_filter_binds(backend, conditions, &values).unwrap_err();
+                assert_eq!(
+                    code(&crate::graphql::errors::graphql_error_from_sqlx(error)),
+                    "\"AUTHORIZATION_MISCONFIGURED\"",
+                    "{backend:?}: {values:?}"
+                );
+                // Where no error can be returned, the filter matches no row
+                // and binds nothing.
+                assert_eq!(
+                    filter_expression_from_raw_parts(backend, conditions, &values),
+                    Some(FilterExpression::Raw {
+                        clause: BIND_COUNT_MISMATCH.to_owned(),
+                        values: Vec::new(),
+                    }),
+                    "{backend:?}: {values:?}"
+                );
+            }
+            // A read predicate refuses that clause by its reason.
+            assert_eq!(
+                handwritten_sql(backend, BIND_COUNT_MISMATCH, 0).map(|_| ()),
+                Err(PolicySqlRefusal::PlaceholderCount),
+                "{backend:?}"
+            );
+        }
     }
 
     #[test]

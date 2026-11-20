@@ -210,6 +210,21 @@ same rows. Hand-written filters are restricted, as described below.
   `__graphql_orm_order_relation`, so a table of that name is an ordinary
   table. An ordering that was never authorized renders
   `(SELECT COUNT(*) FROM <table> WHERE 1 = 0)`.
+- **Clauses and bind values must pair up. Action needed** only if code adds
+  a clause with a different number of placeholders than bind values:
+  `EntityQuery::where_clause` or `where_values`, or a hand-written
+  `DatabaseFilter` whose `to_sql_conditions` returns more or fewer values
+  than its conditions have placeholders. Clauses and values are kept in
+  flat lists that a statement numbers together, and the list was divided
+  by placeholder count with any surplus silently dropped or handed to the
+  next clause, a read policy's included. Such a query is now refused with
+  `AUTHORIZATION_MISCONFIGURED` when it is rendered (list, count,
+  aggregate, projection, search and write-target statements), and
+  `DatabaseFilter::to_filter_expression_checked` refuses such a filter.
+  Where no error can be returned, the default
+  `DatabaseFilter::to_filter_expression` yields a clause that matches no
+  row. `ReadPredicate::from_filter` calls a hand-written filter once and
+  builds the predicate from that one answer.
 - **SQLite bracketed names in trusted SQL. Action needed** only if a
   trusted SQL fragment for SQLite holds `]]` inside a bracketed name.
   Placeholder counting now closes a SQLite `[...]` name at its first `]`,

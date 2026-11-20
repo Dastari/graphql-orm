@@ -226,6 +226,64 @@ struct CaseRow {
     exact: Option<i32>,
 }
 
+/// Columns named like operators: `like` (reserved everywhere) and `glob`.
+#[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(table = "word_rows", plural = "WordRows")
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(backend = "postgres", table = "word_rows", plural = "WordRows")
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "word_rows",
+        plural = "WordRows"
+    )
+)]
+struct WordRow {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    #[graphql_orm(db_column = "like")]
+    liked: Option<i32>,
+    glob: Option<String>,
+}
+
+/// A filter whose `to_sql_conditions` answers differently on each call: the
+/// first answer is `self.0`, every later one `self.1`.
+struct Changing(
+    (&'static str, Vec<SqlValue>),
+    (&'static str, Vec<SqlValue>),
+    std::sync::atomic::AtomicUsize,
+);
+impl DatabaseFilter for Changing {
+    fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+        let call = self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (clause, values) = if call == 0 { &self.0 } else { &self.1 };
+        (vec![(*clause).to_owned()], values.clone())
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+impl ReadVisibilityFilter for Changing {
+    fn entity_type_id() -> std::any::TypeId {
+        std::any::TypeId::of::<NamedNode>()
+    }
+    fn backend() -> DatabaseBackend {
+        B::DIALECT
+    }
+    fn table_name() -> Option<&'static str> {
+        Some(NamedNode::TABLE_NAME)
+    }
+}
+
 /// A hand-built entity over a table `TABLE` names, with the node columns.
 #[derive(Clone)]
 struct HandBuilt<const TABLE: usize>;
@@ -1146,14 +1204,6 @@ async fn hand_written_filters_are_single_row_expressions() {
     let (list, count) = reads::<NamedNode>(&db, &composed, |row| row.id).await;
     assert_eq!(list.unwrap(), ["n1", "n3"]);
     assert_eq!(count.unwrap(), 2);
-    // A column named like an operator is an identifier after its dot.
-    let named = ReadPredicate::from_filter::<B, _>(&written_with::<NamedNode>(
-        "__gom_self.like = ?",
-        vec![SqlValue::Int(1)],
-    ))
-    .unwrap();
-    ReadPredicate::related::<B, NamedNode, NamedNode>(UP, named).unwrap();
-
     // PostgreSQL: Unicode-escape strings and identifiers.
     for clause in ["__gom_self.id <> U&'\\0061'", "U&\"score\" >= 5"] {
         let predicate = ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(clause));
@@ -1326,5 +1376,198 @@ async fn native_predicates_address_the_column_generated_ddl_creates() {
         .await,
         1
     );
+    db.pool().close().await;
+}
+
+/// Asserts a repository read was refused as misconfigured authorization.
+fn refused<T: std::fmt::Debug>(result: graphql_orm::Result<T>, context: &str) {
+    let error = result.expect_err(context);
+    let code = graphql_orm::graphql::errors::graphql_error_from_sqlx(error)
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("code"))
+        .map(ToString::to_string);
+    assert_eq!(
+        code.as_deref(),
+        Some("\"AUTHORIZATION_MISCONFIGURED\""),
+        "{context}"
+    );
+}
+
+/// A query's clauses and bind values are flat lists that a statement
+/// numbers together. A caller clause with more or fewer values than
+/// placeholders would shift the policy's binds: `score >= ?` with `[1, 42]`
+/// before the policy `score <= ?` with `[5]` would test `score <= 42`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_miscounted_caller_filter_never_shifts_the_policy_binds() {
+    let (db, _owned) = nodes().await;
+    let policy = || {
+        ReadVisibility::Complete(
+            ReadPredicate::from_filter::<B, _>(&written_with::<NamedNode>(
+                "__gom_self.score <= ?",
+                vec![SqlValue::Int(4)],
+            ))
+            .unwrap(),
+        )
+    };
+    let query = |clauses: &[(&str, Vec<SqlValue>)], policy_first: bool| {
+        let mut query = EntityQuery::<NamedNode>::new();
+        if policy_first {
+            query = query.with_read_visibility(&policy()).unwrap();
+        }
+        for (clause, values) in clauses {
+            query = query.where_values(clause, values.clone());
+        }
+        if !policy_first {
+            query = query.with_read_visibility(&policy()).unwrap();
+        }
+        query
+    };
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(SqlValue::Int)
+            .collect::<Vec<_>>()
+    };
+    for (name, clauses) in [
+        // The reported case: a surplus value before the policy.
+        ("surplus", vec![("score >= ?", ints(&[1, 42]))]),
+        ("deficit", vec![("score >= ? AND score <> ?", ints(&[1]))]),
+        ("no value", vec![("score >= ?", ints(&[]))]),
+        ("no placeholder", vec![("score >= 1", ints(&[42]))]),
+        // A surplus and a deficit whose totals agree still do not pair up.
+        (
+            "offsetting",
+            vec![
+                ("score >= ?", ints(&[1, 42])),
+                ("score <> ? AND score <> ?", ints(&[9])),
+            ],
+        ),
+    ] {
+        for policy_first in [false, true] {
+            let query = query(&clauses, policy_first);
+            let context = format!("{name} (policy first: {policy_first})");
+            refused(query.try_build_delete_sql(), &context);
+            refused(query.clone().fetch_all(&db).await, &context);
+            refused(query.count(&db).await, &context);
+        }
+    }
+    // Clauses that pair up render in order and return the policy's rows.
+    for policy_first in [false, true] {
+        let query = query(
+            &[
+                ("score >= ?", ints(&[1])),
+                (
+                    "score <> ? AND id <> ?",
+                    vec![SqlValue::Int(9), SqlValue::String("n9".into())],
+                ),
+            ],
+            policy_first,
+        );
+        let (_, binds) = query.try_build_delete_sql().unwrap();
+        assert_eq!(binds.len(), 4);
+        let rows = query.clone().fetch_all(&db).await.unwrap();
+        assert_eq!(
+            rows.into_iter().map(|row| row.id).collect::<Vec<_>>(),
+            ["n2"]
+        );
+        assert_eq!(query.count(&db).await.unwrap(), 1);
+    }
+    #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}
+
+/// A predicate is built from one answer of the filter: the SQL that was
+/// validated is the SQL that is rendered, whatever the filter says later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_is_read_once() {
+    let (db, _owned) = nodes().await;
+    let calls = |filter: &Changing| filter.2.load(std::sync::atomic::Ordering::SeqCst);
+    // First a valid answer, then one that would test nothing.
+    let filter = Changing(
+        ("__gom_self.score >= ?", vec![SqlValue::Int(5)]),
+        ("1 = 1", vec![]),
+        Default::default(),
+    );
+    let predicate = ReadPredicate::from_filter::<B, _>(&filter).unwrap();
+    assert_eq!(calls(&filter), 1);
+    let (list, count) = reads::<NamedNode>(&db, &predicate, |row| row.id).await;
+    assert_eq!(list.unwrap(), ["n1", "n3"]);
+    assert_eq!(count.unwrap(), 2);
+    assert_eq!(calls(&filter), 1);
+    // First a miscounted answer, then a valid one: refused on the first.
+    for first in [
+        (
+            "__gom_self.score >= ?",
+            vec![SqlValue::Int(5), SqlValue::Int(42)],
+        ),
+        (
+            "__gom_self.score >= ? AND __gom_self.score <= ?",
+            vec![SqlValue::Int(5)],
+        ),
+        ("__gom_self.score >= ?", vec![]),
+    ] {
+        let filter = Changing(
+            first,
+            ("__gom_self.score >= ?", vec![SqlValue::Int(5)]),
+            Default::default(),
+        );
+        misconfigured(ReadPredicate::from_filter::<B, _>(&filter));
+        assert_eq!(calls(&filter), 1);
+    }
+    #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}
+
+/// A column named like an operator is an identifier after its dot, and
+/// reads as that column. Rows (`like`, `glob`): w1 (1, 'abc'), w2 (2, 'xyz').
+#[tokio::test(flavor = "multi_thread")]
+async fn columns_named_like_operators_are_read_as_columns() {
+    let (db, _owned) = database().await;
+    // SQL Server reads a reserved word as a name only in brackets.
+    #[cfg(feature = "mssql")]
+    let (like, liked) = ("[like]", "__gom_self.[like] = ?");
+    #[cfg(not(feature = "mssql"))]
+    let (like, liked) = ("\"like\"", "__gom_self.like = ?");
+    execute(
+        &db,
+        &format!(
+            "CREATE TABLE word_rows (id {TEXT} NOT NULL PRIMARY KEY, {like} INT NULL, glob {TEXT} NULL)"
+        ),
+    )
+    .await;
+    execute(
+        &db,
+        &format!(
+            "INSERT INTO word_rows (id, {like}, glob) VALUES ('w1', 1, 'abc'), ('w2', 2, 'xyz')"
+        ),
+    )
+    .await;
+    let mut filters = vec![
+        written_with::<WordRow>(liked, vec![SqlValue::Int(1)]),
+        written_with::<WordRow>(
+            "__gom_self.glob LIKE ? AND __gom_self.glob IN ('abc', ?)",
+            vec![SqlValue::String("a%".into()), SqlValue::String("q".into())],
+        ),
+    ];
+    if B::DIALECT == DatabaseBackend::Sqlite {
+        filters.push(written_with::<WordRow>(
+            "__gom_self.glob GLOB ?",
+            vec![SqlValue::String("a*".into())],
+        ));
+    }
+    for filter in filters {
+        let predicate = ReadPredicate::from_filter::<B, _>(&filter).unwrap();
+        let related =
+            ReadPredicate::related::<B, WordRow, WordRow>(&[("id", "id")], predicate.clone())
+                .unwrap();
+        for predicate in [predicate, related] {
+            let (list, count) = reads::<WordRow>(&db, &predicate, |row| row.id).await;
+            assert_eq!(list.unwrap(), ["w1"], "{}", filter.0);
+            assert_eq!(count.unwrap(), 1, "{}", filter.0);
+        }
+    }
+    #[cfg(not(feature = "mssql"))]
     db.pool().close().await;
 }

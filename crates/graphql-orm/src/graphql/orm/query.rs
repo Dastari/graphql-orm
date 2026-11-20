@@ -323,15 +323,34 @@ pub trait DatabaseFilter {
         self.matches_entity(entity)
     }
 
+    /// This filter's conditions as one expression, each condition with its
+    /// own bind values.
+    ///
+    /// [`Self::to_sql_conditions`] is called once, and its flat value list
+    /// is divided among the conditions by their placeholder counts. The
+    /// placeholders in total must equal the values. If they do not, no
+    /// value is dropped or moved: the result is a clause that matches no
+    /// row, and [`Self::to_filter_expression_checked`] and
+    /// `ReadPredicate::from_filter` refuse the filter with
+    /// `AUTHORIZATION_MISCONFIGURED`.
     fn to_filter_expression(&self) -> Option<FilterExpression> {
         let (conditions, values) = self.to_sql_conditions();
         filter_expression_from_raw_parts(current_backend(), &conditions, &values)
     }
 
     /// Validate and convert this filter to the backend-neutral query IR.
+    /// A filter whose placeholders and bind values differ in number is
+    /// refused with `AUTHORIZATION_MISCONFIGURED`.
     fn to_filter_expression_checked(&self) -> crate::Result<Option<FilterExpression>> {
         self.validate()?;
-        Ok(self.to_filter_expression())
+        let expression = self.to_filter_expression();
+        if matches!(
+            &expression,
+            Some(FilterExpression::Raw { clause, .. }) if clause == BIND_COUNT_MISMATCH
+        ) {
+            return Err(bind_count_mismatch());
+        }
+        Ok(expression)
     }
 }
 
@@ -2958,13 +2977,49 @@ pub fn generate_candidate_pattern(value: &str) -> String {
     contains_like_pattern(value)
 }
 
-pub(crate) fn filter_expression_from_raw_parts(
+/// A clause that stands for a filter whose conditions and bind values do
+/// not pair up, where no error can be returned. It binds nothing and is
+/// never true, also under a negation, so such a filter matches no row and
+/// shifts no other clause's binds. Read predicates recognise it and refuse
+/// the filter with `AUTHORIZATION_MISCONFIGURED`.
+pub(crate) const BIND_COUNT_MISMATCH: &str = "'graphql-orm: bind count mismatch' = NULL";
+
+/// The refusal of SQL whose placeholders and bind values differ in number.
+pub(crate) fn bind_count_mismatch() -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+        )
+        .with_internal("a filter's SQL placeholders and bind values differ in number"),
+    )
+}
+
+/// Whether `conditions`, read with the shared lexer, hold exactly `binds`
+/// placeholders in total.
+pub(crate) fn binds_pair_up(dialect: DatabaseBackend, conditions: &[String], binds: usize) -> bool {
+    conditions
+        .iter()
+        .map(|clause| count_placeholders_for(dialect, clause))
+        .sum::<usize>()
+        == binds
+}
+
+/// The one place a flat list of bind values is divided among SQL
+/// conditions: each condition takes as many values as it has placeholders,
+/// counted with the shared lexer. It fails closed: unless the placeholders
+/// in total equal the values, nothing is divided and the mismatch is
+/// refused with `AUTHORIZATION_MISCONFIGURED`. No value is ever dropped or
+/// handed to another condition.
+pub(crate) fn split_filter_binds(
     dialect: DatabaseBackend,
     conditions: &[String],
     values: &[SqlValue],
-) -> Option<FilterExpression> {
+) -> crate::Result<Option<FilterExpression>> {
+    if !binds_pair_up(dialect, conditions, values.len()) {
+        return Err(bind_count_mismatch());
+    }
     if conditions.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut value_iter = values.iter().cloned();
@@ -2983,11 +3038,26 @@ pub(crate) fn filter_expression_from_raw_parts(
         })
         .collect::<Vec<_>>();
 
-    if filters.len() == 1 {
+    Ok(if filters.len() == 1 {
         filters.into_iter().next()
     } else {
         Some(FilterExpression::And(filters))
-    }
+    })
+}
+
+/// [`split_filter_binds`] where no error can be returned: a mismatch gives
+/// the [`BIND_COUNT_MISMATCH`] clause, which matches no row.
+pub(crate) fn filter_expression_from_raw_parts(
+    dialect: DatabaseBackend,
+    conditions: &[String],
+    values: &[SqlValue],
+) -> Option<FilterExpression> {
+    split_filter_binds(dialect, conditions, values).unwrap_or_else(|_| {
+        Some(FilterExpression::Raw {
+            clause: BIND_COUNT_MISMATCH.to_owned(),
+            values: Vec::new(),
+        })
+    })
 }
 
 /// Count the bind placeholders of a SQL fragment for the default backend.
@@ -3905,12 +3975,12 @@ where
                 "aggregate group pages require complete SQL row authorization",
             ));
         }
-        let mut filters: Vec<FilterExpression> = self
-            .filter
-            .as_ref()
-            .and_then(DatabaseFilter::to_filter_expression)
-            .into_iter()
-            .collect();
+        let mut filters: Vec<FilterExpression> = match self.filter.as_ref() {
+            Some(filter) => filter.to_filter_expression_checked()?,
+            None => None,
+        }
+        .into_iter()
+        .collect();
         if let Some(predicate) = visibility.predicate_expression() {
             filters.push(predicate);
         }
@@ -4038,13 +4108,13 @@ where
                 "aggregate queries require complete SQL row authorization",
             ));
         }
-        let filters: Vec<_> = self
-            .filter
-            .as_ref()
-            .and_then(DatabaseFilter::to_filter_expression)
-            .into_iter()
-            .chain(visibility.predicate_expression())
-            .collect();
+        let filters: Vec<_> = match self.filter.as_ref() {
+            Some(filter) => filter.to_filter_expression_checked()?,
+            None => None,
+        }
+        .into_iter()
+        .chain(visibility.predicate_expression())
+        .collect();
         let filter = if filters.is_empty() {
             None
         } else {
@@ -4570,6 +4640,9 @@ where
     max_limit: Option<i64>,
     requires_in_memory_filtering: bool,
     filter_is_valid: bool,
+    /// Whether every clause was added with exactly the bind values its
+    /// placeholders take.
+    binds_paired: bool,
     _marker: PhantomData<(P, B)>,
 }
 
@@ -4595,6 +4668,7 @@ where
             max_limit: None,
             requires_in_memory_filtering: false,
             filter_is_valid: true,
+            binds_paired: true,
             _marker: PhantomData,
         }
     }
@@ -4605,10 +4679,20 @@ where
             self.requires_in_memory_filtering = true;
         } else {
             let (conditions, values) = filter.to_sql_conditions();
+            self.binds_paired &= binds_pair_up(B::DIALECT, &conditions, values.len());
             self.where_clauses.extend(conditions);
             self.values.extend(values);
         }
         self
+    }
+
+    /// The accumulated filter, each clause with its own bind values, or the
+    /// `AUTHORIZATION_MISCONFIGURED` refusal when they do not pair up.
+    fn checked_filter(&self) -> crate::Result<Option<FilterExpression>> {
+        if !self.binds_paired {
+            return Err(bind_count_mismatch());
+        }
+        split_filter_binds(B::DIALECT, &self.where_clauses, &self.values)
     }
 
     fn order_by(mut self, order: P::Order) -> Self {
@@ -4663,6 +4747,7 @@ where
     fn render(
         &self,
         bound: RepositoryBound,
+        filter: Option<FilterExpression>,
         visibility: Option<&FilterExpression>,
     ) -> RenderedQuery {
         let entity_default = <P::Entity as DatabaseEntity>::DEFAULT_SORT;
@@ -4697,10 +4782,7 @@ where
                     .iter()
                     .map(|column| (*column).to_string())
                     .collect(),
-                filter: match (
-                    filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
-                    visibility,
-                ) {
+                filter: match (filter, visibility) {
                     (Some(filter), Some(policy)) => {
                         Some(FilterExpression::And(vec![filter, policy.clone()]))
                     }
@@ -4887,9 +4969,11 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::All)?;
-        let rendered = self
-            .state
-            .render(bound, visibility.predicate_expression().as_ref());
+        let rendered = self.state.render(
+            bound,
+            self.state.checked_filter()?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -4908,9 +4992,11 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::First)?;
-        let rendered = self
-            .state
-            .render(bound, visibility.predicate_expression().as_ref());
+        let rendered = self.state.render(
+            bound,
+            self.state.checked_filter()?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -4930,9 +5016,11 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::OptionalOne)?;
-        let rendered = self
-            .state
-            .render(bound, visibility.predicate_expression().as_ref());
+        let rendered = self.state.render(
+            bound,
+            self.state.checked_filter()?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -5051,9 +5139,11 @@ where
         let bound = self
             .state
             .bound(self.context.database().pagination_config(), read)?;
-        let rendered = self
-            .state
-            .render(bound, visibility.predicate_expression().as_ref());
+        let rendered = self.state.render(
+            bound,
+            self.state.checked_filter()?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = self
             .context
             .fetch_rows(&rendered.sql, &rendered.values)
@@ -5123,6 +5213,10 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
+    /// Whether every clause was added with exactly the bind values its
+    /// placeholders take. If one was not, the flat lists no longer pair up
+    /// clause by clause, even where their totals happen to agree.
+    binds_paired: bool,
     pub(crate) keyset_filter_identities: Vec<String>,
     /// Per-read maximum of this query's keyset and scan pages.
     pub(crate) max_limit: Option<i64>,
@@ -5139,6 +5233,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             page: self.page.clone(),
             entity_matchers: self.entity_matchers.clone(),
             filter_is_valid: self.filter_is_valid,
+            binds_paired: self.binds_paired,
             keyset_filter_identities: self.keyset_filter_identities.clone(),
             max_limit: self.max_limit,
             _marker: PhantomData,
@@ -5160,21 +5255,47 @@ where
             page: None,
             entity_matchers: Vec::new(),
             filter_is_valid: true,
+            binds_paired: true,
             keyset_filter_identities: Vec::new(),
             max_limit: None,
             _marker: PhantomData,
         }
     }
 
+    /// Add `conditions` with the bind `values` their placeholders take,
+    /// checked where they are paired: a clause with more or fewer values
+    /// than placeholders would shift the binds of every clause after it,
+    /// a read policy's included, so the query is then refused when it is
+    /// rendered.
+    fn pair(&mut self, conditions: Vec<String>, values: Vec<SqlValue>) {
+        self.binds_paired &= binds_pair_up(B::DIALECT, &conditions, values.len());
+        self.where_clauses.extend(conditions);
+        self.values.extend(values);
+    }
+
+    /// The accumulated filter, each clause with its own bind values, or the
+    /// `AUTHORIZATION_MISCONFIGURED` refusal when clauses and values do not
+    /// pair up.
+    pub(crate) fn checked_filter(&self) -> crate::Result<Option<FilterExpression>> {
+        if !self.binds_paired {
+            return Err(bind_count_mismatch());
+        }
+        split_filter_binds(B::DIALECT, &self.where_clauses, &self.values)
+    }
+
+    /// Add a clause with one placeholder and its bind value. A clause whose
+    /// placeholders and values differ in number makes the query fail with
+    /// `AUTHORIZATION_MISCONFIGURED` when it is rendered.
     pub fn where_clause(mut self, clause: &str, value: SqlValue) -> Self {
-        self.where_clauses.push(clause.to_string());
-        self.values.push(value);
+        self.pair(vec![clause.to_string()], vec![value]);
         self
     }
 
+    /// Add a clause with the bind values its placeholders take, in order.
+    /// A clause whose placeholders and values differ in number makes the
+    /// query fail with `AUTHORIZATION_MISCONFIGURED` when it is rendered.
     pub fn where_values(mut self, clause: &str, values: Vec<SqlValue>) -> Self {
-        self.where_clauses.push(clause.to_string());
-        self.values.extend(values);
+        self.pair(vec![clause.to_string()], values);
         self
     }
 
@@ -5187,8 +5308,7 @@ where
             self.keyset_filter_identities.push(identity);
         }
         let (conds, values) = filter.to_sql_conditions();
-        self.where_clauses.extend(conds);
-        self.values.extend(values);
+        self.pair(conds, values);
         self
     }
 
@@ -5202,8 +5322,7 @@ where
         }
         if filter.requires_in_memory_filtering(B::DIALECT) {
             let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
-            self.where_clauses.extend(conds);
-            self.values.extend(values);
+            self.pair(conds, values);
             let filter = filter.clone();
             self.entity_matchers
                 .push(Arc::new(move |entity, calendar_today| {
@@ -5211,8 +5330,7 @@ where
                 }));
         } else {
             let (conds, values) = filter.to_sql_conditions();
-            self.where_clauses.extend(conds);
-            self.values.extend(values);
+            self.pair(conds, values);
         }
         self
     }
@@ -5329,7 +5447,7 @@ where
                 .iter()
                 .map(|column| (*column).to_string())
                 .collect(),
-            filter: filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
+            filter: self.checked_filter()?,
             sorts,
             pagination: if self.requires_in_memory_filtering() {
                 None
@@ -5347,11 +5465,12 @@ where
     }
 
     pub(crate) fn ensure_filter_valid(&self) -> crate::Result<()> {
-        if self.filter_is_valid {
-            Ok(())
-        } else {
-            Err(invalid_filter_input())
+        if !self.filter_is_valid {
+            return Err(invalid_filter_input());
         }
+        // Every statement built from this query numbers its placeholders
+        // across all clauses: refuse it unless clauses and values pair up.
+        self.checked_filter().map(|_| ())
     }
 
     fn aggregate_column_sql(column: &str) -> crate::Result<String>
@@ -5384,7 +5503,7 @@ where
             table: T::TABLE_NAME,
             function,
             column,
-            filter: filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
+            filter: self.checked_filter()?,
         })
     }
 
@@ -5881,7 +6000,7 @@ where
         let seek = format!("XLOCK, FORCESEEK({key_index}({key_column}))");
         // The re-check's column must not collide with a column of the table.
         let still_matches = unused_column_alias::<T>("__gom_still_matches");
-        let filter = filter_expression_from_raw_parts(dialect, &self.where_clauses, &self.values);
+        let filter = self.checked_filter()?;
         let filter_binds = self.values.len();
         let chunk = MAX_BINDS.saturating_sub(filter_binds).clamp(1, 500);
         let placeholders = |first: usize, count: usize| {
@@ -6365,11 +6484,7 @@ where
             B::DIALECT,
             &DeleteQuery {
                 table: T::TABLE_NAME,
-                filter: filter_expression_from_raw_parts(
-                    B::DIALECT,
-                    &self.where_clauses,
-                    &self.values,
-                ),
+                filter: self.checked_filter()?,
             },
         );
         Ok((rendered.sql, rendered.values))
@@ -6967,6 +7082,9 @@ pub struct CountQuery<'a, W, B: OrmBackend = DefaultBackend> {
     filters: Vec<String>,
     values: Vec<SqlValue>,
     filter_is_valid: bool,
+    /// Whether every filter was added with exactly the bind values its
+    /// placeholders take.
+    binds_paired: bool,
     _marker: PhantomData<(W, B)>,
 }
 
@@ -6982,6 +7100,7 @@ where
             filters: Vec::new(),
             values: Vec::new(),
             filter_is_valid: true,
+            binds_paired: true,
             _marker: PhantomData,
         }
     }
@@ -6989,6 +7108,7 @@ where
     pub fn filter(mut self, filter: &W) -> Self {
         self.filter_is_valid &= filter.validate().is_ok();
         let (conds, values) = filter.to_sql_conditions();
+        self.binds_paired &= binds_pair_up(B::DIALECT, &conds, values.len());
         self.filters.extend(conds);
         self.values.extend(values);
         self
@@ -6998,12 +7118,15 @@ where
         if !self.filter_is_valid {
             return Err(invalid_filter_input());
         }
+        if !self.binds_paired {
+            return Err(bind_count_mismatch());
+        }
         let rendered = render_select_query(
             B::DIALECT,
             &SelectQuery {
                 table: self.table,
                 columns: Vec::new(),
-                filter: filter_expression_from_raw_parts(B::DIALECT, &self.filters, &self.values),
+                filter: split_filter_binds(B::DIALECT, &self.filters, &self.values)?,
                 sorts: Vec::new(),
                 pagination: None,
                 count_only: true,
@@ -7022,12 +7145,15 @@ where
         if !self.filter_is_valid {
             return Err(invalid_filter_input());
         }
+        if !self.binds_paired {
+            return Err(bind_count_mismatch());
+        }
         let rendered = render_select_query(
             B::DIALECT,
             &SelectQuery {
                 table: self.table,
                 columns: Vec::new(),
-                filter: filter_expression_from_raw_parts(B::DIALECT, &self.filters, &self.values),
+                filter: split_filter_binds(B::DIALECT, &self.filters, &self.values)?,
                 sorts: Vec::new(),
                 pagination: None,
                 count_only: true,
