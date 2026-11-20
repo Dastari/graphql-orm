@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Generated query roots used in a hand-built schema return field errors when
+the resolver's `Database` or Federation loader is missing. The generated
+`schema_builder(database)` registers the required data for its roots.
+
 Version 0.190.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+`GraphQLOperations` reports malformed keyset order clauses at the entity
+attribute. Use `field asc|desc [nulls first|last]` for each comma-separated
+entry and end the order with the complete primary key.
+
 Version 0.190.0 is the **breaking release**; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
 in upgrade order. For the macros:

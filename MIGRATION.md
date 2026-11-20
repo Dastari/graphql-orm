@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## Next ORM/macros minor after the breaking release
+
+**No action** for valid query declarations. Schemas assembled by hand must still
+register the matching `Database` and any generated Federation loaders they use.
+Generated query resolvers return GraphQL errors when that data is missing.
+If an existing keyset declaration contains an incomplete null-order clause or
+trailing tokens, correct it to `field asc|desc [nulls first|last]`.
+
 ## Breaking release (unreleased)
 
 This release collects every change that breaks hosts or invalidates stored
