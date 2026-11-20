@@ -955,11 +955,10 @@ async fn hand_written_filters_are_single_row_expressions() {
     // so it cannot widen a tenant predicate it would be combined with.
     let tenant = score_at_least(5);
     for malformed in ["1 = 1) OR (1 = 1", "1 = 0) OR ((1 = 1"] {
-        for filter in [written::<NamedNode>(malformed)] {
-            let built = ReadPredicate::from_filter::<B, _>(&filter)
-                .and_then(|malformed| tenant.clone().and(malformed));
-            misconfigured(built);
-        }
+        misconfigured(
+            ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(malformed))
+                .and_then(|malformed| tenant.clone().and(malformed)),
+        );
         misconfigured(
             ReadPredicate::from_filter::<B, _>(&unbound::<NamedNode>(malformed))
                 .and_then(|malformed| tenant.clone().and(malformed)),
