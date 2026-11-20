@@ -4567,11 +4567,6 @@ fn generate_graphql_operations_unfiltered(
         serde_rename_all,
         auto_generated_pk,
     )?;
-    // Target authority belongs to the relationship resolver. Pool-only eager
-    // preloads cannot evaluate current request policies and may fail a parent
-    // before its nullable child can report a sanitized traversal error.
-    let relation_preload_single = quote! {};
-
     let query_context = queries::QueryContext {
         struct_name,
         backend_marker: &backend_marker,
@@ -7824,7 +7819,6 @@ fn generate_graphql_operations_unfiltered(
         &entity_name_lit,
         &backend_marker,
         &resolver_auth_mode,
-        &relation_preload_single,
         &federation_keys,
         &federation_scope_enforcements,
         &single_query_name,
@@ -7863,7 +7857,6 @@ fn generate_graphql_operations_unfiltered(
                 &entity_name_lit,
                 &backend_marker,
                 &resolver_auth_mode,
-                &relation_preload_single,
                 &parts,
                 &scope_enforcement,
                 &single_query_name,

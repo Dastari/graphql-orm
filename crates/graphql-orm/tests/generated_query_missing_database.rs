@@ -68,3 +68,40 @@ async fn search_returns_a_missing_database_error() {
 async fn aggregate_returns_a_missing_database_error() {
     assert_missing_database("missingDatabaseRecordsAggregate(groupBy: [], metrics: [{operator: COUNT}], groupLimit: 1) { metrics { value } }").await;
 }
+
+#[tokio::test]
+async fn federation_reads_report_missing_database_and_loader() {
+    let id = graphql_orm::graphql::federation::encode_node_id(
+        "MissingDatabaseRecord",
+        vec![serde_json::json!("a")],
+    );
+    let queries = [
+        r#"{ _entities(representations: [{__typename: "MissingDatabaseRecord", id: "a"}]) { ... on MissingDatabaseRecord { id } } }"#.to_owned(),
+        format!(r#"{{ _entities(representations: [{{__typename: "MissingDatabaseRecord", NodeId: "{}"}}]) {{ ... on MissingDatabaseRecord {{ id }} }} }}"#, id.0),
+    ];
+    for register_database in [false, true] {
+        let mut builder = async_graphql::Schema::build(
+            MissingDatabaseRecordQueries,
+            async_graphql::EmptyMutation,
+            async_graphql::EmptySubscription,
+        )
+        .enable_federation();
+        if register_database {
+            builder = builder.data(Database::connect_sqlite("sqlite::memory:").await.unwrap());
+        }
+        let schema = builder.finish();
+        let expected = if register_database {
+            "FederationKeyLoader"
+        } else {
+            "Database"
+        };
+        for query in &queries {
+            let response = schema.execute(query).await;
+            assert_eq!(response.errors.len(), 1, "{query}: {response:?}");
+            assert!(
+                response.errors[0].message.contains(expected),
+                "{query}: {response:?}"
+            );
+        }
+    }
+}
