@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - next ORM/macros minor after the breaking release
+
+- **Fixed (security, #799):** generated root search filters qualify each
+  column with the entity table. A same-named column from the native search
+  join can no longer change which rows match or make the query ambiguous.
+  Native search also qualifies entity projections and uses a distinct score
+  name if the entity already has a column of that name.
+
 ## Unreleased - breaking release: ORM/macros 0.190.0, operation catalogue 0.10.0, AI tool profiles 0.27.0, AI 0.151.0, backup 0.28.0, router 0.17.0
 
 Every change that breaks hosts or invalidates stored fingerprints, bindings,

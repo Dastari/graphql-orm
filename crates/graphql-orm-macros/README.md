@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+The next ORM/macros minor after the breaking release generates table-qualified
+filters for root search (#799). See the
+[migration guide](../../MIGRATION.md#next-ormmacros-minor-after-the-breaking-release).
+
 Version 0.190.0 is the **breaking release**; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
 in upgrade order. For the macros:

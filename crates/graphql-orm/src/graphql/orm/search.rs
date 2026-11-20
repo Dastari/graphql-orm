@@ -115,6 +115,19 @@ pub trait SearchableEntity: DatabaseSearchSchema {
     #[doc(hidden)]
     const SEARCH_KEY_IS_BINARY: bool = false;
 
+    /// Score column chosen to leave the entity's projected names available.
+    #[doc(hidden)]
+    const SEARCH_SCORE_COLUMN: &'static str = "__gom_search_score";
+
+    /// Entity columns, qualified in generated projections for the native join.
+    #[doc(hidden)]
+    fn search_projection() -> &'static [&'static str]
+    where
+        Self: DatabaseEntity,
+    {
+        Self::column_names()
+    }
+
     /// Stable text key used in denormalized search tables.
     fn search_key(&self) -> String;
     /// JSON representation of the entity key for rebuild and diagnostics.
@@ -942,7 +955,7 @@ where
     where
         W: DatabaseFilter + Clone + Send + Sync + 'static,
     {
-        self.query = self.query.filter_with_entity_matching(&filter);
+        self.query = self.query.filter_for_search(&filter);
         self
     }
 
@@ -1115,7 +1128,7 @@ where
             rows.iter()
                 .map(|row| {
                     let entity = T::from_row(row)?;
-                    let score = B::try_get_f64(row, "__gom_search_score")?;
+                    let score = B::try_get_f64(row, T::SEARCH_SCORE_COLUMN)?;
                     Ok(SearchHit { score, entity })
                 })
                 .collect(),
@@ -1179,7 +1192,7 @@ where
             .iter()
             .map(|row| {
                 let entity = T::from_row(row)?;
-                let score = B::try_get_f64(row, "__gom_search_score")?;
+                let score = B::try_get_f64(row, T::SEARCH_SCORE_COLUMN)?;
                 Ok(SearchHit { score, entity })
             })
             .collect::<crate::Result<Vec<_>>>()
@@ -1222,20 +1235,25 @@ where
         };
         let function = postgres_tsquery_function(mode);
         let search_table = search_table_name(index.table_name);
+        let helper_alias = self.native_search_helper_alias();
+        let score_column = B::DIALECT.render_identifier(T::SEARCH_SCORE_COLUMN);
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!("{}, s.__gom_search_score", T::column_names().join(", "))
+            format!(
+                "{}, {helper_alias}.{score_column}",
+                T::search_projection().join(", ")
+            )
         };
         // Keep managed document columns out of the entity SQL scope. In
         // particular, entity filters/projections may also use `entity_pk`.
         let mut sql = format!(
             "SELECT {} FROM {} \
              JOIN (SELECT entity_pk AS __gom_search_pk, \
-                   CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score \
+                   CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS {score_column} \
                    FROM {} CROSS JOIN {}('{}', ?) q(query) \
-                   WHERE document_vector @@ q.query) s \
-             ON s.__gom_search_pk = {} WHERE 1 = 1",
+                   WHERE document_vector @@ q.query) {helper_alias} \
+             ON {helper_alias}.__gom_search_pk = {} WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             search_table,
@@ -1246,7 +1264,7 @@ where
         let mut values = vec![SqlValue::String(query_text)];
         self.append_filter_sql(&mut sql, &mut values);
         if !count_only {
-            sql.push_str(" ORDER BY s.__gom_search_score DESC");
+            sql.push_str(&format!(" ORDER BY {helper_alias}.{score_column} DESC"));
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
@@ -1273,19 +1291,24 @@ where
         apply_default_limit: bool,
     ) -> (String, Vec<SqlValue>) {
         let fts_table = sqlite_fts_table_name(index.table_name);
+        let helper_alias = self.native_search_helper_alias();
+        let score_column = B::DIALECT.render_identifier(T::SEARCH_SCORE_COLUMN);
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!("{}, s.__gom_search_score", T::column_names().join(", "))
+            format!(
+                "{}, {helper_alias}.{score_column}",
+                T::search_projection().join(", ")
+            )
         };
         // A derived table also hides FTS5's implicit `rank` column from
         // entity projections, filters and relation subqueries.
         let mut sql = format!(
             "SELECT {} FROM {} \
              JOIN (SELECT entity_pk AS __gom_search_pk, \
-                   bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score \
-                   FROM {} WHERE {} MATCH ?) s \
-             ON s.__gom_search_pk = {} WHERE 1 = 1",
+                   bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS {score_column} \
+                   FROM {} WHERE {} MATCH ?) {helper_alias} \
+             ON {helper_alias}.__gom_search_pk = {} WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             fts_table,
@@ -1299,7 +1322,7 @@ where
         ))];
         self.append_filter_sql(&mut sql, &mut values);
         if !count_only {
-            sql.push_str(" ORDER BY s.__gom_search_score DESC");
+            sql.push_str(&format!(" ORDER BY {helper_alias}.{score_column} DESC"));
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
@@ -1317,6 +1340,15 @@ where
             }
         }
         (sql, values)
+    }
+
+    fn native_search_helper_alias(&self) -> &'static str {
+        // Keep the helper alias distinct from the entity table qualifier.
+        if B::DIALECT.column_qualifier_names_table("s.__gom_search_pk", T::TABLE_NAME) {
+            "__gom_search"
+        } else {
+            "s"
+        }
     }
 
     fn entity_column(&self, column: &str) -> String {

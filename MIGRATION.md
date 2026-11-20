@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## Next ORM/macros minor after the breaking release
+
+**No action** — generated root search qualifies client filter columns with the
+entity table (#799). Search filters, search input, and stored documents require
+no migration. If you snapshot generated search SQL, update the table-qualified
+filter and projection references.
+
 ## Breaking release (unreleased)
 
 This release collects every change that breaks hosts or invalidates stored

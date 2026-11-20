@@ -4222,6 +4222,9 @@ fn generate_entity_tokens(
 
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
+    let mut search_column_names: Vec<String> = Vec::new();
+    let mut projected_column_names = std::collections::HashSet::new();
+    let sql_table = backend_render_identifier_path(backend, &table_name);
     let mut column_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut constraint_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut primary_key_cols: Vec<String> = Vec::new();
@@ -5212,6 +5215,12 @@ fn generate_entity_tokens(
             .unwrap_or_else(|| rust_name.clone());
         let db_col_sql = backend_render_identifier_path(backend, &db_col);
         let db_col_identity = backend_quote_identifier_path(backend, &db_col);
+        let column_part = crate::backend::identifier_path_parts(backend, &db_col_sql)
+            .last()
+            .unwrap_or(&db_col_sql);
+        let qualified_db_col_sql = format!("{sql_table}.{column_part}");
+        projected_column_names
+            .insert(relation_column_identity(backend, &db_col, true).to_ascii_lowercase());
         let constraint_type = option_inner_type(field_type).unwrap_or(field_type);
         let constraint_type_name = quote! { #constraint_type }.to_string().replace(' ', "");
         let numeric_constraint_type = matches!(
@@ -5505,8 +5514,12 @@ fn generate_entity_tokens(
                     "ST_AsGeoJSON({}, 9, 8)::text AS {}",
                     db_col_sql, db_col_sql
                 ));
+                search_column_names.push(format!(
+                    "ST_AsGeoJSON({qualified_db_col_sql}, 9, 8)::text AS {column_part}"
+                ));
             } else {
                 column_names.push(db_col_sql.clone());
+                search_column_names.push(qualified_db_col_sql.clone());
             }
             quote! {
                 Some(::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid))
@@ -5515,9 +5528,13 @@ fn generate_entity_tokens(
             column_names.push(format!(
                 "CAST({db_col_sql} AS DECIMAL(19,4)) AS {db_col_sql}"
             ));
+            search_column_names.push(format!(
+                "CAST({qualified_db_col_sql} AS DECIMAL(19,4)) AS {column_part}"
+            ));
             quote! { None }
         } else {
             column_names.push(db_col_sql.clone());
+            search_column_names.push(qualified_db_col_sql.clone());
             quote! { None }
         };
         let search_tokens = if let Some(search) = &field_meta.search {
@@ -5738,12 +5755,24 @@ fn generate_entity_tokens(
                     field_name,
                     field_type,
                     &graphql_name,
-                    &db_col_sql,
+                    &quote! { __gom_column },
                     filter_type,
                     &field_meta,
                 )?;
                 where_input_fields.push(input_field);
-                filter_to_sql.push(sql_gen);
+                filter_to_sql.push(quote! {
+                    {
+                        let __gom_bound_column;
+                        let __gom_column: &str = match _gom_table {
+                            Some(table) => {
+                                __gom_bound_column = format!("{}.{}", table, #column_part);
+                                &__gom_bound_column
+                            }
+                            None => #db_col_sql,
+                        };
+                        #sql_gen
+                    }
+                });
                 filter_to_entity_match.push(entity_match_gen);
                 filter_is_empty_checks.push(is_empty_check);
                 filter_contains_spatial_checks.push(contains_spatial_check);
@@ -6044,6 +6073,14 @@ fn generate_entity_tokens(
         }
     };
     let searchable_entity_impl = if has_search {
+        let mut score_column = "__gom_search_score".to_owned();
+        for suffix in 1..=projected_column_names.len() {
+            if !projected_column_names.contains(&score_column) {
+                break;
+            }
+            score_column = format!("__gom_search_score_{suffix}");
+        }
+
         let search_key = if search_pk_is_bytes {
             quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#search_pk_field) }
         } else {
@@ -6053,6 +6090,11 @@ fn generate_entity_tokens(
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+                const SEARCH_SCORE_COLUMN: &'static str = #score_column;
+
+                fn search_projection() -> &'static [&'static str] {
+                    &[#(#search_column_names),*]
+                }
 
                 fn search_key(&self) -> String {
                     #search_key
@@ -6758,7 +6800,15 @@ fn generate_entity_tokens(
             }
 
             fn to_sql_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
-                self.__gom_sql_conditions(false)
+                self.__gom_sql_conditions(false, None)
+            }
+
+            fn to_sql_search_conditions(
+                &self,
+                backend: ::graphql_orm::graphql::orm::DatabaseBackend,
+                table: &str,
+            ) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                self.__gom_sql_conditions(self.requires_in_memory_filtering(backend), Some(table))
             }
 
             fn is_empty(&self) -> bool {
@@ -6891,10 +6941,14 @@ fn generate_entity_tokens(
             }
 
             fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
-                self.__gom_sql_conditions(true)
+                self.__gom_sql_conditions(true, None)
             }
 
-            fn __gom_sql_conditions(&self, _gom_spatial_prefilter: bool) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+            fn __gom_sql_conditions(
+                &self,
+                _gom_spatial_prefilter: bool,
+                _gom_table: Option<&str>,
+            ) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
                     return (vec!["1 = 0".to_owned()], Vec::new());
                 }
@@ -6907,7 +6961,7 @@ fn generate_entity_tokens(
                 // Handle And
                 if let Some(ref and_filters) = self.and {
                     for filter in and_filters {
-                        let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                        let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter, _gom_table);
                         conditions.extend(sub_conds);
                         values.extend(sub_vals);
                     }
@@ -6918,7 +6972,7 @@ fn generate_entity_tokens(
                     if let Some(ref or_filters) = self.or {
                         let mut or_parts = Vec::new();
                         for filter in or_filters {
-                            let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                            let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter, _gom_table);
                             // An empty branch is true. Keep it explicit so earlier
                             // binds retain their numbered placeholder positions.
                             // Balanced, so a long list stays shallow for
@@ -6939,7 +6993,7 @@ fn generate_entity_tokens(
 
                     // Handle Not
                     if let Some(ref not_filter) = self.not {
-                        let (sub_conds, sub_vals) = not_filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                        let (sub_conds, sub_vals) = not_filter.__gom_sql_conditions(_gom_spatial_prefilter, _gom_table);
                         if !sub_conds.is_empty() {
                             conditions.push(format!(
                                 "NOT ({})",
@@ -7691,7 +7745,7 @@ fn generate_filter_field(
     field_name: &syn::Ident,
     field_type: &syn::Type,
     graphql_name: &str,
-    db_col: &str,
+    db_col: &proc_macro2::TokenStream,
     filter_type: &str,
     field_meta: &FieldMetadata,
 ) -> syn::Result<(

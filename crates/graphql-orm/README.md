@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+The next ORM/macros minor after the breaking release qualifies generated root
+search filters with the entity table (#799). See the
+[migration guide](../../MIGRATION.md#next-ormmacros-minor-after-the-breaking-release).
+
 Version 0.190.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the

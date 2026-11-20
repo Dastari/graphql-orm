@@ -309,6 +309,20 @@ pub trait DatabaseFilter {
         }
     }
 
+    /// Render generated search conditions bound to the entity table.
+    #[doc(hidden)]
+    fn to_sql_search_conditions(
+        &self,
+        backend: DatabaseBackend,
+        _table: &str,
+    ) -> (Vec<String>, Vec<SqlValue>) {
+        if self.requires_in_memory_filtering(backend) {
+            self.to_sql_prefilter_conditions(backend)
+        } else {
+            self.to_sql_conditions()
+        }
+    }
+
     fn matches_entity(&self, _entity: &(dyn Any + Send + Sync)) -> crate::Result<bool> {
         Ok(true)
     }
@@ -5182,7 +5196,21 @@ where
         self
     }
 
-    pub fn filter_with_entity_matching<F>(mut self, filter: &F) -> Self
+    pub fn filter_with_entity_matching<F>(self, filter: &F) -> Self
+    where
+        F: DatabaseFilter + Clone + Send + Sync + 'static,
+    {
+        self.add_entity_filter(filter, false)
+    }
+
+    pub(crate) fn filter_for_search<F>(self, filter: &F) -> Self
+    where
+        F: DatabaseFilter + Clone + Send + Sync + 'static,
+    {
+        self.add_entity_filter(filter, true)
+    }
+
+    fn add_entity_filter<F>(mut self, filter: &F, for_search: bool) -> Self
     where
         F: DatabaseFilter + Clone + Send + Sync + 'static,
     {
@@ -5190,19 +5218,23 @@ where
         if let Some(identity) = filter.keyset_filter_identity() {
             self.keyset_filter_identities.push(identity);
         }
-        if filter.requires_in_memory_filtering(B::DIALECT) {
-            let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
-            self.where_clauses.extend(conds);
-            self.values.extend(values);
+        let in_memory = filter.requires_in_memory_filtering(B::DIALECT);
+        let (conditions, values) = if for_search {
+            let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
+            filter.to_sql_search_conditions(B::DIALECT, &table)
+        } else if in_memory {
+            filter.to_sql_prefilter_conditions(B::DIALECT)
+        } else {
+            filter.to_sql_conditions()
+        };
+        self.where_clauses.extend(conditions);
+        self.values.extend(values);
+        if in_memory {
             let filter = filter.clone();
             self.entity_matchers
                 .push(Arc::new(move |entity, calendar_today| {
                     filter.matches_entity_at(entity, calendar_today)
                 }));
-        } else {
-            let (conds, values) = filter.to_sql_conditions();
-            self.where_clauses.extend(conds);
-            self.values.extend(values);
         }
         self
     }
