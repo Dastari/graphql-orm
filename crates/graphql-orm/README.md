@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.186.0 fixes startup races in the owned PostgreSQL test harness.
+See the [migration guide](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
+
 Version 0.185.0 renders SQL Server filtered-index strings as Unicode literals,
 including ASCII values. Filters introspected as opaque SQL are replayed
 verbatim. See the
