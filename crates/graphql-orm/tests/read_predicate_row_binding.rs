@@ -883,6 +883,46 @@ async fn policy_columns_bind_to_their_own_row() {
     db.pool().close().await;
 }
 
+/// A prepared relation-count ordering: targets the request may read
+/// (`flag = ?` with 1), as the resolver stores it after authorization.
+fn counted_targets() -> BindSourceOrderByInput {
+    let mut order = BindSourceOrderByInput {
+        target_count: Some(OrderDirection::Desc),
+        ..Default::default()
+    };
+    order.__gom_relation_counts.insert(
+        "TargetCount".to_owned(),
+        (
+            "(SELECT COUNT(*) FROM bind_targets WHERE bind_targets.source_id = bind_sources.id AND bind_targets.flag = ?)"
+                .to_owned(),
+            vec![SqlValue::Int(1)],
+        ),
+    );
+    order
+}
+
+/// A resolver that orders the way generated resolvers do, with the request
+/// context, beside a caller clause.
+struct ContextOrdering;
+#[async_graphql::Object]
+impl ContextOrdering {
+    async fn ordered(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        clause: String,
+        value: String,
+    ) -> async_graphql::Result<Vec<String>> {
+        let db = ctx.data::<Database<B>>()?;
+        let rows = EntityQuery::<BindSource>::new()
+            .where_values(&clause, vec![SqlValue::String(value)])
+            .order_by_with_context(&counted_targets(), ctx)?
+            .fetch_all(db)
+            .await
+            .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+        Ok(rows.into_iter().map(|row| row.id).collect())
+    }
+}
+
 /// A generated related-row filter and a relation-count ordering carry their
 /// target's read policy, and its bind values, inside the source query's own
 /// clause and ordering term. A query that holds one is checked as a policed
@@ -914,21 +954,7 @@ async fn a_policy_inside_a_filter_or_ordering_polices_the_query() {
         filter
     };
     // A prepared relation-count ordering under the same policy.
-    let counted = || {
-        let mut order = BindSourceOrderByInput {
-            target_count: Some(OrderDirection::Desc),
-            ..Default::default()
-        };
-        order.__gom_relation_counts.insert(
-            "TargetCount".to_owned(),
-            (
-                "(SELECT COUNT(*) FROM bind_targets WHERE bind_targets.source_id = bind_sources.id AND bind_targets.flag = ?)"
-                    .to_owned(),
-                vec![SqlValue::Int(1)],
-            ),
-        );
-        order
-    };
+    let counted = counted_targets;
     let ids = |rows: Vec<BindSource>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
     // A placeholder the statement does not number itself, per dialect.
     let named = match B::DIALECT {
@@ -1005,6 +1031,37 @@ async fn a_policy_inside_a_filter_or_ordering_polices_the_query() {
             .await,
         "count ordering, surplus value",
     );
+    // The same ordering added with the request context, as every generated
+    // resolver adds it.
+    let probe = async_graphql::Schema::build(
+        ContextOrdering,
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .data(db.clone())
+    .finish();
+    let with_context = |clause: &str| {
+        let query = format!("{{ ordered(clause: {clause:?}, value: \"s4\") }}");
+        let probe = &probe;
+        async move { probe.execute(query).await }
+    };
+    let response = with_context("id <> ?").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(response.data.into_json().unwrap()["ordered"][0], "s2");
+    let response = with_context(named).await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("\"AUTHORIZATION_MISCONFIGURED\""),
+        "{:?}",
+        response.errors
+    );
+
     // An ordering term whose own binds do not pair up is refused too.
     let mut lopsided = counted();
     lopsided

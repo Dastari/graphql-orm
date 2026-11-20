@@ -3875,6 +3875,7 @@ where
         };
         if backward {
             query.order_clauses = order.iter().map(|c| c.reversed().order_sql()).collect();
+            query.order_values.clear();
         }
         let mut nodes = query
             .bounded_rows(db, auth, limit.saturating_add(1))

@@ -4144,7 +4144,12 @@ where
                 "aggregate group pages require complete SQL row authorization",
             ));
         }
-        let policed = visibility.predicate_expression().is_some();
+        // A related-row filter carries its target's policy in its own SQL.
+        let policed = visibility.predicate_expression().is_some()
+            || self
+                .filter
+                .as_ref()
+                .is_some_and(DatabaseFilter::has_request_authorized_predicates);
         let mut filters: Vec<FilterExpression> = match self.filter.as_ref() {
             Some(filter) => composed_filter_expression::<_, B>(filter, policed)?,
             None => None,
@@ -4278,7 +4283,12 @@ where
                 "aggregate queries require complete SQL row authorization",
             ));
         }
-        let policed = visibility.predicate_expression().is_some();
+        // A related-row filter carries its target's policy in its own SQL.
+        let policed = visibility.predicate_expression().is_some()
+            || self
+                .filter
+                .as_ref()
+                .is_some_and(DatabaseFilter::has_request_authorized_predicates);
         let filters: Vec<_> = match self.filter.as_ref() {
             Some(filter) => composed_filter_expression::<_, B>(filter, policed)?,
             None => None,
@@ -5639,6 +5649,9 @@ where
         order
             .validate_order()
             .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+        // A relation-count ordering carries its target's read policy and
+        // binds in the term: the query is checked as a policed one.
+        self.carries_policy |= order.requires_context();
         if let Some(sort) = order.to_sort_expression_with_context(ctx)? {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);
@@ -6391,6 +6404,9 @@ where
                 .collect::<Vec<_>>()
                 .join(", "),
         ];
+        // The replaced ordering binds nothing: drop the values of the
+        // ordering it replaces.
+        query.order_values = Vec::new();
         query.page = Some(PageInput {
             limit: Some(sentinel_limit),
             offset: Some(0),
