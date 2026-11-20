@@ -94,3 +94,8 @@ fn keyset_and_scan_resolvers_use_qualified_standard_library_names() {
     assert_resolver(&generated, "keyset");
     assert_resolver(&generated, "authorized_scan");
 }
+
+#[test]
+fn search_resolver_uses_qualified_standard_library_names() {
+    assert_resolver(&generated(false), "search");
+}

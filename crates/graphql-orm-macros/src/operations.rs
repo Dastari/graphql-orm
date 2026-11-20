@@ -4570,7 +4570,6 @@ fn generate_graphql_operations_unfiltered(
     // Target authority belongs to the relationship resolver. Pool-only eager
     // preloads cannot evaluate current request policies and may fail a parent
     // before its nullable child can report a sanitized traversal error.
-    let relation_preload_search_list = quote! {};
     let relation_preload_single = quote! {};
 
     let query_context = queries::QueryContext {
@@ -5576,7 +5575,6 @@ fn generate_graphql_operations_unfiltered(
                 search_arg_name: &search_arg_name,
                 search_arg_description: &search_arg_description,
                 search_scope_enforcement: &search_scope_enforcement,
-                relation_preload_search_list: &relation_preload_search_list,
                 pool_type: &pool_type,
                 has_search,
             },

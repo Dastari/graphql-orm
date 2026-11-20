@@ -744,7 +744,6 @@ pub(super) struct SearchInput<'a> {
     pub(super) search_arg_name: &'a str,
     pub(super) search_arg_description: &'a str,
     pub(super) search_scope_enforcement: &'a TokenStream,
-    pub(super) relation_preload_search_list: &'a TokenStream,
     pub(super) pool_type: &'a TokenStream,
     pub(super) has_search: bool,
 }
@@ -765,7 +764,6 @@ pub(super) fn search(
         search_arg_name,
         search_arg_description,
         search_scope_enforcement,
-        relation_preload_search_list,
         pool_type,
         has_search,
     } = input;
@@ -792,14 +790,14 @@ pub(super) fn search(
             #[graphql(name = #search_edge_type_str, rename_fields = #field_case_rule)]
             pub struct #search_edge_type {
                 pub node: #struct_name,
-                pub cursor: String,
+                pub cursor: ::std::string::String,
                 pub score: f64,
             }
 
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
             #[graphql(name = #search_connection_type_str, rename_fields = #field_case_rule)]
             pub struct #search_connection_type {
-                pub edges: Vec<#search_edge_type>,
+                pub edges: ::std::vec::Vec<#search_edge_type>,
                 #[graphql(name = #page_info_field_name)]
                 pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
             }
@@ -829,8 +827,8 @@ pub(super) fn search(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #search_arg_name, desc = #search_arg_description)] search: ::graphql_orm::graphql::filters::SearchInput,
-                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
-                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
+                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::std::option::Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -839,13 +837,13 @@ pub(super) fn search(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
                 let pool = db.pool();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
@@ -855,7 +853,7 @@ pub(super) fn search(
 
                 let mut query = #struct_name::search(pool, search)
                     .client_pagination_config(db.client_pagination_config());
-                if let Some(ref filter) = where_input {
+                if let ::std::option::Option::Some(ref filter) = where_input {
                     query = query.filter(filter.clone());
                 }
                 query = query.default_order();
@@ -864,9 +862,7 @@ pub(super) fn search(
                     .fetch_authorized_connection(db, ctx, auth_context.as_ref(), page)
                     .await?;
 
-                #relation_preload_search_list
-
-                Ok(#search_connection_type::from_generic(generic_conn))
+                ::std::result::Result::Ok(#search_connection_type::from_generic(generic_conn))
             }
         }
     } else {

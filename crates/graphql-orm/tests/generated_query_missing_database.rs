@@ -55,3 +55,11 @@ async fn keyset_and_scan_return_missing_database_errors() {
     assert_missing_database("missingDatabaseRecordsScan(page: {limit: 1}) { pageInfo { status } }")
         .await;
 }
+
+#[tokio::test]
+async fn search_returns_a_missing_database_error() {
+    assert_missing_database(
+        r#"missingDatabaseRecordsSearch(search: {query: "a"}) { edges { cursor } }"#,
+    )
+    .await;
+}
