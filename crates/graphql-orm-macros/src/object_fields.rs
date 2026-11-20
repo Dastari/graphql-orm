@@ -2,14 +2,15 @@
 //!
 //! `GraphQLEntity` emits one closed `#[Object] impl` per entity, and a second
 //! macro cannot add methods to it. With `#[graphql_orm(object_fields)]` the
-//! derive therefore emits its object methods as the body of a hidden
-//! `macro_rules!` instead. `#[graphql_object_fields]` on the handwritten impl
-//! calls that macro, which hands both halves to [`compose`]. The object is
-//! still emitted once, with the generated methods unchanged and first.
+//! derive therefore emits a hidden `macro_rules!` whose body holds that impl,
+//! generated methods included, with a hole for more methods.
+//! `#[graphql_object_fields]` hands the handwritten impl to that macro, which
+//! passes it to [`wrap`] and receives the wrapped methods back for the hole.
 //!
-//! [`compose`] also puts the authorization of the row in front of every
-//! handwritten resolver, checks its name against the generated ones, and
-//! describes it to the entity's metadata.
+//! [`wrap`] never sees the generated methods and has no input it leaves
+//! unwrapped: every resolver it is given gets the field check a generated
+//! getter runs in front of its body, has its name checked against the
+//! generated ones, and is described to the entity's metadata.
 
 use crate::composed_identity::{flag, string_literal};
 use crate::entity::{humanize_identifier, semantic_doc_description};
@@ -52,15 +53,37 @@ pub(crate) fn host_tokens(
         #[doc(hidden)]
         #[allow(unused_macros)]
         macro_rules! #callback {
-            ($($handwritten:tt)*) => {
-                ::graphql_orm::__graphql_object_fields_compose! {
+            // The entity's one GraphQL object. `__graphql_object_fields_wrap!`
+            // expands to this arm, with the methods it wrapped.
+            (
+                @object
+                { $($entity:tt)* }
+                { $($attributes:tt)* }
+                { $($definitions:tt)* }
+                $($wrapped:tt)*
+            ) => {
+                #[doc = #description]
+                $($attributes)*
+                #[::graphql_orm::async_graphql::Object]
+                impl $($entity)* {
+                    #(#generated_methods)*
+                    $($wrapped)*
+                }
+
+                impl ::graphql_orm::graphql::orm::HandwrittenObjectFields for $($entity)* {
+                    const FIELDS: &'static [::graphql_orm::graphql::orm::ComputedObjectFieldDef] =
+                        &[$($definitions)*];
+                }
+            };
+            // From `#[graphql_object_fields]`: this macro's path, then the impl.
+            ({ $($callback:tt)* } $($handwritten:tt)*) => {
+                ::graphql_orm::__graphql_object_fields_wrap! {
                     #entity_name
-                    #description
                     { #backend_marker }
                     { #(#graphql_rename_fields)* }
                     { #(#serde_rename_all)* }
                     [ #(#generated_names),* ]
-                    { #(#generated_methods)* }
+                    { $($callback)* }
                     $($handwritten)*
                 }
             };
@@ -135,25 +158,23 @@ pub(crate) fn attribute(args: TokenStream, mut item_impl: ItemImpl) -> syn::Resu
             >() {}
             assert_object_fields_host::<#self_ty>();
         };
-        #callback! { #item_impl }
+        #callback! { { #callback } #item_impl }
     })
 }
 
-struct Composition {
+struct Wrapping {
     entity_name: LitStr,
-    description: LitStr,
     backend: TokenStream,
     graphql_rename_fields: Option<LitStr>,
     serde_rename_all: Option<LitStr>,
     generated_names: Vec<LitStr>,
-    generated_methods: TokenStream,
+    callback: syn::Path,
     handwritten: ItemImpl,
 }
 
-impl Parse for Composition {
+impl Parse for Wrapping {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let entity_name = input.parse()?;
-        let description = input.parse()?;
         let backend;
         syn::braced!(backend in input);
         let graphql_rename_fields;
@@ -162,18 +183,19 @@ impl Parse for Composition {
         syn::braced!(serde_rename_all in input);
         let generated_names;
         syn::bracketed!(generated_names in input);
-        let generated_methods;
-        syn::braced!(generated_methods in input);
+        let callback;
+        syn::braced!(callback in input);
         Ok(Self {
             entity_name,
-            description,
             backend: backend.parse()?,
             graphql_rename_fields: graphql_rename_fields.parse()?,
             serde_rename_all: serde_rename_all.parse()?,
             generated_names: Punctuated::<LitStr, Token![,]>::parse_terminated(&generated_names)?
                 .into_iter()
                 .collect(),
-            generated_methods: generated_methods.parse()?,
+            callback: callback.parse()?,
+            // One impl and nothing else: there is no position for a method
+            // that would reach the object without the field check.
             handwritten: input.parse()?,
         })
     }
@@ -209,7 +231,7 @@ fn field_options(method: &mut syn::ImplItemFn) -> syn::Result<FieldOptions> {
                         return Err(syn::Error::new_spanned(
                             &option,
                             format!(
-                                "graphql_object_fields does not support `{unsupported}`: every handwritten field is one named resolver, authorized against its row"
+                                "graphql_object_fields does not support `{unsupported}`: every handwritten field is one named resolver with its own field read decision"
                             ),
                         ));
                     }
@@ -338,16 +360,16 @@ fn context_ident(method: &mut syn::ImplItemFn) -> syn::Result<syn::Ident> {
     Ok(generated)
 }
 
-/// `__graphql_object_fields_compose!`: emit the entity's one `#[Object] impl`.
-pub(crate) fn compose(input: TokenStream) -> syn::Result<TokenStream> {
-    let Composition {
+/// `__graphql_object_fields_wrap!`: wrap every handwritten resolver and hand
+/// the result to the entity's callback macro, which emits the object.
+pub(crate) fn wrap(input: TokenStream) -> syn::Result<TokenStream> {
+    let Wrapping {
         entity_name,
-        description,
         backend,
         graphql_rename_fields,
         serde_rename_all,
         generated_names,
-        generated_methods,
+        callback,
         mut handwritten,
     } = syn::parse2(input)?;
     let entity = entity_name.value();
@@ -382,22 +404,17 @@ pub(crate) fn compose(input: TokenStream) -> syn::Result<TokenStream> {
     Ok(quote! {
         #refusal
 
-        #[doc = #description]
-        #(#attributes)*
-        #[::graphql_orm::async_graphql::Object]
-        impl #self_ty {
-            #generated_methods
+        #callback! {
+            @object
+            { #self_ty }
+            { #(#attributes)* }
+            { #(#definitions),* }
             #(#items)*
-        }
-
-        impl ::graphql_orm::graphql::orm::HandwrittenObjectFields for #self_ty {
-            const FIELDS: &'static [::graphql_orm::graphql::orm::ComputedObjectFieldDef] =
-                &[#(#definitions),*];
         }
     })
 }
 
-/// Put the row's authorization in front of every handwritten resolver, and
+/// Put the field check in front of every handwritten resolver, and
 /// return the field definitions in declaration order.
 fn handwritten_fields(
     handwritten: &mut ItemImpl,
@@ -439,7 +456,7 @@ fn handwritten_fields(
             _ => {
                 return Err(syn::Error::new_spanned(
                     &method.sig,
-                    "a handwritten object field must take `&self`: it is authorized against the loaded row before it resolves",
+                    "a handwritten object field must take `&self`: its field read decision is asked for the loaded row before it resolves",
                 ));
             }
         };
@@ -479,7 +496,27 @@ fn handwritten_fields(
         let context = context_ident(method)?;
         let index = definitions.len();
         let body = &method.block;
-        // Nothing of the handwritten body runs before these decisions.
+        // A refused `Option<T>` field is an explicit null beside its error.
+        // Any other field can only return the error.
+        let nullable = matches!(
+            &value_type,
+            Type::Path(path) if path.qself.is_none()
+                && path.path.segments.last().is_some_and(|segment| segment.ident == "Option")
+        );
+        let refuse = if nullable {
+            quote! {
+                ::graphql_orm::graphql::orm::report_computed_object_field_refusal(
+                    #context,
+                    __gom_denied,
+                );
+                return ::std::result::Result::Ok(::std::option::Option::None);
+            }
+        } else {
+            quote! {
+                return ::std::result::Result::Err(::std::convert::Into::into(__gom_denied));
+            }
+        };
+        // Nothing of the handwritten body runs before the field decision.
         method.block = syn::parse_quote!({
             if let ::std::result::Result::Err(__gom_denied) =
                 ::graphql_orm::graphql::orm::authorize_computed_object_field::<Self, #backend>(
@@ -489,7 +526,7 @@ fn handwritten_fields(
                 )
                 .await
             {
-                return ::std::result::Result::Err(::std::convert::Into::into(__gom_denied));
+                #refuse
             }
             #body
         });
@@ -498,6 +535,16 @@ fn handwritten_fields(
             None => quote! { ::std::option::Option::None },
         };
         let subscribe = options.subscribe;
+        // An event is released only once its selected fields are proved, and
+        // only a leaf value is proved by its own field decision.
+        let leaf = if subscribe {
+            quote! {
+                fn leaf<Kind, T: ?Sized + ::graphql_orm::graphql::orm::SubscribableFieldOutput<Kind>>() {}
+                leaf::<_, #value_type>();
+            }
+        } else {
+            quote! {}
+        };
         definitions.push(quote! {
             ::graphql_orm::graphql::orm::ComputedObjectFieldDef::new(
                 #rust_name,
@@ -505,7 +552,10 @@ fn handwritten_fields(
                 #field_description,
                 #read_policy,
                 #subscribe,
-                || <#value_type as ::graphql_orm::async_graphql::OutputType>::qualified_type_name(),
+                || {
+                    #leaf
+                    <#value_type as ::graphql_orm::async_graphql::OutputType>::qualified_type_name()
+                },
             )
         });
     }
@@ -518,15 +568,10 @@ mod tests {
 
     fn composed(rename_fields: &str, handwritten: TokenStream) -> syn::Result<String> {
         let rename_fields: TokenStream = rename_fields.parse().unwrap();
-        compose(quote! {
-            "Record" "A record." { ::graphql_orm::SqliteBackend } { #rename_fields } {}
+        wrap(quote! {
+            "Record" { ::graphql_orm::SqliteBackend } { #rename_fields } {}
             ["id", "RecordVersion"]
-            {
-                #[graphql(name = "id")]
-                async fn id(&self) -> ::graphql_orm::async_graphql::Result<String> {
-                    Ok(self.id.clone())
-                }
-            }
+            { records::__gom_object_fields_Record }
             #handwritten
         })
         .map(|tokens| tokens.to_string())
@@ -575,19 +620,103 @@ mod tests {
     }
 
     #[test]
-    fn the_authorization_precedes_the_handwritten_body_and_the_generated_methods_come_first() {
+    fn the_field_check_precedes_the_handwritten_body() {
         let expanded = composed("", field()).unwrap();
-        let generated = expanded.find("async fn id").unwrap();
+        let callback = expanded
+            .find("records :: __gom_object_fields_Record ! { @ object { Record }")
+            .unwrap();
         let handwritten = expanded.find("async fn word_count").unwrap();
         let check = expanded.find("authorize_computed_object_field").unwrap();
         let body = expanded.find("Ok (1)").unwrap();
         assert!(
-            generated < handwritten && handwritten < check && check < body,
+            callback < handwritten && handwritten < check && check < body,
             "{expanded}"
         );
         // A resolver without a context parameter is given one for the check.
         assert!(expanded.contains("__gom_ctx : & :: graphql_orm :: async_graphql :: Context"));
-        assert!(expanded.contains("# [doc = \"A record.\"]"));
+    }
+
+    #[test]
+    fn every_resolver_the_wrapper_receives_is_checked() {
+        let expanded = composed(
+            "",
+            quote! {
+                impl Record {
+                    async fn one(&self) -> async_graphql::Result<i32> { Ok(1) }
+                    #[graphql(name = "second")]
+                    async fn two(&self, ctx: &Context<'_>) -> FieldResult<i32> { Ok(2) }
+                    #[graphql_orm(read_policy = "three.read", subscribe)]
+                    async fn three(&self, _: &Context<'_>) -> Result<Option<i32>> { Ok(None) }
+                }
+            },
+        )
+        .unwrap();
+        // Only the field declared `Option<T>` can answer a refusal with a null.
+        assert_eq!(
+            expanded
+                .matches("report_computed_object_field_refusal")
+                .count(),
+            1,
+            "{expanded}"
+        );
+        assert_eq!(
+            expanded.matches("Into :: into (__gom_denied)").count(),
+            2,
+            "{expanded}"
+        );
+        assert_eq!(expanded.matches("async fn").count(), 3, "{expanded}");
+        assert_eq!(
+            expanded.matches("authorize_computed_object_field").count(),
+            3,
+            "{expanded}"
+        );
+        assert!(expanded.contains("SubscribableFieldOutput"));
+    }
+
+    #[test]
+    fn the_wrapper_takes_one_impl_and_no_other_methods() {
+        // The shape that would carry an unwrapped method: a block of methods
+        // beside the handwritten impl.
+        let smuggled = wrap(quote! {
+            "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"]
+            { __gom_object_fields_Record }
+            { async fn unchecked(&self) -> async_graphql::Result<i32> { Ok(1) } }
+            impl Record {}
+        });
+        assert!(smuggled.is_err());
+        let trailing = wrap(quote! {
+            "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"]
+            { __gom_object_fields_Record }
+            impl Record {}
+            async fn unchecked(&self) -> async_graphql::Result<i32> { Ok(1) }
+        });
+        assert!(trailing.is_err());
+    }
+
+    #[test]
+    fn the_generated_methods_precede_the_wrapped_ones_in_the_callback() {
+        let host = host_tokens(
+            &syn::Ident::new("Record", Span::call_site()),
+            "A record.",
+            "Record",
+            &quote! { ::graphql_orm::SqliteBackend },
+            Some("PascalCase"),
+            None,
+            &["Id".to_owned()],
+            &[quote! { async fn id(&self) -> i32 { 1 } }],
+        )
+        .to_string();
+        let object = host.find("async_graphql :: Object").unwrap();
+        let generated = host.find("async fn id").unwrap();
+        let hole = host.find("$ ($ wrapped) *").unwrap();
+        let wrapper = host.find("__graphql_object_fields_wrap").unwrap();
+        assert!(
+            object < generated && generated < hole && hole < wrapper,
+            "{host}"
+        );
+        // The generated methods are not passed to the wrapper.
+        assert_eq!(host.matches("async fn id").count(), 1, "{host}");
+        assert!(host.contains("# [doc = \"A record.\"]"));
     }
 
     #[test]
@@ -642,7 +771,10 @@ mod tests {
             let expanded = composed("", handwritten).unwrap();
             assert!(expanded.contains(message), "{message}: {expanded}");
             assert!(expanded.contains("compile_error"), "{expanded}");
-            assert!(expanded.contains("async fn id"), "{expanded}");
+            assert!(
+                expanded.contains("@ object { Record } { } { }"),
+                "{expanded}"
+            );
             assert!(
                 !expanded.contains("authorize_computed_object_field"),
                 "{expanded}"
@@ -658,8 +790,10 @@ mod tests {
         )
         .unwrap();
         assert!(!expanded.contains("authorize_computed_object_field"));
-        assert!(expanded.contains(
-            "FIELDS : & 'static [:: graphql_orm :: graphql :: orm :: ComputedObjectFieldDef] = & []"
-        ));
+        // Not a field: no definition, and async-graphql leaves it out of the object.
+        assert!(
+            expanded.contains("@ object { Record } { } { } # [graphql (skip)] fn helper"),
+            "{expanded}"
+        );
     }
 }

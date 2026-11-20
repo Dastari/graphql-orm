@@ -578,24 +578,42 @@ Rules for the impl:
 - `#[graphql(skip)]` keeps a method as a plain helper. `flatten`, `entity` and
   `derived` are refused, and so is `cfg` on a single method.
 
-Authorization. Before a handwritten body runs, the object asks, in order:
-whether the field is available in the operation (see below); the entity read
-decision; the row read decision for the row the object holds; and the field
-read decision, with the key declared by `#[graphql_orm(read_policy = "…")]` or
-none. These are the decisions `graphql_policy_object` asks for a `SimpleObject`
-scalar. Any denial or policy error is returned as the field's error and the
-body does not run, so a row that reached the object through a host resolver
-that skipped the row policy still does not resolve handwritten fields. Declare
-a field that carries a read policy nullable: a denied non-null field nulls its
-parent, as in any GraphQL response. What a handwritten resolver returns is its
-own: the ORM does not authorize rows it loads or objects it builds.
+Authorization. A handwritten field runs the checks a generated column field
+runs, before its body: whether the field is available in the operation (see
+below), then the field read decision for the row the object holds, with the
+key declared by `#[graphql_orm(read_policy = "…")]` or none. A declared key
+with no field policy provider is refused in the strict authorization modes, and
+a policy callback failure is reported through the callback sanitizer, exactly
+as for a generated field.
+
+As with generated column fields, no entity or row decision is asked at the
+field. Generated queries, relations, mutations, entity resolution and
+subscriptions make both before the object exists, so on those paths a caller
+who cannot read the row never reaches a handwritten field. An entity object
+that a host resolver constructs or loads itself is the host's to authorize, for
+handwritten and generated fields alike. What a handwritten resolver returns is
+also its own: the ORM does not authorize rows it loads or objects it builds.
+
+A refusal is the field's error and the body does not run. A field declared
+`Option<T>` then resolves to an explicit `null`: its key stays in the response
+and the error carries the field's path. Any other field returns the error;
+async-graphql reports it at the field's path and leaves the key out of the
+parent object, as it does for a refused non-null generated field. Declare a
+field that carries a read policy as `Option<T>` (spelled so, not through a type
+alias) when clients should see the key.
 
 Subscriptions. A handwritten field is not available in generated `Changed`
 subscriptions: selecting it refuses the stream at admission, like any computed
-field. `#[graphql_orm(subscribe)]` makes it available. The stream then asks the
-same decisions for the delivered row before the event is released, the
-resolver asks them again, and the field appears in the stream's
-`carried_fields`. Selections below an available field are the resolver's own.
+field. `#[graphql_orm(subscribe)]` makes it available, and is accepted only on
+a field whose output type is a scalar, an enum, or an `Option` or list of
+those; any other output type is a compile error, because an event is released
+once its selected fields are proved and nothing proves what an object would
+resolve below the field. The stream asks the field decision for the delivered
+row before the event is released, the resolver asks it again, and the field
+appears in the stream's `carried_fields`. Admission takes leaves of the
+subscribed entity only: a relation is refused with everything below it, so a
+handwritten field of a related entity cannot be selected in an event,
+available or not.
 
 Metadata. `Entity::computed_object_fields()` lists each field with its Rust
 and GraphQL names, description, read policy key, subscription availability and

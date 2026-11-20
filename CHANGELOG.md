@@ -21,10 +21,14 @@ for historical context.
   `#[graphql_orm::graphql_object_fields]` on one inherent impl of it. The
   generated column fields, descriptions, `RecordVersion` and `NodeId` are
   unchanged; the handwritten fields follow them in the same object. Each
-  handwritten field asks the entity, row and field read decisions before its
-  body runs, may declare `#[graphql_orm(read_policy = "…")]`, and is refused
-  in generated `Changed` subscriptions unless it declares
-  `#[graphql_orm(subscribe)]`. The fields are listed by
+  handwritten field runs the checks of a generated column field before its
+  body: the field read decision for its row, with the key it may declare with
+  `#[graphql_orm(read_policy = "…")]`. Generated read paths authorize the row
+  before the object exists; an object a host resolver builds itself is the
+  host's to authorize. A refused `Option<T>` field is an explicit `null` with
+  a path-specific error. The field is refused in generated `Changed`
+  subscriptions unless it declares `#[graphql_orm(subscribe)]`, which needs a
+  scalar or enum output, or an `Option` or list of those. The fields are listed by
   `Entity::computed_object_fields()` and in the semantic catalogue as
   selectable, never-exported fields with no filter, ordering, grouping or
   aggregate. Entities that do not opt in generate exactly what they did

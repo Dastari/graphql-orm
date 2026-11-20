@@ -25,7 +25,20 @@ To move an entity off the `SimpleObject` + `#[graphql(complex)]` +
 return `async_graphql::Result<T>`. Compare the SDL afterwards: descriptions
 come from `#[graphql_orm(description = "…")]` and doc comments again, and
 handwritten fields are named by the entity's naming rule unless
-`#[graphql(name = "…")]` names them. Declaring `object_fields` adds the
+`#[graphql(name = "…")]` names them.
+
+Authorization differs from `graphql_policy_object` in one respect. A
+handwritten field asks what a generated column field asks: the field read
+decision for its row, with its declared `read_policy` key or none. It does not
+ask the entity or row decision again. Generated queries, relations, mutations,
+entity resolution and subscriptions authorize the row before the object
+exists. A host resolver that constructs or loads an entity object itself must
+authorize that object itself, as it must for the generated column fields. A
+refused field declared `Option<T>` is an explicit `null` with a path-specific
+error. `subscribe` is accepted only on scalar or enum outputs, or an `Option`
+or list of those.
+
+Declaring `object_fields` adds the
 handwritten fields to the entity's semantic catalogue entry, so that entity's
 catalogue fingerprint changes once. See
 [handwritten fields on a generated object](docs/reference/graphql-orm/macros-and-attributes.md#handwritten-fields-on-a-generated-object).

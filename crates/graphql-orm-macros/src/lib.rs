@@ -588,11 +588,21 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
 /// and it is named by the entity's naming rule unless `#[graphql(name = "...")]`
 /// names it. A method marked `#[graphql(skip)]` stays a plain helper.
 ///
-/// Before a handwritten field resolves, the entity read decision, the row read
-/// decision for its row and the field read decision are asked, in that order.
-/// `#[graphql_orm(read_policy = "key")]` on the method declares the field's
-/// policy key. Generated `Changed` subscriptions refuse the field unless the
-/// method declares `#[graphql_orm(subscribe)]`.
+/// A handwritten field runs the checks a generated column field runs before
+/// its body: it is refused in generated `Changed` subscriptions unless the
+/// method declares `#[graphql_orm(subscribe)]`, and the field read decision is
+/// asked for its row, with the policy key declared by
+/// `#[graphql_orm(read_policy = "key")]` or none. A refusal is the field's
+/// error. A field declared `Option<T>` then resolves to an explicit `null`,
+/// with its key in the response and the error at its path. Any other field
+/// returns the error, and async-graphql leaves its key out of the parent
+/// object, as for a refused non-null generated field. `subscribe` requires a
+/// scalar or enum output type, or an `Option` or list of those.
+///
+/// As with generated column fields, no entity or row decision is asked at the
+/// field. Generated queries, relations, mutations and subscriptions authorize
+/// the row before the object exists. A host resolver that constructs or loads
+/// an entity object itself must authorize it itself.
 ///
 /// The fields are computed: they have no column and take no part in generated
 /// filters, ordering, grouping, aggregates or writes.
@@ -607,8 +617,8 @@ pub fn graphql_object_fields(args: TokenStream, input: TokenStream) -> TokenStre
 /// Implementation detail of [`macro@graphql_object_fields`].
 #[doc(hidden)]
 #[proc_macro]
-pub fn __graphql_object_fields_compose(input: TokenStream) -> TokenStream {
-    match object_fields::compose(input.into()) {
+pub fn __graphql_object_fields_wrap(input: TokenStream) -> TokenStream {
+    match object_fields::wrap(input.into()) {
         Ok(tokens) => TokenStream::from(tokens),
         Err(err) => TokenStream::from(err.to_compile_error()),
     }

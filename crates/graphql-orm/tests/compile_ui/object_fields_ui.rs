@@ -12,4 +12,6 @@ fn handwritten_object_fields_compose_only_with_an_opted_in_generated_object() {
     cases.compile_fail("tests/ui/object_fields_with_complex.rs");
     cases.compile_fail("tests/ui/object_fields_unmounted.rs");
     cases.compile_fail("tests/ui/object_fields_invalid_field.rs");
+    cases.compile_fail("tests/ui/object_fields_subscribe_object.rs");
+    cases.compile_fail("tests/ui/object_fields_unchecked_method.rs");
 }
