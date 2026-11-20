@@ -2,8 +2,12 @@
 #![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
 use graphql_orm::prelude::*;
-use std::process::Command;
 use std::sync::Arc;
+
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
+use owned_postgres::OwnedPostgres;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
@@ -57,115 +61,6 @@ impl graphql_orm::graphql::orm::EntityPolicy<PostgresBackend> for RetentionPolic
     }
 }
 
-struct OwnedPostgres {
-    name: String,
-    admin_url: String,
-    app_url: String,
-}
-
-impl Drop for OwnedPostgres {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "--force", &self.name])
-            .output();
-    }
-}
-
-impl OwnedPostgres {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let suffix = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
-        let name = format!("graphql-orm-retention-{suffix}");
-        let admin_password = format!("admin_{suffix}");
-        let database = format!("retention_{suffix}");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--name",
-                &name,
-                "--memory",
-                "4g",
-                "--memory-swap",
-                "4g",
-                "--publish",
-                "127.0.0.1::5432",
-                "--env",
-                "POSTGRES_USER=retention_admin",
-                "--env",
-                &format!("POSTGRES_PASSWORD={admin_password}"),
-                "--env",
-                &format!("POSTGRES_DB={database}"),
-                "postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to start disposable PostgreSQL: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-
-        // Own cleanup immediately after Docker accepts the container. Every
-        // subsequent `?` path then removes it through `Drop` as well.
-        let mut owned = Self {
-            name,
-            admin_url: String::new(),
-            app_url: String::new(),
-        };
-
-        let mut ready = false;
-        for _ in 0..120 {
-            let status = Command::new("docker")
-                .args(["exec", &owned.name, "pg_isready", "-U", "retention_admin"])
-                .output()?;
-            if status.status.success() {
-                ready = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        if !ready {
-            let logs = Command::new("docker")
-                .args(["logs", &owned.name])
-                .output()?;
-            return Err(format!(
-                "disposable PostgreSQL did not become ready: {}",
-                String::from_utf8_lossy(&logs.stderr)
-            )
-            .into());
-        }
-
-        let port_output = Command::new("docker")
-            .args(["port", &owned.name, "5432/tcp"])
-            .output()?;
-        let ports = String::from_utf8(port_output.stdout)?;
-        let port = ports
-            .lines()
-            .find_map(|line| line.strip_prefix("127.0.0.1:"))
-            .ok_or("docker did not publish PostgreSQL on loopback")?;
-        owned.admin_url =
-            format!("postgres://retention_admin:{admin_password}@127.0.0.1:{port}/{database}");
-        let app_password = format!("app_{suffix}");
-        owned.app_url =
-            format!("postgres://retention_app:{app_password}@127.0.0.1:{port}/{database}");
-        Ok(owned)
-    }
-}
-
-async fn connect_owned_postgres(
-    url: &str,
-) -> Result<graphql_orm::sqlx::PgPool, Box<dyn std::error::Error>> {
-    for _ in 0..40 {
-        match graphql_orm::sqlx::PgPool::connect(url).await {
-            Ok(pool) => return Ok(pool),
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
-        }
-    }
-    Err("disposable PostgreSQL refused connections after readiness".into())
-}
-
 fn create(kind: &str) -> CreateRetainedPgEventInput {
     CreateRetainedPgEventInput {
         kind: kind.to_string(),
@@ -187,17 +82,11 @@ fn kind_filter(kind: &str) -> RetainedPgEventWhereInput {
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_retention_runtime_and_rls_parity()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
-    let admin = connect_owned_postgres(&owned.admin_url).await?;
-    let app_password = owned
-        .app_url
-        .split_once("retention_app:")
-        .and_then(|(_, rest)| rest.split_once('@'))
-        .map(|(password, _)| password)
-        .ok_or("generated app URL")?;
+    let owned = OwnedPostgres::start_postgres_16("retention")?;
+    let admin = graphql_orm::sqlx::PgPool::connect(&owned.url).await?;
+    let app_password = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
     graphql_orm::sqlx::query(&format!(
-        "CREATE ROLE retention_app LOGIN PASSWORD '{}'",
-        app_password.replace('\'', "''")
+        "CREATE ROLE retention_app LOGIN PASSWORD '{app_password}'"
     ))
     .execute(&admin)
     .await?;
@@ -209,9 +98,17 @@ async fn disposable_postgres_retention_runtime_and_rls_parity()
     )
     .execute(&admin)
     .await?;
+    let app_options = admin
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("retention_app")
+        .password(&app_password);
     drop(admin);
 
-    let pool = connect_owned_postgres(&owned.app_url).await?;
+    let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .connect_with(app_options)
+        .await?;
     let mut database =
         Database::<PostgresBackend>::new(pool).with_schema_policy(SchemaPolicy::Managed);
     database.set_entity_policy(RetentionPolicy);
@@ -248,7 +145,7 @@ async fn disposable_postgres_retention_runtime_and_rls_parity()
         .execute(database.pool())
         .await?;
     assert_eq!(ordinary_delete.rows_affected(), 0);
-    let admin = connect_owned_postgres(&owned.admin_url).await?;
+    let admin = graphql_orm::sqlx::PgPool::connect(&owned.url).await?;
     assert!(
         graphql_orm::sqlx::query("DELETE FROM retained_pg_events")
             .execute(&admin)

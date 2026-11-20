@@ -14,9 +14,9 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.186.0
+## Unreleased - ORM/macros 0.187.0
 
-Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01850-to-01860-read-predicate-columns-bound-to-their-row).
+Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01860-to-01870-read-predicate-columns-bound-to-their-row).
 
 - **Fix (authorization): read-predicate columns no longer resolve against an outer row (#796).** `ReadPredicate::column`, `is_null` and `is_not_null` rendered an unqualified column. Several constructs evaluate their target's predicate inside a correlated subquery: relation, `not_related` and closure predicates (the closure CTE on SQLite and PostgreSQL, and the SQL Server walk), generated related-row filters and relation-count orderings. When a column was declared in the entity's metadata but missing from its physical table, for example after schema drift or before a migration was applied, SQLite, PostgreSQL and SQL Server resolved the name against an outer query's table. The policy was then evaluated against another row and could admit it.
 - **Each row has its own alias.** Inside a predicate, "the row this predicate governs" is a value of its own, not text, which each place the predicate is rendered binds:
@@ -45,6 +45,12 @@ Read predicates bind every column they render to their own row ([#796](https://g
   - **Hand-written filters.** Each refusal is tested per dialect, including an alias spelled `'__gom_row_1'` and an alias spelled like the root table; unqualified, delimited and otherwise-qualified columns are refused in every correlated context and accepted at the root.
   - **Others.** PostgreSQL `OwnerId` beside `"OwnerId"`; SQLite `rowid`, `_rowid_` and `oid`, undeclared and declared; three sibling closures under a negation and three nested ones; the count ordering's aliases; the lexer per construct per dialect.
   - **Budget tests** are resized for the longer terms.
+
+## Unreleased - ORM/macros 0.186.0
+
+- Owned PostgreSQL tests wait for the server to accept TCP connections before
+  connecting. Startup reports the container name if readiness exceeds 30 seconds.
+  [#806](https://github.com/Dastari/graphql-orm/issues/806)
 
 ## Unreleased - ORM/macros 0.185.0
 

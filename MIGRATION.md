@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.185.0 to 0.186.0: read-predicate columns bound to their row
+## 0.186.0 to 0.187.0: read-predicate columns bound to their row
 
 Upgrade ORM and macros together. Read predicates now bind every column to
 the row it describes (#796):
@@ -196,6 +196,11 @@ same rows. Hand-written filters are restricted, as described below.
   Placeholder counting now closes a SQLite `[...]` name at its first `]`,
   as SQLite does; it used to read `]]` as an escaped bracket, which only
   SQL Server has. Fragments without `]]` count the same.
+
+## 0.185.0 to 0.186.0: Owned PostgreSQL test readiness
+
+**No action.** Upgrade ORM and macros together. The readiness check runs in the
+owned PostgreSQL test harness. No data migration is needed.
 
 ## 0.183.0 to 0.185.0: SQL Server filtered-index literals
 
