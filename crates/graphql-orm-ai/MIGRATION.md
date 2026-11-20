@@ -49,13 +49,13 @@ The direct runtime dispatch methods (`AiRuntime::dispatch_provider`,
 `stream_provider`, their dynamic-tool variants, `submit_provider_background`)
 are unchanged and send the marker permanently.
 
-## Breaking release (unreleased)
+## 0.150.2 to 0.151.0: breaking release
 
 AI 0.150.2 to 0.151.0. **Action needed.** This is the AI part of the single
-breaking release. Upgrade it together with ORM/macros 0.190.0, operation
+breaking release. Upgrade it together with ORM/macros 0.187.0, operation
 catalogue 0.10.0 and AI tool profiles 0.27.0; the ORM, catalogue and router
 steps are in the root
-[migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release). No GraphQL
 SDL change. Do the steps in this order.
 
 ### 1. Migrate: AI schema module `0.83.0`

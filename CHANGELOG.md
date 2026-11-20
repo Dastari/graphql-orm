@@ -14,11 +14,11 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - breaking release: ORM/macros 0.190.0, operation catalogue 0.10.0, AI tool profiles 0.27.0, AI 0.151.0, backup 0.28.0, router 0.17.0
+## Unreleased - breaking release: ORM/macros 0.187.0, operation catalogue 0.10.0, AI tool profiles 0.27.0, AI 0.151.0, backup 0.28.0, router 0.17.0
 
 Every change that breaks hosts or invalidates stored fingerprints, bindings,
 approvals or sessions ships in this one release. Host steps, in upgrade order,
-are in the [migration guide](MIGRATION.md#breaking-release-unreleased).
+are in the [migration guide](MIGRATION.md#01860-to-01870-breaking-release).
 
 Schema and storage:
 
@@ -68,6 +68,12 @@ Added, opt-in or no action:
 - **Fixed:** `EntitySearchQuery::pagination_config` keeps the client page-offset maximum the search already had; it used to drop it, so a search whose page limits were replaced served any client offset.
 - **Fixed (AI tool profiles, AI):** runtime live key inputs compile under the ORM's default `RuntimeInt64` identities as well as `with_legacy_int_identities()`. A UUID-keyed runtime collection with live subscriptions and a node identity no longer fails every capability catalogue with `InvalidConfiguration`.
 - **Tests:** the 40 trybuild compile-contract binaries of `graphql-orm` are one `compile_ui` test binary with a module each (#508).
+
+## Unreleased - ORM/macros 0.186.0
+
+- Owned PostgreSQL tests wait for the server to accept TCP connections before
+  connecting. Startup reports the container name if readiness exceeds 30 seconds.
+  [#806](https://github.com/Dastari/graphql-orm/issues/806)
 
 ## Unreleased - ORM/macros 0.185.0
 

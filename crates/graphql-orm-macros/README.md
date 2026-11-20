@@ -10,8 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.190.0 is the **breaking release**; see the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
+Version 0.187.0 is the **breaking release**; see the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) for the steps
 in upgrade order. For the macros:
 
 - The 15 `resolver-case-*`, `argument-case-*` and `field-case-*` features are
@@ -32,6 +32,9 @@ in upgrade order. For the macros:
   for `Key`/`Keys` subscribers.
 
 Upgrade ORM and macros together.
+
+Version 0.186.0 aligns with the ORM's
+[owned PostgreSQL test harness fix](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
 
 Version 0.185.0 aligns with the runtime's
 [SQL Server filtered-index fix](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).
