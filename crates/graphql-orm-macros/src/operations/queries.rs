@@ -43,11 +43,11 @@ pub(super) fn filter_read_authorization(
         // One budget per statement: where-input nodes, and the relation
         // policy SQL that relation filters and count orderings add.
         let mut __gom_statement_budget = ::graphql_orm::graphql::orm::RelationFilterBudget::new();
-        if let Some(filter) = where_input.as_mut() {
+        if let ::std::option::Option::Some(filter) = where_input.as_mut() {
             filter.__gom_prepare_read(ctx, 0, &mut __gom_statement_budget).await?;
         }
 
-        if let Some(filter) = where_input.as_ref() {
+        if let ::std::option::Option::Some(filter) = where_input.as_ref() {
             ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
                 db, ctx, ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter),
             ).await?;
@@ -860,7 +860,7 @@ pub(super) fn search(
                 }
                 query = query.default_order();
 
-                let mut generic_conn = query
+                let generic_conn = query
                     .fetch_authorized_connection(db, ctx, auth_context.as_ref(), page)
                     .await?;
 
@@ -1205,7 +1205,6 @@ pub(super) struct RootInput<'a> {
     pub(super) list_requires_scopes: &'a TokenStream,
     pub(super) order_by_input: &'a syn::Ident,
     pub(super) list_scope_enforcement: &'a TokenStream,
-    pub(super) relation_preload_list: &'a TokenStream,
     pub(super) search_query_method: &'a TokenStream,
     pub(super) keyset_graphql_method: &'a TokenStream,
     pub(super) single_operation_description: &'a str,
@@ -1231,7 +1230,6 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
         list_requires_scopes,
         order_by_input,
         list_scope_enforcement,
-        relation_preload_list,
         search_query_method,
         keyset_graphql_method,
         single_operation_description,
@@ -1264,17 +1262,15 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
         ref filter_read_authorization,
         ..
     } = *context;
-    let (query_docs, list_imports, single_imports) = if full_write_surface {
+    let (query_docs, single_imports) = if full_write_surface {
         (
             quote! { /// Generated queries for this entity
             },
-            quote! { use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow}; },
             quote! { use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow}; },
         )
     } else {
         (
             quote! {},
-            quote! { use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery}; },
             quote! { use ::graphql_orm::graphql::orm::EntityQuery; },
         )
     };
@@ -1284,9 +1280,9 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
     // and SQL visibility, before any SQL.
     let order_read_authorization = quote! {
         let mut order_by = order_by;
-        if let Some(orders) = order_by.as_mut() {
+        if let ::std::option::Option::Some(orders) = order_by.as_mut() {
             if orders.len() > ::graphql_orm::graphql::orm::MAX_ORDER_BY_TERMS {
-                return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(
                     ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
             }
             for order in orders.iter_mut() {
@@ -1315,25 +1311,24 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
             async fn list(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
-                #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#order_by_input>>,
-                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
+                #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: ::std::option::Option<::std::vec::Vec<#order_by_input>>,
+                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::std::option::Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
-                #list_imports
+                use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
-                let pool = db.pool();
+                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
@@ -1344,11 +1339,11 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                 #order_read_authorization
                 let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
-                if let Some(ref filter) = where_input {
+                if let ::std::option::Option::Some(ref filter) = where_input {
                     query = query.filter_with_entity_matching(filter);
                 }
 
-                if let Some(ref orders) = order_by {
+                if let ::std::option::Option::Some(ref orders) = order_by {
                     for order in orders {
                         query = query.order_by_with_context(order, ctx)?;
                     }
@@ -1359,7 +1354,7 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                 }
 
                 let visibility = db.read_visibility::<#struct_name>(
-                    Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                    ::std::option::Option::Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 if visibility.requires_residual_checks() {
                     let resolved_page = db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
@@ -1380,43 +1375,39 @@ pub(super) fn root(context: &QueryContext<'_>, input: RootInput<'_>) -> TokenStr
                                 cursor: ::graphql_orm::graphql::pagination::encode_cursor((offset + index) as i64),
                                 node,
                             }
-                        }).collect::<Vec<_>>(),
+                        }).collect(),
                         page_info: ::graphql_orm::graphql::pagination::PageInfo {
                             has_next_page,
                             has_previous_page,
-                            start_cursor: None,
-                            end_cursor: None,
-                            total_count: Some(total),
+                            start_cursor: ::std::option::Option::None,
+                            end_cursor: ::std::option::Option::None,
+                            total_count: ::std::option::Option::Some(total),
                         },
                     };
 
                     generic_conn.page_info.start_cursor = generic_conn.edges.first().map(|edge| edge.cursor.clone());
                     generic_conn.page_info.end_cursor = generic_conn.edges.last().map(|edge| edge.cursor.clone());
 
-                    #relation_preload_list
-
-                    return Ok(#connection_type::from_generic(generic_conn));
+                    return ::std::result::Result::Ok(#connection_type::from_generic(generic_conn));
                 }
 
                 query = query.with_read_visibility(&visibility)?;
                 // Client page semantics: reduce, or refuse when the host opted in,
                 // before the exact host connection read.
-                if let Some(ref p) = page {
-                    let resolved_page = db.client_pagination_config().resolve_client_page(Some(p), true).map_err(|error| error.into_graphql_error())?;
+                if let ::std::option::Option::Some(ref p) = page {
+                    let resolved_page = db.client_pagination_config().resolve_client_page(::std::option::Option::Some(p), true).map_err(|error| error.into_graphql_error())?;
                     query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
                         limit: resolved_page.limit,
-                        offset: Some(resolved_page.offset),
+                        offset: ::std::option::Option::Some(resolved_page.offset),
                     });
                 }
 
-                let mut generic_conn = query
+                let generic_conn = query
                     .fetch_connection_selected_with_auth(db, auth_context.as_ref(), ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
-                #relation_preload_list
-
-                Ok(#connection_type::from_generic(generic_conn))
+                ::std::result::Result::Ok(#connection_type::from_generic(generic_conn))
             }
 
             #search_query_method
@@ -1530,7 +1521,7 @@ pub(super) fn connection(context: &QueryContext<'_>, input: ConnectionInput<'_>)
             #node_docs
             pub node: #struct_name,
             #cursor_docs
-            pub cursor: String,
+            pub cursor: ::std::string::String,
         }
     });
     let connection_object = crate::wrapper_object::wrapper_object(quote! {
@@ -1539,7 +1530,7 @@ pub(super) fn connection(context: &QueryContext<'_>, input: ConnectionInput<'_>)
         #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
         pub struct #connection_type {
             #edges_docs
-            pub edges: Vec<#edge_type>,
+            pub edges: ::std::vec::Vec<#edge_type>,
             #page_info_docs
             #[graphql(name = #page_info_field_name)]
             pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
@@ -1561,7 +1552,7 @@ pub(super) fn connection(context: &QueryContext<'_>, input: ConnectionInput<'_>)
             #empty_docs
             pub fn empty() -> Self {
                 Self {
-                    edges: Vec::new(),
+                    edges: ::std::vec::Vec::new(),
                     page_info: ::graphql_orm::graphql::pagination::PageInfo::default(),
                 }
             }
@@ -1570,3 +1561,6 @@ pub(super) fn connection(context: &QueryContext<'_>, input: ConnectionInput<'_>)
     };
     quote! { #edge_object #connection_object #connection_impl }
 }
+
+#[cfg(test)]
+mod tests;
