@@ -94,6 +94,7 @@ pub struct Post {
 )]
 pub struct Edition {
     #[primary_key]
+    #[sortable]
     #[graphql_orm(auto_generated = false)]
     pub title: String,
     #[primary_key]
