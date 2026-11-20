@@ -740,16 +740,26 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
         (
             first_event["record"]["id"].as_str().unwrap().to_string(),
             first_event["path"][0].as_str().unwrap().to_string(),
+            first_event["action"].as_str().unwrap().to_string(),
         ),
         (
             second_event["record"]["id"].as_str().unwrap().to_string(),
             second_event["path"][0].as_str().unwrap().to_string(),
+            second_event["action"].as_str().unwrap().to_string(),
         ),
     ];
     received.sort();
     let mut expected = vec![
-        (first_record_id.clone(), "sourceRecord".to_string()),
-        (second_record_id.clone(), "targetRecord".to_string()),
+        (
+            first_record_id.clone(),
+            "sourceRecord".to_string(),
+            "UPDATED".to_string(),
+        ),
+        (
+            second_record_id.clone(),
+            "targetRecord".to_string(),
+            "CREATED".to_string(),
+        ),
     ];
     expected.sort();
     assert_eq!(received, expected);
@@ -833,6 +843,68 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
         "propagation emitted an extra event for the same path"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn propagation_action_is_selected_per_hop() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let database = graphql_orm::db::Database::new(setup_pool().await?);
+    let schema = schema(database.clone());
+
+    let mut records = Vec::new();
+    for name in ["Source", "Target"] {
+        let collection =
+            Collection::insert(&database, CreateCollectionInput { name: name.into() }).await?;
+        records.push(
+            Record::insert(
+                &database,
+                CreateRecordInput {
+                    collection_id: collection.id,
+                    title: name.into(),
+                },
+            )
+            .await?,
+        );
+    }
+    let [source, target] = records.as_slice() else {
+        unreachable!("the fixture creates two records");
+    };
+    let mut record = Box::pin(schema.execute_stream(Request::new(format!(
+        r#"subscription {{ recordChanged(key: "{}") {{ action path }} }}"#,
+        source.id,
+    ))));
+    let mut collection = Box::pin(schema.execute_stream(Request::new(format!(
+        r#"subscription {{ collectionChanged(key: "{}") {{ action path }} }}"#,
+        source.collection_id,
+    ))));
+    wait_until_pending(&mut record).await;
+    wait_until_pending(&mut collection).await;
+
+    RecordRelationship::insert(
+        &database,
+        CreateRecordRelationshipInput {
+            source_record_id: source.id,
+            target_record_id: target.id,
+            kind: "related".into(),
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        next_json(&mut record).await,
+        serde_json::json!({"recordChanged": {"action": "UPDATED", "path": ["sourceRecord"]}}),
+    );
+    assert_eq!(
+        next_json(&mut collection).await,
+        serde_json::json!({
+            "collectionChanged": {"action": "CREATED", "path": ["sourceRecord", "collection"]},
+        }),
+    );
     Ok(())
 }
 
@@ -964,7 +1036,6 @@ async fn opted_in_relation_reports_parent_updates() -> Result<(), Box<dyn std::e
             .await
             .is_err()
     );
-    drop(denied);
 
     let deleted = schema
         .execute(Request::new(format!(
@@ -986,6 +1057,7 @@ async fn opted_in_relation_reports_parent_updates() -> Result<(), Box<dyn std::e
     });
     assert_eq!(next_json(&mut all).await, delete_event);
     assert_eq!(next_json(&mut updated).await, delete_event);
+    assert_eq!(next_json(&mut denied).await, delete_event);
     assert!(
         timeout(Duration::from_millis(250), created.next())
             .await
