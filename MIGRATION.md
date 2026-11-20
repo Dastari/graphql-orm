@@ -226,7 +226,10 @@ same rows. Hand-written filters are restricted, as described below.
   is rendered (list, count, aggregate, projection, search, delete and
   write-target statements). The policy and its bind values are kept apart
   from the caller's clauses and values and composed only at render, after
-  the caller's are validated on their own. Before, the lists were flat and
+  the caller's are validated on their own. So after
+  `with_read_visibility`, `EntityQuery::where_clauses` and `values` hold
+  only the caller's own clauses and values, no longer the policy's; read
+  the rendered statement instead (`try_build_delete_sql` and the like). Before, the lists were flat and
   shared: a clause `status = ?` with two values handed its second value to
   the policy's placeholder after it, and on SQLite a caller's `?1` left the
   policy's `?` reading the caller's first argument. PostgreSQL `$N` and SQL
