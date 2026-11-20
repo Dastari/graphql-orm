@@ -976,7 +976,7 @@ pub(super) fn aggregate(
                 .collect()
         }
     } else {
-        quote! { rows.into_iter().map(Into::into).collect() }
+        quote! { rows.into_iter().map(::std::convert::Into::into).collect() }
     };
     let aggregate_row_object = if entity_meta.aggregate_source {
         let object = crate::wrapper_object::wrapper_object(quote! {
@@ -985,12 +985,12 @@ pub(super) fn aggregate(
             #[graphql(name = #aggregate_row_str, rename_fields = #field_case_rule)]
             pub struct #aggregate_row {
                 /// Group keys in requested order.
-                pub groups: Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultValue>,
+                pub groups: ::std::vec::Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultValue>,
                 /// Metrics in requested order.
-                pub metrics: Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultValue>,
+                pub metrics: ::std::vec::Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultValue>,
                 /// Always null. The field's type is the entity this aggregate reads.
                 #[graphql(name = #source_entity_field_name)]
-                pub source_entity: Option<#struct_name>,
+                pub source_entity: ::std::option::Option<#struct_name>,
             }
         });
         quote! {
@@ -998,7 +998,7 @@ pub(super) fn aggregate(
 
             impl ::std::convert::From<::graphql_orm::graphql::orm::GraphqlAggregateResultRow> for #aggregate_row {
                 fn from(row: ::graphql_orm::graphql::orm::GraphqlAggregateResultRow) -> Self {
-                    Self { groups: row.groups, metrics: row.metrics, source_entity: None }
+                    Self { groups: row.groups, metrics: row.metrics, source_entity: ::std::option::Option::None }
                 }
             }
         }
@@ -1016,7 +1016,7 @@ pub(super) fn aggregate(
                 /// Canonical aggregate operator.
                 pub operator: ::graphql_orm::graphql::orm::GraphqlAggregateInputOperator,
                 /// Selected public field. Omit only for row count.
-                pub field: Option<#aggregate_field>,
+                pub field: ::std::option::Option<#aggregate_field>,
             }
         }
     } else {
@@ -1029,11 +1029,11 @@ pub(super) fn aggregate(
             async fn aggregate(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
-                #[graphql(name = #group_by_arg_name, desc = #group_by_arg_description)] group_by: Vec<#aggregate_field>,
-                #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: Vec<#aggregate_metric_input>,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
+                #[graphql(name = #group_by_arg_name, desc = #group_by_arg_description)] group_by: ::std::vec::Vec<#aggregate_field>,
+                #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: ::std::vec::Vec<#aggregate_metric_input>,
                 #[graphql(name = #group_limit_arg_name, desc = #group_limit_arg_description)] group_limit: i32,
-            ) -> ::graphql_orm::async_graphql::Result<Vec<#aggregate_row_type>> {
+            ) -> ::graphql_orm::async_graphql::Result<::std::vec::Vec<#aggregate_row_type>> {
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #aggregate_scope_enforcement
@@ -1041,13 +1041,13 @@ pub(super) fn aggregate(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
                 #filter_read_authorization
                 let mut query = #struct_name::aggregate(db).with_auth(auth_context.as_ref());
-                if let Some(filter) = where_input {
+                if let ::std::option::Option::Some(filter) = where_input {
                     query = query.filter(filter);
                 }
                 for field in group_by {
@@ -1058,12 +1058,12 @@ pub(super) fn aggregate(
                 for metric in metrics {
                     use ::graphql_orm::graphql::orm::GraphqlAggregateInputOperator as Operator;
                     query = match (metric.operator, metric.field) {
-                        (Operator::Count, Some(field)) => query.count(field),
-                        (Operator::Count, None) => query.count_rows(),
-                        (Operator::Min, Some(field)) => query.min(field),
-                        (Operator::Max, Some(field)) => query.max(field),
-                        (Operator::Sum, Some(field)) => query.sum(field),
-                        (_, None) => Err(::graphql_orm::sqlx::Error::Protocol(
+                        (Operator::Count, ::std::option::Option::Some(field)) => query.count(field),
+                        (Operator::Count, ::std::option::Option::None) => query.count_rows(),
+                        (Operator::Min, ::std::option::Option::Some(field)) => query.min(field),
+                        (Operator::Max, ::std::option::Option::Some(field)) => query.max(field),
+                        (Operator::Sum, ::std::option::Option::Some(field)) => query.sum(field),
+                        (_, ::std::option::Option::None) => ::std::result::Result::Err(::graphql_orm::sqlx::Error::Protocol(
                             "aggregate metric field is required for this operator".to_owned()
                         )),
                     }.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -1074,7 +1074,7 @@ pub(super) fn aggregate(
                 let rows = query.fetch_with_graphql_context(ctx).await.map_err(
                     ::graphql_orm::graphql::errors::graphql_error_from_sqlx
                 )?;
-                Ok(#aggregate_rows_value)
+                ::std::result::Result::Ok(#aggregate_rows_value)
             }
         }
     } else {

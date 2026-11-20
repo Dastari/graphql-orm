@@ -63,3 +63,8 @@ async fn search_returns_a_missing_database_error() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn aggregate_returns_a_missing_database_error() {
+    assert_missing_database("missingDatabaseRecordsAggregate(groupBy: [], metrics: [{operator: COUNT}], groupLimit: 1) { metrics { value } }").await;
+}
