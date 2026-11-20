@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.186.0 aligns with the ORM's
+[owned PostgreSQL test harness fix](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
+
 Version 0.185.0 aligns with the runtime's
 [SQL Server filtered-index fix](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).
 Macro output is unchanged.

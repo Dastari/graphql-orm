@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.186.0
+
+- Owned PostgreSQL tests wait for the server to accept TCP connections before
+  connecting. Startup reports the container name if readiness exceeds 30 seconds.
+  [#806](https://github.com/Dastari/graphql-orm/issues/806)
+
 ## Unreleased - ORM/macros 0.185.0
 
 - SQL Server migrations render closed-set filtered-index string values as
