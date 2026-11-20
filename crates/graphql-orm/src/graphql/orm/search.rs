@@ -115,6 +115,10 @@ pub trait SearchableEntity: DatabaseSearchSchema {
     #[doc(hidden)]
     const SEARCH_KEY_IS_BINARY: bool = false;
 
+    /// Helper join key chosen to leave the entity's projected names available.
+    #[doc(hidden)]
+    const SEARCH_KEY_COLUMN: &'static str = "__gom_search_pk";
+
     /// Score column chosen to leave the entity's projected names available.
     #[doc(hidden)]
     const SEARCH_SCORE_COLUMN: &'static str = "__gom_search_score";
@@ -1236,6 +1240,7 @@ where
         let function = postgres_tsquery_function(mode);
         let search_table = search_table_name(index.table_name);
         let helper_alias = self.native_search_helper_alias();
+        let key_column = B::DIALECT.render_identifier(T::SEARCH_KEY_COLUMN);
         let score_column = B::DIALECT.render_identifier(T::SEARCH_SCORE_COLUMN);
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
@@ -1249,11 +1254,11 @@ where
         // particular, entity filters/projections may also use `entity_pk`.
         let mut sql = format!(
             "SELECT {} FROM {} \
-             JOIN (SELECT entity_pk AS __gom_search_pk, \
+             JOIN (SELECT entity_pk AS {key_column}, \
                    CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS {score_column} \
                    FROM {} CROSS JOIN {}('{}', ?) q(query) \
                    WHERE document_vector @@ q.query) {helper_alias} \
-             ON {helper_alias}.__gom_search_pk = {} WHERE 1 = 1",
+             ON {helper_alias}.{key_column} = {} WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             search_table,
@@ -1292,6 +1297,7 @@ where
     ) -> (String, Vec<SqlValue>) {
         let fts_table = sqlite_fts_table_name(index.table_name);
         let helper_alias = self.native_search_helper_alias();
+        let key_column = B::DIALECT.render_identifier(T::SEARCH_KEY_COLUMN);
         let score_column = B::DIALECT.render_identifier(T::SEARCH_SCORE_COLUMN);
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
@@ -1305,10 +1311,10 @@ where
         // entity projections, filters and relation subqueries.
         let mut sql = format!(
             "SELECT {} FROM {} \
-             JOIN (SELECT entity_pk AS __gom_search_pk, \
+             JOIN (SELECT entity_pk AS {key_column}, \
                    bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS {score_column} \
                    FROM {} WHERE {} MATCH ?) {helper_alias} \
-             ON {helper_alias}.__gom_search_pk = {} WHERE 1 = 1",
+             ON {helper_alias}.{key_column} = {} WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             fts_table,

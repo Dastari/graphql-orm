@@ -6073,13 +6073,18 @@ fn generate_entity_tokens(
         }
     };
     let searchable_entity_impl = if has_search {
-        let mut score_column = "__gom_search_score".to_owned();
-        for suffix in 1..=projected_column_names.len() {
-            if !projected_column_names.contains(&score_column) {
-                break;
+        let unused_projection_name = |base: &str| {
+            let mut name = base.to_owned();
+            for suffix in 1..=projected_column_names.len() {
+                if !projected_column_names.contains(&name) {
+                    break;
+                }
+                name = format!("{base}_{suffix}");
             }
-            score_column = format!("__gom_search_score_{suffix}");
-        }
+            name
+        };
+        let key_column = unused_projection_name("__gom_search_pk");
+        let score_column = unused_projection_name("__gom_search_score");
 
         let search_key = if search_pk_is_bytes {
             quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#search_pk_field) }
@@ -6090,6 +6095,7 @@ fn generate_entity_tokens(
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+                const SEARCH_KEY_COLUMN: &'static str = #key_column;
                 const SEARCH_SCORE_COLUMN: &'static str = #score_column;
 
                 fn search_projection() -> &'static [&'static str] {

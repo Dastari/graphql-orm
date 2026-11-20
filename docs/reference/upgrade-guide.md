@@ -72,6 +72,8 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.151.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
 
+- **No action** — the next ORM/macros minor after the breaking release qualifies generated root search filters with the entity table and keeps native search helper columns distinct from entity columns (#799). [Migration](../../MIGRATION.md#next-ormmacros-minor-after-the-breaking-release)
+
 This is the single **breaking release**: every change that breaks hosts or invalidates stored fingerprints, bindings, approvals or sessions. The [migration guide](../../MIGRATION.md#breaking-release-unreleased) has one section for it, in upgrade order; the entry numbers below are that section's.
 
 Part 1, schema and storage:

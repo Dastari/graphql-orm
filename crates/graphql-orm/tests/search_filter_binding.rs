@@ -20,7 +20,10 @@ use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
 // The native helper normally uses the alias `s`.
-#[cfg_attr(not(feature = "mssql"), graphql_entity(table = "s", auth = "none"))]
+#[cfg_attr(
+    not(feature = "mssql"),
+    graphql_entity(table = "s", auth = "none", default_sort = "__gom_search_pk + 0 DESC")
+)]
 #[cfg_attr(
     feature = "mssql",
     graphql_entity(table = "s", auth = "none", schema_policy = "external_writable")
@@ -62,14 +65,16 @@ fn generated_search_sql_keeps_ordinary_filter_operators_and_binds() {
     let dialect = current_backend();
     let table = dialect.render_identifier_path(SearchFilterRecord::TABLE_NAME);
     let (clauses, values) = filter.to_sql_search_conditions(dialect, &table);
-    let expected = match dialect {
-        DatabaseBackend::Sqlite => "s.title = ?",
-        DatabaseBackend::Postgres => "s.title = $1",
-        DatabaseBackend::Mssql => "[s].[title] = @P1",
+    let (expected_search, expected_non_search) = match dialect {
+        DatabaseBackend::Sqlite => ("s.title = ?", "title = ?"),
+        DatabaseBackend::Postgres => ("s.title = $1", "title = $1"),
+        DatabaseBackend::Mssql => ("[s].[title] = @P1", "[title] = @P1"),
         DatabaseBackend::Mysql => unreachable!(),
     };
-    assert_eq!(clauses, [expected]);
-    assert_eq!(values, filter.to_sql_conditions().1);
+    let (non_search_clauses, non_search_values) = filter.to_sql_conditions();
+    assert_eq!(clauses, [expected_search]);
+    assert_eq!(non_search_clauses, [expected_non_search]);
+    assert_eq!(values, non_search_values);
 }
 
 #[tokio::test]
@@ -130,6 +135,23 @@ async fn root_search_filters_bind_to_entity_columns() -> Result<(), Box<dyn std:
     }
 
     let schema = schema_builder(db.clone()).finish();
+    #[cfg(not(feature = "mssql"))]
+    {
+        // Equal search scores leave the entity's default sort to choose the first row.
+        let response = schema
+            .execute(
+                r#"{ searchFilterRecordsSearch(search: {query: "identical"}, page: {limit: 1}) {
+                    edges { node { id } }
+                    pageInfo { totalCount }
+                } }"#,
+            )
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let json = response.data.into_json()?;
+        let result = &json["searchFilterRecordsSearch"];
+        assert_eq!(result["pageInfo"]["totalCount"], 3);
+        assert_eq!(result["edges"][0]["node"]["id"], 7);
+    }
     let response = schema
         .execute(
             r#"{
