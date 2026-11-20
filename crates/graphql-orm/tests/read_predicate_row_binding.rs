@@ -187,6 +187,13 @@ const ADD_FLAG: &str = "ALTER TABLE bind_targets ADD flag INT NULL";
 #[cfg(not(feature = "mssql"))]
 const ADD_FLAG: &str = "ALTER TABLE bind_targets ADD COLUMN flag INT NULL";
 
+#[cfg(feature = "sqlite")]
+const TIMESTAMP: &str = "TEXT";
+#[cfg(feature = "postgres")]
+const TIMESTAMP: &str = "TIMESTAMP";
+#[cfg(feature = "mssql")]
+const TIMESTAMP: &str = "DATETIME2";
+
 const KEYS: &[(&str, &str)] = &[("id", "source_id")];
 const UP: &[(&str, &str)] = &[("up", "id")];
 const SOURCES: [&str; 4] = ["s1", "s2", "s3", "s4"];
@@ -258,6 +265,36 @@ fn shapes() -> Vec<(&'static str, ReadPredicate, &'static [&'static str])> {
     ]
 }
 
+/// The target's policy as a hand-written filter: every column through the
+/// row qualifier, compared with a constant that needs no row.
+#[derive(Clone)]
+struct UnexpiredFlagged;
+impl DatabaseFilter for UnexpiredFlagged {
+    fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+        (
+            vec!["__gom_self.flag = ? AND __gom_self.expires_at > CURRENT_TIMESTAMP".to_owned()],
+            vec![SqlValue::Int(1)],
+        )
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+impl ReadVisibilityFilter for UnexpiredFlagged {
+    fn entity_type_id() -> std::any::TypeId {
+        std::any::TypeId::of::<BindTarget>()
+    }
+    fn backend() -> DatabaseBackend {
+        B::DIALECT
+    }
+    fn table_name() -> Option<&'static str> {
+        Some(BindTarget::TABLE_NAME)
+    }
+}
+
+/// Whether the target's policy is the hand-written [`UnexpiredFlagged`].
+static TARGET_WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The source policy in force: an index into [`shapes`], or `usize::MAX`
 /// for unrestricted sources.
 static SHAPE: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -278,6 +315,9 @@ impl RowPolicy<B> for Policy {
                     Some((_, predicate, _)) => ReadVisibility::Complete(predicate),
                     None => ReadVisibility::Unrestricted,
                 },
+                "BindTarget" if TARGET_WRITTEN.load(Ordering::SeqCst) => {
+                    ReadVisibility::Complete(ReadPredicate::from_filter::<B, _>(&UnexpiredFlagged)?)
+                }
                 "BindTarget" => ReadVisibility::Complete(flag(ReadPredicateOp::Eq, 1)),
                 "BindOwner" => ReadVisibility::Unrestricted,
                 _ => ReadVisibility::CallbackOnly,
@@ -351,7 +391,7 @@ async fn fixture() -> (Database<B>, Owned) {
     for statement in [
         format!("CREATE TABLE bind_sources (id {TEXT} NOT NULL PRIMARY KEY, flag INT NULL)"),
         format!(
-            "CREATE TABLE bind_targets (id {TEXT} NOT NULL PRIMARY KEY, source_id {TEXT} NOT NULL, up {TEXT} NULL)"
+            "CREATE TABLE bind_targets (id {TEXT} NOT NULL PRIMARY KEY, source_id {TEXT} NOT NULL, up {TEXT} NULL, expires_at {TIMESTAMP} NOT NULL DEFAULT '9999-01-01 00:00:00')"
         ),
         "INSERT INTO bind_sources (id, flag) VALUES ('s1', NULL), ('s2', 0), ('s3', 5), ('s4', 1)"
             .to_owned(),
@@ -826,6 +866,17 @@ async fn policy_columns_bind_to_their_own_row() {
         graphql_admitted(&schema, &ordered).await.unwrap(),
         ["s2", "s1", "s3", "s4"]
     );
+
+    // The same two reads with the target's policy written by hand: bound
+    // through the qualifier, it is accepted in the relation's and the
+    // count's subquery and admits the same rows.
+    TARGET_WRITTEN.store(true, Ordering::SeqCst);
+    assert_eq!(graphql_admitted(&schema, &filtered).await.unwrap(), ["s2"]);
+    assert_eq!(
+        graphql_admitted(&schema, &ordered).await.unwrap(),
+        ["s2", "s1", "s3", "s4"]
+    );
+    TARGET_WRITTEN.store(false, Ordering::SeqCst);
 
     drop(schema);
     #[cfg(not(feature = "mssql"))]

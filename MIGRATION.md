@@ -44,29 +44,57 @@ same rows. Hand-written filters are restricted, as described below.
   spelling can capture a name. A filter is refused with
   `AUTHORIZATION_MISCONFIGURED` when a clause holds, outside string
   constants:
-  - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT` or `EXCEPT`, so
-    no subquery and no alias of its own. This also refuses `IS DISTINCT
-    FROM`, `EXTRACT(... FROM ...)` and similar forms: write the comparison
-    another way, or use a generated filter;
+  - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT`, `EXCEPT`,
+    `VALUES` or `TABLE`, so no subquery and no alias of its own. This also
+    refuses `IS DISTINCT FROM`, `EXTRACT(... FROM ...)` and similar forms:
+    write the comparison another way, or use a generated filter;
+  - an unmatched parenthesis or bracket, or a semicolon. Each clause is
+    validated on its own before it is combined, so it can close neither its
+    own group nor the one it is composed into;
   - a comment (`--`, `/* */`, and `#` on MySQL);
   - a PostgreSQL `U&'...'` string or `U&"..."` identifier;
-  - two string constants separated only by whitespace;
+  - two string constants separated only by whitespace, or a string
+    constant beside a dot;
   - a delimited identifier that names the row qualifier or a generated
     alias, such as `"__gom_self"` or `"__gom_row_1"`;
-  - on SQLite, `rowid`, `_rowid_` or `oid`;
+  - a byte-order mark or other non-ASCII whitespace;
+  - on SQL Server, a `#` name;
+  - on SQLite, `rowid`, `_rowid_` or `oid`, and `IN` over anything but a
+    parenthesised list (`x IN t`, or `x IN (f(...))` for a function outside
+    SQLite's common scalar ones);
   - the bare word `__gom_self` with no dot after it, or an unclosed string,
     identifier or dollar quote.
+
+  **Threat model.** Hand-written policy SQL is trusted host code. The ORM
+  guarantees that every clause it accepts is evaluated against exactly the
+  row it governs and cannot change how it composes with other policies, and
+  it refuses any construct its validator cannot classify with certainty.
+  SQL deliberately obfuscated to defeat that classification is outside the
+  guarantee. Known residuals:
+  - SQLite reads the bare words `true` and `false` as a column of that name
+    when the table has one; do not write the bare literals in a policy over
+    such a table.
+  - SQL Server compares identifiers with the catalog's collation. A table
+    whose name differs from a generated alias only by accents or case under
+    that collation, such as `__góm_visibility_1` in an accent-insensitive
+    catalog, is not recognised as reserved; do not name a table that way.
+  - A filter that overrides the macro-only `__gom_row_bound_filter` hook is
+    rendered as generated code and is not validated.
 
   A policy that reads another table uses the structured builders. Before:
 
   ```rust
   // Refused: a subquery in hand-written SQL.
-  struct OwnedByMember;
+  struct OwnedByMember {
+      user: String,
+  }
   impl DatabaseFilter for OwnedByMember {
       fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
           (
-              vec!["EXISTS (SELECT 1 FROM members m WHERE m.team_id = team_id AND m.user_id = ?)"
-                  .to_owned()],
+              vec![
+                  "EXISTS (SELECT 1 FROM members m WHERE m.team_id = records.team_id AND m.user_id = ?)"
+                      .to_owned(),
+              ],
               vec![SqlValue::String(self.user.clone())],
           )
       }
@@ -110,7 +138,12 @@ same rows. Hand-written filters are restricted, as described below.
   column that could resolve against an outer row. Earlier revisions of this
   change documented that as a legacy fallback; it no longer exists. At the
   root of a statement, where no enclosing row exists, an unqualified column
-  is still accepted. The default `to_row_bound_filter_expression` returns
+  is still accepted. Numbers, bound parameters, function calls, `NULL` and
+  the dialect's own constants (`TRUE`/`FALSE` except on SQL Server,
+  `CURRENT_TIMESTAMP`, and `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_USER`,
+  `LOCALTIMESTAMP` where the dialect has them) are not columns, so
+  `__gom_self.expires_at > CURRENT_TIMESTAMP` is bound. The default
+  `to_row_bound_filter_expression` returns
   `to_filter_expression`, so writing the qualifier there is enough.
   Generated where inputs need no change. Bulk writes do not accept
   related-row filters, so write-target selection never evaluates a policy
@@ -132,6 +165,14 @@ same rows. Hand-written filters are restricted, as described below.
   `AUTHORIZATION_MISCONFIGURED` when it is built. Express a long list of
   values on one column as `from_filter` with an `in_list`, which writes the
   qualifier once.
+- **SQLite `rowid`, `_rowid_` and `oid`. Action needed** only if a SQLite
+  entity declares a column with one of those names and a read policy names
+  it. `ReadPredicate::column`, `is_null`, `is_not_null` and relation and
+  closure keys now refuse it with `AUTHORIZATION_MISCONFIGURED`, as
+  hand-written SQL does: every SQLite table has an implicit row id under
+  those names, so if the declared column were missing from the table,
+  SQLite would read the row id instead of failing the statement. Rename the
+  column. Other backends are unchanged.
 - **Table names read-policy SQL generates are reserved. Action needed**
   only if an entity's table is named `__gom_self`, `__gom_row_<n>`,
   `__gom_visibility_<n>`, `__gom_closure_<n>` or `__gom_closure_<n>_<suffix>`
@@ -142,7 +183,7 @@ same rows. Hand-written filters are restricted, as described below.
   error. A hand-built `Entity` over such a table is refused with
   `AUTHORIZATION_MISCONFIGURED` by every read-predicate constructor,
   related-row filter and count ordering, and when a predicate is attached
-  to a statement over it. Rename the table. Any other name, including
+  to a statement over it, projections and aggregates included. Rename the table. Any other name, including
   others that start with `__gom_`, is accepted.
 - **Relation-count ordering alias. Action needed** only if you compare the
   SQL text of a relation-count ordering. The counted rows are now named by

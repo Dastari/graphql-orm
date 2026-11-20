@@ -6763,7 +6763,7 @@ fn generate_entity_tokens(
         impl ::graphql_orm::graphql::orm::ReadVisibilityFilter for #where_input_name {
             fn entity_type_id() -> ::std::any::TypeId { ::std::any::TypeId::of::<#struct_name>() }
             fn backend() -> ::graphql_orm::graphql::orm::DatabaseBackend { <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT }
-            fn row_bound_filter(&self) -> Option<::graphql_orm::graphql::orm::RowBoundFilter> {
+            fn __gom_row_bound_filter(&self) -> Option<::graphql_orm::graphql::orm::RowBoundFilter> {
                 // The filter renders its own conditions for the row it is
                 // given: no row name is substituted into its SQL (#796).
                 let filter = self.clone();

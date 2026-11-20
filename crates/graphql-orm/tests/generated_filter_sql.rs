@@ -113,7 +113,7 @@ fn emitted_sql_and_bind_order_are_pinned() {
             unqualified,
             filter.to_sql_prefilter_conditions(backend)
         ));
-        let bound = filter.row_bound_filter().unwrap().conditions(row);
+        let bound = filter.__gom_row_bound_filter().unwrap().conditions(row);
         row_bound.push_str(&format!("{bound:?}\n"));
         // The row-bound form, which read predicates and related-row
         // filters render (#796), differs only by naming the row and

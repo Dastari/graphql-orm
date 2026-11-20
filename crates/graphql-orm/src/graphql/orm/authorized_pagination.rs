@@ -33,21 +33,48 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// each column for the row they are given, with no row name in their
     /// SQL text (#796).
     ///
+    /// **Threat model.** Hand-written policy SQL is trusted host code. The
+    /// ORM guarantees that every clause it accepts is evaluated against
+    /// exactly the row it governs and cannot change how it composes with
+    /// other policies. It refuses, with `AUTHORIZATION_MISCONFIGURED`, any
+    /// construct its validator cannot classify with certainty. SQL that is
+    /// deliberately obfuscated to defeat that classification is outside the
+    /// guarantee. Known residuals:
+    ///
+    /// - SQLite reads the bare words `true` and `false` as a column of
+    ///   that name when the table has one. Do not write the bare literals
+    ///   in a policy over such a table.
+    /// - SQL Server compares identifiers with the catalog's collation. A
+    ///   table whose name differs from a generated alias only by accents or
+    ///   case under that collation (`__góm_visibility_1` under an
+    ///   accent-insensitive catalog) is not recognised as reserved. Do not
+    ///   name a table that way.
+    /// - A filter that overrides the macro-only `__gom_row_bound_filter`
+    ///   hook is rendered as generated code and is not validated.
+    ///
     /// **What a hand-written filter may hold.** Each clause must be a
     /// single-row boolean expression over the entity's own columns and
-    /// bound parameters. A filter is refused with
+    /// bound parameters. Each clause is validated on its own, before it is
+    /// combined with anything. A filter is refused with
     /// `AUTHORIZATION_MISCONFIGURED` when a clause holds, outside string
     /// constants:
     ///
-    /// - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT` or
-    ///   `EXCEPT`. A policy that reads another table is built with
-    ///   [`ReadPredicate::related`], [`ReadPredicate::not_related`] or the
-    ///   closure constructors, which bind every row structurally;
+    /// - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT`, `EXCEPT`,
+    ///   `VALUES` or `TABLE`. A policy that reads another table is built
+    ///   with [`ReadPredicate::related`], [`ReadPredicate::not_related`] or
+    ///   the closure constructors, which bind every row structurally;
+    /// - an unmatched parenthesis or bracket, or a semicolon, so a clause
+    ///   can close neither its own group nor the one it is composed into;
     /// - a comment, a PostgreSQL `U&'...'` string or `U&"..."` identifier,
-    ///   or two string constants separated only by whitespace;
+    ///   two string constants separated only by whitespace, or a string
+    ///   constant beside a dot;
     /// - a delimited identifier that names the row qualifier or a
     ///   generated alias (`"__gom_self"`, `"__gom_row_1"`, ...);
-    /// - on SQLite, `rowid`, `_rowid_` or `oid`;
+    /// - a byte-order mark or other non-ASCII whitespace;
+    /// - on SQL Server, a `#` name;
+    /// - on SQLite, `rowid`, `_rowid_` or `oid`, and `IN` over anything but
+    ///   a parenthesised list (a table, or a function SQLite could read as
+    ///   table-valued);
     /// - the bare word `__gom_self` with no dot after it, or an unclosed
     ///   string, identifier or dollar quote.
     ///
@@ -67,7 +94,11 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     /// evaluated in a correlated subquery: as a relation, `not_related` or
     /// closure target, and as the policy of an entity that a generated
     /// related-row filter or relation-count ordering targets. There a
-    /// column the table lacks would resolve against an outer row.
+    /// column the table lacks would resolve against an outer row. Numbers,
+    /// bound parameters, function calls, `NULL`, and the dialect's own
+    /// constants (`TRUE`/`FALSE` except on SQL Server, `CURRENT_TIMESTAMP`,
+    /// and `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_USER`, `LOCALTIMESTAMP`
+    /// where the dialect has them) are not columns.
     ///
     /// The SQL is read with the backend's own lexical rules. An ordinary
     /// PostgreSQL string is read with `standard_conforming_strings` on, as
@@ -83,10 +114,15 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
         None
     }
 
-    /// Generated filter support: this filter as a renderer over the row it
-    /// is given. Hand-written filters keep the default.
+    /// Macro-only. The entity derive implements this for generated where
+    /// inputs, whose SQL is trusted generated code: it is rendered for the
+    /// row it is given and is not read by the hand-written validator. A
+    /// hand-written filter must keep the default (`None`), so that its SQL
+    /// is validated wherever a predicate is built from it; overriding this
+    /// is outside the guarantee described on
+    /// [`Self::to_row_bound_filter_expression`].
     #[doc(hidden)]
-    fn row_bound_filter(&self) -> Option<RowBoundFilter> {
+    fn __gom_row_bound_filter(&self) -> Option<RowBoundFilter> {
         None
     }
 }
@@ -425,7 +461,8 @@ fn sql_tokens(backend: DatabaseBackend, sql: &str) -> async_graphql::Result<Vec<
 enum PolicySqlRefusal {
     /// A string, identifier or dollar quote is not closed.
     Unreadable,
-    /// `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT` or `EXCEPT`.
+    /// `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT`, `EXCEPT`,
+    /// `VALUES` or `TABLE`.
     Keyword,
     /// A comment.
     Comment,
@@ -445,6 +482,17 @@ enum PolicySqlRefusal {
     /// A column that is not written through the row qualifier, where the
     /// predicate is evaluated in a correlated subquery.
     UnboundColumn,
+    /// A closing delimiter with no opening one, an opening one left open,
+    /// or a statement separator.
+    Unbalanced,
+    /// A string constant where an identifier stands: beside a dot.
+    StringIdentifier,
+    /// A SQL Server `#` name.
+    TemporaryName,
+    /// On SQLite, `IN` over a table or a table-valued function.
+    TableOperand,
+    /// A byte-order mark or other non-ASCII whitespace outside a string.
+    HiddenWhitespace,
 }
 
 impl PolicySqlRefusal {
@@ -454,7 +502,20 @@ impl PolicySqlRefusal {
                 "hand-written policy SQL holds an unclosed string, identifier or dollar quote"
             }
             Self::Keyword => {
-                "hand-written policy SQL holds SELECT, FROM, JOIN, WITH, UNION, INTERSECT or EXCEPT; use the related, not_related or closure builders to read another table"
+                "hand-written policy SQL holds SELECT, FROM, JOIN, WITH, UNION, INTERSECT, EXCEPT, VALUES or TABLE; use the related, not_related or closure builders to read another table"
+            }
+            Self::Unbalanced => {
+                "hand-written policy SQL holds an unmatched parenthesis or bracket, or a semicolon"
+            }
+            Self::StringIdentifier => {
+                "hand-written policy SQL writes a string constant beside a dot, where an identifier stands"
+            }
+            Self::TemporaryName => "hand-written policy SQL holds a # name",
+            Self::TableOperand => {
+                "hand-written policy SQL uses IN over a table or table-valued function"
+            }
+            Self::HiddenWhitespace => {
+                "hand-written policy SQL holds a byte-order mark or non-ASCII whitespace outside a string"
             }
             Self::Comment => "hand-written policy SQL holds a comment",
             Self::UnicodeEscape => "hand-written policy SQL holds a U& string or identifier",
@@ -525,8 +586,65 @@ fn generated_name(name: &str) -> bool {
 /// references, numbers, parameters and function calls.
 const POLICY_SQL_WORDS: &[&str] = &[
     "all", "and", "any", "as", "between", "case", "cast", "collate", "else", "end", "escape",
-    "false", "glob", "ilike", "in", "is", "isnull", "like", "not", "notnull", "null", "or",
-    "regexp", "similar", "some", "then", "to", "true", "unknown", "when",
+    "glob", "ilike", "in", "is", "isnull", "like", "not", "notnull", "null", "or", "regexp",
+    "similar", "some", "then", "to", "unknown", "when",
+];
+
+/// Whether `word`, in lower case, is a constant of `backend` that needs no
+/// row: a boolean literal where the dialect has one, or a scalar constant
+/// such as `CURRENT_TIMESTAMP`. SQL Server has no `TRUE` or `FALSE`, so
+/// there they would be column names.
+///
+/// Residual: SQLite reads `true` and `false` as a column of that name when
+/// the table in scope has one, so a policy over such a table must not write
+/// the bare literal.
+fn policy_sql_constant(backend: DatabaseBackend, word: &str) -> bool {
+    match word {
+        "true" | "false" => backend != DatabaseBackend::Mssql,
+        "current_timestamp" => true,
+        "current_date" | "current_time" => backend != DatabaseBackend::Mssql,
+        "localtimestamp" | "localtime" | "session_user" => backend == DatabaseBackend::Postgres,
+        "current_user" => matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql),
+        _ => false,
+    }
+}
+
+/// SQLite scalar functions a policy may call directly inside `IN (...)`,
+/// where any other call could be a table-valued function.
+const SQLITE_SCALAR_FUNCTIONS: &[&str] = &[
+    "abs",
+    "cast",
+    "char",
+    "coalesce",
+    "date",
+    "datetime",
+    "format",
+    "hex",
+    "ifnull",
+    "iif",
+    "instr",
+    "julianday",
+    "length",
+    "lower",
+    "ltrim",
+    "max",
+    "min",
+    "nullif",
+    "printf",
+    "quote",
+    "replace",
+    "round",
+    "rtrim",
+    "sign",
+    "strftime",
+    "substr",
+    "substring",
+    "time",
+    "trim",
+    "typeof",
+    "unicode",
+    "unixepoch",
+    "upper",
 ];
 
 /// One clause of a hand-written filter as SQL over the governed row, and
@@ -590,9 +708,23 @@ fn handwritten_sql(
     let mut sql = RowBoundSql::default();
     let mut copied = 0;
     let mut bound = true;
+    // Open parentheses and brackets, so the clause can close neither its
+    // own group nor the group it is composed into.
+    let mut open: Vec<&str> = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         let before = at(index.checked_sub(1));
         let after = at(Some(index + 1));
+        // Whitespace the lexer does not skip would be read as part of a
+        // word here and as a separator by the database.
+        if !matches!(
+            token.kind,
+            SqlTokenKind::StringLiteral | SqlTokenKind::QuotedIdentifier
+        ) && text(token)
+            .chars()
+            .any(|character| character == '\u{feff}' || character.is_whitespace())
+        {
+            return Err(PolicySqlRefusal::HiddenWhitespace);
+        }
         let after_dot = symbol(before, ".");
         // Whether this name is a column of the governed row.
         let of_row = after_dot && qualifier(index.checked_sub(2));
@@ -601,9 +733,39 @@ fn handwritten_sql(
                 let lower = text(token).to_ascii_lowercase();
                 if matches!(
                     lower.as_str(),
-                    "select" | "from" | "join" | "with" | "union" | "intersect" | "except"
+                    "select"
+                        | "from"
+                        | "join"
+                        | "with"
+                        | "union"
+                        | "intersect"
+                        | "except"
+                        | "values"
+                        | "table"
                 ) {
                     return Err(PolicySqlRefusal::Keyword);
+                }
+                if backend == DatabaseBackend::Mssql && lower.starts_with('#') {
+                    return Err(PolicySqlRefusal::TemporaryName);
+                }
+                // SQLite reads `x IN t` and `x IN f(...)` as a table or
+                // table-valued function, and so `x IN (f(...))` for a
+                // function it does not know as scalar.
+                if backend == DatabaseBackend::Sqlite && lower == "in" && !after_dot {
+                    if !symbol(after, "(") {
+                        return Err(PolicySqlRefusal::TableOperand);
+                    }
+                    let operand = at(Some(index + 2));
+                    if operand.is_some_and(|operand| operand.kind == SqlTokenKind::Word)
+                        && symbol(at(Some(index + 3)), "(")
+                        && !operand.is_some_and(|operand| {
+                            SQLITE_SCALAR_FUNCTIONS
+                                .binary_search(&text(operand).to_ascii_lowercase().as_str())
+                                .is_ok()
+                        })
+                    {
+                        return Err(PolicySqlRefusal::TableOperand);
+                    }
                 }
                 if implicit_rowid(&lower) {
                     return Err(PolicySqlRefusal::ImplicitRowid);
@@ -639,18 +801,23 @@ fn handwritten_sql(
                 }
                 let number = lower.as_bytes()[0].is_ascii_digit();
                 let allowed = if after_dot {
-                    // A column of the row, or the fraction of a number.
+                    // A column of the row, or the fraction of a number:
+                    // after its whole part, or with none (`.5`), which no
+                    // name, closing parenthesis or bracket precedes.
                     of_row
                         || (number
-                            && at(index.checked_sub(2)).is_some_and(|whole| {
-                                whole.kind == SqlTokenKind::Word
-                                    && text(whole).as_bytes()[0].is_ascii_digit()
+                            && at(index.checked_sub(2)).is_none_or(|whole| match whole.kind {
+                                SqlTokenKind::Word => text(whole).as_bytes()[0].is_ascii_digit(),
+                                SqlTokenKind::Symbol => !matches!(text(whole), ")" | "]"),
+                                SqlTokenKind::Placeholder => true,
+                                _ => false,
                             }))
                 } else {
                     number
-                        || matches!(lower.as_bytes()[0], b'@' | b':' | b'$' | b'#')
+                        || matches!(lower.as_bytes()[0], b'@' | b':' | b'$')
                         || symbol(after, "(")
                         || POLICY_SQL_WORDS.binary_search(&lower.as_str()).is_ok()
+                        || policy_sql_constant(backend, &lower)
                         || word(before, "as")
                         || word(before, "collate")
                         || (symbol(before, ":") && symbol(at(index.checked_sub(2)), ":"))
@@ -673,15 +840,32 @@ fn handwritten_sql(
                 if after.is_some_and(|next| next.kind == SqlTokenKind::StringLiteral) {
                     return Err(PolicySqlRefusal::StringContinuation);
                 }
-            }
-            SqlTokenKind::Symbol => {
-                // MySQL reads `#` to the end of the line as a comment.
-                if backend == DatabaseBackend::Mysql && text(token) == "#" {
-                    return Err(PolicySqlRefusal::Comment);
+                // A string beside a dot stands where an identifier does:
+                // some dialects read it as a name.
+                if after_dot || symbol(after, ".") {
+                    return Err(PolicySqlRefusal::StringIdentifier);
                 }
             }
+            SqlTokenKind::Symbol => match text(token) {
+                // MySQL reads `#` to the end of the line as a comment.
+                "#" if backend == DatabaseBackend::Mysql => {
+                    return Err(PolicySqlRefusal::Comment);
+                }
+                ";" => return Err(PolicySqlRefusal::Unbalanced),
+                opening @ ("(" | "[") => open.push(opening),
+                closing @ (")" | "]") => {
+                    let opening = if closing == ")" { "(" } else { "[" };
+                    if open.pop() != Some(opening) {
+                        return Err(PolicySqlRefusal::Unbalanced);
+                    }
+                }
+                _ => {}
+            },
             SqlTokenKind::Comment | SqlTokenKind::Placeholder => {}
         }
+    }
+    if !open.is_empty() {
+        return Err(PolicySqlRefusal::Unbalanced);
     }
     sql.push_str(&clause[copied..]);
     Ok((sql, bound))
@@ -727,7 +911,7 @@ fn filter_policy<F: ReadVisibilityFilter>(
     backend: DatabaseBackend,
     filter: &F,
 ) -> async_graphql::Result<(Option<Policy>, bool)> {
-    if let Some(generated) = filter.row_bound_filter() {
+    if let Some(generated) = filter.__gom_row_bound_filter() {
         return Ok((generated.policy(backend), true));
     }
     let mut bound = true;
@@ -891,6 +1075,21 @@ pub struct ReadPredicate {
 /// column to `T`'s row, so any other qualifier is refused rather than
 /// stripped (#782).
 fn validate_column<B: OrmBackend, T: Entity>(column: &str) -> async_graphql::Result<()> {
+    // Every SQLite table has an implicit row id under these names. If a
+    // declared column of that name were missing from the table, SQLite
+    // would read the row id instead of failing the statement.
+    if B::DIALECT == DatabaseBackend::Sqlite
+        && matches!(
+            B::DIALECT
+                .delimited_column_identifier(column)
+                .trim_matches('"')
+                .to_ascii_lowercase()
+                .as_str(),
+            "rowid" | "_rowid_" | "oid"
+        )
+    {
+        return Err(PolicySqlRefusal::ImplicitRowid.into());
+    }
     if T::columns()
         .iter()
         .any(|definition| definition.name == column)
@@ -1547,9 +1746,16 @@ impl ReadPredicate {
         backend: DatabaseBackend,
         table: Option<&'static str>,
         policy: Policy,
+        closures: Option<u32>,
     ) -> async_graphql::Result<Self> {
         let (sql, _) = policy.flatten();
-        let cost = Cost::of(backend, &sql.bind(&root_row(backend, table)))?.check(backend)?;
+        let mut cost = Cost::of(backend, &sql.bind(&root_row(backend, table)))?;
+        // How deep closures nest, where the caller knows it from how the
+        // policy was assembled; otherwise as the rendered text shows it.
+        if let Some(closures) = closures {
+            cost.closures = closures;
+        }
+        let cost = cost.check(backend)?;
         Ok(Self {
             entity,
             backend,
@@ -1733,7 +1939,13 @@ impl ReadPredicate {
         }
         Ok(Self {
             unbound: !bound,
-            ..Self::measured(F::entity_type_id(), B::DIALECT, F::table_name(), policy)?
+            ..Self::measured(
+                F::entity_type_id(),
+                B::DIALECT,
+                F::table_name(),
+                policy,
+                None,
+            )?
         })
     }
 
@@ -2395,16 +2607,27 @@ where
     } else {
         Policy::Or(policies)
     };
+    // The alternatives are generated filters, whose nested relation clauses
+    // are rendered text: their closure depth is read from it. The target's
+    // own policy carries its depth from how it was built.
+    let mut closures = Cost::of(B::DIALECT, &policy.flatten().0.bind(READ_PREDICATE_ROW))?.closures;
     if let Some(target) = visibility.row_predicate() {
         // The target's own policy is evaluated in the relation's subquery.
         if target.unbound {
             return Err(PolicySqlRefusal::UnboundColumn.into());
         }
+        closures = closures.max(target.cost.closures);
         policy = Policy::And(vec![policy, target.policy.clone()]);
     }
     let predicate = ReadPredicate::related::<B, S, T>(
         keys,
-        ReadPredicate::measured(TypeId::of::<T>(), B::DIALECT, Some(T::TABLE_NAME), policy)?,
+        ReadPredicate::measured(
+            TypeId::of::<T>(),
+            B::DIALECT,
+            Some(T::TABLE_NAME),
+            policy,
+            Some(closures),
+        )?,
     )?;
     // Keep anonymous placeholders in this composable fragment. EntityQuery
     // rebases them after preceding scalar/policy binds using B::DIALECT.
@@ -2591,10 +2814,20 @@ impl ReadVisibility {
         // A predicate attached to a statement over `T` names its rows by
         // `T`'s table: a hand-built entity over a generated name is refused
         // here too, whatever built the predicate.
-        if matches!(self, Self::Prefilter(_) | Self::Complete(_)) {
-            ensure_table_name(B::DIALECT, T::TABLE_NAME)?;
-        }
+        self.validate_table(B::DIALECT, T::TABLE_NAME)?;
         self.validate_identity(Some(TypeId::of::<T>()), B::DIALECT)
+    }
+    /// `Err` when a predicate is attached to a statement over `table` and
+    /// the table's own name is one read predicates generate.
+    pub(crate) fn validate_table(
+        &self,
+        backend: DatabaseBackend,
+        table: &str,
+    ) -> async_graphql::Result<()> {
+        if matches!(self, Self::Prefilter(_) | Self::Complete(_)) {
+            ensure_table_name(backend, table)?;
+        }
+        Ok(())
     }
     pub(crate) fn validate_identity(
         &self,
@@ -3786,7 +4019,10 @@ mod predicate_tests {
             for clause in [
                 "__gom_self.a IN (?, ?) OR NOT (__gom_self.b BETWEEN 1 AND 2.5)",
                 "LOWER(__gom_self.a) LIKE ? ESCAPE '\\' AND __gom_self.b IS NULL",
-                "CASE WHEN __gom_self.a > 0 THEN TRUE ELSE FALSE END",
+                "CASE WHEN __gom_self.a > 0 THEN 1 ELSE 0 END = 1",
+                // Constants that need no row, and numbers with no whole part.
+                "__gom_self.expires_at > CURRENT_TIMESTAMP AND __gom_self.a > .5",
+                "__gom_self.a IN (?, ?) AND __gom_self.b IN (LOWER(?), 'x')",
                 "CAST(__gom_self.a AS INTEGER) = 1 AND COALESCE(__gom_self.b, 0) = 0",
                 "1 = 1",
             ] {
@@ -3831,6 +4067,27 @@ mod predicate_tests {
                 ("__gom_self.a = 1 UNION x", PolicySqlRefusal::Keyword),
                 ("__gom_self.a = 1 INTERSECT x", PolicySqlRefusal::Keyword),
                 ("__gom_self.a = 1 EXCEPT x", PolicySqlRefusal::Keyword),
+                ("__gom_self.a = (VALUES (1))", PolicySqlRefusal::Keyword),
+                ("__gom_self.a = (TABLE t)", PolicySqlRefusal::Keyword),
+                // A clause that would close its own group, or the group it
+                // is composed into, or end the statement.
+                ("__gom_self.a = 1) OR (1 = 1", PolicySqlRefusal::Unbalanced),
+                ("__gom_self.a = 1)", PolicySqlRefusal::Unbalanced),
+                ("(__gom_self.a = 1", PolicySqlRefusal::Unbalanced),
+                ("__gom_self.a = 1; x", PolicySqlRefusal::Unbalanced),
+                // A string where an identifier stands.
+                ("'__gom_row_1'.a = 1", PolicySqlRefusal::StringIdentifier),
+                ("__gom_self.'a' = 1", PolicySqlRefusal::StringIdentifier),
+                // Whitespace only the database would read as such.
+                (
+                    "\u{feff}__gom_self.a = 1",
+                    PolicySqlRefusal::HiddenWhitespace,
+                ),
+                ("__gom_self.a\u{a0}= 1", PolicySqlRefusal::HiddenWhitespace),
+                (
+                    "__gom_self.a = 1 AND\u{2003}b = 2",
+                    PolicySqlRefusal::HiddenWhitespace,
+                ),
                 // Comments, closed or not.
                 ("__gom_self.a = 1 /* it's */", PolicySqlRefusal::Comment),
                 (
@@ -3869,6 +4126,71 @@ mod predicate_tests {
                 bind(backend, "__gom_self.a = 'SELECT x FROM y -- z'").map(|(_, bound)| bound),
                 Ok(true),
                 "{backend:?}"
+            );
+        }
+        // Non-ASCII text in a string is text.
+        assert_eq!(
+            bind(Sqlite, "__gom_self.a = '\u{feff}\u{a0}'").map(|(_, bound)| bound),
+            Ok(true)
+        );
+        // `TRUE` and `FALSE` are literals where the dialect has them; on
+        // SQL Server they would be column names.
+        for (backend, bound) in [(Sqlite, true), (Postgres, true), (Mssql, false)] {
+            assert_eq!(
+                bind(backend, "__gom_self.a = TRUE OR __gom_self.b = false").map(|(_, b)| b),
+                Ok(bound),
+                "{backend:?}"
+            );
+        }
+        // Scalar constants, per dialect.
+        for (backend, clause, bound) in [
+            (Mssql, "__gom_self.a = CURRENT_USER", true),
+            (Postgres, "__gom_self.a < LOCALTIMESTAMP", true),
+            (Sqlite, "__gom_self.a = CURRENT_USER", false),
+            (Mssql, "__gom_self.a < CURRENT_DATE", false),
+            (Sqlite, "__gom_self.a < CURRENT_DATE", true),
+        ] {
+            assert_eq!(
+                bind(backend, clause).map(|(_, b)| b),
+                Ok(bound),
+                "{backend:?}: {clause}"
+            );
+        }
+        // A fraction needs a number, not a name, before its dot.
+        assert_eq!(
+            bind(Postgres, "__gom_self.a > f(1).5").map(|(_, b)| b),
+            Ok(false)
+        );
+        // SQL Server `#` names; PostgreSQL unmatched subscripts.
+        for clause in ["#t.a = 1", "__gom_self.a = #b"] {
+            assert_eq!(
+                bind(Mssql, clause),
+                Err(PolicySqlRefusal::TemporaryName),
+                "{clause}"
+            );
+        }
+        for clause in [
+            "__gom_self.t[1 = 1",
+            "__gom_self.t 1] = 1",
+            "(__gom_self.t[1) ]",
+        ] {
+            assert_eq!(
+                bind(Postgres, clause),
+                Err(PolicySqlRefusal::Unbalanced),
+                "{clause}"
+            );
+        }
+        // SQLite: `IN` over a table or a table-valued function.
+        for clause in [
+            "__gom_self.a IN t",
+            "__gom_self.a NOT IN main.t",
+            "__gom_self.a IN (json_each(?))",
+            "__gom_self.a IN (generate_series(1, 9))",
+        ] {
+            assert_eq!(
+                bind(Sqlite, clause),
+                Err(PolicySqlRefusal::TableOperand),
+                "{clause}"
             );
         }
         // PostgreSQL: `U&` strings and identifiers, and an unclosed dollar

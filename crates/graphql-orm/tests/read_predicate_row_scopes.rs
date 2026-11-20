@@ -933,6 +933,16 @@ async fn hand_written_filters_are_single_row_expressions() {
         // String continuation.
         "__gom_self.id <> 'a' 'b'",
         "__gom_self.id <> 'a'\n'b'",
+        // A clause that would close the group it is composed into, or its
+        // own, or end the statement.
+        "__gom_self.score >= 5) OR (1 = 1",
+        "(__gom_self.score >= 5",
+        "__gom_self.score >= 5; DELETE",
+        // A string where an identifier stands.
+        "'named_nodes'.score >= 5",
+        // Other statements' keywords, and whitespace only the database reads.
+        "__gom_self.score IN (VALUES (5))",
+        "__gom_self.score >= 5 AND\u{a0}__gom_self.up IS NULL",
         // Unclosed text.
         "__gom_self.score >= 5 AND __gom_self.id <> 'open",
         "__gom_self.score >= 5 AND \"open = 1",
@@ -940,6 +950,20 @@ async fn hand_written_filters_are_single_row_expressions() {
         misconfigured(ReadPredicate::from_filter::<B, _>(&written::<NamedNode>(
             clause,
         )));
+    }
+    // A malformed clause never reaches a composition: it cannot be built,
+    // so it cannot widen a tenant predicate it would be combined with.
+    let tenant = score_at_least(5);
+    for malformed in ["1 = 1) OR (1 = 1", "1 = 0) OR ((1 = 1"] {
+        for filter in [written::<NamedNode>(malformed)] {
+            let built = ReadPredicate::from_filter::<B, _>(&filter)
+                .and_then(|malformed| tenant.clone().and(malformed));
+            misconfigured(built);
+        }
+        misconfigured(
+            ReadPredicate::from_filter::<B, _>(&unbound::<NamedNode>(malformed))
+                .and_then(|malformed| tenant.clone().and(malformed)),
+        );
     }
     // PostgreSQL: Unicode-escape strings and identifiers.
     for clause in ["__gom_self.id <> U&'\\0061'", "U&\"score\" >= 5"] {
@@ -952,12 +976,16 @@ async fn hand_written_filters_are_single_row_expressions() {
     db.pool().close().await;
 }
 
-/// `oid` is a declared, physical column here (r1: 7, r2: 1), so a policy
-/// may test it. On SQLite an undeclared `rowid`, `_rowid_` or `oid` would
-/// silently name the implicit row id of whatever table is in scope.
+/// Every SQLite table has an implicit row id named `rowid`, `_rowid_` and
+/// `oid`. If a declared column of that name were missing from the table,
+/// SQLite would read the row id instead of failing the statement, so there
+/// the names are not policy columns even when declared. Elsewhere a
+/// declared `oid` (r1: 7, r2: 1) is an ordinary column.
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_implicit_row_ids_are_not_policy_columns() {
+    let sqlite = B::DIALECT == DatabaseBackend::Sqlite;
     for column in ["rowid", "_rowid_", "oid", "ROWID"] {
+        // Undeclared: refused on every backend.
         misconfigured(ReadPredicate::column::<B, NamedNode>(
             column,
             ReadPredicateOp::Eq,
@@ -974,9 +1002,28 @@ async fn sqlite_implicit_row_ids_are_not_policy_columns() {
             "oid" => "__gom_self.\"oid\" = 1",
             _ => "ROWID = 1",
         }));
-        if B::DIALECT == DatabaseBackend::Sqlite {
+        if sqlite {
             misconfigured(written);
         }
+    }
+    // Declared: still refused on SQLite, as a column, a null test and a key.
+    let declared =
+        || ReadPredicate::column::<B, OidRow>("oid", ReadPredicateOp::Eq, SqlValue::Int(7));
+    let keyed = || {
+        ReadPredicate::related::<B, OidRow, OidRow>(
+            &[("oid", "oid")],
+            ReadPredicate::is_not_null::<B, OidRow>("id").unwrap(),
+        )
+    };
+    if sqlite {
+        misconfigured(declared());
+        misconfigured(ReadPredicate::is_not_null::<B, OidRow>("oid"));
+        misconfigured(keyed());
+        misconfigured(ReadPredicate::related_closure::<B, OidRow>(
+            &[("oid", "id")],
+            ReadPredicate::is_not_null::<B, OidRow>("id").unwrap(),
+        ));
+        return;
     }
 
     let (db, _owned) = database().await;
@@ -990,15 +1037,15 @@ async fn sqlite_implicit_row_ids_are_not_policy_columns() {
         "INSERT INTO oid_rows (id, oid) VALUES ('r1', 7), ('r2', 1)",
     )
     .await;
-    let declared =
-        ReadPredicate::column::<B, OidRow>("oid", ReadPredicateOp::Eq, SqlValue::Int(7)).unwrap();
     let related =
-        ReadPredicate::related::<B, OidRow, OidRow>(&[("id", "id")], declared.clone()).unwrap();
-    for predicate in [declared, related] {
+        ReadPredicate::related::<B, OidRow, OidRow>(&[("id", "id")], declared().unwrap()).unwrap();
+    for predicate in [declared().unwrap(), related] {
         let (list, count) = reads::<OidRow>(&db, &predicate, |row| row.id).await;
         assert_eq!(list.unwrap(), ["r1"]);
         assert_eq!(count.unwrap(), 1);
     }
+    let (list, _) = reads::<OidRow>(&db, &keyed().unwrap(), |row| row.id).await;
+    assert_eq!(list.unwrap(), ["r1", "r2"]);
     #[cfg(not(feature = "mssql"))]
     db.pool().close().await;
 }
