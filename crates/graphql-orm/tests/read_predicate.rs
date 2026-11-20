@@ -741,6 +741,64 @@ async fn negation_truth_tables_with_nulls() {
     owner.cleanup().unwrap();
 }
 
+/// A relation whose own key is NULL is UNKNOWN (#770), and that UNKNOWN
+/// propagates through compositions: an outer `not_related`, or the negation
+/// of a closure, over such a target denies rows that the two-valued relation
+/// admitted before the breaking release. These are the compositions where a
+/// policy returns fewer rows than `not_related` did before.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+async fn an_unknown_inner_relation_denies_through_not_related_and_negated_closures() {
+    let (db, mut owner) = negation_fixture().await;
+    // Inner relation, keyed by the nullable secret: "a child of the record
+    // named by my secret has flag 1". Rank 1 has a NULL key (UNKNOWN), rank
+    // 2 a matching child (TRUE), rank 3 only a non-matching one (FALSE) and
+    // rank 4 a NULL-flag child and a non-matching one (UNKNOWN).
+    let inner = || related("secret", flag(1));
+    assert_eq!(visible_ranks(&db, inner()).await, vec![2]);
+    assert_eq!(visible_ranks(&db, not(inner())).await, vec![3]);
+    // Outer relation from a record to the record its secret names.
+    let outer = |target: ReadPredicate| {
+        ReadPredicate::not_related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+            &[("secret", "rank")],
+            target,
+        )
+        .unwrap()
+    };
+    // Rank 2's related record is rank 1, whose inner relation is UNKNOWN:
+    // "no related record can match" is UNKNOWN too, so rank 2 is denied.
+    // The two-valued inner relation read rank 1 as FALSE and admitted rank
+    // 2. Rank 3 relates to rank 2 (TRUE: denied), rank 4 to rank 3 (FALSE:
+    // admitted) and rank 1 has no key (UNKNOWN: denied).
+    assert_eq!(visible_ranks(&db, outer(inner())).await, vec![4]);
+    // The same composition spelled with `related(..).not()`.
+    let spelled = ReadPredicate::related::<DefaultBackend, PredicateRecord, PredicateRecord>(
+        &[("secret", "rank")],
+        inner(),
+    )
+    .unwrap();
+    assert_eq!(visible_ranks(&db, not(spelled)).await, vec![4]);
+    // Its negation is the positive relation: only rank 3, whose related
+    // record (rank 2) matches.
+    assert_eq!(visible_ranks(&db, not(outer(inner()))).await, vec![3]);
+    // A complete `Any` closure whose only row is UNKNOWN stays UNKNOWN
+    // under negation: rank 1 (NULL key, nothing further to reach) was read
+    // as FALSE, and admitted by the negation, when the relation was
+    // two-valued. Every other rank reaches rank 2, where the target is TRUE.
+    assert_eq!(
+        visible_ranks(&db, closure_any(inner())).await,
+        vec![2, 3, 4]
+    );
+    assert_eq!(
+        visible_ranks(&db, not(closure_any(inner()))).await,
+        Vec::<i64>::new()
+    );
+    owner.cleanup().unwrap();
+}
+
 #[tokio::test]
 #[cfg_attr(
     any(feature = "postgres", feature = "mssql"),

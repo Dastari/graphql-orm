@@ -3,7 +3,6 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-17
 last_reviewed: 2026-11-18
 review_by: 2027-02-07
 supersedes: []
@@ -61,6 +60,7 @@ unchanged. A host whose clients need to tell that a refused operation never
 ran may enable it; each error of an operation refused before any subgraph
 request then also carries `extensions.outcome: "refused"`. See
 [refusal outcome](docs/configuration.md#refusal-outcome).
+
 ## 0.16.7 to 0.16.8: operations documentation
 
 **No action.** The operations runbook records the startup hand-off and

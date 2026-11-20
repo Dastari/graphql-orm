@@ -827,20 +827,33 @@ mod portable {
         // closure nesting. A negation runs on every read path, and negating
         // it again is the identity.
         let (wrapped, _) = deepest_wrapped_closure(all(PARENT, passes()));
+        let one_relation = chains(related_to_itself(all(PARENT, passes())));
+        let one_relation_rows = visible(&db, one_relation.clone()).await;
+        assert_eq!(one_relation_rows, vec![1, 2, 5, 6, 7]);
         for (base, expected) in [
             (
                 passes(),
                 vec![1, 2, 4, 5, 6, 7, 8, 10, 200, 201, 202, 203, 205],
             ),
-            (chains(wrapped), vec![1, 2, 5, 6, 7]),
+            (one_relation, one_relation_rows),
         ] {
-            // A relation chain deeper than the CASE limit refuses negation.
-            if let Ok(negated) = base.clone().not() {
-                shapes.push((negated.clone(), None));
-                shapes.push((negated.not().unwrap(), Some(expected)));
-            }
+            // These shapes must negate: the negation runs on every read
+            // path, and negating it again admits the original rows.
+            let negated = base.clone().not().expect("the shape negates");
+            assert_ne!(rendered(&negated), rendered(&base));
+            shapes.push((negated.clone(), None));
+            shapes.push((negated.not().unwrap(), Some(expected)));
             shapes.push((alternations(base).0, None));
         }
+        // The deepest closure-in-relations shape runs as built. Its negation
+        // either builds and runs, or is refused as a misconfiguration (it is
+        // deeper than the CASE limit on SQLite and PostgreSQL).
+        let deepest = chains(wrapped);
+        match deepest.clone().not() {
+            Ok(negated) => shapes.push((negated, None)),
+            Err(error) => misconfigured(Err(error)),
+        }
+        shapes.push((alternations(deepest).0, None));
         for (policy, expected) in shapes {
             let ids = visible(&db, policy.clone()).await;
             if let Some(expected) = &expected {

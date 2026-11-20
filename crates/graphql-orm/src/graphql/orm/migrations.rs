@@ -89,9 +89,15 @@ impl TableIdentifierConflict {
 /// unique constraint are not checked here; if existing rows violate one, the
 /// database rejects that statement and the transactional apply rolls back.
 /// Conditional indexes apply their structured closed-set predicate to the
-/// check. If the plan adds the predicate column, the check is skipped too.
-/// Predicate dependencies are tracked structurally, never inferred from SQL;
-/// an unanalysable predicate must defer to database enforcement at creation.
+/// check, rendered exactly as the `CREATE INDEX` statement renders it (on SQL
+/// Server with Unicode `N'...'` literals), so the check reads the rows the
+/// index will cover. If the plan adds the predicate column, the check is
+/// skipped too. Predicate dependencies are tracked structurally, never
+/// inferred from SQL. An opaque SQL Server catalogue filter, which names no
+/// column, is checked with its validated text; it is not checked, and the
+/// database enforces uniqueness when the index is created, when the same plan
+/// adds any column to the table or the filter fails validation (rendering
+/// then refuses the plan).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniqueIndexDuplicates {
     /// The declared table the index belongs to.
@@ -182,6 +188,21 @@ pub(super) async fn unique_index_duplicates<B: super::OrmBackend>(
         }) {
             continue;
         }
+        // An opaque SQL Server catalogue filter names no column. It is probed
+        // with the same validated text the index is created with. It is not
+        // probed when it fails that validation (the apply refuses the plan
+        // before any DDL), on another backend, or when this plan adds a
+        // column to the table, which the filter may reference.
+        if index.predicate.as_ref().is_some_and(|predicate| {
+            predicate.column.is_empty()
+                && (backend != DatabaseBackend::Mssql
+                    || validate_mssql_step_predicates(step).is_err()
+                    || added_columns
+                        .iter()
+                        .any(|(table, _)| *table == table_name.as_str()))
+        }) {
+            continue;
+        }
         let key = index
             .columns
             .iter()
@@ -192,16 +213,9 @@ pub(super) async fn unique_index_duplicates<B: super::OrmBackend>(
             conditions.extend(key.iter().map(|column| format!("{column} IS NOT NULL")));
         }
         if let Some(predicate) = index.predicate.as_ref() {
-            let values = predicate
-                .values
-                .iter()
-                .map(|value| sql_string_literal(value))
-                .collect::<Vec<_>>()
-                .join(", ");
-            conditions.push(format!(
-                "{} IN ({values})",
-                backend.quote_identifier(predicate.column)
-            ));
+            // The rows the index will cover: the predicate exactly as
+            // `CREATE INDEX` renders it.
+            conditions.push(render_index_predicate(backend, predicate));
         }
         let filter = if conditions.is_empty() {
             String::new()
@@ -2846,6 +2860,38 @@ fn mssql_closed_opaque_filter(filter: &str) -> bool {
     depth == 0
 }
 
+/// The filter of a partial index, as `CREATE INDEX ... WHERE` takes it. The
+/// unique-index duplicate preflight probes with the same text, so it examines
+/// exactly the rows the index will cover.
+fn render_index_predicate(
+    backend: DatabaseBackend,
+    predicate: &super::owned_schema::IndexPredicateRef<'_>,
+) -> String {
+    if backend == DatabaseBackend::Mssql
+        && predicate.column.is_empty()
+        && let [filter] = predicate.values.as_slice()
+    {
+        // Introspection retained the catalog's opaque filter verbatim.
+        return (*filter).to_string();
+    }
+    let values = predicate
+        .values
+        .iter()
+        .map(|value| {
+            if backend == DatabaseBackend::Mssql {
+                render_mssql_index_literal(value)
+            } else {
+                sql_string_literal(value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} IN ({values})",
+        backend.quote_identifier(predicate.column)
+    )
+}
+
 fn render_create_index_statement(
     backend: DatabaseBackend,
     table_name: &str,
@@ -2874,29 +2920,7 @@ fn render_create_index_statement(
         .predicate
         .as_ref()
         .map_or_else(String::new, |predicate| {
-            if backend == DatabaseBackend::Mssql
-                && predicate.column.is_empty()
-                && let [filter] = predicate.values.as_slice()
-            {
-                // Introspection retained the catalog's opaque filter verbatim.
-                return format!(" WHERE {filter}");
-            }
-            let values = predicate
-                .values
-                .iter()
-                .map(|value| {
-                    if backend == DatabaseBackend::Mssql {
-                        render_mssql_index_literal(value)
-                    } else {
-                        sql_string_literal(value)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                " WHERE {} IN ({values})",
-                backend.quote_identifier(predicate.column)
-            )
+            format!(" WHERE {}", render_index_predicate(backend, predicate))
         });
     format!(
         "CREATE {}INDEX {} ON {}{} ({}){}",
@@ -7234,6 +7258,97 @@ impl IntrospectionBackend for super::MssqlBackend {
 
 #[cfg(feature = "mssql")]
 impl RlsIntrospectionBackend for super::MssqlBackend {}
+
+/// The unique-index duplicate preflight on SQL Server. No public apply path
+/// reaches it there yet (SQL Server has no `MigrationBackend`), so these
+/// tests call it directly, on a disposable SQL Server they own.
+#[cfg(all(test, feature = "mssql"))]
+mod mssql_unique_preflight_tests {
+    use super::super::owned_schema::StepRef;
+    use super::{MigrationStep, unique_index_duplicates};
+    use crate::db::mssql::owned_mssql::{OwnedSqlServer, execute_batch};
+    use crate::graphql::orm::{IndexDef, MssqlBackend};
+
+    /// The probe filters with the predicate exactly as `CREATE INDEX` renders
+    /// it. With a plain string literal, a value outside the database code
+    /// page compared as `'??'`, the probe saw no covered row, and duplicates
+    /// reached `CREATE UNIQUE INDEX`. An opaque catalogue filter is probed
+    /// with its validated text, and skipped when it is not valid.
+    #[tokio::test]
+    #[ignore = "requires Docker; owns a disposable loopback SQL Server container"]
+    async fn the_probe_reads_the_rows_the_filtered_index_covers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut server = OwnedSqlServer::start().await?;
+        execute_batch(
+            &server.connection_string,
+            "CREATE TABLE dbo.preflight_items (id int NOT NULL PRIMARY KEY, \
+                 digest nvarchar(40) NOT NULL, state nvarchar(20) NULL); \
+             INSERT INTO dbo.preflight_items VALUES \
+                 (1, N'same', N'状態'), (2, N'same', N'状態'), (3, N'other', N'状態'), \
+                 (4, N'once', N'open'); \
+             IF EXISTS (SELECT 1 FROM dbo.preflight_items WHERE [state] IN ('状態')) \
+                 THROW 50001, 'the database code page represents the test value', 1;",
+        )
+        .await?;
+        let pool = crate::db::mssql::MssqlPool::connect_ado(&server.connection_string).await?;
+        let probe = |index: IndexDef| {
+            let pool = pool.clone();
+            async move {
+                let step = MigrationStep::CreateIndex {
+                    table_name: "dbo.preflight_items".to_owned(),
+                    index,
+                };
+                unique_index_duplicates::<MssqlBackend>(&pool, &[StepRef::from(&step)]).await
+            }
+        };
+        let unique = |column, values| {
+            IndexDef::new("uq_preflight", &["digest"])
+                .unique()
+                .where_in(column, values)
+        };
+
+        // A closed set with a value outside the code page: the duplicates
+        // are found before any DDL, and named by table, index and key only.
+        let found = probe(unique("state", &["状態"]))
+            .await?
+            .expect("duplicates");
+        assert_eq!(found.table, "dbo.preflight_items");
+        assert_eq!(found.index, "uq_preflight");
+        assert_eq!(found.columns, ["digest"]);
+        // A closed set that covers no repeated key.
+        assert!(probe(unique("state", &["open"])).await?.is_none());
+        // An opaque catalogue filter is probed with its own text.
+        assert!(
+            probe(unique("", &["([state]=N'状態' AND [id]<(3))"]))
+                .await?
+                .is_some()
+        );
+        assert!(
+            probe(unique("", &["([state]=N'状態' AND [id]>(1))"]))
+                .await?
+                .is_none()
+        );
+        // An opaque filter that fails validation is never sent to the
+        // server; rendering the plan refuses it.
+        assert!(
+            probe(unique(
+                "",
+                &["([id]>(0)); DROP TABLE dbo.preflight_items; --"]
+            ))
+            .await?
+            .is_none()
+        );
+        execute_batch(
+            &server.connection_string,
+            "IF OBJECT_ID(N'dbo.preflight_items') IS NULL THROW 50002, 'table was dropped', 1; \
+             IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uq_preflight') \
+                 THROW 50003, 'the probe created an index', 1;",
+        )
+        .await?;
+        server.cleanup()?;
+        Ok(())
+    }
+}
 
 #[cfg(all(test, feature = "postgres"))]
 #[allow(dead_code)]

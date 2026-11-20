@@ -853,7 +853,18 @@ fn sql_server_caps_refuse_what_the_server_cannot_run() {
             // and alternations as still build, run.
             let (chain, related) = grow(leaf(), &wrap_step, &|_| true);
             assert_eq!(related as u32, READ_PREDICATE_MSSQL_MAX_RELATION_NESTING);
-            let (negated, _) = grow(chain.clone(), &not_step, &|_| true);
+            // Nine nested relations nest nine CASE expressions when negated,
+            // within SQL Server's limit of ten: the negation must build.
+            let negated = chain
+                .clone()
+                .not()
+                .expect("the deepest relation chain negates");
+            assert_eq!(
+                rendered(&negated)
+                    .matches("IS NOT NULL AND NOT EXISTS (")
+                    .count(),
+                related
+            );
             let (alternated, _) = grow(chain.clone(), &alternate, &|_| true);
             // The default closure inside as many relations as build, then
             // negations.
@@ -861,14 +872,31 @@ fn sql_server_caps_refuse_what_the_server_cannot_run() {
                 ReadPredicate::related_closure::<B, ZrKid>(&[("parent_id", "id")], leaf()).unwrap();
             let (wrapped, around) = grow(closure, &wrap_step, &|_| true);
             assert!(around >= 4, "{around}");
-            let (wrapped_negated, _) = grow(wrapped.clone(), &not_step, &|_| true);
-            for (name, p) in [
+            // A closure inside one relation always negates. The deepest
+            // wrapped closure either negates and runs, or is refused with
+            // the misconfiguration code; it is never silently skipped.
+            let closure_negated = wrap(
+                ReadPredicate::related_closure::<B, ZrKid>(&[("parent_id", "id")], leaf()).unwrap(),
+            )
+            .unwrap()
+            .not()
+            .expect("a closure inside one relation negates");
+            assert!(rendered(&closure_negated).contains("IS NOT NULL AND NOT EXISTS ("));
+            let mut shapes = vec![
                 ("deepest relation chain", chain),
-                ("relation chain and negations", negated),
+                ("relation chain negated", negated),
                 ("relation chain and alternations", alternated),
-                ("closure in relations", wrapped),
-                ("closure in relations and negations", wrapped_negated),
-            ] {
+                ("closure in relations", wrapped.clone()),
+                ("closure in one relation, negated", closure_negated),
+            ];
+            match wrapped.not() {
+                Ok(negated) => shapes.push(("closure in relations, negated", negated)),
+                Err(error) => assert_eq!(
+                    refusal_code(Err(error)),
+                    Some("\"AUTHORIZATION_MISCONFIGURED\"".to_owned())
+                ),
+            }
+            for (name, p) in shapes {
                 let (depth, units_, subqueries) = units(&rendered(&p));
                 eprintln!("{name}: depth {depth} units {units_} subqueries {subqueries}");
                 failures.extend(run(name.to_owned(), p).await);
@@ -1069,6 +1097,108 @@ fn not_related_chains_stop_at_the_case_and_relation_limits() {
             let _keep = owned;
             assert!(failures.is_empty(), "{failures:#?}");
         })
+    });
+}
+
+/// The code of a refused composition.
+fn refusal_code(result: async_graphql::Result<ReadPredicate>) -> Option<String> {
+    result.err().and_then(|error| {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+    })
+}
+
+/// Negation is bounded exactly, with adjacent accepted and refused shapes
+/// (#770): a negated relation nests one `CASE` per relation level, so the
+/// CASE limit of ten is the deepest relation chain that negates on SQLite and
+/// PostgreSQL, where a chain one deeper still builds but refuses `not()`. On
+/// SQL Server the nine-relation limits come first. Every refusal carries
+/// `AUTHORIZATION_MISCONFIGURED`, and every accepted negation renders the
+/// negated SQL it names. Needs no database.
+#[test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+fn negation_limits_are_exact_and_refusals_are_coded() {
+    on_thread(2 << 20, || {
+        let misconfigured = Some("\"AUTHORIZATION_MISCONFIGURED\"".to_owned());
+        let wrap_step = |p: ReadPredicate, _| wrap(p);
+        let not_related_step =
+            |p: ReadPredicate, _| ReadPredicate::not_related::<B, ZrKid, ZrKid>(&[("id", "id")], p);
+        let chain = |levels: usize| build(&[(&wrap_step, levels)]);
+        let cases = |p: &ReadPredicate| rendered(p).matches("CASE WHEN").count();
+        let negated_relation = |p: &ReadPredicate, levels: usize| {
+            let sql = rendered(p);
+            assert_eq!(
+                sql.matches("IS NOT NULL AND NOT EXISTS (").count(),
+                levels,
+                "{sql}"
+            );
+            assert_eq!(cases(p), levels, "{sql}");
+        };
+        assert_eq!(READ_PREDICATE_MAX_CASE_NESTING, 10);
+        if cfg!(feature = "mssql") {
+            // Nine nested relations build and negate; a tenth is refused when
+            // the chain is built.
+            let limit = READ_PREDICATE_MSSQL_MAX_RELATION_NESTING as usize;
+            assert_eq!(limit, 9);
+            let deepest = chain(limit).expect("nine nested relations build");
+            assert_eq!(cases(&deepest), 0);
+            negated_relation(&deepest.not().expect("nine nested relations negate"), limit);
+            assert_eq!(
+                refusal_code(wrap(chain(limit).unwrap())),
+                misconfigured,
+                "a tenth nested relation"
+            );
+        } else {
+            // Ten nested relations negate; eleven build and admit rows, but
+            // their negation is refused.
+            let at_limit = chain(10).expect("ten nested relations build");
+            negated_relation(&at_limit.not().expect("ten nested relations negate"), 10);
+            let over = chain(11).expect("eleven nested relations build");
+            assert_eq!(cases(&over), 0);
+            assert_eq!(refusal_code(over.not()), misconfigured, "eleven negated");
+        }
+        // A `not_related` chain: the deepest that builds, and one more.
+        let levels = if cfg!(feature = "mssql") { 9 } else { 20 };
+        let deepest = build(&[(&not_related_step, levels)]).expect("the deepest chain builds");
+        assert!(rendered(&deepest).contains("IS NOT NULL AND NOT EXISTS ("));
+        assert_eq!(
+            refusal_code(not_related_step(deepest.clone(), 0)),
+            misconfigured,
+            "one more not_related level"
+        );
+        // Negating it back is the relation chain itself.
+        deepest.not().expect("a not_related chain negates back");
+        // A closure inside one relation negates on every backend, and its
+        // negation is the relation's FALSE rows around `NOT (closure)`.
+        let closure =
+            ReadPredicate::related_closure::<B, ZrKid>(&[("parent_id", "id")], leaf()).unwrap();
+        let negated = wrap(closure)
+            .unwrap()
+            .not()
+            .expect("a wrapped closure negates");
+        let sql = rendered(&negated);
+        assert!(sql.contains("IS NOT NULL AND NOT EXISTS ("), "{sql}");
+        assert!(sql.contains("CASE WHEN NOT ("), "{sql}");
+        // A target that renders the deny fallback is refused with the code.
+        let empty = ReadPredicate::from_filter::<B, _>(&ZrKidWhereInput {
+            score: Some(graphql_orm::graphql::filters::IntFilter {
+                in_list: Some(Vec::new()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            refusal_code(wrap(empty.clone()).unwrap().not()),
+            misconfigured
+        );
+        assert_eq!(refusal_code(not_related_step(empty, 0)), misconfigured);
     });
 }
 

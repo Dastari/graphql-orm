@@ -134,7 +134,7 @@ legacy `Int` identities.
 | `EagerExact`, `ProviderDeferred`, `ClientDeferred` bindings | They hash the index-set fingerprint, which the tool-profiles index version 3 changes. This is the same single rebind the fingerprint change (#683) already causes. |
 | Generated query capability fingerprints | Change once with the operation fingerprint algorithm (#683); broker version 2 does not change them again. |
 | Loaded references, discovery cache | Process-local; a selection from before the upgrade is `selection_stale`. |
-| Approvals | Unaffected: mutations do not join the broker. |
+| Approvals | Unaffected by broker version 2: mutations do not join the broker. Approvals bound to an old generated-operation tool fingerprint are stale for #683; see step 2. |
 
 
 1. **Rebind once. Action needed.** Regenerate tool manifests and capability

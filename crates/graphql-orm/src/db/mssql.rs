@@ -2,7 +2,7 @@ mod notifications;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../tests/support/owned_mssql.rs"]
-mod owned_mssql;
+pub(crate) mod owned_mssql;
 mod transport;
 pub use notifications::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,

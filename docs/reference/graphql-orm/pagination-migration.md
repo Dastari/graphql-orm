@@ -232,6 +232,13 @@ policy in Rust.
   breaking release (#770). Before it, the form rendered plain `NOT EXISTS`,
   which admitted a row with a NULL key, or whose related rows all had `P`
   UNKNOWN.
+- Because a relation with a NULL key, or with only UNKNOWN matches, is
+  UNKNOWN and not FALSE, the UNKNOWN propagates through compositions:
+  `not_related(k, related(k2, q))` denies a source row whose related row has
+  a NULL `k2` key, and a negated closure over a relation target denies a row
+  whose closure holds an UNKNOWN and no TRUE. To count a related row with a
+  NULL key as "does not match", write the target as
+  `is_not_null(k2).and(related(k2, q))`.
 - A negated relation nests one `CASE` for each relation level it negates, so
   the `CASE` limit below also bounds negation: a relation chain more than ten
   levels deep builds but cannot be negated, and `not()` refuses it with

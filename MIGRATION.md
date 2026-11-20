@@ -36,16 +36,20 @@ fingerprint.
 | `graphql-orm-router` | 0.17.0 |
 | `graphql-orm-storage`, `graphql-orm-router-protocol` | unchanged |
 
-**How to upgrade in one pass.** The entries are in the order to apply them.
-Every entry in parts 1 to 4 is marked **Action needed** and says who it applies
-to; skip an entry whose condition you do not meet.
+**How to upgrade in one pass.** Every entry in parts 1 to 4 is marked
+**Action needed** and says who it applies to; skip an entry whose condition
+you do not meet. The parts are ordered by what they change. Work in two
+stages: first make the Part 2 code changes, because replanning a migration
+needs a build that compiles against the new release; then, at deployment, run
+Part 1, Part 3 and Part 4 in that order.
 
 1. [Part 1: schema and storage](#part-1-schema-and-storage). Replan pending
    migrations, re-apply the PostgreSQL change-journal recorder, and apply AI
-   schema module `0.83.0`, before any new worker starts.
+   schema module `0.83.0`, with the new build and before any new worker
+   starts.
 2. [Part 2: build configuration and Rust API](#part-2-build-configuration-and-rust-api).
    Make the workspace compile again: naming variables, removed features and
-   APIs, new enum variants and the compile-time page maximum.
+   APIs, new enum variants and the compile-time page maximum. Do this first.
 3. [Part 3: defaults and behaviour](#part-3-defaults-and-behaviour). Review
    each default that changed and either accept it or set the documented
    opt-out, before the first request is served.
@@ -58,8 +62,9 @@ Changes in this release that need no action are listed
 
 ### Part 1: schema and storage
 
-Do these before deploying the new code, or as the first step of the
-deployment. None of them changes generated SDL.
+Do these as the first step of the deployment, with a build that already has
+the Part 2 code changes: planning and applying need the new release. None of
+them changes generated SDL.
 
 #### 1.1 Migration plans: undeclared tables, lossy type changes and integrity removal (#441, #568, #569)
 
@@ -178,18 +183,17 @@ on PostgreSQL. ORM and macros, and the backup ORM adapter.
   (`ChangeJournalCascadeGap::from_error`), `validate_target` reports
   `Unjournaled cascade`, and the recorder install also refuses, from the
   catalog, any such foreign key on a table no schema target declares
-  (including `ON UPDATE` actions). Give the table a single-column primary
-  key, or make the foreign key restrict the delete and delete the rows
-  through the ORM.
+  (including `ON UPDATE` actions). `validate_target` reports the same for
+  live tables, including constraints added outside the ORM after the recorder
+  was installed. Give the table a single-column primary key, journal it, or
+  make the foreign key restrict the delete and delete the rows through the
+  ORM.
 - **Backup adapter.** `OrmBackupAdapter::clear_restore_target` clears a
   PostgreSQL target inside a transaction that turns the journal setting off,
   so it keeps working on journaled databases. No action.
 - SQLite records journal entries from the ORM's own writes and has no
   `TRUNCATE` statement; SQL Server has no change journal. Neither changes.
-- **Action needed.** PostgreSQL `validate_target` now reports cascading foreign
-  keys into unjournaled live tables, including constraints added outside the ORM
-  after recorder installation. Journal those tables or use restrictive FK actions.
-- **Action needed.** never set `graphql_orm.change_journal = off` as a role-level
+- **Action needed.** Never set `graphql_orm.change_journal = off` as a role-level
   or database-level default. The TRUNCATE guard reads the effective
   `current_setting`, so those defaults also disable the guard. Limit the opt-out
   to a trusted restore transaction using `SET LOCAL`, then take a full backup.
@@ -617,7 +621,8 @@ callers see the default message either way
 
 **Action needed** only for row policies that negate
 `ReadPredicate::related(..)`, directly or inside an `and`/`or` tree, for
-example `related(keys, p).not()?`. ORM and macros. No SDL, persistent schema
+example `related(keys, p).not()?`, or that put a relation inside the target of
+a `not_related` or of a negated closure. ORM and macros. No SDL, persistent schema
 or data migration.
 
 `related(keys, target)` is now three-valued. For each source row it is
@@ -626,7 +631,8 @@ UNKNOWN when none does but one has `target` UNKNOWN, and FALSE otherwise.
 
 - Positive uses admit exactly the same rows as before, and render the same
   single correlated `EXISTS (<related rows where target>)`, because only TRUE
-  admits a row.
+  admits a row. This holds for a positive relation or closure over any
+  target that contains no negation.
 - A negation, including one that reaches the relation through `and` or `or`
   under `not()`, renders the rows where the relation is FALSE:
   `<every source key IS NOT NULL> AND NOT EXISTS (<related rows where target
@@ -641,10 +647,35 @@ UNKNOWN when none does but one has `target` UNKNOWN, and FALSE otherwise.
   `ReadPredicate::is_null` (release 0.174.0) also works for keys that are
   private or not filterable.
 - `ReadPredicate::not_related(keys, p)` (release 0.174.0) is now exactly
-  `related(keys, p)?.not()`. It admits the same rows as before and renders the
-  form above instead of a `CASE` over two `EXISTS` probes, binding the
-  target's values once instead of twice. Code that compares its rendered SQL
-  or counts its bind values must be updated.
+  `related(keys, p)?.not()`. It renders the form above instead of a `CASE`
+  over two `EXISTS` probes, binding the target's values once instead of
+  twice. Code that compares its rendered SQL or counts its bind values must
+  be updated. It admits the same rows as before when `p` contains no
+  relation. When `p` itself contains a `related` (or the positive side of a
+  `not_related`), it can admit fewer; see the next item.
+- **Compositions that return fewer rows.** A relation that used to be FALSE
+  for a row with a NULL key, or for a row whose related rows only leave the
+  target UNKNOWN, is now UNKNOWN for that row, and the UNKNOWN propagates
+  outwards. Two compositions that were not negations of a bare `related`
+  therefore change:
+  - nested `not_related`:
+    `not_related(outer_keys, related(inner_keys, q))`. A source row whose
+    related row has a NULL inner key (or only UNKNOWN inner matches) used to
+    be admitted, because that related row counted as "does not match". The
+    related row is now "might match", so the source row is denied. The same
+    holds for `related(outer_keys, related(inner_keys, q)).not()`;
+  - a negated closure over a relation target:
+    `related_closure(keys, related(inner_keys, q)).not()` (and the `All`
+    forms). A closure whose reached rows are FALSE or UNKNOWN, with at least
+    one UNKNOWN, used to be FALSE and was admitted by the negation; it is now
+    UNKNOWN and denied.
+
+  Both fail closed: they can deny a row, never admit one that was denied. To
+  treat a related row with a NULL inner key as "does not match" again, say so
+  on the inner target, where FALSE wins over UNKNOWN:
+  `ReadPredicate::is_not_null::<B, T>("inner_key")?.and(related(inner_keys, q))?`.
+  A related row whose inner matches are only UNKNOWN stays UNKNOWN; decide
+  that case in `q` (for example with `is_null` on the compared column).
 - Double negation is the identity: `p.not()?.not()?` renders `p`, not
   `NOT (NOT (p))`. A policy that cannot be negated is still refused with
   `AUTHORIZATION_MISCONFIGURED`: a predicate that renders the deny fallback
@@ -658,8 +689,10 @@ UNKNOWN when none does but one has `target` UNKNOWN, and FALSE otherwise.
   nested, 9 on SQL Server) could be negated. A `not_related` chain now stops
   at twenty levels instead of five (nine instead of two on SQL Server).
 
-Review each negated relation policy, and add the explicit NULL alternative
-where rows without a relation key should stay visible.
+Review each negated relation policy, each `not_related` whose target contains
+a relation and each negated closure over a relation target, and add the
+explicit NULL alternative where rows without a relation key should stay
+visible.
 
 #### 3.5 Runtime `RecordVersion` and integer live keys are strings (#528)
 
@@ -743,8 +776,12 @@ Host steps:
    `recentMfaRequired` is `true` or a decision returns the recent-MFA error.
 2. If you construct `AiApprovalServiceLimits` with a lifetime above 7 days,
    lower it. Construction now fails with `AiError::InvalidConfiguration`.
-3. Pending `HighImpact` approvals stay valid but need step-up to decide.
-   Tell approvers, or let those approvals expire and request them again.
+3. Pending `HighImpact` approvals of host-defined tools stay valid but need
+   step-up to decide. Tell approvers, or let those approvals expire and
+   request them again. Pending approvals of generated-operation tools are
+   stale after this release whatever their impact, because the tool
+   fingerprint they are bound to changes (4.1); they cannot be consumed and
+   must be requested again.
 
 ### Part 4: fingerprints, bindings, approvals and sessions
 
@@ -753,10 +790,10 @@ all happens once, in this release. In short:
 
 | Stored state | What happens at the upgrade |
 | --- | --- |
-| Operation, catalogue, semantic and router-export fingerprints | Change once for every entity (4.1). Regenerate exports and replace recorded literals |
+| Operation, catalogue and router-export fingerprints | Change once for every entity (4.1). Regenerate exports and replace recorded literals |
 | AI tool manifests | Regenerate; a manifest that names `graphql-orm-sha256-len-v1` is refused as stale (4.1) |
 | Tool bindings, pending approvals of generated-operation tools, durable subscription waits | Stale; let them finish or expire before the upgrade, or request them again afterwards (4.1) |
-| Pending `HighImpact` approvals | Stay valid, but every decision needs recent MFA (3.7) |
+| Pending `HighImpact` approvals | Of host-defined tools: stay valid, but every decision needs recent MFA (3.7). Of generated-operation tools: stale, like every approval bound to an old fingerprint (4.1) |
 | Retained provider sessions, every delivery mode | Rebind once through cleanup-and-rebind (4.1 to 4.3) |
 | Retained fixed-broker sessions | Rebind once, then no longer rebind on catalogue or schema changes (4.2) |
 | Broker definition fingerprints listed by value | Admit the four new ones (4.3) |
@@ -792,7 +829,12 @@ Host steps:
    expire before the upgrade where you can; afterwards request them again.
    Retained provider sessions rebind once through the existing
    cleanup-and-rebind lifecycle.
-4. Replace any fingerprint you compare against a recorded literal.
+4. Replace any fingerprint you compare against a recorded literal. To detect
+   which algorithm produced a fingerprint, read the operation algorithm name
+   (`GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM`, exported as
+   `operation_fingerprint_algorithm`), not the router-export label: that
+   label (`GRAPHQL_ROUTER_EXPORT_FINGERPRINT_ALGORITHM`) keeps its `v1` name
+   although every router-export fingerprint changes.
 5. `stable_type_id` is still accepted on `#[graphql_entity(...)]` and
    `#[repository_entity(...)]`, and still detects two entity groups that
    claim one identity, but it no longer changes any fingerprint. You may
