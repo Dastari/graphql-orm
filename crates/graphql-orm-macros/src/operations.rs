@@ -10840,9 +10840,9 @@ mod composite_keyset_tests {
             "rank desc nulls, partition_key asc, item_no asc",
             "rank desc nulls last ascending, partition_key asc, item_no asc",
         ] {
-            let error = generate_graphql_operations(&entity(order))
-                .err()
-                .expect("malformed keyset order should be rejected");
+            let Err(error) = generate_graphql_operations(&entity(order)) else {
+                panic!("malformed keyset order should be rejected: {order}");
+            };
             assert!(
                 error.to_string().contains("keyset entries must use"),
                 "{error}"
