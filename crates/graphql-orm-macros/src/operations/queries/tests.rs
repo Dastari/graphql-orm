@@ -87,3 +87,10 @@ fn point_resolver_uses_qualified_standard_library_names() {
         assert_resolver(&generated(composite), "get_by_id");
     }
 }
+
+#[test]
+fn keyset_and_scan_resolvers_use_qualified_standard_library_names() {
+    let generated = generated(false);
+    assert_resolver(&generated, "keyset");
+    assert_resolver(&generated, "authorized_scan");
+}

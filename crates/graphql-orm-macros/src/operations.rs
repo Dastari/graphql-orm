@@ -42,7 +42,7 @@ pub(crate) fn runtime_keyset_value(ty: &syn::Type) -> Option<proc_macro2::TokenS
         return None;
     };
     Some(if optional {
-        quote! { match value.as_ref() { Some(value) => #value, None => ::graphql_orm::graphql::pagination::KeysetValue::Null } }
+        quote! { match value.as_ref() { ::std::option::Option::Some(value) => #value, ::std::option::Option::None => ::graphql_orm::graphql::pagination::KeysetValue::Null } }
     } else {
         value
     })
@@ -2094,23 +2094,33 @@ fn generate_graphql_operations_unfiltered(
     let keyset_parts: Option<Vec<queries::KeysetPart>> = if let Some(config) =
         entity_meta.keyset.as_deref()
     {
+        let keyset_span = input
+            .attrs
+            .iter()
+            .find(|attr| {
+                attr.path().is_ident("graphql_entity") || attr.path().is_ident("repository_entity")
+            })
+            .map_or_else(|| struct_name.span(), syn::spanned::Spanned::span);
         let mut parts = Vec::new();
         for raw in config.split(',') {
             let tokens = raw.split_whitespace().collect::<Vec<_>>();
-            if tokens.len() < 2
+            if !matches!(tokens.len(), 2 | 4)
                 || !matches!(tokens[1].to_ascii_lowercase().as_str(), "asc" | "desc")
             {
-                return Err(syn::Error::new_spanned(
-                    struct_name,
+                return Err(syn::Error::new(
+                    keyset_span,
                     "keyset entries must use `field asc|desc [nulls first|last]`",
                 ));
             }
-            let field = fields
+            let (field, ident) = fields
                 .iter()
-                .find(|field| field.ident.as_ref().is_some_and(|ident| ident == tokens[0]))
+                .find_map(|field| {
+                    let ident = field.ident.as_ref()?;
+                    (ident == tokens[0]).then_some((field, ident))
+                })
                 .ok_or_else(|| {
-                    syn::Error::new_spanned(
-                        struct_name,
+                    syn::Error::new(
+                        keyset_span,
                         format!("keyset references unknown field `{}`", tokens[0]),
                     )
                 })?;
@@ -2133,16 +2143,16 @@ fn generate_graphql_operations_unfiltered(
                 {
                     false
                 }
-                Some([]) | None => false,
+                None => false,
                 _ => {
-                    return Err(syn::Error::new_spanned(
-                        field,
+                    return Err(syn::Error::new(
+                        keyset_span,
                         "keyset null ordering must be `nulls first` or `nulls last`",
                     ));
                 }
             };
             parts.push((
-                field.ident.clone().expect("named field"),
+                ident.clone(),
                 field.ty.clone(),
                 meta.db_column
                     .clone()
@@ -2157,8 +2167,8 @@ fn generate_graphql_operations_unfiltered(
                 .zip(&primary_key_fields)
                 .all(|((field, _, _, _, _), key)| field == &key.field_name);
         if !complete_key_suffix {
-            return Err(syn::Error::new_spanned(
-                struct_name,
+            return Err(syn::Error::new(
+                keyset_span,
                 if has_composite_primary_key {
                     "keyset order must end with every primary-key field in declaration order as a unique tiebreaker"
                 } else {
@@ -10822,6 +10832,22 @@ mod composite_keyset_tests {
             let error = generate_graphql_operations(&entity(order)).unwrap_err();
             assert!(
                 error.to_string().contains("every primary-key field"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_or_trailing_keyset_order_tokens_are_rejected() {
+        for order in [
+            "rank desc nulls, partition_key asc, item_no asc",
+            "rank desc nulls last ascending, partition_key asc, item_no asc",
+        ] {
+            let error = generate_graphql_operations(&entity(order))
+                .err()
+                .expect("malformed keyset order should be rejected");
+            assert!(
+                error.to_string().contains("keyset entries must use"),
                 "{error}"
             );
         }

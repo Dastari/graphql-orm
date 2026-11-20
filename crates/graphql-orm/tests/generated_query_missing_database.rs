@@ -47,3 +47,11 @@ async fn point_read_returns_a_missing_database_error() {
 async fn list_returns_a_missing_database_error() {
     assert_missing_database("missingDatabaseRecords { edges { cursor } }").await;
 }
+
+#[tokio::test]
+async fn keyset_and_scan_return_missing_database_errors() {
+    assert_missing_database("missingDatabaseRecordsKeyset(page: {limit: 1}) { edges { cursor } }")
+        .await;
+    assert_missing_database("missingDatabaseRecordsScan(page: {limit: 1}) { pageInfo { status } }")
+        .await;
+}
