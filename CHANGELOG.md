@@ -14,6 +14,10 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - next ORM/macros minor after the breaking release
+
+- **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation to report child creates and deletes as `UPDATED` in the parent's `Changed` subscription and action filter.
+
 ## Unreleased - breaking release: ORM/macros 0.190.0, operation catalogue 0.10.0, AI tool profiles 0.27.0, AI 0.151.0, backup 0.28.0, router 0.17.0
 
 Every change that breaks hosts or invalidates stored fingerprints, bindings,

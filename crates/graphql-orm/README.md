@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+The next ORM/macros minor after the breaking release adds
+`propagate_change_action = "updated"` for upward relations. See the
+[relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
+
 Version 0.190.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the

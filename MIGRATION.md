@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## Next ORM/macros minor after the breaking release
+
+**No action.** Relations continue to use the source mutation's action by
+default. To report child creates and deletes as `UPDATED` on a surviving
+parent, set `propagate_change_action = "updated"` on the relation alongside
+`propagate_change = "up"` and use `UPDATED` in the parent's subscription filter.
+
 ## Breaking release (unreleased)
 
 This release collects every change that breaks hosts or invalidates stored
