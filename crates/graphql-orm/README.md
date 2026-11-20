@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.190.0 is the **breaking release**: every change that breaks hosts or
+Version 0.187.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) lists the
 steps in upgrade order. In short:
 
 - **Schema and storage.** Migration plans no longer drop tables the target

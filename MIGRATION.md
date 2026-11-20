@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## Breaking release (unreleased)
+## 0.186.0 to 0.187.0: breaking release
 
 This release collects every change that breaks hosts or invalidates stored
 fingerprints, bindings, approvals or sessions. It is the only breaking release
@@ -28,7 +28,7 @@ fingerprint.
 
 | Package | Version in this release |
 | --- | --- |
-| `graphql-orm`, `graphql-orm-macros` | 0.190.0 |
+| `graphql-orm`, `graphql-orm-macros` | 0.187.0 |
 | `graphql-orm-operation-catalog` | 0.10.0 |
 | `graphql-orm-ai-tool-profiles` | 0.27.0 |
 | `graphql-orm-ai` (AI schema module `0.83.0`) | 0.151.0 |
@@ -264,7 +264,7 @@ drops that index and creates the current composite one, and the drop is now
 `Destructive` (entry 1.1). Pass the plan's options through
 `AiSchemaModule::admit_index_replacements(&plan, options)`, which admits
 destructive steps only when every one is that known index replacement. See the
-[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased).
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release).
 
 ### Part 2: build configuration and Rust API
 
@@ -517,7 +517,7 @@ wildcard-free matches on `PruneResult`, `DeleteSnapshotResult` and
 `BackupError` of `graphql-orm-backup`. All three are now `#[non_exhaustive]`,
 the results gain `deleted_snapshot_ids`, and an unadmitted snapshot is refused
 with `BackupError::SnapshotNotAdmitted`. See the
-[backup migration guide](crates/graphql-orm-backup/MIGRATION.md#breaking-release-unreleased).
+[backup migration guide](crates/graphql-orm-backup/MIGRATION.md#0272-to-0280-breaking-release).
 
 ### Part 3: defaults and behaviour
 
@@ -742,7 +742,7 @@ on an `@interfaceObject` type.
   protected selection into its own operation; the router does not null a
   refused field.
 - Keep subgraph guards and policies: the router check grants nothing.
-See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#breaking-release-unreleased).
+See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release).
 Anonymous development mode is unchanged.
 
 Releases before this one never enforced SDL `@authenticated` or
@@ -943,9 +943,9 @@ Host steps:
    rebinds retained sessions, so decide before the upgrade's single rebind.
 4. Update exhaustive matches and struct literals, and any model guidance that
    names `planSchema`. Details: the
-   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
+   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
    and the
-   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#breaking-release-unreleased).
+   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0261-to-0270-breaking-release).
 
 ### Also in this release: no action
 
@@ -986,7 +986,7 @@ router refused before sending any subgraph request carries
 `extensions.outcome: "refused"`, the value generated services send with
 `DatabaseBuilder::mutation_error_outcome(true)`, so a client handles both the
 same way. An absent `outcome` still means unknown. See the
-[router migration guide](crates/graphql-orm-router/MIGRATION.md#breaking-release-unreleased)
+[router migration guide](crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release)
 and the [shared vocabulary](docs/reference/graphql-orm/error-codes.md#router-refusal-outcome).
 
 #### Key-only delete signals per entity (#666)

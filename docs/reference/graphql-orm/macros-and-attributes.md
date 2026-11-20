@@ -1047,7 +1047,7 @@ Changing a variable rebuilds the two crates. `graphql-orm-ai` reads
 These variables replaced the mutually exclusive `resolver-case-*`,
 `argument-case-*` and `field-case-*` Cargo features (#508). Features must be
 additive, and two dependants enabling different case features failed to
-compile; see the [migration guide](../../../MIGRATION.md#breaking-release-unreleased).
+compile; see the [migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).
 
 ## Further reading
 
@@ -1488,4 +1488,4 @@ qualifier changes fingerprints even if it names the same type. Prefer imported
 bare names, retain their spelling across modules/crates, and compare
 `catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
 or your catalogue accessor). See the
-[migration guide](../../../MIGRATION.md#breaking-release-unreleased).
+[migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).

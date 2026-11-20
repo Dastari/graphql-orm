@@ -10,8 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.190.0 is the **breaking release**; see the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
+Version 0.187.0 is the **breaking release**; see the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) for the steps
 in upgrade order. For the macros:
 
 - The 15 `resolver-case-*`, `argument-case-*` and `field-case-*` features are
