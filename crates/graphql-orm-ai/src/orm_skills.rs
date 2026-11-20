@@ -1250,10 +1250,16 @@ fn from_value<T: for<'de> Deserialize<'de>>(
 }
 
 fn map_protection(error: crate::ContentProtectionError) -> AiError {
-    match error {
-        crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
-        _ => AiError::PersistenceFailed,
-    }
+    use crate::ContentProtectionError;
+
+    let code = match error {
+        ContentProtectionError::PolicyNotReady => return AiError::RuntimeNotReady,
+        ContentProtectionError::KeyUnavailable => "key_unavailable",
+        ContentProtectionError::ValidationFailed => "validation_failed",
+        ContentProtectionError::Unsupported => "unsupported",
+    };
+    tracing::debug!(code, "AI skill content protection failed");
+    AiError::PersistenceFailed
 }
 
 fn hide_inaccessible_id(error: AiError) -> AiError {
@@ -1298,5 +1304,85 @@ mod schema_bound_tests {
             // A version stored before the bounds existed is still readable.
             assert!(validate_schema(&rejected, "stored skill input").is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod protection_diagnostic_tests {
+    use super::*;
+    use crate::ContentProtectionError;
+    use std::sync::{Arc, Mutex};
+
+    type EventFields = Vec<(String, String)>;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<EventFields>>>);
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            #[derive(Default)]
+            struct Fields(Vec<(String, String)>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push((field.name().to_owned(), format!("{value:?}")));
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.push((field.name().to_owned(), value.to_owned()));
+                }
+            }
+
+            assert_eq!(*event.metadata().level(), tracing::Level::DEBUG);
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            fields.0.sort_unstable();
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    #[test]
+    fn skill_protection_diagnostics_keep_only_fixed_codes() {
+        let capture = Capture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            assert!(matches!(
+                map_protection(ContentProtectionError::PolicyNotReady),
+                AiError::RuntimeNotReady
+            ));
+            for error in [
+                ContentProtectionError::KeyUnavailable,
+                ContentProtectionError::ValidationFailed,
+                ContentProtectionError::Unsupported,
+            ] {
+                assert!(matches!(map_protection(error), AiError::PersistenceFailed));
+            }
+        });
+
+        let expected = ["key_unavailable", "validation_failed", "unsupported"].map(|code| {
+            vec![
+                ("code".to_owned(), code.to_owned()),
+                (
+                    "message".to_owned(),
+                    "AI skill content protection failed".to_owned(),
+                ),
+            ]
+        });
+        assert_eq!(*capture.0.lock().unwrap(), expected);
     }
 }

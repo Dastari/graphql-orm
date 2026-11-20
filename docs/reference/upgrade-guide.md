@@ -118,6 +118,11 @@ Also unreleased on main, before the breaking release:
 
 - **Action needed** — ORM/macros 0.185.0: if you compare generated SQL Server filtered-index DDL, update expected string literals to include the `N` prefix, even for ASCII values. [Migration](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
 
+Following the breaking release:
+
+- **No action** — AI tool profiles 0.28.0: replayable subscriptions reuse compiled plan and condition validators (#543). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0280-subscription-validator-reuse)
+- **No action** — AI 0.152.0: skill content protection emits fixed debug reason codes (#543). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-skill-content-protection-diagnostics)
+
 ### workspace-2026.11.19.2
 
 Commit `3e9c34a5fcc9` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.19.2)

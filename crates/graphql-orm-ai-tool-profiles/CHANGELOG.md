@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.28.0 (next minor after the breaking release)
+
+- Replayable subscriptions reuse compiled plan and condition validators
+  across closed and compact plans. Plan schemas, accepted conditions and
+  fingerprints retain their existing contracts (#543).
+
 ## Unreleased - 0.27.0 (breaking release)
 
 The tool-profiles part of the single breaking release, with operation catalogue

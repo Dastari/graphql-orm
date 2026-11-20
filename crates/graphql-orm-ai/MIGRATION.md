@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.152.0 skill content protection diagnostics
+
+**No action.** At debug level, the skill service emits an
+`AI skill content protection failed` event with a `code` of
+`key_unavailable`, `validation_failed` or `unsupported`. Each event contains
+only that fixed message and code. The service still returns the same public
+errors. Stored skill versions continue to use the existing read validation,
+including versions published before the new-schema depth and pattern bounds.
+No schema or data migration is needed.
+
 ## Breaking release (unreleased)
 
 AI 0.150.2 to 0.151.0. **Action needed.** This is the AI part of the single
