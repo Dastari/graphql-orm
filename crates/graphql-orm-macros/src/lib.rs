@@ -196,6 +196,7 @@ mod entity;
 mod federation;
 mod mutation_result;
 mod naming;
+mod object_fields;
 mod operations;
 mod policy_object;
 mod relations;
@@ -574,6 +575,43 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         impl ::graphql_orm::graphql::orm::GeneratedComplexObjectMounted for #self_ty {}
     }
     .into()
+}
+
+#[proc_macro_attribute]
+/// Add handwritten resolver fields to the GraphQL object `GraphQLEntity` generates.
+///
+/// Mark the entity with `#[graphql_orm(object_fields)]` and apply this to one
+/// inherent `impl` of it, in the entity's module. Each `async fn` taking
+/// `&self` and returning `async_graphql::Result<T>` becomes a field of the
+/// generated object, beside the generated column fields, `NodeId` and
+/// `RecordVersion`, which are unchanged. Its doc comment is its description,
+/// and it is named by the entity's naming rule unless `#[graphql(name = "...")]`
+/// names it. A method marked `#[graphql(skip)]` stays a plain helper.
+///
+/// Before a handwritten field resolves, the entity read decision, the row read
+/// decision for its row and the field read decision are asked, in that order.
+/// `#[graphql_orm(read_policy = "key")]` on the method declares the field's
+/// policy key. Generated `Changed` subscriptions refuse the field unless the
+/// method declares `#[graphql_orm(subscribe)]`.
+///
+/// The fields are computed: they have no column and take no part in generated
+/// filters, ordering, grouping, aggregates or writes.
+pub fn graphql_object_fields(args: TokenStream, input: TokenStream) -> TokenStream {
+    let item_impl = parse_macro_input!(input as syn::ItemImpl);
+    match object_fields::attribute(args.into(), item_impl) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(err) => TokenStream::from(err.to_compile_error()),
+    }
+}
+
+/// Implementation detail of [`macro@graphql_object_fields`].
+#[doc(hidden)]
+#[proc_macro]
+pub fn __graphql_object_fields_compose(input: TokenStream) -> TokenStream {
+    match object_fields::compose(input.into()) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(err) => TokenStream::from(err.to_compile_error()),
+    }
 }
 
 #[proc_macro_derive(

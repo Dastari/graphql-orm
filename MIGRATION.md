@@ -10,6 +10,26 @@ supersedes: []
 
 # Migration Guide
 
+## Next ORM/macros minor after the breaking release: handwritten fields on generated objects
+
+**No action.** Upgrade ORM and macros together. Nothing changes for an entity
+that does not declare `#[graphql_orm(object_fields)]`: its SDL, catalogues and
+fingerprints are byte-identical. `Entity` gains the provided method
+`computed_object_fields()`, which handwritten `Entity` implementations inherit.
+
+To move an entity off the `SimpleObject` + `#[graphql(complex)]` +
+`graphql_policy_object` workaround for a computed field, restore the plain
+`GraphQLEntity` derive, add `#[graphql_orm(object_fields)]`, and replace
+`#[ComplexObject]` (or `#[graphql_complex_object]`) on the impl with
+`#[graphql_orm::graphql_object_fields]`. Each handwritten resolver must then
+return `async_graphql::Result<T>`. Compare the SDL afterwards: descriptions
+come from `#[graphql_orm(description = "…")]` and doc comments again, and
+handwritten fields are named by the entity's naming rule unless
+`#[graphql(name = "…")]` names them. Declaring `object_fields` adds the
+handwritten fields to the entity's semantic catalogue entry, so that entity's
+catalogue fingerprint changes once. See
+[handwritten fields on a generated object](docs/reference/graphql-orm/macros-and-attributes.md#handwritten-fields-on-a-generated-object).
+
 ## Breaking release (unreleased)
 
 This release collects every change that breaks hosts or invalidates stored

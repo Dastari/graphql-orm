@@ -816,7 +816,7 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
             &selected.node.selection_set.node,
         ) {
             let name = persisted_field_name::<T>(field.node.name.node.as_str());
-            if name == "__typename" {
+            if name == "__typename" || subscribable_computed_field::<T>(name).is_some() {
                 continue;
             }
             if !field.node.selection_set.node.items.is_empty()
@@ -835,9 +835,21 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
     Ok(())
 }
 
-// Only a generated NodeId opts into this path; arbitrary computed fields remain refused.
+// Only a generated NodeId opts into this path. A handwritten object field is
+// admitted separately, and only when it declares `subscribe`.
 fn is_node_identity<T: Entity>(name: &str) -> bool {
     name == "NodeId" && T::subscription_field_policy(name) == Some(("__gom_node_id", true, None))
+}
+
+/// The handwritten object field of this name that declares itself available
+/// in subscriptions. A generated field of the same name cannot exist: the
+/// macro refuses the collision.
+fn subscribable_computed_field<T: Entity>(
+    name: &str,
+) -> Option<&'static crate::graphql::orm::ComputedObjectFieldDef> {
+    T::computed_object_fields()
+        .iter()
+        .find(|field| field.api_name == name && field.subscribe)
 }
 
 fn subscription_keys_available<T: Entity, B: OrmBackend>() -> bool {
@@ -866,7 +878,9 @@ pub(crate) fn changed_stream_carried_fields<T: Entity, B: OrmBackend>() -> (Vec<
                 .filter(|field| field.selectable && field.relationship.is_none())
                 .filter(|field| {
                     let name = persisted_field_name::<T>(&field.field_name);
-                    if is_node_identity::<T>(name) {
+                    if subscribable_computed_field::<T>(name).is_some() {
+                        true
+                    } else if is_node_identity::<T>(name) {
                         identity
                     } else {
                         T::columns().iter().any(|column| column.api_name == name)
@@ -920,6 +934,18 @@ where
                     continue;
                 }
                 let scalar_ctx = field_ctx.with_field(scalar);
+                // A handwritten field is proved by the decisions its resolver
+                // repeats: entity, row, then the field with its declared key.
+                // What it returns below that is the resolver's own.
+                if let Some(computed) = subscribable_computed_field::<T>(name) {
+                    crate::graphql::orm::authorize_computed_object_field::<T, B>(
+                        &scalar_ctx,
+                        row,
+                        computed,
+                    )
+                    .await?;
+                    continue;
+                }
                 if is_node_identity::<T>(name) {
                     if !scalar.node.selection_set.node.items.is_empty() {
                         return Err(OrmPublicError::forbidden().into_graphql_error());

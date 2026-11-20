@@ -94,8 +94,9 @@ entity name:
 `carried_fields` lists, in the entity's field order, exactly the fields the
 subscribe-time selection check admits under the event's entity field: the
 persisted scalar fields that are public, readable and not `subscribe = false`,
-and generated identity fields such as `NodeId` where the semantic catalogue
-lists them. The list is
+handwritten fields of a generated object that declare
+`#[graphql_orm(subscribe)]`, and generated identity fields such as `NodeId`
+where the semantic catalogue lists them. The list is
 computed by the same rules as that check, so the two cannot differ. Selecting
 any other field (a relation, a computed field, a `subscribe = false` field)
 refuses the whole stream, with `INVALID_INPUT`, or with

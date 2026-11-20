@@ -788,6 +788,7 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `RepositoryEntity` | typed repository CRUD and private projections with no GraphQL surface |
 | `GraphQLRelations` | batched single/composite-key relation resolvers |
 | `graphql_complex_object` | handwritten complex fields composed with generated relations |
+| `graphql_object_fields` | handwritten resolver fields added to the object `GraphQLEntity` generates, with `#[graphql_orm(object_fields)]` |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
 | `graphql_orm_custom_operations` | semantic metadata beside a handwritten root impl, plus its enforced authorization and assurance guards |

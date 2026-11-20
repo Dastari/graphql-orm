@@ -14,6 +14,23 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros: next ORM/macros minor after the breaking release
+
+- **Added:** a `GraphQLEntity`-generated object can host handwritten resolver
+  fields. Mark the entity `#[graphql_orm(object_fields)]` and put
+  `#[graphql_orm::graphql_object_fields]` on one inherent impl of it. The
+  generated column fields, descriptions, `RecordVersion` and `NodeId` are
+  unchanged; the handwritten fields follow them in the same object. Each
+  handwritten field asks the entity, row and field read decisions before its
+  body runs, may declare `#[graphql_orm(read_policy = "…")]`, and is refused
+  in generated `Changed` subscriptions unless it declares
+  `#[graphql_orm(subscribe)]`. The fields are listed by
+  `Entity::computed_object_fields()` and in the semantic catalogue as
+  selectable, never-exported fields with no filter, ordering, grouping or
+  aggregate. Entities that do not opt in generate exactly what they did
+  ([#808](https://github.com/Dastari/graphql-orm/issues/808)). See the
+  [migration guide](MIGRATION.md#next-ormmacros-minor-after-the-breaking-release-handwritten-fields-on-generated-objects).
+
 ## Unreleased - breaking release: ORM/macros 0.190.0, operation catalogue 0.10.0, AI tool profiles 0.27.0, AI 0.151.0, backup 0.28.0, router 0.17.0
 
 Every change that breaks hosts or invalidates stored fingerprints, bindings,

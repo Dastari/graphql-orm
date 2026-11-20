@@ -1,0 +1,11 @@
+error: a handwritten object field must return `async_graphql::Result<T>`, so that a refused read is a field error
+  --> tests/ui/object_fields_invalid_field.rs:16:35
+   |
+16 |     async fn infallible(&self) -> i32 {
+   |                                   ^^^
+
+error: graphql_object_fields takes no arguments; the generated object keeps the entity's own naming and description
+  --> tests/ui/object_fields_invalid_field.rs:30:25
+   |
+30 | #[graphql_object_fields(rename_fields = "PascalCase")]
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

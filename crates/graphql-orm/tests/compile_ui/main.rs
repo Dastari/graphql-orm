@@ -21,6 +21,7 @@ mod generated_mutation_exposure_ui;
 mod host_timestamp_ui;
 mod mssql_write_unavailable_ui;
 mod mutation_shapes_ui;
+mod object_fields_ui;
 mod operation_authorization_ui;
 mod order_aggregate_ui;
 mod ordinary_index_ui;
