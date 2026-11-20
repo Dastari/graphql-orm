@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+mod rfc8785;
 mod semantic;
 
+pub use rfc8785::*;
 pub use semantic::*;
 
 /// Stable identifier for the resolver-operation fingerprint algorithm.
@@ -1936,6 +1938,82 @@ mod tests {
         // Generated queries remain exposed, while the generated mutation is
         // correctly omitted from protocol export.
         assert_eq!(hidden.router_protocol_operations().unwrap().len(), 1);
+    }
+
+    /// A router export carries the scope names, scope templates and
+    /// `SubgraphOnly` text of exposed operations, and nothing of an operation
+    /// the schema root omits.
+    #[cfg(feature = "router-protocol")]
+    #[test]
+    fn protocol_export_discloses_requirements_of_exposed_operations_only() {
+        let root = |kind, category, field: &'static str, authorization| {
+            GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+                "example::Record",
+                "Record",
+                "records",
+                "sqlite",
+                kind,
+                category,
+                field,
+                vec![GraphqlOperationArgumentDescriptor::generated(
+                    "id", "String", "String!",
+                )],
+                "Record",
+                "Record!",
+                "record-shape-v1",
+                authorization,
+            )
+        };
+        let generated: &'static [GeneratedGraphqlOperationDescriptor] = Box::leak(Box::new([
+            root(
+                GraphqlOperationKind::Query,
+                GeneratedGraphqlOperationCategory::SingleRead,
+                "record",
+                GraphqlAuthorizationRequirement::AllScopes {
+                    scopes: vec!["records.{id}.read".into(), "records.read".into()],
+                },
+            ),
+            root(
+                GraphqlOperationKind::Query,
+                GeneratedGraphqlOperationCategory::List,
+                "records",
+                GraphqlAuthorizationRequirement::SubgraphOnly {
+                    policy: GraphqlUnrepresentablePolicy::new(
+                        GraphqlUnrepresentablePolicyCode::Custom,
+                        "host policy decides",
+                    ),
+                },
+            ),
+            root(
+                GraphqlOperationKind::Mutation,
+                GeneratedGraphqlOperationCategory::Delete,
+                "deleteRecord",
+                GraphqlAuthorizationRequirement::AllScopes {
+                    scopes: vec!["records.purge".into()],
+                },
+            ),
+        ]));
+        let export = |mutations| {
+            let catalog = GraphqlOperationCatalog::compose([(generated, mutations, true)]);
+            serde_json::to_string(&catalog.router_protocol_operations().unwrap()).unwrap()
+        };
+        let exposed = export(true);
+        for disclosed in [
+            "records.{id}.read",
+            "records.read",
+            "host policy decides",
+            "records.purge",
+        ] {
+            assert!(exposed.contains(disclosed), "{disclosed}");
+        }
+        // No backend, Rust path or schema signature is exported.
+        for undisclosed in ["sqlite", "example::Record", "record-shape-v1"] {
+            assert!(!exposed.contains(undisclosed), "{undisclosed}");
+        }
+        let hidden = export(false);
+        assert!(hidden.contains("records.read"));
+        assert!(!hidden.contains("records.purge"));
+        assert!(!hidden.contains("deleteRecord"));
     }
 }
 

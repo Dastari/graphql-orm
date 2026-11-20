@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+`schema_roots!` also emits `graphql_orm_resolver_catalog()`: the relationship
+fields and Federation entity resolvers of the schema, which no operation
+catalogue lists. It is descriptive, names only what the SDL publishes, and
+changes no existing catalogue or fingerprint. See
+[generated resolver operation metadata](../../docs/reference/graphql-orm/resolver-operation-metadata.md#relation-and-entity-resolvers).
+
 Generated query roots used in a hand-built schema return field errors when
 the resolver's `Database` or Federation loader is missing. The generated
 `schema_builder(database)` registers the required data for its roots.

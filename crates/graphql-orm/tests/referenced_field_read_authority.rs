@@ -672,6 +672,39 @@ async fn traversal_into_an_undeclared_category_requires_every_declared_read_scop
     }
 }
 
+/// The resolver catalogue (#544) names a root as a traversal's requirement
+/// only for the traversals the tests above and below show to enforce exactly
+/// that root's requirement.
+#[test]
+fn resolver_catalogue_references_match_the_enforced_traversal_requirements() {
+    use graphql_orm::graphql::orm::{GraphqlOperationKind, GraphqlResolverAuthorization};
+    let resolvers = ledgers::graphql_orm_resolver_catalog();
+    let same_as = |root: &str| GraphqlResolverAuthorization::SameAsRoot {
+        kind: GraphqlOperationKind::Query,
+        field_name: root.to_owned(),
+    };
+    for (field, expected) in [
+        // `list` and `single_read` declare fixed scopes.
+        ("ledgers", same_as("refLedgers")),
+        ("ledger", same_as("refLedger")),
+        // No read category is declared: the auth mode alone applies.
+        ("vaults", same_as("refVaults")),
+        // The mapped category is undeclared while others are declared, so the
+        // traversal requires more than any one root.
+        ("archives", GraphqlResolverAuthorization::SubgraphOnly),
+        ("badge", GraphqlResolverAuthorization::SubgraphOnly),
+    ] {
+        let relation = resolvers
+            .relation("RefOwner", field)
+            .unwrap_or_else(|| panic!("RefOwner.{field} is not catalogued"));
+        assert_eq!(relation.authorization, expected, "RefOwner.{field}");
+    }
+    let exported = resolvers.export_json().unwrap();
+    for scope in ["ledgers.list", "ledgers.read", "archives.", "badges.list"] {
+        assert!(!exported.contains(scope), "{scope} is disclosed");
+    }
+}
+
 #[tokio::test]
 async fn relation_traversal_enforces_the_target_auth_mode() {
     let schema = ledger_schema().await;

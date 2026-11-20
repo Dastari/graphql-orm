@@ -30,6 +30,8 @@ mod owned_schema;
 mod point_read;
 mod query;
 mod read_authorization;
+mod resolver_catalog;
+pub use resolver_catalog::*;
 mod restore_marker;
 mod rls;
 mod root_fields;

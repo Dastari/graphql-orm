@@ -282,8 +282,37 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
+    let resolver_sources = entities.iter().map(|entity| {
+        quote! {
+            ::graphql_orm::graphql::orm::ResolverEntitySource::of::<#entity>(
+                #entity::__GOM_RESOLVER_FACTS,
+            )
+        }
+    });
     let operation_catalog_helper = quote! {
         #client_metadata_helper
+
+        /// Returns the resolver catalogue of [`graphql_orm_semantic_catalog`]:
+        /// every relationship field and every entity with a resolvable
+        /// Federation key, which have no root coordinate and so appear in
+        /// no operation catalogue. Export it at build time with
+        /// `GraphqlResolverCatalog::export_json`.
+        ///
+        /// The document is descriptive. It names only public GraphQL
+        /// identities, grants no resolver, field, row, database or provider
+        /// authority, and changes no other catalogue or fingerprint.
+        pub fn graphql_orm_resolver_catalog(
+        ) -> &'static ::graphql_orm::graphql::orm::GraphqlResolverCatalog {
+            static CATALOG: ::std::sync::OnceLock<
+                ::graphql_orm::graphql::orm::GraphqlResolverCatalog
+            > = ::std::sync::OnceLock::new();
+            CATALOG.get_or_init(|| {
+                ::graphql_orm::graphql::orm::compose_resolver_catalog(
+                    graphql_orm_semantic_catalog(),
+                    ::std::vec![#(#resolver_sources),*],
+                )
+            })
+        }
 
         /// Returns this schema's interpretation fingerprint: a value that
         /// changes when a release may read existing cursors, keys or `NodeId`

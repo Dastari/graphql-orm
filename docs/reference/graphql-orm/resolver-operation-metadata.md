@@ -3,7 +3,7 @@ title: "Generated Resolver Operation Metadata"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -136,6 +136,55 @@ authority proofs. They do not bind:
 A host requiring a complete target-schema fingerprint must fingerprint its
 finished schema/registry and may include this catalog fingerprint as one
 generated-surface component.
+
+## Relation and entity resolvers
+
+The operation catalogue lists root fields. Relationship fields and Federation
+entity resolvers are not root fields: a relation resolves below an object and
+an entity resolver is reached through `_entities`. `schema_roots!` therefore
+also emits `graphql_orm_resolver_catalog()`, which returns a
+`GraphqlResolverCatalog` (catalogue 0.11.0): a separate, versioned and
+fingerprinted document bound to `graphql_orm_semantic_catalog()`. Composing it
+changes no SDL, descriptor or fingerprint described above.
+
+```rust,ignore
+let resolvers = graphql_orm_resolver_catalog();
+
+// Every relationship field, generated or handwritten.
+let orders = resolvers.relation("Customer", "orders").unwrap();
+assert_eq!(orders.target, "Order");
+
+// Every entity with a resolvable `@key`, including the `NodeId` key.
+let customer = resolvers.entity("Customer").unwrap();
+assert_eq!(customer.keys[0].fields, ["id"]);
+```
+
+Each descriptor carries an authorization reference instead of a requirement:
+
+| Resolver | Static requirement the ORM enforces | Reference |
+| --- | --- | --- |
+| to-many relation | the target's auth mode and its `list` scopes | the target's list root, when exposed |
+| to-one relation | the target's auth mode and its `single_read` scopes | the target's single-read root, when exposed |
+| entity resolver, `NodeId` resolver | the entity's auth mode and its `single_read` scopes | the entity's single-read root, when exposed |
+
+The reference is `subgraph_only` when the comparison would not be exact:
+
+- the mapped category declares scope templates. A traversal has no root
+  arguments to bind and is refused; an entity resolver binds the template from
+  key fields, not root arguments;
+- the mapped category is undeclared while another read category is declared.
+  The traversal then requires every declared read category's scopes;
+- `query_shapes` does not expose the root; or
+- the relation is handwritten, or its target is not in `entities:`.
+
+The owning entity's auth mode, field policies, row policies and RLS apply to
+every traversal in addition. The catalogue is descriptive and is never read
+back by the server.
+
+Handwritten `#[graphql(entity)]` resolvers are not listed.
+See the [catalogue README](../../../crates/graphql-orm-operation-catalog/README.md#relation-and-entity-resolvers)
+for the document format, its RFC 8785 fingerprint, and
+[what each export discloses](../../../crates/graphql-orm-operation-catalog/README.md#what-an-export-discloses).
 
 ## Backend and policy behavior
 

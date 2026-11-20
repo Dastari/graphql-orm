@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## Next ORM/macros minor after #822: resolver catalogue (operation catalogue 0.11.0)
+
+**No action.** `schema_roots!` emits one more function,
+`graphql_orm_resolver_catalog()`, and the operation catalogue crate adds
+`GraphqlResolverCatalog`, `rfc8785_canonical_json` and `rfc8785_json_hash`.
+The SDL, the operation and semantic catalogues, the client metadata, the
+router export and every existing fingerprint and receiver binding are
+unchanged, so nothing stored needs to be regenerated. A module that already
+defines an item named `graphql_orm_resolver_catalog` beside `schema_roots!`
+must rename it.
+
 ## Next ORM/macros minor after the breaking release
 
 **No action** for valid query declarations. Schemas assembled by hand must still

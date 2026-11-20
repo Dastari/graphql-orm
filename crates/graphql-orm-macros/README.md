@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+`schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
+and semantic catalogue functions. `GraphQLOperations` supplies each entity's
+resolvable `@key` field sets and the roots whose static requirement its
+traversals and entity resolvers enforce. Generated SDL and resolvers are
+unchanged.
+
 `GraphQLOperations` reports malformed keyset order clauses at the entity
 attribute. Use `field asc|desc [nulls first|last]` for each comma-separated
 entry and end the order with the complete primary key.
