@@ -603,7 +603,15 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
 /// Beside this attribute the impl may carry only `allow`, `warn`, `deny`,
 /// `forbid`, `expect` and `cfg`. Any other attribute, `cfg_attr` included, is
 /// a compile error: it would run on the generated object after the resolvers
-/// were given their field check. `subscribe` requires a
+/// were given their field check.
+///
+/// An attribute macro the host places on one of its own handwritten methods
+/// is host code. It receives that method and can rewrite it, including the
+/// inserted check, with the same trust as writing the method body. It cannot
+/// add a field to the object.
+///
+/// A handwritten field may not take the GraphQL name of a generated field or
+/// of any other declared entity field, served by the object or not. `subscribe` requires a
 /// scalar or enum output type, or an `Option` or list of those.
 ///
 /// As with generated column fields, no entity or row decision is asked at the

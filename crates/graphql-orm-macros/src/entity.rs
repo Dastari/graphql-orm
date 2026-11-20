@@ -4043,6 +4043,10 @@ fn generate_entity_tokens(
     // GraphQL names of the fields of the generated object, for the collision
     // check of handwritten fields.
     let mut object_field_names: Vec<String> = Vec::new();
+    // GraphQL names of every declared entity field, served by the object or
+    // not. Generated paths decide these names by the entity field's policy,
+    // so a handwritten field may take none of them.
+    let mut declared_field_names: Vec<String> = Vec::new();
     // A `graphql_policy_object` marker must come with the guard that attribute
     // installs; the attribute also implements this witness trait.
     let mut policy_object_witness = quote! {};
@@ -4391,6 +4395,7 @@ fn generate_entity_tokens(
             graphql_rename_fields,
             serde_rename_all,
         );
+        declared_field_names.push(subscription_api_name.clone());
         let subscription_allowed = !has_repository_entity_attribute(&input.attrs)
             && field_meta.graphql_readable()
             && (!field_meta.graphql_skip || field_meta.is_relation)
@@ -6429,6 +6434,7 @@ fn generate_entity_tokens(
             graphql_rename_fields,
             serde_rename_all,
             &object_field_names,
+            &declared_field_names,
             &object_field_methods,
         )
     } else {

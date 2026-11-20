@@ -556,12 +556,15 @@ where
             // target's generated object is asked like a column, with its
             // declared key, so both refuse the relation alike.
             let name = selection.node.name.node.as_str();
-            let Some((api_name, read_policy)) = T::repository_field_policies()
+            // The handwritten field is looked up first: it is what the object
+            // serves under the name. The macro also refuses a handwritten
+            // field named like any entity field, so the two cannot differ.
+            let Some((api_name, read_policy)) = T::computed_object_fields()
                 .iter()
                 .find(|field| field.api_name == name)
                 .map(|field| (field.api_name, field.read_policy))
                 .or_else(|| {
-                    T::computed_object_fields()
+                    T::repository_field_policies()
                         .iter()
                         .find(|field| field.api_name == name)
                         .map(|field| (field.api_name, field.read_policy))

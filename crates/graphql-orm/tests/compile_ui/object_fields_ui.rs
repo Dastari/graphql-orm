@@ -15,4 +15,5 @@ fn handwritten_object_fields_compose_only_with_an_opted_in_generated_object() {
     cases.compile_fail("tests/ui/object_fields_subscribe_object.rs");
     cases.compile_fail("tests/ui/object_fields_unchecked_method.rs");
     cases.compile_fail("tests/ui/object_fields_stacked_attribute.rs");
+    cases.compile_fail("tests/ui/object_fields_hidden_column_collision.rs");
 }

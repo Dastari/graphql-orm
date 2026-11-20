@@ -44,6 +44,7 @@ pub(crate) fn host_tokens(
     graphql_rename_fields: Option<&str>,
     serde_rename_all: Option<&str>,
     generated_names: &[String],
+    declared_names: &[String],
     generated_methods: &[TokenStream],
 ) -> TokenStream {
     let callback = callback_ident(struct_name);
@@ -83,6 +84,7 @@ pub(crate) fn host_tokens(
                     { #(#graphql_rename_fields)* }
                     { #(#serde_rename_all)* }
                     [ #(#generated_names),* ]
+                    [ #(#declared_names),* ]
                     { $($callback)* }
                     $($handwritten)*
                 }
@@ -199,6 +201,7 @@ struct Wrapping {
     graphql_rename_fields: Option<LitStr>,
     serde_rename_all: Option<LitStr>,
     generated_names: Vec<LitStr>,
+    declared_names: Vec<LitStr>,
     callback: syn::Path,
     handwritten: ItemImpl,
 }
@@ -214,6 +217,8 @@ impl Parse for Wrapping {
         syn::braced!(serde_rename_all in input);
         let generated_names;
         syn::bracketed!(generated_names in input);
+        let declared_names;
+        syn::bracketed!(declared_names in input);
         let callback;
         syn::braced!(callback in input);
         Ok(Self {
@@ -222,6 +227,9 @@ impl Parse for Wrapping {
             graphql_rename_fields: graphql_rename_fields.parse()?,
             serde_rename_all: serde_rename_all.parse()?,
             generated_names: Punctuated::<LitStr, Token![,]>::parse_terminated(&generated_names)?
+                .into_iter()
+                .collect(),
+            declared_names: Punctuated::<LitStr, Token![,]>::parse_terminated(&declared_names)?
                 .into_iter()
                 .collect(),
             callback: callback.parse()?,
@@ -400,6 +408,7 @@ pub(crate) fn wrap(input: TokenStream) -> syn::Result<TokenStream> {
         graphql_rename_fields,
         serde_rename_all,
         generated_names,
+        declared_names,
         callback,
         mut handwritten,
     } = syn::parse2(input)?;
@@ -407,6 +416,7 @@ pub(crate) fn wrap(input: TokenStream) -> syn::Result<TokenStream> {
     let graphql_rename_fields = graphql_rename_fields.map(|rule| rule.value());
     let serde_rename_all = serde_rename_all.map(|rule| rule.value());
     let generated_names: BTreeSet<String> = generated_names.iter().map(LitStr::value).collect();
+    let declared_names: BTreeSet<String> = declared_names.iter().map(LitStr::value).collect();
     let self_ty = handwritten.self_ty.clone();
 
     // A refused handwritten field is reported beside the generated object
@@ -421,6 +431,7 @@ pub(crate) fn wrap(input: TokenStream) -> syn::Result<TokenStream> {
             graphql_rename_fields.as_deref(),
             serde_rename_all.as_deref(),
             &generated_names,
+            &declared_names,
         )
     }) {
         Ok(definitions) => (definitions, quote! {}),
@@ -459,6 +470,7 @@ fn handwritten_fields(
     graphql_rename_fields: Option<&str>,
     serde_rename_all: Option<&str>,
     generated_names: &BTreeSet<String>,
+    declared_names: &BTreeSet<String>,
 ) -> syn::Result<Vec<TokenStream>> {
     let mut handwritten_names = BTreeSet::new();
     let mut definitions = Vec::new();
@@ -505,6 +517,18 @@ fn handwritten_fields(
                 &method.sig.ident,
                 format!(
                     "handwritten field `{api_name}` collides with the generated field `{api_name}` of `{entity}`; rename one of them"
+                ),
+            ));
+        }
+        // An entity field without a generated getter (`read = false`,
+        // `private`, a relation) still owns its name: relation preflights,
+        // filters and subscriptions decide that name by the entity field's
+        // policy, not by a handwritten field's.
+        if declared_names.contains(&api_name) {
+            return Err(syn::Error::new_spanned(
+                &method.sig.ident,
+                format!(
+                    "handwritten field `{api_name}` has the GraphQL name of the entity field `{api_name}` of `{entity}`, which the generated object does not serve; rename the handwritten field, because generated read paths decide that name by the entity field's policy"
                 ),
             ));
         }
@@ -607,6 +631,7 @@ mod tests {
         wrap(quote! {
             "Record" { ::graphql_orm::SqliteBackend } { #rename_fields } {}
             ["id", "RecordVersion"]
+            ["id", "version", "hidden"]
             { records::__gom_object_fields_Record }
             #handwritten
         })
@@ -714,14 +739,14 @@ mod tests {
         // The shape that would carry an unwrapped method: a block of methods
         // beside the handwritten impl.
         let smuggled = wrap(quote! {
-            "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"]
+            "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"] ["id"]
             { __gom_object_fields_Record }
             { async fn unchecked(&self) -> async_graphql::Result<i32> { Ok(1) } }
             impl Record {}
         });
         assert!(smuggled.is_err());
         let trailing = wrap(quote! {
-            "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"]
+            "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"] ["id"]
             { __gom_object_fields_Record }
             impl Record {}
             async fn unchecked(&self) -> async_graphql::Result<i32> { Ok(1) }
@@ -739,6 +764,7 @@ mod tests {
             Some("PascalCase"),
             None,
             &["Id".to_owned()],
+            &["Id".to_owned(), "Hidden".to_owned()],
             &[quote! { async fn id(&self) -> i32 { 1 } }],
         )
         .to_string();
@@ -768,6 +794,17 @@ mod tests {
                     async fn version(&self) -> async_graphql::Result<i32> { Ok(1) }
                 } },
                 "collides with the generated field `RecordVersion`",
+            ),
+            (
+                quote! { impl Record { async fn hidden(&self) -> async_graphql::Result<i32> { Ok(1) } } },
+                "has the GraphQL name of the entity field `hidden`",
+            ),
+            (
+                quote! { impl Record {
+                    #[graphql(name = "version")]
+                    async fn other(&self) -> async_graphql::Result<i32> { Ok(1) }
+                } },
+                "has the GraphQL name of the entity field `version`",
             ),
             (
                 quote! { impl Record { async fn plain(&self) -> i32 { 1 } } },

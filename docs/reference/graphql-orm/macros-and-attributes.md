@@ -576,7 +576,10 @@ Rules for the impl:
 - A field is named by the entity's naming rule (`rename_fields`,
   `GRAPHQL_ORM_FIELD_CASE`, serde `rename_all`), like a generated field,
   unless `#[graphql(name = "…")]` names it. A name that a generated field
-  already has, `RecordVersion` and `NodeId` included, is a compile error.
+  already has, `RecordVersion` and `NodeId` included, is a compile error. So
+  is the name of any other declared entity field, such as a column marked
+  `read = false` or `private`, or a relation field: the object does not serve
+  it, but generated read paths decide that name by the entity field's policy.
 - The doc comment is the field description, in the SDL and in metadata.
   Without one the description is derived from the method name.
 - `#[graphql(skip)]` keeps a method as a plain helper. `flatten`, `entity` and
@@ -607,6 +610,13 @@ object resolves, and resolves the parent object to `null` when none does, as
 it does for a refused non-null generated field. Declare a field that carries a
 read policy as `Option<T>` (spelled so, not through a type alias) when clients
 should see the key.
+
+Trust boundary. The inserted check belongs to the method it is inserted in. An
+attribute macro that the host places on its own handwritten method is host
+code: it receives that method and can rewrite it, including the inserted
+check, with the same trust as writing the method body. Such a macro cannot add
+a field to the object. Attributes on the impl itself are restricted, as listed
+above, because they would apply to the whole generated object.
 
 Through a generated relation the decision is made earlier. The relation's
 preflight asks the field decision for every selected field of the target row,

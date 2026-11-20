@@ -14,7 +14,7 @@ struct Record {
 }
 
 graphql_orm::__graphql_object_fields_wrap! {
-    "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"]
+    "Record" { ::graphql_orm::SqliteBackend } {} {} ["id"] ["id"]
     { __gom_object_fields_Record }
     {
         async fn unchecked(&self) -> graphql_orm::async_graphql::Result<i32> {
