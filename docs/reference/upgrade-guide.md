@@ -114,10 +114,15 @@ No action:
 - **No action** — router 0.17.0: the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default (#764). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
 
-Also unreleased on main, before the breaking release:
+### workspace-2026.11.20.1
+
+Commit `ffd85c8075a7` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.20.1)
+
+Packages (changed in bold): **`graphql-orm` 0.186.0, `graphql-orm-macros` 0.186.0**; `graphql-orm-operation-catalog` 0.9.1; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.27.2; `graphql-orm-ai-tool-profiles` 0.26.1; `graphql-orm-ai` 0.150.2; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.16.8**.
 
 - **No action** — ORM/macros 0.186.0: the owned PostgreSQL test harness waits for TCP readiness before connecting. [Migration](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness)
 - **Action needed** — ORM/macros 0.185.0: if you compare generated SQL Server filtered-index DDL, update expected string literals to include the `N` prefix, even for ASCII values. [Migration](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
+- **No action** — router 0.16.8: the operations runbook records the startup hand-off and ownership rationale, and a few source comments are clearer; no behaviour, configuration or public API changes. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0167-to-0168-operations-documentation)
 
 ### workspace-2026.11.19.2
 
