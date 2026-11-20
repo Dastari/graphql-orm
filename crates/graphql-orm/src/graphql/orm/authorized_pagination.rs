@@ -4730,7 +4730,7 @@ mod predicate_tests {
         assert!(super::super::query::checked_adapter_is_idle());
         // SQL Server `@@name` system functions are not parameters.
         assert!(ensure_composable_sql(Mssql, "[id] = @@SPID AND @@ROWCOUNT > 0").is_ok());
-        assert!(ensure_composable_sql(Sqlite, "id = @@x").is_err());
+        assert!(ensure_composable_sql(Mssql, "[id] = @spid").is_err());
     }
 
     #[test]
