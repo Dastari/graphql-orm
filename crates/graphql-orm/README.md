@@ -10,8 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
-`schema_roots!` also emits `graphql_orm_resolver_catalog()`: the relationship
-fields and Federation entity resolvers of the schema, which no operation
+`schema_roots!` also emits `graphql_orm_resolver_catalog()`: the generated
+relationship fields and Federation entity resolvers of the schema, which no operation
 catalogue lists. It is descriptive, names only what the SDL publishes, and
 changes no existing catalogue or fingerprint. See
 [generated resolver operation metadata](../../docs/reference/graphql-orm/resolver-operation-metadata.md#relation-and-entity-resolvers).

@@ -304,9 +304,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #client_metadata_helper
 
         /// Returns the resolver catalogue of [`graphql_orm_semantic_catalog`]:
-        /// every relationship field this schema serves and every entity it
-        /// resolves by a Federation key, which have no root coordinate and
-        /// so appear in no operation catalogue. Coordinates are the names
+        /// every generated relationship field this schema serves and every
+        /// entity it resolves by a generated Federation key, which have no
+        /// root coordinate and so appear in no operation catalogue.
+        /// Handwritten resolvers are not listed. Coordinates are the names
         /// the schema registers. Export it at build time with
         /// `GraphqlResolverCatalog::export_json`.
         ///

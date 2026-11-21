@@ -1126,6 +1126,26 @@ pub(crate) fn generate_graphql_relations(
     // publishes its fields separately; graphql_complex_object proves mounting.
     let output_witness = if !complex_object_impl.is_empty() {
         let fields = relations.iter().map(|r| &r.graphql_name);
+        // A `SimpleObject` derive on the same struct may serve a getter under
+        // a relation's name, for a relation field without `#[graphql(skip)]`
+        // or through a rename. Which definition the schema then serves is
+        // async-graphql's choice, so such a relation is not reported as a
+        // mounted generated resolver.
+        let getters = legacy_graphql_complex
+            .then(|| simple_object_getter_names(&parsed_fields, graphql_rename_fields));
+        let is_shadowed = |name: &String| match &getters {
+            None => false,
+            Some(None) => true,
+            Some(Some(names)) => names.contains(name),
+        };
+        let shadowed = relations
+            .iter()
+            .map(|r| &r.graphql_name)
+            .filter(|name| is_shadowed(name));
+        let mounted = relations
+            .iter()
+            .map(|r| &r.graphql_name)
+            .filter(|name| !is_shadowed(name));
         let exposed = if !entity_meta.compose_complex_object {
             quote! {
                 #[doc(hidden)]
@@ -1134,11 +1154,12 @@ pub(crate) fn generate_graphql_relations(
                 }
 
                 /// Relation fields whose generated resolver this object
-                /// mounts. Unlike the exposure witness above, this proves
-                /// mounting only, not unrestricted output eligibility.
+                /// mounts and no `SimpleObject` getter shadows. Unlike the
+                /// exposure witness above, this proves mounting only, not
+                /// unrestricted output eligibility.
                 #[doc(hidden)]
                 pub fn __gom_mounted_relation_fields() -> &'static [&'static str] {
-                    Self::__gom_generated_relation_fields()
+                    &[#(#mounted),*]
                 }
             }
         } else {
@@ -1148,6 +1169,13 @@ pub(crate) fn generate_graphql_relations(
             #[doc(hidden)]
             pub fn __gom_generated_relation_fields() -> &'static [&'static str] {
                 &[#(#fields),*]
+            }
+
+            /// Generated relation fields that a `SimpleObject` getter of the
+            /// same name may shadow.
+            #[doc(hidden)]
+            pub fn __gom_shadowed_relation_fields() -> &'static [&'static str] {
+                &[#(#shadowed),*]
             }
             #exposed
         }
@@ -1218,9 +1246,155 @@ pub(crate) fn generate_graphql_relations(
     })
 }
 
+/// The GraphQL names a `SimpleObject` derive on this struct serves for the
+/// struct's own fields, or `None` when they cannot be known here.
+///
+/// A `#[graphql(flatten)]` field serves the fields of another type, which
+/// this derive cannot see, and an attribute this function cannot read may
+/// rename or hide a field. Both give `None`, and the caller then treats every
+/// relation as possibly shadowed.
+fn simple_object_getter_names(
+    fields: &[crate::entity::ParsedField],
+    rename_fields: Option<&str>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut names = std::collections::BTreeSet::new();
+    for parsed in fields {
+        let mut skipped = false;
+        for attr in parsed
+            .field
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("graphql"))
+        {
+            let options = attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .ok()?;
+            for option in &options {
+                let enabled = match option {
+                    syn::Meta::Path(_) => true,
+                    syn::Meta::NameValue(value) => matches!(
+                        &value.value,
+                        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(flag), .. }) if flag.value
+                    ),
+                    syn::Meta::List(_) => false,
+                };
+                let path = option.path();
+                if path.is_ident("flatten") {
+                    // `flatten = false` is not accepted by async-graphql.
+                    return None;
+                }
+                skipped |= enabled && (path.is_ident("skip") || path.is_ident("skip_output"));
+            }
+        }
+        if skipped {
+            continue;
+        }
+        let rust_name = parsed.field.ident.as_ref()?.to_string();
+        let rust_name = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
+        names.insert(
+            parsed
+                .meta
+                .graphql_name
+                .clone()
+                .unwrap_or_else(|| crate::naming::async_graphql_rename(rust_name, rename_fields)),
+        );
+    }
+    Some(names)
+}
+
 #[cfg(test)]
 mod object_visibility_tests {
     use super::*;
+
+    fn getters(fields: &str, rename_fields: Option<&str>) -> Option<Vec<String>> {
+        let input: DeriveInput = syn::parse_str(&format!("struct Record {{ {fields} }}")).unwrap();
+        let syn::Data::Struct(data) = &input.data else {
+            unreachable!()
+        };
+        let parsed = collect_parsed_fields(data.fields.iter()).unwrap();
+        simple_object_getter_names(&parsed, rename_fields).map(|names| names.into_iter().collect())
+    }
+
+    #[test]
+    fn simple_object_getter_names_follow_skips_and_renames() {
+        let fields = r#"
+            id: String,
+            owner_id: String,
+            #[graphql(skip)]
+            hidden: String,
+            #[graphql(skip = false)]
+            shown: String,
+            #[graphql(skip_output)]
+            input_only: String,
+            #[graphql(name = "Renamed")]
+            original: String,
+        "#;
+        assert_eq!(
+            getters(fields, None).unwrap(),
+            ["Renamed", "id", "ownerId", "shown"]
+        );
+        assert_eq!(
+            getters(fields, Some("PascalCase")).unwrap(),
+            ["Id", "OwnerId", "Renamed", "Shown"]
+        );
+        // A flattened field serves names this derive cannot see.
+        assert_eq!(
+            getters("id: String, #[graphql(flatten)] more: More,", None),
+            None
+        );
+    }
+
+    /// A relation whose name a `SimpleObject` getter also serves is not in
+    /// the mount witness; with a flattened field, none is.
+    #[test]
+    fn shadowed_relations_are_left_out_of_the_mount_witness() {
+        let witness = |fields: &str| {
+            let backend = crate::backend::enabled_backends()[0].name();
+            let input: DeriveInput = syn::parse_str(&format!(
+                r#"
+                #[graphql(complex)]
+                #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                struct Record {{
+                    #[primary_key]
+                    id: String,
+                    {fields}
+                }}
+            "#
+            ))
+            .unwrap();
+            let generated = generate_graphql_relations(&input).unwrap().to_string();
+            let start = generated
+                .find("fn __gom_mounted_relation_fields")
+                .expect("mount witness");
+            let body = &generated[start..];
+            body[..body.find('}').unwrap()].to_owned()
+        };
+        let relation = r#"#[relation(target = "Target", from = "id", to = "id", emit_fk = false)]"#;
+        let skipped = witness(&format!(
+            "#[graphql(skip)] {relation} kept: Option<Target>,"
+        ));
+        assert!(skipped.contains("\"kept\""), "{skipped}");
+
+        let both = witness(&format!(
+            "#[graphql(skip)] {relation} kept: Option<Target>, {relation} shadowed: Option<Target>,"
+        ));
+        assert!(
+            both.contains("\"kept\"") && !both.contains("\"shadowed\""),
+            "{both}"
+        );
+
+        let renamed = witness(&format!(
+            "#[graphql(skip)] {relation} kept: Option<Target>, #[graphql(name = \"kept\")] other: String,"
+        ));
+        assert!(!renamed.contains("\"kept\""), "{renamed}");
+
+        let flattened = witness(&format!(
+            "#[graphql(skip)] {relation} kept: Option<Target>, #[graphql(flatten)] #[skip_db] more: More,"
+        ));
+        assert!(!flattened.contains("\"kept\""), "{flattened}");
+    }
 
     #[test]
     fn input_only_relations_do_not_regenerate_skipped_getters() {

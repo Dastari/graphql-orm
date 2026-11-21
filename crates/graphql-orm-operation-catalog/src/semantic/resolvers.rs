@@ -5,7 +5,11 @@
 //! resolves below an object, and a Federation entity resolver is reached
 //! through `_entities`, so neither has a root coordinate. A consumer that
 //! binds policy to root fields therefore has no view of them.
-//! [`GraphqlResolverCatalog`] lists both.
+//! [`GraphqlResolverCatalog`] lists both, for the resolvers the ORM
+//! generates. Handwritten relationship fields and handwritten entity
+//! resolvers are out of scope for version 1: nothing proves what they resolve
+//! or enforce, so a served field is listed only when its generated resolver
+//! is proven mounted.
 //!
 //! It is a separate, versioned and fingerprinted document, bound to one
 //! semantic catalogue by that catalogue's fingerprint. Composing it changes no
@@ -78,8 +82,8 @@ pub struct GraphqlResolverCatalog {
     pub version: u16,
     /// Fingerprint of the semantic catalogue this document describes.
     pub semantic_catalog_fingerprint: String,
-    /// Every served relationship field, ordered by owning type and field
-    /// name.
+    /// Every served relationship field with a generated resolver, ordered
+    /// by owning type and field name.
     pub relations: Vec<GraphqlRelationResolverDescriptor>,
     /// Types with a resolvable Federation key, ordered by type name.
     pub entities: Vec<GraphqlEntityResolverDescriptor>,
@@ -87,7 +91,7 @@ pub struct GraphqlResolverCatalog {
     pub fingerprint: String,
 }
 
-/// One relationship field resolver.
+/// One generated relationship field resolver.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -100,8 +104,6 @@ pub struct GraphqlRelationResolverDescriptor {
     pub semantic_entity_name: Option<String>,
     /// Relationship field name, as served and as in the semantic catalogue.
     pub field_name: String,
-    /// Whether the ORM generated the resolver or the host wrote it.
-    pub source: GraphqlSemanticOperationSource,
     /// Name the served schema registers for the related type.
     pub target: String,
     /// The related entity's name in the semantic catalogue, when it differs
@@ -181,9 +183,9 @@ pub enum GraphqlResolverAuthorization {
         field_name: String,
     },
     /// The requirement is enforced by the subgraph and is not published: the
-    /// resolver is handwritten, the matching root is not exposed, the
-    /// requirement binds root arguments this resolver does not have, or it
-    /// differs from the root's.
+    /// matching root is not exposed, the related type is not a generated
+    /// entity of this schema, the requirement binds root arguments this
+    /// resolver does not have, or it differs from the root's.
     SubgraphOnly,
 }
 
@@ -416,13 +418,15 @@ impl GraphqlResolverCatalog {
     /// Composes the resolver catalogue of one semantic catalogue.
     ///
     /// A relationship field of the catalogue becomes a relation descriptor
-    /// when `served` has that field on the owning type, the field returns
-    /// the related type (directly, or as the nodes of a connection for a
-    /// to-many relationship) and it takes exactly the catalogue's arguments
-    /// with the same types; every other relationship is left out. A field
-    /// is `generated` when `sources` lists it for its entity, and `custom`
-    /// otherwise. An entity is listed with its keys when `served` has its
-    /// type. An entity whose source is
+    /// when `sources` lists it for its entity as a mounted generated
+    /// resolver and `served` confirms it: the owning type has that field,
+    /// the field returns the related type (directly, or as the nodes of a
+    /// connection for a to-many relationship) and it takes exactly the
+    /// catalogue's arguments with the same types. Every other relationship
+    /// is left out, including any a handwritten resolver serves: the shape
+    /// of a served field never makes it a relationship by itself. An entity
+    /// is listed with its keys when `served` has its type. An entity whose
+    /// source is
     /// [`unregistered`](GraphqlGeneratedResolverSource::unregistered) is
     /// never listed, as an owner, a target or a keyed type; an entity with
     /// no source is taken to be served under its catalogue name. Sources
@@ -488,7 +492,11 @@ impl GraphqlResolverCatalog {
                     continue;
                 };
                 let (target, semantic_target) = served_name(&relationship.target);
-                if source(&relationship.target).is_some_and(|target| target.unregistered)
+                // Only a mounted generated resolver is listed. The checks
+                // against the served schema confirm it; they never admit a
+                // field on their own.
+                if !owner.is_some_and(|owner| owner.relation_fields.contains(&field.field_name))
+                    || source(&relationship.target).is_some_and(|target| target.unregistered)
                     || !served.has_object(&target)
                     || !served.serves_relationship(
                         &type_name,
@@ -499,10 +507,8 @@ impl GraphqlResolverCatalog {
                 {
                     continue;
                 }
-                let generated =
-                    owner.is_some_and(|owner| owner.relation_fields.contains(&field.field_name));
                 let authorization = match source(&relationship.target) {
-                    Some(target) if generated => match relationship.cardinality {
+                    Some(target) => match relationship.cardinality {
                         GraphqlSemanticRelationshipCardinality::Many => published(
                             &target.to_many_root,
                             &relationship.target,
@@ -514,17 +520,12 @@ impl GraphqlResolverCatalog {
                             GeneratedGraphqlOperationCategory::SingleRead,
                         ),
                     },
-                    _ => GraphqlResolverAuthorization::SubgraphOnly,
+                    None => GraphqlResolverAuthorization::SubgraphOnly,
                 };
                 relations.push(GraphqlRelationResolverDescriptor {
                     type_name: type_name.clone(),
                     semantic_entity_name: semantic_entity_name.clone(),
                     field_name: field.field_name.clone(),
-                    source: if generated {
-                        GraphqlSemanticOperationSource::Generated
-                    } else {
-                        GraphqlSemanticOperationSource::Custom
-                    },
                     target,
                     semantic_target,
                     cardinality: relationship.cardinality,
@@ -616,8 +617,6 @@ impl GraphqlResolverCatalog {
                     .all(|name| valid_graphql_name(name))
                 || unique.len() != relation.arguments.len()
                 || !authorization_shape_valid(&relation.authorization)
-                || (relation.source == GraphqlSemanticOperationSource::Custom
-                    && relation.authorization != GraphqlResolverAuthorization::SubgraphOnly)
             {
                 return Err(GraphqlSemanticError::new(
                     "resolver catalogue relation is invalid",
@@ -1048,8 +1047,8 @@ mod tests {
         .expect("root descriptor")
     }
 
-    /// `Parent` has many `Child`; `Child` has one `Parent` and one handwritten
-    /// `Summary` relation. `Summary` is a handwritten type.
+    /// `Parent` has many `Child`; `Child` has one `Parent` and one `Summary`.
+    /// `Summary` is a handwritten type with no generated source.
     fn catalog() -> GraphqlSemanticCatalog {
         let mut guarded = to_one("Guarded", "Parent");
         guarded.has_field_policy = true;
@@ -1112,7 +1111,7 @@ mod tests {
                 .with_traversal_roots(Some("Parents".into()), Some("Parent".into()))
                 .with_entity_root(Some("Parent".into())),
             GraphqlGeneratedResolverSource::new("Child")
-                .with_relation_fields(vec!["Parent".into(), "Guarded".into()])
+                .with_relation_fields(vec!["Parent".into(), "Guarded".into(), "Summary".into()])
                 .with_traversal_roots(Some("Children".into()), Some("Child".into())),
         ]
     }
@@ -1215,7 +1214,6 @@ mod tests {
             GraphqlSemanticRelationshipCardinality::Many
         );
         assert_eq!(children.arguments, ["Page"]);
-        assert_eq!(children.source, GraphqlSemanticOperationSource::Generated);
         assert_eq!(children.authorization, same_as("Children"));
 
         let parent = resolvers.relation("Child", "Parent").unwrap();
@@ -1243,11 +1241,11 @@ mod tests {
     }
 
     #[test]
-    fn handwritten_and_unmatched_resolvers_publish_no_requirement() {
+    fn unmatched_resolvers_publish_no_requirement_and_unproven_ones_are_omitted() {
         let resolvers = composed();
-        // The host wrote `Child.Summary`; its target has no generated source.
+        // `Child.Summary` is generated, but its target has no generated
+        // source, so there is no root to refer to.
         let summary = resolvers.relation("Child", "Summary").unwrap();
-        assert_eq!(summary.source, GraphqlSemanticOperationSource::Custom);
         assert_eq!(
             summary.authorization,
             GraphqlResolverAuthorization::SubgraphOnly
@@ -1275,14 +1273,21 @@ mod tests {
             GraphqlResolverAuthorization::SubgraphOnly
         );
 
-        // With no source at all, every relation is handwritten.
+        // A served relationship no source claims is not proven generated,
+        // so it is omitted, whatever its shape.
+        let mut partial = self::sources();
+        partial[1].relation_fields = vec!["Parent".into()];
+        let resolvers = compose(&catalog(), partial).unwrap();
+        assert!(resolvers.relation("Child", "Parent").is_some());
+        assert!(resolvers.relation("Child", "Guarded").is_none());
+        assert!(resolvers.relation("Child", "Summary").is_none());
+        assert!(serving(&catalog()).has_field("Child", "Summary"));
+
+        // With no source at all, nothing is listed.
         let bare = compose(&catalog(), []).unwrap();
-        assert_eq!(bare.relations.len(), 4);
+        assert!(bare.relations.is_empty());
         assert!(bare.entities.is_empty());
-        assert!(bare.relations.iter().all(|relation| {
-            relation.source == GraphqlSemanticOperationSource::Custom
-                && relation.authorization == GraphqlResolverAuthorization::SubgraphOnly
-        }));
+        bare.validate_against(&catalog()).unwrap();
     }
 
     #[test]
@@ -1347,7 +1352,7 @@ mod tests {
                 r#"{{"entities":[{{"authorization":{{"field_name":"Parent","kind":"query","mode":"same_as_root"}},"#,
                 r#""keys":[{{"fields":["Id"]}}],"type_name":"Parent"}}],"fingerprint":"{}","#,
                 r#""relations":[{{"arguments":[],"authorization":{{"field_name":"Parent","kind":"query","mode":"same_as_root"}},"#,
-                r#""cardinality":"one","field_name":"Parent","has_field_policy":false,"source":"generated","#,
+                r#""cardinality":"one","field_name":"Parent","has_field_policy":false,"#,
                 r#""target":"Parent","type_name":"Child"}}],"semantic_catalog_fingerprint":"{}","version":1}}"#,
             ),
             resolvers.fingerprint, catalog.fingerprint,
@@ -1405,7 +1410,9 @@ mod tests {
     #[test]
     fn refuses_a_document_that_disagrees_with_the_catalogue() {
         let catalog = catalog();
-        let edits: [fn(&mut GraphqlResolverCatalog); 10] = [
+        let edits: [fn(&mut GraphqlResolverCatalog); 11] = [
+            // A reference to a root of another entity than the target.
+            |resolvers| resolvers.relations[2].authorization = same_as("Parent"),
             // A carried semantic name the catalogue does not publish.
             |resolvers| resolvers.relations[1].semantic_entity_name = Some("Unlisted".into()),
             // One catalogue entity under two served names.
@@ -1447,8 +1454,7 @@ mod tests {
             |resolvers| resolvers.entities[0].semantic_entity_name = Some("Parent".into()),
             |resolvers| resolvers.relations.swap(0, 1),
             |resolvers| resolvers.relations[0].field_name = "not a name".into(),
-            // A handwritten resolver cannot claim a root's requirement.
-            |resolvers| resolvers.relations[2].authorization = same_as("Parent"),
+            |resolvers| resolvers.relations[2].target = "not a name".into(),
             |resolvers| {
                 resolvers.relations[1].authorization = GraphqlResolverAuthorization::SameAsRoot {
                     kind: GraphqlOperationKind::Mutation,
@@ -1667,7 +1673,6 @@ mod tests {
         for (edges, node) in [("edges", "node"), ("Edges", "Node"), ("EDGES", "NODE")] {
             let relation = listed(&connection(edges, node, "Child!"), "Parent", "Children")
                 .expect("a connection over the target");
-            assert_eq!(relation.source, GraphqlSemanticOperationSource::Generated);
             assert_eq!(relation.authorization, same_as("Children"));
         }
         assert!(
@@ -1701,8 +1706,7 @@ mod tests {
                 .all(|relation| relation.type_name != "Parent" && relation.target != "Parent")
         );
         // `Summary` has no source at all and is still a target.
-        let summary = resolvers.relation("Child", "Summary").unwrap();
-        assert_eq!(summary.source, GraphqlSemanticOperationSource::Custom);
+        assert!(resolvers.relation("Child", "Summary").is_some());
         assert_eq!(resolvers.relations.len(), 1);
         resolvers.validate_against(&catalog).unwrap();
     }
@@ -1768,8 +1772,6 @@ mod tests {
         let catalog = catalog();
         let resolvers = composed();
         let mut allowed = BTreeSet::from([
-            "generated".to_owned(),
-            "custom".to_owned(),
             "one".to_owned(),
             "many".to_owned(),
             "query".to_owned(),

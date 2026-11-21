@@ -150,7 +150,7 @@ changes no SDL, descriptor or fingerprint described above.
 ```rust,ignore
 let resolvers = graphql_orm_resolver_catalog()?;
 
-// Every relationship field the schema serves, generated or handwritten.
+// Every served relationship field with a generated resolver.
 let orders = resolvers.relation("Customer", "orders").unwrap();
 assert_eq!(orders.target, "Order");
 
@@ -175,9 +175,15 @@ reads the query root's type registry, so:
   type (or a connection over it) and takes the declared arguments. A
   handwritten `parent: String` beside a declared `parent: Parent` relation is
   not listed;
-- a relation is `generated` when the entity's object mounts the generated
+- a relation is listed only when the entity's object mounts the generated
   resolver, including through `#[graphql_complex_object(...)]` with any
-  options; any other served relationship is `custom`;
+  options. Handwritten relationship fields are out of scope for version 1 and
+  are never listed, whatever their shape;
+- a generated relation is left out when a `SimpleObject` getter on the same
+  struct serves the same name: on a `compose_complex_object` entity, a
+  relation field without `#[graphql(skip)]`; anywhere, another field renamed
+  to it. With a `#[graphql(flatten)]` field the
+  derive cannot see the served names, so no relation of that entity is listed;
 - a declared key the schema does not resolve is not listed, and neither is
   any key of a type marked `unresolvable`;
 - an entity whose type the schema does not register has no entry, even when
@@ -205,13 +211,14 @@ The reference is `subgraph_only` when the comparison would not be exact:
 - the mapped category is undeclared while another read category is declared.
   The traversal then requires every declared read category's scopes;
 - `query_shapes` does not expose the root; or
-- the relation is handwritten, or its target is not in `entities:`.
+- the relation's target is not in `entities:`.
 
 The owning entity's auth mode, field policies, row policies and RLS apply to
 every traversal in addition. The catalogue is descriptive and is never read
 back by the server.
 
-Handwritten `#[graphql(entity)]` resolvers are not listed.
+Handwritten `#[graphql(entity)]` resolvers and handwritten relationship fields
+are not listed; that needs an explicit per-field annotation and is a follow-up.
 See the [catalogue README](../../../crates/graphql-orm-operation-catalog/README.md#relation-and-entity-resolvers)
 for the document format, its RFC 8785 fingerprint, and
 [what each export discloses](../../../crates/graphql-orm-operation-catalog/README.md#what-an-export-discloses).

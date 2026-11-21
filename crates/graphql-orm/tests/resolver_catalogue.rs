@@ -16,8 +16,8 @@
 use graphql_orm::async_graphql::SDLExportOptions;
 use graphql_orm::graphql::orm::{
     GRAPHQL_RESOLVER_CATALOG_VERSION, GeneratedResolverFacts, GraphqlOperationKind,
-    GraphqlResolverAuthorization, GraphqlResolverCatalog, GraphqlSemanticOperationSource,
-    GraphqlSemanticRelationshipCardinality, ResolverEntitySource, compose_resolver_catalog,
+    GraphqlResolverAuthorization, GraphqlResolverCatalog, GraphqlSemanticRelationshipCardinality,
+    ResolverEntitySource, compose_resolver_catalog,
 };
 use graphql_orm::prelude::*;
 
@@ -281,10 +281,50 @@ mod catalogued {
         }
     }
 
+    /// A relation field without `#[graphql(skip)]`: the `SimpleObject`
+    /// derive serves a plain getter for it, named `ledger` by async-graphql's
+    /// own rule, beside the generated relation resolver. The object is
+    /// composed, so the generated resolvers live on a wrapper type; on the
+    /// entity itself the two Rust methods would not compile.
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        SimpleObject,
+        Clone,
+        Debug,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[graphql(complex)]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "tbl_cat_loose",
+        plural = "CatLooseRows",
+        auth = "none"
+    )]
+    #[graphql_orm(compose_complex_object)]
+    pub struct CatLoose {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[sortable]
+        pub id: String,
+        pub ledger_id: String,
+        pub sealed_id: String,
+        #[relation(target = "CatLedger", from = "ledger_id", to = "id", emit_fk = false)]
+        pub ledger: Option<CatLedger>,
+        #[graphql(skip)]
+        #[relation(target = "CatSealed", from = "sealed_id", to = "id", emit_fk = false)]
+        pub sealed: Option<CatSealed>,
+    }
+
+    #[graphql_complex_object]
+    impl CatLoose {}
+
     schema_roots! {
         backend: "sqlite",
         query_custom_ops: [],
-        entities: [CatOwner, CatLedger, CatSealed, CatListed, CatNote, CatStub],
+        entities: [CatOwner, CatLedger, CatSealed, CatListed, CatNote, CatStub, CatLoose],
     }
 }
 
@@ -538,7 +578,12 @@ fn served_relation_fields_are_listed_under_their_registered_names() {
         ("PublicOwner", field_name("listed"), "CatListed", One),
         ("PublicOwner", field_name("listedRows"), "CatListed", Many),
         ("PublicOwner", field_name("sealed"), "CatSealed", One),
+        ("CatLoose", field_name("sealed"), "CatSealed", One),
     ];
+    // `CatLoose.ledger` is listed only where no getter takes its name.
+    if field_name("ledger") != "ledger" {
+        expected.push(("CatLoose", field_name("ledger"), "CatLedger", One));
+    }
     expected.sort_by_key(|(owner, field, _, _)| (*owner, *field));
     let listed = resolvers
         .relations
@@ -565,7 +610,6 @@ fn served_relation_fields_are_listed_under_their_registered_names() {
     for (owner, field, _, cardinality) in &expected {
         let relation = resolvers.relation(owner, field).unwrap();
         assert_eq!(relation.cardinality, *cardinality);
-        assert_eq!(relation.source, GraphqlSemanticOperationSource::Generated);
         assert!(!relation.has_field_policy);
         // A to-many field takes the generated connection arguments; their
         // types are in the semantic catalogue.
@@ -793,7 +837,10 @@ async fn an_unresolvable_type_and_a_same_named_field_of_another_type_are_not_lis
     // The registered keys include the declared one, and the type is marked
     // unresolvable.
     assert!(header.contains("resolvable: false"), "{header}");
-    assert!(!sdl_keys(&sdl, "CatStub").is_empty(), "{header}");
+    assert!(
+        sdl_keys(&sdl, "CatStub").contains(&vec![field_name("id").to_owned()]),
+        "the declared key is registered: {header}"
+    );
     let start = sdl.find("type CatStub ").unwrap();
     let stub = &sdl[start..start + sdl[start..].find("\n}").unwrap()];
     let ledger = field_name("ledger");
@@ -824,6 +871,50 @@ async fn an_unresolvable_type_and_a_same_named_field_of_another_type_are_not_lis
             .iter()
             .all(|relation| relation.type_name != "CatStub" && relation.target != "CatStub")
     );
+}
+
+/// A generated relation whose name a `SimpleObject` getter also serves is
+/// not listed: which of the two the schema serves is not the ORM's choice,
+/// so nothing claims the generated resolver's requirement for it. The getter
+/// is named by async-graphql's own rule, so the two collide only where the
+/// field rule gives the relation the same name.
+#[tokio::test]
+async fn a_relation_shadowed_by_a_simple_object_getter_is_not_listed() {
+    let sdl = federation_sdl().await;
+    let start = sdl.find("type CatLoose ").expect("CatLoose is served");
+    let loose = &sdl[start..start + sdl[start..].find("\n}").unwrap()];
+    assert!(
+        loose.lines().any(|line| line.trim().starts_with("ledger:")),
+        "the getter is served: {loose}"
+    );
+    let relation = field_name("ledger");
+    let shadowed = relation == "ledger";
+    assert_eq!(
+        catalogued::CatLoose::__gom_shadowed_relation_fields().contains(&relation),
+        shadowed
+    );
+    assert_eq!(
+        catalogued::CatLoose::__gom_mounted_relation_fields().contains(&relation),
+        !shadowed
+    );
+    let resolvers = resolvers();
+    assert_eq!(resolvers.relation("CatLoose", relation).is_none(), shadowed);
+    // The semantic catalogue still describes the declared relationship, and
+    // the skipped relation beside it is listed.
+    assert!(
+        catalogued::graphql_orm_semantic_catalog()
+            .entities
+            .iter()
+            .find(|entity| entity.entity_name == "CatLoose")
+            .unwrap()
+            .fields
+            .iter()
+            .any(|field| field.field_name == relation && field.relationship.is_some())
+    );
+    let sealed = resolvers
+        .relation("CatLoose", field_name("sealed"))
+        .expect("the skipped relation is listed");
+    assert_eq!(sealed.target, "CatSealed");
 }
 
 /// An entity the schema does not register is not matched to another type
@@ -867,7 +958,6 @@ async fn an_unregistered_entity_is_not_matched_to_a_same_named_type() {
     // The same schema, catalogued as itself, lists that relation.
     let own = shadow::graphql_orm_resolver_catalog().unwrap();
     let relation = own.relation("CatOwner", ledger).expect("its own relation");
-    assert_eq!(relation.source, GraphqlSemanticOperationSource::Generated);
     assert_eq!(relation.target, "CatLedger");
 }
 
@@ -911,14 +1001,7 @@ async fn the_export_names_only_what_the_schema_and_semantic_catalogue_publish() 
     let mut found = Vec::new();
     strings(&serde_json::from_str(&exported).unwrap(), &mut found);
     assert!(found.len() > 20);
-    let keywords = [
-        "generated",
-        "one",
-        "many",
-        "query",
-        "same_as_root",
-        "subgraph_only",
-    ];
+    let keywords = ["one", "many", "query", "same_as_root", "subgraph_only"];
     for string in found {
         assert!(
             keywords.contains(&string.as_str())

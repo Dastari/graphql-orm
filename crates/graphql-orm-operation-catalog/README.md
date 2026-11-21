@@ -235,7 +235,7 @@ version `GRAPHQL_RESOLVER_CATALOG_VERSION` 1) lists both:
 
 | Member | Contents |
 | --- | --- |
-| `relations` | one `GraphqlRelationResolverDescriptor` per relationship field the schema serves: owning type, field, `generated` or `custom` source, target type, cardinality, argument names, whether a field policy exists, and an authorization reference |
+| `relations` | one `GraphqlRelationResolverDescriptor` per served relationship field with a generated resolver: owning type, field, target type, cardinality, argument names, whether a field policy exists, and an authorization reference |
 | `entities` | one `GraphqlEntityResolverDescriptor` per type the schema resolves by a `@key`: the type name, each key's field names in `@key` order, and an authorization reference |
 
 Coordinates are those of the served schema, not of the Rust declarations:
@@ -269,8 +269,9 @@ validate is an error, never a panic. A host that never calls it is unaffected.
 `GraphqlResolverCatalog::compose(&semantic, sources, &served)` builds one for
 a schema composed some other way. `served` is a `GraphqlServedObjects` holding
 the object types that schema serves and each field's type and arguments
-(`GraphqlServedField`); nothing outside it is listed, and every served
-relationship field no source claims is `custom`. A source marked
+(`GraphqlServedField`); nothing outside it is listed. A relationship is
+listed only when a source names it as a mounted generated resolver; the served
+schema confirms that claim and never creates one. A source marked
 `unregistered()` says the schema registers no type for that entity.
 
 ```rust,ignore
@@ -295,18 +296,32 @@ is one of:
   exposed generated root of the related or resolved entity (its list root for
   a to-many relationship, its single-read root for a to-one relationship or an
   entity lookup). Read the requirement from that root's descriptor.
-- `subgraph_only`: the requirement is not published. This covers handwritten
-  resolvers, a target with no matching exposed root, a requirement that binds
-  root arguments (scope templates), and a traversal that requires more than
-  the root does.
+- `subgraph_only`: the requirement is not published. This covers a target
+  with no matching exposed root, a target that is not a generated entity of
+  the schema, a requirement that binds root arguments (scope templates), and a
+  traversal that requires more than the root does.
 
 The reference is to a static requirement only. The subgraph also applies the
 owning type's authentication mode, field policy, row policy and database
 policy, and a consumer must not treat a reference as permission.
 
-Handwritten entity resolvers (`#[graphql(entity)]` in a host's own object) and
-relationship fields on types the semantic catalogue does not list are not
-represented.
+### Out of scope for version 1: handwritten resolvers
+
+Version 1 lists only what the ORM generates. The following are not listed,
+and their absence says nothing about whether the schema serves them:
+
+- handwritten relationship fields, including a handwritten field with the
+  name, return type and arguments of a declared relation;
+- a generated relation whose name a `SimpleObject` getter on the same struct
+  also serves (on a composed object, a relation field without
+  `#[graphql(skip)]`; anywhere, a field renamed to the relation's name). Which of the two the schema serves is
+  async-graphql's choice, so the entry is left out. If the struct has a
+  `#[graphql(flatten)]` field, the derive cannot see the names it serves, and
+  no relation of that entity is listed;
+- handwritten entity resolvers (`#[graphql(entity)]` in a host's own object).
+
+Nothing proves what a handwritten resolver resolves or enforces. Listing them
+is a follow-up that needs an explicit per-field annotation.
 
 ## Canonical JSON encodings
 

@@ -172,8 +172,8 @@ schema_roots! {auth: "none", query_custom_ops: [], entities: [InputInventoryReco
 
 /// `InputInventoryRecord` mounts its generated relation object through
 /// `graphql_complex_object`, with `rename_fields` under the PascalCase field
-/// rule. Either way the resolver catalogue (#544) reports the mounted
-/// relation as generated.
+/// rule. Either way the resolver catalogue (#544), which lists generated
+/// relations only, lists the mounted relation.
 #[test]
 fn a_composed_object_reports_its_generated_relations_as_generated() {
     let resolvers = graphql_orm_resolver_catalog().expect("resolver catalogue");
@@ -182,7 +182,6 @@ fn a_composed_object_reports_its_generated_relations_as_generated() {
         .iter()
         .find(|relation| relation.type_name == "InputInventoryRecord")
         .expect("InputInventoryRecord.children is served");
-    assert_eq!(children.source, GraphqlSemanticOperationSource::Generated);
     assert_eq!(children.target, "InputInventoryChild");
     assert_eq!(
         children.cardinality,
