@@ -41,7 +41,7 @@ pub struct GeneratedResolverFacts {
 #[doc(hidden)]
 pub struct ResolverEntitySource {
     semantic_name: Option<String>,
-    type_name: String,
+    rust_type: &'static str,
     mounted_relations: &'static [&'static str],
     facts: GeneratedResolverFacts,
 }
@@ -49,16 +49,17 @@ pub struct ResolverEntitySource {
 impl ResolverEntitySource {
     /// Captures an entity's generated resolver facts.
     ///
-    /// `mounted_relations` is the entity's generated-output witness: the
+    /// The entity's Rust type identifies its object in the schema's type
+    /// registry. `mounted_relations` is the entity's generated-output witness: the
     /// relation fields whose generated resolver its GraphQL object mounts. It
     /// is empty for an entity with no generated relation resolver.
-    pub fn of<T: Entity + OutputType>(
+    pub fn of<T: Entity>(
         facts: GeneratedResolverFacts,
         mounted_relations: &'static [&'static str],
     ) -> Self {
         Self {
             semantic_name: T::graphql_semantic_metadata().map(|entity| entity.entity_name.clone()),
-            type_name: <T as OutputType>::type_name().into_owned(),
+            rust_type: std::any::type_name::<T>(),
             mounted_relations,
             facts,
         }
@@ -87,18 +88,28 @@ pub fn compose_resolver_catalog<Q: OutputType>(
     }
     let sources = sources.into_iter().filter_map(|source| {
         let entity_name = source.semantic_name?;
-        // The keys the served schema resolves for this type, as it spells
-        // them in `@key(fields: "...")`.
-        let resolvable = match registry.types.get(&source.type_name) {
-            Some(MetaType::Object {
-                keys: Some(keys), ..
-            }) => keys.as_slice(),
-            _ => &[],
-        };
+        // The object the schema registers for this Rust type gives the
+        // served type name and the keys the schema resolves for it, as it
+        // spells them in `@key(fields: "...")`. An entity with no registered
+        // object is not served, and has no entry.
+        let (type_name, resolvable) =
+            registry
+                .types
+                .iter()
+                .find_map(|(type_name, registered)| match registered {
+                    MetaType::Object {
+                        rust_typename: Some(rust_type),
+                        keys,
+                        ..
+                    } if *rust_type == source.rust_type => {
+                        Some((type_name.clone(), keys.as_deref().unwrap_or_default()))
+                    }
+                    _ => None,
+                })?;
         let owned = |name: Option<&str>| name.map(str::to_owned);
         Some(
             GraphqlGeneratedResolverSource::new(entity_name)
-                .with_type_name(source.type_name)
+                .with_type_name(type_name)
                 .with_relation_fields(
                     source
                         .mounted_relations

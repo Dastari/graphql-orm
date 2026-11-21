@@ -269,6 +269,9 @@ mod plain {
 
 /// A composite key of 17 fields, one more than a relationship key mapping
 /// may hold.
+// The derive is expanded through a local macro, so Clippy attributes its
+// generated 17-key functions to this file.
+#[allow(clippy::too_many_arguments)]
 mod wide {
     use graphql_orm::prelude::*;
 
