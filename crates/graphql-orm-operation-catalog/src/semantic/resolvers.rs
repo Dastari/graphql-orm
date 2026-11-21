@@ -11,6 +11,12 @@
 //! semantic catalogue by that catalogue's fingerprint. Composing it changes no
 //! existing descriptor, wire format or fingerprint.
 //!
+//! Coordinates are those of the served schema. A relationship the semantic
+//! catalogue describes is listed only when the served schema has that field,
+//! under the type name the schema registers. Where that name differs from the
+//! semantic catalogue's entity name, the descriptor carries both, so it still
+//! binds to the catalogue.
+//!
 //! The document is descriptive. It grants no resolver, field, row, database
 //! or provider authority, and the server never reads it back. It names only
 //! what the bound semantic catalogue and the schema's SDL already publish:
@@ -20,14 +26,14 @@
 //! or Rust path. An authorization requirement is given only as a reference to
 //! a root field the semantic catalogue already lists.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::{
     GraphqlEntitySemanticMetadata, GraphqlSemanticCatalog, GraphqlSemanticError,
-    GraphqlSemanticOperationSource, GraphqlSemanticRelationshipCardinality, hex_sha256,
-    valid_fingerprint, valid_graphql_name,
+    GraphqlSemanticOperationSource, GraphqlSemanticRelationshipCardinality, MAXIMUM_ENTITIES,
+    MAXIMUM_FIELDS_PER_ENTITY, hex_sha256, valid_fingerprint, valid_graphql_name,
 };
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationKind, rfc8785_canonical_json};
 
@@ -47,16 +53,22 @@ pub const GRAPHQL_RESOLVER_CATALOG_FINGERPRINT_ALGORITHM: &str =
 /// without the semantic catalogue listing it as an entity field.
 pub const GRAPHQL_RESOLVER_NODE_ID_KEY_FIELD: &str = "NodeId";
 
-const MAXIMUM_RELATIONS: usize = 65_536;
-const MAXIMUM_ENTITY_KEYS: usize = 64;
-const MAXIMUM_KEY_FIELDS: usize = 16;
+/// Most fields one resolvable key may name, and most keys one type may
+/// carry: the semantic catalogue's own bound on the fields of an entity.
+/// Entity derives accept any key the entity's fields can form, so no key the
+/// semantic catalogue can describe is refused here.
+pub const GRAPHQL_RESOLVER_MAXIMUM_KEY_FIELDS: usize = MAXIMUM_FIELDS_PER_ENTITY;
+
+const MAXIMUM_RELATIONS: usize = MAXIMUM_ENTITIES * MAXIMUM_FIELDS_PER_ENTITY;
+const MAXIMUM_ENTITY_KEYS: usize = MAXIMUM_FIELDS_PER_ENTITY;
 
 /// Relation and entity resolvers of one semantic catalogue.
 ///
 /// Compose it with [`Self::compose`]. A deserialized document is a trusted
 /// host assertion like the catalogue itself; [`Self::validate_against`]
-/// checks it against the catalogue it claims to describe, including that it
-/// lists every relationship field of that catalogue exactly once.
+/// checks every entry against the catalogue it claims to describe. It cannot
+/// check that no served relationship is missing: the semantic catalogue does
+/// not record which of its fields a schema serves.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -65,7 +77,8 @@ pub struct GraphqlResolverCatalog {
     pub version: u16,
     /// Fingerprint of the semantic catalogue this document describes.
     pub semantic_catalog_fingerprint: String,
-    /// Every relationship field, ordered by owning type and field name.
+    /// Every served relationship field, ordered by owning type and field
+    /// name.
     pub relations: Vec<GraphqlRelationResolverDescriptor>,
     /// Types with a resolvable Federation key, ordered by type name.
     pub entities: Vec<GraphqlEntityResolverDescriptor>,
@@ -78,14 +91,22 @@ pub struct GraphqlResolverCatalog {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GraphqlRelationResolverDescriptor {
-    /// Public GraphQL name of the type that owns the field.
+    /// Name the served schema registers for the type that owns the field.
     pub type_name: String,
-    /// Public relationship field name.
+    /// The owning entity's name in the semantic catalogue, when it differs
+    /// from [`Self::type_name`]. Omitted from the wire when they are equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_entity_name: Option<String>,
+    /// Relationship field name, as served and as in the semantic catalogue.
     pub field_name: String,
     /// Whether the ORM generated the resolver or the host wrote it.
     pub source: GraphqlSemanticOperationSource,
-    /// Public GraphQL name of the related type.
+    /// Name the served schema registers for the related type.
     pub target: String,
+    /// The related entity's name in the semantic catalogue, when it differs
+    /// from [`Self::target`]. Omitted from the wire when they are equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_target: Option<String>,
     /// Relationship cardinality.
     pub cardinality: GraphqlSemanticRelationshipCardinality,
     /// Public argument names, in declaration order. Their types are in the
@@ -102,8 +123,13 @@ pub struct GraphqlRelationResolverDescriptor {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GraphqlEntityResolverDescriptor {
-    /// Public GraphQL type name: the `__typename` of a representation.
+    /// Name the served schema registers for the type: the `__typename` of a
+    /// representation.
     pub type_name: String,
+    /// The entity's name in the semantic catalogue, when it differs from
+    /// [`Self::type_name`]. Omitted from the wire when they are equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_entity_name: Option<String>,
     /// Resolvable keys in declaration order, one per `@key`.
     pub keys: Vec<GraphqlEntityResolverKey>,
     /// What an entity lookup is required to hold.
@@ -170,11 +196,15 @@ pub enum GraphqlResolverAuthorization {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct GraphqlGeneratedResolverSource {
-    /// Public GraphQL entity name, as in the semantic catalogue.
+    /// Entity name, as in the semantic catalogue.
     pub entity_name: String,
-    /// Relationship fields of this entity whose resolver the ORM generated.
+    /// Name the served schema registers for the entity's type, when it
+    /// differs from [`Self::entity_name`].
+    pub type_name: Option<String>,
+    /// Relationship fields of this entity whose generated resolver the
+    /// schema mounts.
     pub relation_fields: Vec<String>,
-    /// Resolvable Federation keys in declaration order.
+    /// Federation keys the served schema resolves, in declaration order.
     pub federation_keys: Vec<Vec<String>>,
     /// The list root whose requirement a to-many traversal into this entity
     /// enforces, when the two are the same.
@@ -194,6 +224,14 @@ impl GraphqlGeneratedResolverSource {
             entity_name: entity_name.into(),
             ..Self::default()
         }
+    }
+
+    /// Sets the name the served schema registers for the entity's type.
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: impl Into<String>) -> Self {
+        let type_name = type_name.into();
+        self.type_name = (type_name != self.entity_name).then_some(type_name);
+        self
     }
 
     /// Sets the generated relationship fields.
@@ -230,21 +268,68 @@ impl GraphqlGeneratedResolverSource {
     }
 }
 
+/// The object types a schema serves and the fields of each, as input to
+/// [`GraphqlResolverCatalog::compose`].
+///
+/// Composition lists a coordinate only when it is present here, so an empty
+/// value yields an empty resolver catalogue.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphqlServedObjects {
+    objects: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl GraphqlServedObjects {
+    /// Creates an empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds one served object type and its field names.
+    #[must_use]
+    pub fn with_object<I, S>(mut self, type_name: impl Into<String>, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.objects
+            .entry(type_name.into())
+            .or_default()
+            .extend(fields.into_iter().map(Into::into));
+        self
+    }
+
+    /// Whether the schema serves this object type.
+    pub fn has_object(&self, type_name: &str) -> bool {
+        self.objects.contains_key(type_name)
+    }
+
+    /// Whether the schema serves this field of this object type.
+    pub fn has_field(&self, type_name: &str, field_name: &str) -> bool {
+        self.objects
+            .get(type_name)
+            .is_some_and(|fields| fields.contains(field_name))
+    }
+}
+
 impl GraphqlResolverCatalog {
     /// Composes the resolver catalogue of one semantic catalogue.
     ///
-    /// Every relationship field of the catalogue becomes one relation
-    /// descriptor. A field is `generated` when `sources` lists it for its
-    /// entity, and `custom` otherwise. Sources naming an entity the catalogue
-    /// does not publish are ignored.
+    /// A relationship field of the catalogue becomes a relation descriptor
+    /// when `served` has that field on the owning type and has the related
+    /// type; every other relationship is left out. A field is `generated`
+    /// when `sources` lists it for its entity, and `custom` otherwise. An
+    /// entity is listed with its keys when `served` has its type. Sources
+    /// naming an entity the catalogue does not publish are ignored.
     ///
     /// # Errors
     ///
     /// Returns an error when the catalogue is invalid, an entity has two
-    /// sources, or a key does not validate against the catalogue.
+    /// sources, two entities are served under one type name, a key does not
+    /// validate against the catalogue, or a bound is exceeded.
     pub fn compose(
         catalog: &GraphqlSemanticCatalog,
         sources: impl IntoIterator<Item = GraphqlGeneratedResolverSource>,
+        served: &GraphqlServedObjects,
     ) -> Result<Self, GraphqlSemanticError> {
         catalog.validate()?;
         let sources = sources.into_iter().collect::<Vec<_>>();
@@ -273,14 +358,29 @@ impl GraphqlResolverCatalog {
                 })
         };
 
+        // The served name of a semantic entity, and the semantic name to
+        // carry beside it when the two differ.
+        let served_name = |entity_name: &str| {
+            let type_name = source(entity_name)
+                .and_then(|source| source.type_name.clone())
+                .unwrap_or_else(|| entity_name.to_owned());
+            let semantic = (type_name != entity_name).then(|| entity_name.to_owned());
+            (type_name, semantic)
+        };
+
         let mut relations = Vec::new();
         let mut entities = Vec::new();
         for entity in &catalog.entities {
             let owner = source(&entity.entity_name);
+            let (type_name, semantic_entity_name) = served_name(&entity.entity_name);
             for field in &entity.fields {
                 let Some(relationship) = &field.relationship else {
                     continue;
                 };
+                let (target, semantic_target) = served_name(&relationship.target);
+                if !served.has_field(&type_name, &field.field_name) || !served.has_object(&target) {
+                    continue;
+                }
                 let generated =
                     owner.is_some_and(|owner| owner.relation_fields.contains(&field.field_name));
                 let authorization = match source(&relationship.target) {
@@ -299,14 +399,16 @@ impl GraphqlResolverCatalog {
                     _ => GraphqlResolverAuthorization::SubgraphOnly,
                 };
                 relations.push(GraphqlRelationResolverDescriptor {
-                    type_name: entity.entity_name.clone(),
+                    type_name: type_name.clone(),
+                    semantic_entity_name: semantic_entity_name.clone(),
                     field_name: field.field_name.clone(),
                     source: if generated {
                         GraphqlSemanticOperationSource::Generated
                     } else {
                         GraphqlSemanticOperationSource::Custom
                     },
-                    target: relationship.target.clone(),
+                    target,
+                    semantic_target,
                     cardinality: relationship.cardinality,
                     arguments: relationship
                         .arguments
@@ -317,9 +419,12 @@ impl GraphqlResolverCatalog {
                     authorization,
                 });
             }
-            if let Some(owner) = owner.filter(|owner| !owner.federation_keys.is_empty()) {
+            if let Some(owner) = owner
+                .filter(|owner| !owner.federation_keys.is_empty() && served.has_object(&type_name))
+            {
                 entities.push(GraphqlEntityResolverDescriptor {
-                    type_name: entity.entity_name.clone(),
+                    type_name,
+                    semantic_entity_name,
                     keys: owner
                         .federation_keys
                         .iter()
@@ -385,6 +490,8 @@ impl GraphqlResolverCatalog {
             if !valid_graphql_name(&relation.type_name)
                 || !valid_graphql_name(&relation.field_name)
                 || !valid_graphql_name(&relation.target)
+                || !semantic_name_valid(&relation.semantic_entity_name, &relation.type_name)
+                || !semantic_name_valid(&relation.semantic_target, &relation.target)
                 || !relation
                     .arguments
                     .iter()
@@ -404,12 +511,13 @@ impl GraphqlResolverCatalog {
             let keys_valid = entity.keys.iter().all(|key| {
                 let unique = key.fields.iter().collect::<BTreeSet<_>>();
                 !key.fields.is_empty()
-                    && key.fields.len() <= MAXIMUM_KEY_FIELDS
+                    && key.fields.len() <= GRAPHQL_RESOLVER_MAXIMUM_KEY_FIELDS
                     && key.fields.iter().all(|name| valid_graphql_name(name))
                     && unique.len() == key.fields.len()
                     && key_sets.insert(unique)
             });
             if !valid_graphql_name(&entity.type_name)
+                || !semantic_name_valid(&entity.semantic_entity_name, &entity.type_name)
                 || entity.keys.is_empty()
                 || entity.keys.len() > MAXIMUM_ENTITY_KEYS
                 || !keys_valid
@@ -435,11 +543,12 @@ impl GraphqlResolverCatalog {
     /// # Errors
     ///
     /// Returns an error when [`Self::validate`] fails, the catalogue
-    /// fingerprint differs, the relations are not exactly the catalogue's
-    /// relationship fields with the same target, cardinality, arguments and
+    /// fingerprint differs, a relation is not a relationship field of the
+    /// catalogue with the same target, cardinality, arguments and
     /// field-policy flag, a key names a field the catalogue does not publish
-    /// as a readable plain field, or an authorization reference does not name
-    /// an exposed generated root of the right entity and category.
+    /// as a readable plain field, an authorization reference does not name an
+    /// exposed generated root of the right entity and category, or two
+    /// entries disagree about which served type a catalogue entity is.
     pub fn validate_against(
         &self,
         catalog: &GraphqlSemanticCatalog,
@@ -453,24 +562,42 @@ impl GraphqlResolverCatalog {
         let mismatch = || {
             GraphqlSemanticError::new("resolver catalogue relation does not match the catalogue")
         };
-        let mut expected = catalog
-            .entities
-            .iter()
-            .flat_map(|entity| {
-                entity
-                    .fields
-                    .iter()
-                    .filter(|field| field.relationship.is_some())
-                    .map(move |field| (entity.entity_name.as_str(), field))
-            })
-            .collect::<Vec<_>>();
-        expected.sort_by(|left, right| {
-            (left.0, left.1.field_name.as_str()).cmp(&(right.0, right.1.field_name.as_str()))
-        });
-        if expected.len() != self.relations.len() {
-            return Err(mismatch());
-        }
-        for (relation, (entity_name, field)) in self.relations.iter().zip(expected) {
+        let semantic_entity = |entity_name: &str| {
+            catalog
+                .entities
+                .iter()
+                .find(|entity| entity.entity_name == entity_name)
+        };
+        // One served type per catalogue entity, and one entity per type.
+        let mut served_by_entity = BTreeMap::new();
+        let mut entity_by_served = BTreeMap::new();
+        let mut bind = |served: &'_ str, semantic: &'_ str| {
+            *served_by_entity
+                .entry(semantic.to_owned())
+                .or_insert_with(|| served.to_owned())
+                == served
+                && *entity_by_served
+                    .entry(served.to_owned())
+                    .or_insert_with(|| semantic.to_owned())
+                    == semantic
+        };
+        for relation in &self.relations {
+            let entity_name = relation
+                .semantic_entity_name
+                .as_deref()
+                .unwrap_or(&relation.type_name);
+            let target_name = relation
+                .semantic_target
+                .as_deref()
+                .unwrap_or(&relation.target);
+            let field = semantic_entity(entity_name)
+                .and_then(|entity| {
+                    entity
+                        .fields
+                        .iter()
+                        .find(|field| field.field_name == relation.field_name)
+                })
+                .ok_or_else(mismatch)?;
             let relationship = field.relationship.as_ref().ok_or_else(mismatch)?;
             let root_valid = match &relation.authorization {
                 GraphqlResolverAuthorization::SubgraphOnly => true,
@@ -490,9 +617,7 @@ impl GraphqlResolverCatalog {
                     )
                 }
             };
-            if relation.type_name != entity_name
-                || relation.field_name != field.field_name
-                || relation.target != relationship.target
+            if target_name != relationship.target
                 || relation.cardinality != relationship.cardinality
                 || relation.has_field_policy != field.has_field_policy
                 || !relation.arguments.iter().eq(relationship
@@ -500,6 +625,8 @@ impl GraphqlResolverCatalog {
                     .iter()
                     .map(|argument| &argument.graphql_name))
                 || !root_valid
+                || !bind(&relation.type_name, entity_name)
+                || !bind(&relation.target, target_name)
             {
                 return Err(mismatch());
             }
@@ -510,11 +637,11 @@ impl GraphqlResolverCatalog {
                     "resolver catalogue entity resolver does not match the catalogue",
                 )
             };
-            let semantic = catalog
-                .entities
-                .iter()
-                .find(|semantic| semantic.entity_name == entity.type_name)
-                .ok_or_else(mismatch)?;
+            let entity_name = entity
+                .semantic_entity_name
+                .as_deref()
+                .unwrap_or(&entity.type_name);
+            let semantic = semantic_entity(entity_name).ok_or_else(mismatch)?;
             let keys_published = entity.keys.iter().all(|key| {
                 key.fields == [GRAPHQL_RESOLVER_NODE_ID_KEY_FIELD]
                     || key
@@ -528,19 +655,20 @@ impl GraphqlResolverCatalog {
                     generated_query_root(
                         catalog,
                         field_name,
-                        &entity.type_name,
+                        entity_name,
                         GeneratedGraphqlOperationCategory::SingleRead,
                     )
                 }
             };
-            if !keys_published || !root_valid {
+            if !keys_published || !root_valid || !bind(&entity.type_name, entity_name) {
                 return Err(mismatch());
             }
         }
         Ok(())
     }
 
-    /// Returns the descriptor of one relationship field.
+    /// Returns the descriptor of one relationship field, by the names the
+    /// served schema registers.
     pub fn relation(
         &self,
         type_name: &str,
@@ -551,7 +679,8 @@ impl GraphqlResolverCatalog {
             .find(|relation| relation.type_name == type_name && relation.field_name == field_name)
     }
 
-    /// Returns the entity resolvers of one type, when it has a resolvable key.
+    /// Returns the entity resolvers of one served type, when it has a
+    /// resolvable key.
     pub fn entity(&self, type_name: &str) -> Option<&GraphqlEntityResolverDescriptor> {
         self.entities
             .iter()
@@ -658,6 +787,14 @@ fn authorization_shape_valid(authorization: &GraphqlResolverAuthorization) -> bo
             *kind == GraphqlOperationKind::Query && valid_graphql_name(field_name)
         }
     }
+}
+
+/// A carried semantic name is a GraphQL name that differs from the served
+/// one; an equal name is left out, so each document has one encoding.
+fn semantic_name_valid(semantic: &Option<String>, served: &str) -> bool {
+    semantic
+        .as_deref()
+        .is_none_or(|semantic| valid_graphql_name(semantic) && semantic != served)
 }
 
 /// Whether `root` is an exposed generated query root of `entity_name` in
@@ -869,8 +1006,28 @@ mod tests {
         }
     }
 
+    /// A schema that serves every type and field of the catalogue.
+    fn serving(catalog: &GraphqlSemanticCatalog) -> GraphqlServedObjects {
+        catalog
+            .entities
+            .iter()
+            .fold(GraphqlServedObjects::new(), |served, entity| {
+                served.with_object(
+                    entity.entity_name.clone(),
+                    entity.fields.iter().map(|field| field.field_name.clone()),
+                )
+            })
+    }
+
+    fn compose(
+        catalog: &GraphqlSemanticCatalog,
+        sources: impl IntoIterator<Item = GraphqlGeneratedResolverSource>,
+    ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
+        GraphqlResolverCatalog::compose(catalog, sources, &serving(catalog))
+    }
+
     fn composed() -> GraphqlResolverCatalog {
-        GraphqlResolverCatalog::compose(&catalog(), sources()).expect("resolver catalogue")
+        compose(&catalog(), sources()).expect("resolver catalogue")
     }
 
     /// Recomputes the fingerprint after a test edits the document.
@@ -948,7 +1105,7 @@ mod tests {
         sources[0].to_many_root = None;
         sources[0].entity_root = Some("Children".into());
         sources[1].to_many_root = Some("Missing".into());
-        let resolvers = GraphqlResolverCatalog::compose(&catalog(), sources).unwrap();
+        let resolvers = compose(&catalog(), sources).unwrap();
         for (type_name, field_name) in [("Child", "Parent"), ("Parent", "Children")] {
             assert_eq!(
                 resolvers
@@ -964,7 +1121,7 @@ mod tests {
         );
 
         // With no source at all, every relation is handwritten.
-        let bare = GraphqlResolverCatalog::compose(&catalog(), []).unwrap();
+        let bare = compose(&catalog(), []).unwrap();
         assert_eq!(bare.relations.len(), 4);
         assert!(bare.entities.is_empty());
         assert!(bare.relations.iter().all(|relation| {
@@ -978,10 +1135,7 @@ mod tests {
         let resolvers = composed();
         let mut reversed = sources();
         reversed.reverse();
-        assert_eq!(
-            resolvers,
-            GraphqlResolverCatalog::compose(&catalog(), reversed).unwrap()
-        );
+        assert_eq!(resolvers, compose(&catalog(), reversed).unwrap());
         assert_eq!(resolvers.fingerprint.len(), 64);
 
         let exported = resolvers.export_json().unwrap();
@@ -1021,7 +1175,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let resolvers = GraphqlResolverCatalog::compose(
+        let resolvers = compose(
             &catalog,
             [
                 GraphqlGeneratedResolverSource::new("Parent")
@@ -1096,10 +1250,13 @@ mod tests {
     #[test]
     fn refuses_a_document_that_disagrees_with_the_catalogue() {
         let catalog = catalog();
-        let edits: [fn(&mut GraphqlResolverCatalog); 9] = [
-            // A relationship field is left out.
+        let edits: [fn(&mut GraphqlResolverCatalog); 10] = [
+            // A carried semantic name the catalogue does not publish.
+            |resolvers| resolvers.relations[1].semantic_entity_name = Some("Unlisted".into()),
+            // One catalogue entity under two served names.
             |resolvers| {
-                resolvers.relations.pop();
+                resolvers.relations[3].type_name = "PublicParent".into();
+                resolvers.relations[3].semantic_entity_name = Some("Parent".into());
             },
             |resolvers| resolvers.relations[1].target = "Child".into(),
             |resolvers| {
@@ -1128,7 +1285,11 @@ mod tests {
 
     #[test]
     fn refuses_malformed_shapes() {
-        let edits: [fn(&mut GraphqlResolverCatalog); 8] = [
+        let edits: [fn(&mut GraphqlResolverCatalog); 11] = [
+            // A carried semantic name must differ from the served one.
+            |resolvers| resolvers.relations[0].semantic_entity_name = Some("Child".into()),
+            |resolvers| resolvers.relations[0].semantic_target = Some("not a name".into()),
+            |resolvers| resolvers.entities[0].semantic_entity_name = Some("Parent".into()),
             |resolvers| resolvers.relations.swap(0, 1),
             |resolvers| resolvers.relations[0].field_name = "not a name".into(),
             // A handwritten resolver cannot claim a root's requirement.
@@ -1160,21 +1321,192 @@ mod tests {
         let catalog = catalog();
         let mut duplicated = sources();
         duplicated.push(GraphqlGeneratedResolverSource::new("Parent"));
-        assert!(GraphqlResolverCatalog::compose(&catalog, duplicated).is_err());
+        assert!(compose(&catalog, duplicated).is_err());
 
         for key in ["PolicyKey", "Children", "Unknown"] {
             let source = GraphqlGeneratedResolverSource::new("Parent")
                 .with_federation_keys(vec![vec![key.into()]]);
             assert!(
-                GraphqlResolverCatalog::compose(&catalog, [source]).is_err(),
+                compose(&catalog, [source]).is_err(),
                 "{key} was accepted as a key"
             );
         }
         // A source for an entity the catalogue does not publish is ignored.
         let unknown = GraphqlGeneratedResolverSource::new("Unlisted")
             .with_federation_keys(vec![vec!["Id".into()]]);
-        let resolvers = GraphqlResolverCatalog::compose(&catalog, [unknown]).unwrap();
+        let resolvers = compose(&catalog, [unknown]).unwrap();
         assert!(resolvers.entities.is_empty());
+    }
+
+    /// A relationship the catalogue describes but the schema does not serve
+    /// has no coordinate, so it is not listed and no root is attached.
+    #[test]
+    fn lists_only_coordinates_the_schema_serves() {
+        let catalog = catalog();
+        let all = serving(&catalog);
+        let without = |type_name: &str, dropped: Option<&str>| {
+            catalog
+                .entities
+                .iter()
+                .filter(|entity| dropped.is_some() || entity.entity_name != type_name)
+                .fold(GraphqlServedObjects::new(), |served, entity| {
+                    served.with_object(
+                        entity.entity_name.clone(),
+                        entity
+                            .fields
+                            .iter()
+                            .map(|field| field.field_name.clone())
+                            .filter(|field| {
+                                entity.entity_name != type_name || Some(field.as_str()) != dropped
+                            }),
+                    )
+                })
+        };
+        assert!(all.has_field("Child", "Parent"));
+        assert!(!all.has_field("Child", "Missing"));
+        assert!(!all.has_object("Missing"));
+
+        // The field is not served.
+        let resolvers =
+            GraphqlResolverCatalog::compose(&catalog, sources(), &without("Child", Some("Parent")))
+                .unwrap();
+        assert!(resolvers.relation("Child", "Parent").is_none());
+        assert_eq!(resolvers.relations.len(), 3);
+        resolvers.validate_against(&catalog).unwrap();
+        assert!(
+            !resolvers
+                .export_json()
+                .unwrap()
+                .contains(r#""field_name":"Parent","has"#)
+        );
+
+        // The owning type is not served: none of its fields is.
+        let resolvers =
+            GraphqlResolverCatalog::compose(&catalog, sources(), &without("Child", None)).unwrap();
+        assert!(
+            resolvers
+                .relations
+                .iter()
+                .all(|relation| relation.type_name != "Child" && relation.target != "Child")
+        );
+        // The entity's type is not served: its keys are not resolvable.
+        let resolvers =
+            GraphqlResolverCatalog::compose(&catalog, sources(), &without("Parent", None)).unwrap();
+        assert!(resolvers.entities.is_empty());
+        assert!(
+            resolvers
+                .relations
+                .iter()
+                .all(|relation| relation.target != "Parent")
+        );
+
+        // Nothing served: nothing listed.
+        let empty =
+            GraphqlResolverCatalog::compose(&catalog, sources(), &GraphqlServedObjects::new())
+                .unwrap();
+        assert!(empty.relations.is_empty() && empty.entities.is_empty());
+        empty.validate_against(&catalog).unwrap();
+    }
+
+    /// A type the schema registers under another name is listed under that
+    /// name, and carries its catalogue name for the binding.
+    #[test]
+    fn coordinates_use_the_registered_type_name() {
+        let catalog = catalog();
+        let mut sources = sources();
+        sources[0] = sources[0].clone().with_type_name("PublicParent");
+        // A name equal to the entity name is not a rename.
+        sources[1] = sources[1].clone().with_type_name("Child");
+        assert_eq!(sources[1].type_name, None);
+        let served = catalog
+            .entities
+            .iter()
+            .fold(GraphqlServedObjects::new(), |served, entity| {
+                served.with_object(
+                    if entity.entity_name == "Parent" {
+                        "PublicParent".to_owned()
+                    } else {
+                        entity.entity_name.clone()
+                    },
+                    entity.fields.iter().map(|field| field.field_name.clone()),
+                )
+            });
+        let resolvers = GraphqlResolverCatalog::compose(&catalog, sources, &served).unwrap();
+        resolvers.validate_against(&catalog).unwrap();
+
+        let children = resolvers.relation("PublicParent", "Children").unwrap();
+        assert_eq!(children.semantic_entity_name.as_deref(), Some("Parent"));
+        assert_eq!(children.target, "Child");
+        assert_eq!(children.semantic_target, None);
+        assert_eq!(children.authorization, same_as("Children"));
+        assert!(resolvers.relation("Parent", "Children").is_none());
+
+        let parent = resolvers.relation("Child", "Parent").unwrap();
+        assert_eq!(parent.target, "PublicParent");
+        assert_eq!(parent.semantic_target.as_deref(), Some("Parent"));
+        assert_eq!(parent.semantic_entity_name, None);
+        assert_eq!(parent.authorization, same_as("Parent"));
+
+        let entity = resolvers.entity("PublicParent").unwrap();
+        assert_eq!(entity.semantic_entity_name.as_deref(), Some("Parent"));
+        assert!(resolvers.entity("Parent").is_none());
+        // Ordered by served name: `Child` relations, then `PublicParent`.
+        assert_eq!(
+            resolvers.relations.last().unwrap().type_name,
+            "PublicParent"
+        );
+
+        let decoded =
+            GraphqlResolverCatalog::from_export_json(&resolvers.export_json().unwrap()).unwrap();
+        assert_eq!(decoded, resolvers);
+        decoded.validate_against(&catalog).unwrap();
+
+        // Without the served type, the renamed entity has no coordinate.
+        let unserved = GraphqlResolverCatalog::compose(&catalog, self::sources(), &served).unwrap();
+        assert!(unserved.entities.is_empty());
+        assert!(unserved.relation("Parent", "Children").is_none());
+    }
+
+    /// A key may name as many fields as an entity can have, and a document
+    /// over a bound is refused with an error, never a panic.
+    #[test]
+    fn wide_keys_compose_and_bounds_fail_closed() {
+        let names = (0..17).map(|index| format!("K{index}")).collect::<Vec<_>>();
+        let catalog = GraphqlSemanticCatalog::compose_descriptors(
+            [entity(
+                "Wide",
+                names
+                    .iter()
+                    .map(|name| field(name, scalar("String")))
+                    .collect(),
+            )],
+            [],
+        )
+        .unwrap();
+        let source =
+            GraphqlGeneratedResolverSource::new("Wide").with_federation_keys(vec![names.clone()]);
+        let resolvers = compose(&catalog, [source]).unwrap();
+        assert_eq!(resolvers.entity("Wide").unwrap().keys[0].fields, names);
+        resolvers.validate_against(&catalog).unwrap();
+
+        let too_many = (0..=GRAPHQL_RESOLVER_MAXIMUM_KEY_FIELDS)
+            .map(|index| format!("K{index}"))
+            .collect::<Vec<_>>();
+        let source = GraphqlGeneratedResolverSource::new("Wide")
+            .with_federation_keys(vec![too_many.clone()]);
+        let error = compose(&catalog, [source]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "resolver catalogue entity resolver is invalid"
+        );
+        let mut edited = resolvers.clone();
+        edited.entities[0].keys[0].fields = too_many;
+        assert!(resealed(edited).validate().is_err());
+        let mut edited = resolvers;
+        edited.entities[0].keys = (0..=GRAPHQL_RESOLVER_MAXIMUM_KEY_FIELDS)
+            .map(|index| GraphqlEntityResolverKey::new([format!("K{index}")]))
+            .collect();
+        assert!(resealed(edited).validate().is_err());
     }
 
     /// The document names public GraphQL identities and nothing else: no

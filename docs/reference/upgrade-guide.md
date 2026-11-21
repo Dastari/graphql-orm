@@ -112,6 +112,7 @@ No action:
 - **No action** — ORM/macros 0.190.0: opt in per SQL Server pool to native binding for temporal text; review legacy `datetime` storage and comparisons before enabling it (#521). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — ORM/macros 0.190.0: opt-in key-only deletes; review key-existence disclosure before adopting them (#666). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — router 0.17.0: the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default (#764). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
+- **No action** — operation catalog 0.11.0, ORM/macros next minor: `schema_roots!` also emits `graphql_orm_resolver_catalog()`, a separate document listing served relationship fields and Federation entity resolvers, and the catalogue adds an opt-in RFC 8785 encoder. Existing SDL, catalogues, fingerprints and receiver bindings are unchanged (#544). [Migration](../../MIGRATION.md#next-ormmacros-minor-after-822-resolver-catalogue-operation-catalogue-0110)
 - **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
 
 Also unreleased on main, before the breaking release:

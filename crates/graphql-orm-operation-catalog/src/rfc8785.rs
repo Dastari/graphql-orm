@@ -20,9 +20,11 @@ use sha2::{Digest, Sha256};
 
 /// A value RFC 8785 cannot encode.
 ///
-/// The only such `serde_json` value is an integer that is not exactly an IEEE
-/// 754 double, for example `9007199254740993`. RFC 8785 numbers are doubles,
-/// so encoding it would silently change the value.
+/// RFC 8785 numbers are IEEE 754 doubles. An integer that is not exactly a
+/// double, for example `9007199254740993`, is refused, because encoding it
+/// would silently change the value. With `serde_json/arbitrary_precision`
+/// this includes integers of any length, and a number too large to be a
+/// finite double is refused as well.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rfc8785Error {
     message: &'static str,
@@ -50,9 +52,26 @@ impl std::error::Error for Rfc8785Error {}
 /// `JSON.stringify` escapes, and no whitespace is written. Array order is
 /// kept.
 ///
+/// # What the caller must check first
+///
+/// The encoder sees a [`Value`], not JSON text, and two things RFC 8785
+/// forbids are already gone by then:
+///
+/// - **Duplicate member names.** A `Value` object holds one value per name.
+///   When `serde_json` reads text with a repeated name it keeps the last
+///   value and reports nothing. A caller that canonicalizes untrusted text
+///   must reject repeated names while parsing, at every depth.
+/// - **Non-finite numbers.** JSON has no NaN or infinity, and `serde_json`
+///   turns a non-finite float into `null` when it builds a `Value`. A caller
+///   that builds values from floats must refuse non-finite ones itself.
+///
+/// Reading a decimal into a double is also the caller's step; see the module
+/// documentation.
+///
 /// # Errors
 ///
-/// Returns an error for an integer that is not exactly an IEEE 754 double.
+/// Returns an error for an integer that is not exactly an IEEE 754 double,
+/// and for a number that is not a finite double.
 pub fn rfc8785_canonical_json(value: &Value) -> Result<Vec<u8>, Rfc8785Error> {
     let mut output = String::new();
     write_value(value, &mut output)?;
@@ -107,30 +126,44 @@ fn write_value(value: &Value, output: &mut String) -> Result<(), Rfc8785Error> {
 }
 
 fn write_number(number: &serde_json::Number, output: &mut String) -> Result<(), Rfc8785Error> {
+    // With `serde_json/arbitrary_precision` a number keeps the text it was
+    // written with, and `to_string` returns it; without, it returns the
+    // integer or double that was stored. Both are read the same way.
+    write_double(number_double(&number.to_string(), number.as_f64())?, output);
+    Ok(())
+}
+
+/// The double a JSON number stands for, from its text and from the double
+/// `serde_json` reads it as.
+///
+/// An integer written without fraction or exponent must be exactly a double,
+/// whatever its length: `as_f64` would round `18446744073709551617` to a
+/// neighbour, so the text is checked instead. Any other number is the double
+/// it reads as, which must be finite.
+fn number_double(lexeme: &str, read: Option<f64>) -> Result<f64, Rfc8785Error> {
     const INEXACT: Rfc8785Error = Rfc8785Error {
         message: "integer is not exactly representable as an RFC 8785 number",
     };
-    let double = if let Some(integer) = number.as_u64() {
-        let double = integer as f64;
-        // `u64::MAX as f64` rounds up to 2^64, which saturates on the way back.
-        if double >= 18_446_744_073_709_551_616.0 || double as u64 != integer {
-            return Err(INEXACT);
-        }
-        double
-    } else if let Some(integer) = number.as_i64() {
-        let double = integer as f64;
-        if double as i64 != integer {
-            return Err(INEXACT);
-        }
-        double
+    let digits = lexeme.strip_prefix('-').unwrap_or(lexeme);
+    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+        return read
+            .filter(|double| double.is_finite())
+            .ok_or(Rfc8785Error {
+                message: "number is not a finite IEEE 754 double",
+            });
+    }
+    let double = lexeme.parse::<f64>().map_err(|_| INEXACT)?;
+    let significant = digits.trim_start_matches('0');
+    let significant = if significant.is_empty() {
+        "0"
     } else {
-        // `serde_json` numbers are never NaN or infinite.
-        number.as_f64().ok_or(Rfc8785Error {
-            message: "number is not an IEEE 754 double",
-        })?
+        significant
     };
-    write_double(double, output);
-    Ok(())
+    // With a precision, Rust writes the exact decimal value of a double.
+    if !double.is_finite() || format!("{:.0}", double.abs()) != significant {
+        return Err(INEXACT);
+    }
+    Ok(double)
 }
 
 /// ECMAScript `Number::toString` for a finite double.
@@ -363,6 +396,68 @@ mod tests {
             assert!(rfc8785_canonical_json(&inexact).is_err(), "{inexact}");
         }
         assert_eq!(encode(&json!(i64::MIN)), "-9223372036854776000");
+    }
+
+    /// The text of a number decides, so the result is the same whether or
+    /// not `serde_json/arbitrary_precision` keeps that text.
+    #[test]
+    fn integer_lexemes_must_be_exactly_a_double_at_any_length() {
+        let encoded = |lexeme: &str, read| {
+            number_double(lexeme, read).map(|double| {
+                let mut output = String::new();
+                write_double(double, &mut output);
+                output
+            })
+        };
+        for (lexeme, expected) in [
+            ("0", "0"),
+            ("-0", "0"),
+            ("7", "7"),
+            ("-9007199254740992", "-9007199254740992"),
+            // 2^64 and 2^128 are doubles, although neither fits `u64`.
+            ("18446744073709551616", "18446744073709552000"),
+            (
+                "340282366920938463463374607431768211456",
+                "3.402823669209385e+38",
+            ),
+        ] {
+            // `as_f64` is not consulted for an integer, so a wrong reading
+            // of it changes nothing.
+            assert_eq!(encoded(lexeme, Some(1.5)).unwrap(), expected, "{lexeme}");
+            assert_eq!(encoded(lexeme, None).unwrap(), expected, "{lexeme}");
+        }
+        let too_long = "9".repeat(400);
+        for inexact in [
+            "9007199254740993",
+            "18446744073709551615",
+            "18446744073709551617",
+            "-18446744073709551617",
+            "340282366920938463463374607431768211457",
+            too_long.as_str(),
+        ] {
+            // `as_f64` would have rounded each of these to a neighbour.
+            let rounded = inexact.parse::<f64>().ok();
+            assert!(encoded(inexact, rounded).is_err(), "{inexact}");
+        }
+        // Not an integer lexeme: the double it reads as, when finite.
+        assert_eq!(encoded("1.0", Some(1.0)).unwrap(), "1");
+        assert_eq!(encoded("1e2", Some(100.0)).unwrap(), "100");
+        assert_eq!(encoded("-2.5E-3", Some(-0.0025)).unwrap(), "-0.0025");
+        assert!(encoded("1e400", Some(f64::INFINITY)).is_err());
+        assert!(encoded("1e400", None).is_err());
+        assert!(encoded("-", None).is_err());
+    }
+
+    /// What is lost before a `Value` exists, which the encoder cannot see.
+    #[test]
+    fn duplicate_names_and_non_finite_numbers_are_gone_before_encoding() {
+        let parsed: Value = serde_json::from_str(r#"{"a":1,"a":2}"#).unwrap();
+        assert_eq!(encode(&parsed), r#"{"a":2}"#);
+        assert_eq!(encode(&json!(f64::NAN)), "null");
+        assert_eq!(
+            encode(&json!([f64::INFINITY, f64::NEG_INFINITY])),
+            "[null,null]"
+        );
     }
 
     /// Where the earlier sorted `serde_json` encoding and RFC 8785 disagree.

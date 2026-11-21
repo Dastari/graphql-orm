@@ -148,16 +148,34 @@ fingerprinted document bound to `graphql_orm_semantic_catalog()`. Composing it
 changes no SDL, descriptor or fingerprint described above.
 
 ```rust,ignore
-let resolvers = graphql_orm_resolver_catalog();
+let resolvers = graphql_orm_resolver_catalog()?;
 
-// Every relationship field, generated or handwritten.
+// Every relationship field the schema serves, generated or handwritten.
 let orders = resolvers.relation("Customer", "orders").unwrap();
 assert_eq!(orders.target, "Order");
 
-// Every entity with a resolvable `@key`, including the `NodeId` key.
+// Every entity the schema resolves by a `@key`, including the `NodeId` key.
 let customer = resolvers.entity("Customer").unwrap();
 assert_eq!(customer.keys[0].fields, ["id"]);
 ```
+
+The function returns a `Result`; a document that does not validate against
+the semantic catalogue is an error, not a panic.
+
+The served schema decides what is listed and under which names. The function
+reads the query root's type registry, so:
+
+- a relation declared with `#[relation(...)]` on an entity that mounts no
+  resolver for it (no `GraphQLRelations`, or a composed object that omits it)
+  is not listed, although the semantic catalogue and the client metadata still
+  describe it;
+- a declared key the schema does not resolve is not listed;
+- a type is listed under its registered name. An entity served as
+  `#[graphql(name = "PublicCustomer")]` appears as `PublicCustomer`, with
+  `semantic_entity_name: "Customer"` so the entry still binds to the semantic
+  catalogue; relations into it carry `semantic_target` the same way;
+- field and key names follow the configured naming rules and any
+  `#[graphql(name = "...")]` on the field.
 
 Each descriptor carries an authorization reference instead of a requirement:
 

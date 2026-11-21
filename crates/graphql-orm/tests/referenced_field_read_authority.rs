@@ -678,7 +678,7 @@ async fn traversal_into_an_undeclared_category_requires_every_declared_read_scop
 #[test]
 fn resolver_catalogue_references_match_the_enforced_traversal_requirements() {
     use graphql_orm::graphql::orm::{GraphqlOperationKind, GraphqlResolverAuthorization};
-    let resolvers = ledgers::graphql_orm_resolver_catalog();
+    let resolvers = ledgers::graphql_orm_resolver_catalog().expect("resolver catalogue");
     let same_as = |root: &str| GraphqlResolverAuthorization::SameAsRoot {
         kind: GraphqlOperationKind::Query,
         field_name: root.to_owned(),
