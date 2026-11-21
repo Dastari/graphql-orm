@@ -10,13 +10,34 @@ supersedes: []
 
 # Migration Guide
 
-## Breaking release (unreleased)
+## 0.151.2 skill content protection diagnostics
+
+**No action.** Skill protection diagnostics have a stable debug event target
+of `graphql_orm_ai::orm_skills` and a fixed message of
+`AI skill content protection failed`. The stable `code` values are
+`key_unavailable`, `validation_failed` and `unsupported`. Each event contains
+only that fixed message and code. The service still returns the same public
+errors. Stored skill versions continue to use the existing read validation,
+including versions published before the new-schema depth and pattern bounds.
+The proposal registry now reuses its validators. Malformed registered
+schemas still fail when a proposal is validated. No schema or data migration
+is needed.
+
+## 0.151.0 to 0.151.1: lint and documentation lanes
+
+AI 0.151.0 to 0.151.1. **No action.** A test-only re-export and its dead-code
+allowances are compiled only with the `sqlite` feature, and one intra-doc link
+that did not resolve in SQL Server builds is plain text. No Rust API, GraphQL
+SDL, configuration, authorization, persistence or runtime change, and no data
+migration is needed.
+
+## 0.150.2 to 0.151.0: breaking release
 
 AI 0.150.2 to 0.151.0. **Action needed.** This is the AI part of the single
-breaking release. Upgrade it together with ORM/macros 0.190.0, operation
+breaking release. Upgrade it together with ORM/macros 0.187.0, operation
 catalogue 0.10.0 and AI tool profiles 0.27.0; the ORM, catalogue and router
 steps are in the root
-[migration guide](../../MIGRATION.md#breaking-release-unreleased). No GraphQL
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release). No GraphQL
 SDL change. Do the steps in this order.
 
 ### 1. Migrate: AI schema module `0.83.0`

@@ -3,27 +3,41 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
 
-`schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
+In version 0.194.0, `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
 and semantic catalogue functions, and `GraphQLRelations` and
 `#[graphql_complex_object]` (with any options) record which generated
 relation resolvers an object mounts. `GraphQLOperations` supplies each entity's
 resolvable `@key` field sets and the roots whose static requirement its
 traversals and entity resolvers enforce. Generated SDL and resolvers are
 unchanged.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110).
 
-`GraphQLOperations` reports malformed keyset order clauses at the entity
-attribute. Use `field asc|desc [nulls first|last]` for each comma-separated
-entry and end the order with the complete primary key.
+In version 0.190.0, `GraphQLOperations` reports malformed keyset orders at
+the keyset attribute. Use `field asc|desc [nulls first|last]` for each
+comma-separated entry and end the order with the complete primary key.
+See the [migration guide](../../MIGRATION.md#01890-to-01900-generated-query-resolvers).
 
-Version 0.190.0 is the **breaking release**; see the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) for the steps
+Version 0.189.0 qualifies generated root search filters with the entity table
+(#799). See the [migration guide](../../MIGRATION.md#01880-to-01890-root-search-filter-binding).
+
+Version 0.188.0 generates a macro-only `ReadVisibilityFilter` hook and `table_name` for where
+inputs. The first renders each filter column as `row.<column>` for the row it is given, the column
+delimited as generated DDL and DML address it, so read predicates and related-row filters bind to
+the row they describe without substituting a row name into SQL (#796). Related-row filter keys are
+bound the same way. The entity derive refuses a table named like a generated alias (`__gom_self`,
+`__gom_row_<n>`, `__gom_visibility_<n>`, `__gom_closure_<n>`). Relation-count orderings pass
+their key columns to the runtime, which allocates the count's aliases. Other generated SQL is
+unchanged.
+
+Version 0.187.0 is the **breaking release**; see the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) for the steps
 in upgrade order. For the macros:
 
 - The 15 `resolver-case-*`, `argument-case-*` and `field-case-*` features are
@@ -44,6 +58,9 @@ in upgrade order. For the macros:
   for `Key`/`Keys` subscribers.
 
 Upgrade ORM and macros together.
+
+Version 0.186.0 aligns with the ORM's
+[owned PostgreSQL test harness fix](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
 
 Version 0.185.0 aligns with the runtime's
 [SQL Server filtered-index fix](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals).

@@ -342,3 +342,66 @@ async fn count_sees_writes_in_the_same_transaction_and_rollback_keeps_them_priva
     assert_eq!(after, 2);
     db.finish().await;
 }
+
+/// A hand-written caller filter: one clause and its bind values.
+#[derive(Clone)]
+struct Clause(&'static str, Vec<SqlValue>);
+impl DatabaseFilter for Clause {
+    fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+        (vec![self.0.to_owned()], self.1.clone())
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+/// The count is one statement over the caller's filter and the row policy
+/// (`tenant = 'alpha'`: rows 1 and 3). Caller SQL that would shift or share
+/// the policy's bind is refused; SQL that pairs up counts the policy's rows.
+#[tokio::test]
+async fn a_count_validates_caller_sql_beside_the_row_policy() {
+    let db = fixture(Some(Visibility::Complete)).await;
+    let text = |value: &str| SqlValue::String(value.into());
+    let count = |clause: &'static str, values: Vec<SqlValue>| {
+        let db = &db;
+        async move {
+            db.transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    Ok(tx
+                        .query::<CountRow>()
+                        .filter(Clause(clause, values))
+                        .count()
+                        .await?)
+                })
+            })
+            .await
+        }
+    };
+    assert_eq!(count("id <> ?", vec![text("3")]).await.unwrap(), 1);
+    assert_eq!(count("id <> ?", vec![text("2")]).await.unwrap(), 2);
+    // On SQLite `?1` would leave the policy's `?` reading the caller's
+    // value: `tenant = '2'`. A named parameter stands in on PostgreSQL.
+    #[cfg(feature = "sqlite")]
+    let named = ["id <> ?1", "id <> :id", "id <> @id", "id <> $id"];
+    #[cfg(feature = "postgres")]
+    let named = ["id <> $id"];
+    let mut refused = named
+        .into_iter()
+        .map(|clause| (clause, vec![text("2")]))
+        .collect::<Vec<_>>();
+    // A surplus value would be handed to the policy; a missing one would
+    // take the policy's.
+    refused.push(("id <> ?", vec![text("2"), text("beta")]));
+    refused.push(("id <> ? AND id <> ?", vec![text("2")]));
+    for (clause, values) in refused {
+        let (TransactionError::Rejected(error)
+        | TransactionError::Retryable(error)
+        | TransactionError::Failed(error)) = count(clause, values).await.expect_err(clause);
+        assert_eq!(
+            error.code,
+            graphql_orm::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+            "{clause}"
+        );
+    }
+    db.finish().await;
+}
