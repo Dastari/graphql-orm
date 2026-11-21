@@ -3,12 +3,21 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.188.0 generates a macro-only `ReadVisibilityFilter` hook and `table_name` for where
+inputs. The first renders each filter column as `row.<column>` for the row it is given, the column
+delimited as generated DDL and DML address it, so read predicates and related-row filters bind to
+the row they describe without substituting a row name into SQL (#796). Related-row filter keys are
+bound the same way. The entity derive refuses a table named like a generated alias (`__gom_self`,
+`__gom_row_<n>`, `__gom_visibility_<n>`, `__gom_closure_<n>`). Relation-count orderings pass
+their key columns to the runtime, which allocates the count's aliases. Other generated SQL is
+unchanged.
 
 Version 0.187.0 is the **breaking release**; see the
 [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) for the steps

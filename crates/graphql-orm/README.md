@@ -3,12 +3,20 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.188.0 binds every column a read predicate renders to its own row: through the entity's
+table path at the root of a statement, and through an alias no other scope uses inside a relation,
+`not_related`, closure or count subquery. A column missing from a target table then fails the read
+instead of resolving against an outer row (#796). The generated alias names are
+reserved as table names, and a hand-written `ReadVisibilityFilter` may only hold single-row
+expressions, with every column written through `__gom_self` where it is evaluated in a subquery.
+See the [migration guide](../../MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row).
 
 Version 0.187.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
