@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.151.2
+
+- The skill service emits fixed debug codes for unavailable keys, failed
+  envelope validation and unsupported protection. Legacy stored skill schemas
+  retain their existing read validation (#543).
+- The proposal registry reuses one validator per registered proposal schema
+  across repeated validations and catalog clones (#543).
+
 ## Unreleased - 0.151.1
 
 - **Fixed (lint and documentation lanes, #814):** warnings-denied Clippy with `--no-default-features --features postgres,provider-openai` no longer fails on an unused test-only `MockBackgroundRetrievalFailure` re-export, which is now compiled only where its SQLite-only consumer exists, and Rustdoc with `--no-default-features --features mssql` no longer fails on an intra-doc link to `AiProviderCallExecutor`, which the SQL Server build does not provide. No runtime, API or persistence change.
