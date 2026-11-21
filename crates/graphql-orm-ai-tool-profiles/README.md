@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+Version 0.27.1 reuses compiled replayable subscription validators for both
+plan formats and for admitted condition values. See the
+[migration guide](MIGRATION.md#0271-subscription-validator-reuse).
+
 Version 0.26.0 reuses compiled plan and argument validators. See the
 [migration guide](MIGRATION.md#0250-to-0260).
 

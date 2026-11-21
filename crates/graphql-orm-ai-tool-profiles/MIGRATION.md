@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.27.1 subscription validator reuse
+
+**No action.** Existing subscription plans and capability bindings remain
+compatible. No schema or data migration is needed.
+
 ## 0.26.1 to 0.27.0: breaking release
 
 AI tool profiles 0.26.1 to 0.27.0. **Action needed.** Part of the single
