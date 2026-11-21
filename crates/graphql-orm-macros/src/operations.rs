@@ -1686,7 +1686,7 @@ fn generate_graphql_operations_unfiltered(
         if let Some(ref handler) = notify_handler_path {
             if entity_meta.notify_report_errors {
                 quote! {
-                    if let Err(error) = #handler(ctx, pool, &entity, #action).await {
+                    if let ::std::result::Result::Err(error) = #handler(ctx, pool, &entity, #action).await {
                         db.report_post_commit_error(error.message).await;
                     }
                 }
@@ -1710,28 +1710,28 @@ fn generate_graphql_operations_unfiltered(
     let result_error_code_field = if entity_meta.mutation_error_codes {
         quote! {
             /// Stable code of `error`, from the ORM's public error codes. Null on success.
-            pub error_code: Option<String>,
+            pub error_code: ::std::option::Option<::std::string::String>,
         }
     } else {
         quote! {}
     };
     let result_error_code_none = if entity_meta.mutation_error_codes {
-        quote! { error_code: None, }
+        quote! { error_code: ::std::option::Option::None, }
     } else {
         quote! {}
     };
     let result_error_code_from_graphql = if entity_meta.mutation_error_codes {
         quote! {
             result.error_code = error.extensions.as_ref().and_then(|ext| ext.get("code")).and_then(|value| match value {
-                ::graphql_orm::async_graphql::Value::String(code) => Some(code.clone()),
-                _ => None,
+                ::graphql_orm::async_graphql::Value::String(code) => ::std::option::Option::Some(code.clone()),
+                _ => ::std::option::Option::None,
             });
         }
     } else {
         quote! { let _ = &error.extensions; }
     };
     let refusal_error_code = if entity_meta.mutation_error_codes {
-        quote! { result.error_code = Some(code.as_str().to_owned()); }
+        quote! { result.error_code = ::std::option::Option::Some(code.as_str().to_owned()); }
     } else {
         quote! { let _ = code; }
     };
@@ -1743,17 +1743,17 @@ fn generate_graphql_operations_unfiltered(
     let result_error_code_get = if entity_meta.mutation_error_codes {
         quote! { self.error_code.clone() }
     } else {
-        quote! { None }
+        quote! { ::std::option::Option::None }
     };
     let notify_bulk = |action: proc_macro2::TokenStream| {
         if let Some(ref handler) = notify_handler_path {
             quote! {
                 for entity in &notification_rows {
-                    if let Err(error) = #handler(ctx, db.pool(), entity, #action).await {
+                    if let ::std::result::Result::Err(error) = #handler(ctx, db.pool(), entity, #action).await {
                         db.report_post_commit_error(error.message.clone()).await;
                         let safe_error = ::graphql_orm::graphql::errors::graphql_error_from_sqlx(
                             ::graphql_orm::graphql::errors::sqlx_error_from_graphql(error));
-                        result.notification_errors.get_or_insert_with(Vec::new).push(
+                        result.notification_errors.get_or_insert_with(::std::vec::Vec::new).push(
                             ::graphql_orm::graphql::orm::NotificationError::from_graphql_error(safe_error));
                     }
                 }
@@ -4511,7 +4511,9 @@ fn generate_graphql_operations_unfiltered(
         ));
     }
     if let Some(shapes) = &entity_meta.mutation_shapes {
-        let shape_span = entity_meta.mutation_shapes_span.unwrap_or_else(|| struct_name.span());
+        let shape_span = entity_meta
+            .mutation_shapes_span
+            .unwrap_or_else(|| struct_name.span());
         for shape in shapes {
             let available = match shape.as_str() {
                 "create" => generates_public_create,
@@ -5143,14 +5145,14 @@ fn generate_graphql_operations_unfiltered(
                         )
                     }
                     // `version < i64::MAX` already makes the update match nothing.
-                    None => update,
+                    ::std::option::Option::None => update,
                 }
             }
         }
     } else {
         quote! {
             {
-                format!(
+                ::std::format!(
                     "UPDATE {} SET {} WHERE {} RETURNING {}",
                     dialect.render_table_identifier_path(#table_name),
                     set_clauses.join(", "),
@@ -5190,13 +5192,13 @@ fn generate_graphql_operations_unfiltered(
 
                     let current_entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
                     let db = hook_ctx.database().clone();
-                    if let Some(ref current) = current_entity {
+                    if let ::std::option::Option::Some(ref current) = current_entity {
                         db.ensure_writable_row(
-                            None,
+                            ::std::option::Option::None,
                             #entity_name_lit,
                             <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                             ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                            current as &(dyn ::std::any::Any + Send + Sync),
+                            current as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     }
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
@@ -5205,32 +5207,32 @@ fn generate_graphql_operations_unfiltered(
                     );
                     db.run_before_update_with_context(
                         &mut write_ctx,
-                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                         &db,
-                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     Self::__gom_authorize_repository_update_field_writes(
                         &db,
-                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
+                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                         &input,
                     ).await?;
 
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     let quoted_version_column = dialect.quote_identifier_path(#version_column);
-                    let mut set_clauses = vec![format!("{quoted_version_column} = {quoted_version_column} + 1")];
-                    let mut changed_fields = vec![#version_column];
-                    let mut values: Vec<SqlValue> = Vec::new();
+                    let mut set_clauses = ::std::vec![::std::format!("{quoted_version_column} = {quoted_version_column} + 1")];
+                    let mut changed_fields = ::std::vec![#version_column];
+                    let mut values: ::std::vec::Vec<SqlValue> = ::std::vec::Vec::new();
                     #update_assignments_repo_call
                     for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
-                        *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
+                        *clause = ::std::format!("{} = {rhs}", dialect.quote_identifier_path(column));
                     }
                     if #has_updated_at_column {
-                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                        set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                     }
                     let before_state = current_entity
                         .as_ref()
@@ -5238,25 +5240,25 @@ fn generate_graphql_operations_unfiltered(
                         .transpose()?;
                     let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                     let expected_clause = if expected.is_empty() {
-                        None
+                        ::std::option::Option::None
                     } else {
                         let query = EntityQuery::<Self, #backend_marker>::new().filter(&expected);
                         let (delete_sql, expected_values) = query.try_build_delete_sql()?;
                         let clause = delete_sql.split_once(" WHERE ")
                             .map(|(_, clause)| clause.to_string())
                             .ok_or_else(|| Self::__gom_runtime_error("expected predicates produced empty SQL"))?;
-                        Some((clause, expected_values))
+                        ::std::option::Option::Some((clause, expected_values))
                     };
                     let pk_placeholder = Self::__gom_placeholder(values.len() + 1);
                     values.push(#pk_bind_value_ref);
                     let version_placeholder = Self::__gom_placeholder(values.len() + 1);
                     values.push(SqlValue::Int(expected_version));
-                    let mut predicates = vec![
-                        format!("{} = {}", dialect.quote_identifier_path(Self::PRIMARY_KEY), pk_placeholder),
-                        format!("{} = {}", quoted_version_column, version_placeholder),
-                        format!("{} < {}", quoted_version_column, i64::MAX),
+                    let mut predicates = ::std::vec![
+                        ::std::format!("{} = {}", dialect.quote_identifier_path(Self::PRIMARY_KEY), pk_placeholder),
+                        ::std::format!("{} = {}", quoted_version_column, version_placeholder),
+                        ::std::format!("{} < {}", quoted_version_column, i64::MAX),
                     ];
-                    if let Some((clause, expected_values)) = expected_clause {
+                    if let ::std::option::Option::Some((clause, expected_values)) = expected_clause {
                         predicates.push(Self::__gom_rebind_sql(&clause, values.len() + 1));
                         values.extend(expected_values);
                     }
@@ -5266,29 +5268,29 @@ fn generate_graphql_operations_unfiltered(
                         hook_ctx.__note_write();
                     }
                     if rows.len() > 1 {
-                        return Err(Self::__gom_runtime_error("conditional update affected more than one row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("conditional update affected more than one row"));
                     }
-                    let Some(row) = rows.first() else {
+                    let ::std::option::Option::Some(row) = rows.first() else {
                         #cas_rollback_savepoint
                         return if Self::__gom_fetch_by_id_on(hook_ctx, id).await?.is_some() {
-                            Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Conflict)
+                            ::std::result::Result::Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Conflict)
                         } else {
-                            Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::NotFound)
+                            ::std::result::Result::Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::NotFound)
                         };
                     };
                     let entity = <Self as FromSqlRow<#backend_marker>>::from_row(row)?;
-                    if let Err(error) = hook_ctx.__ensure_written_row(
-                        None,
+                    if let ::std::result::Result::Err(error) = hook_ctx.__ensure_written_row(
+                        ::std::option::Option::None,
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                        &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await {
                         // The savepoint is undone below; the context also stays uncommittable.
-                        return Err(::graphql_orm::graphql::errors::sqlx_error_from_graphql(error));
+                        return ::std::result::Result::Err(::graphql_orm::graphql::errors::sqlx_error_from_graphql(error));
                     }
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -5298,11 +5300,11 @@ fn generate_graphql_operations_unfiltered(
                             id: #pk_id_for_entity,
                             changes: mutation_changes.clone(),
                             before_state: before_state.clone(),
-                            after_state: None,
+                            after_state: ::std::option::Option::None,
                         },
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -5312,16 +5314,16 @@ fn generate_graphql_operations_unfiltered(
                             id: #pk_id_for_entity,
                             changes: mutation_changes,
                             before_state,
-                            after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                            after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                         },
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     Self::__gom_queue_changed_event(
                         hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                        Some(&entity),
+                        ::std::option::Option::Some(&entity),
                     ).await?;
                     #cas_release_savepoint
-                    Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Updated(entity))
+                    ::std::result::Result::Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Updated(entity))
                 }.await;
                     if __gom_cas.is_err() {
                         #cas_abort_savepoint
@@ -5342,7 +5344,7 @@ fn generate_graphql_operations_unfiltered(
                     input: #update_input,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> {
                     db.ensure_entity_access(
-                        None,
+                        ::std::option::Option::None,
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -5357,7 +5359,7 @@ fn generate_graphql_operations_unfiltered(
                         &mut hook_ctx, id, expected_version, expected, input,
                     ).await?;
                     hook_ctx.commit_and_emit().await?;
-                    Ok(outcome)
+                    ::std::result::Result::Ok(outcome)
                 }
             },
             quote! {
@@ -5373,7 +5375,7 @@ fn generate_graphql_operations_unfiltered(
                         expected: Self::Expected,
                         input: Self::UpdateInput,
                     ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>>> {
-                        Box::pin(async move {
+                        ::std::boxed::Box::pin(async move {
                             Self::__gom_compare_and_swap_with_mutation_context(
                                 hook_ctx, id, expected_version, expected, input,
                             ).await
@@ -5459,11 +5461,11 @@ fn generate_graphql_operations_unfiltered(
             pub async fn rebuild_search_index(
                 db: &::graphql_orm::db::Database<#backend_marker>,
             ) -> ::graphql_orm::Result<()> {
-                let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
-                    return Ok(());
+                let ::std::option::Option::Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
+                    return ::std::result::Result::Ok(());
                 };
                 if !index.enabled {
-                    return Ok(());
+                    return ::std::result::Result::Ok(());
                 }
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
@@ -5482,20 +5484,20 @@ fn generate_graphql_operations_unfiltered(
                     ).await?;
                 }
                 hook_ctx.commit_and_emit().await?;
-                Ok(())
+                ::std::result::Result::Ok(())
             }
 
             pub async fn rebuild_search_document(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
             ) -> ::graphql_orm::Result<()> {
-                let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
-                    return Ok(());
+                let ::std::option::Option::Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
+                    return ::std::result::Result::Ok(());
                 };
                 if !index.enabled {
-                    return Ok(());
+                    return ::std::result::Result::Ok(());
                 }
-                db.ensure_entity_access(None, #entity_name_lit,
+                db.ensure_entity_access(::std::option::Option::None, #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
@@ -5509,20 +5511,20 @@ fn generate_graphql_operations_unfiltered(
                 // query through a one-connection pool. They authorize the exact
                 // fetched row used for the document; the later index write is separate.
                 let entity = { #rebuild_document_read };
-                let Some(entity) = entity else {
-                    return Ok(());
+                let ::std::option::Option::Some(entity) = entity else {
+                    return ::std::result::Result::Ok(());
                 };
-                if !db.can_read_row(None, #entity_name_lit,
+                if !db.can_read_row(::std::option::Option::None, #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    &entity as &(dyn ::std::any::Any + Send + Sync),
+                    &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                    return Ok(());
+                    return ::std::result::Result::Ok(());
                 }
                 for field in <Self as ::graphql_orm::graphql::orm::Entity>::repository_field_policies() {
-                    db.ensure_repository_readable_field(None, #entity_name_lit,
+                    db.ensure_repository_readable_field(::std::option::Option::None, #entity_name_lit,
                         field.api_name, field.read_policy,
-                        Some(&entity as &(dyn ::std::any::Any + Send + Sync)),
+                        ::std::option::Option::Some(&entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 }
                 let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(&entity);
@@ -5537,7 +5539,7 @@ fn generate_graphql_operations_unfiltered(
                     &document,
                 ).await?;
                 hook_ctx.commit_and_emit().await?;
-                Ok(())
+                ::std::result::Result::Ok(())
             }
         }
     } else {
@@ -5545,7 +5547,7 @@ fn generate_graphql_operations_unfiltered(
     };
     let search_write_maintenance = if has_search && backend != BackendKind::Mssql {
         quote! {
-            if let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() {
+            if let ::std::option::Option::Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() {
                 if index.enabled {
                     match action {
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted => {
@@ -5589,7 +5591,7 @@ fn generate_graphql_operations_unfiltered(
         .collect::<Vec<_>>();
     let retention_event_id = if has_composite_primary_key {
         quote! {{
-            let mut bind_values = Vec::new();
+            let mut bind_values = ::std::vec::Vec::new();
             #(#retention_event_id_values)*
             ::graphql_orm::graphql::orm::composite_key_id(&bind_values)
         }}
@@ -5603,7 +5605,7 @@ fn generate_graphql_operations_unfiltered(
             impl ::graphql_orm::graphql::orm::RetentionPurge<#backend_marker> for #struct_name {
                 type Filter = #where_input;
 
-                fn retention_event_id(&self) -> String {
+                fn retention_event_id(&self) -> ::std::string::String {
                     #retention_event_id
                 }
 
@@ -5611,7 +5613,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     entity: &'a Self,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
-                    Box::pin(async move {
+                    ::std::boxed::Box::pin(async move {
                         Self::__gom_queue_changed_event(
                             hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -5631,7 +5633,7 @@ fn generate_graphql_operations_unfiltered(
         let entity = db.__release_graphql_mutation_output(
             ctx,
             #entity_result_field_name,
-            Some(entity),
+            ::std::option::Option::Some(entity),
             &#struct_name::__gom_key_where_clause(),
             #struct_name::__gom_subscription_key_values,
         ).await?;
@@ -5662,7 +5664,7 @@ fn generate_graphql_operations_unfiltered(
     let create_graphql_event_entity = if entity_meta.append_only {
         quote! { &entity }
     } else {
-        quote! { Some(&entity) }
+        quote! { ::std::option::Option::Some(&entity) }
     };
     let create_output_binding = if has_notify_handler {
         // Retain the committed row for notification after the output checks.
@@ -5723,7 +5725,7 @@ fn generate_graphql_operations_unfiltered(
                 async fn __gom_public_create_unavailable(
                     &self,
                 ) -> ::graphql_orm::async_graphql::Result<bool> {
-                    Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
+                    ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
                 }
             }
         } else {
@@ -5744,14 +5746,14 @@ fn generate_graphql_operations_unfiltered(
             #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
             pub struct #result_type {
                 pub success: bool,
-                pub error: Option<String>,
+                pub error: ::std::option::Option<::std::string::String>,
                 #result_error_code_field
                 #[graphql(name = #entity_result_field_name)]
-                pub entity: Option<#struct_name>,
+                pub entity: ::std::option::Option<#struct_name>,
             }
         });
         let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
             #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
             pub struct #changed_event {
                 pub action: ::graphql_orm::graphql::orm::ChangeAction,
@@ -5760,12 +5762,12 @@ fn generate_graphql_operations_unfiltered(
                 pub id: #subscription_identity_type,
                 #subscription_extra_key_field
                 #[graphql(name = #source_entity_field_name)]
-                pub source_entity: Option<String>,
+                pub source_entity: ::std::option::Option<::std::string::String>,
                 #[graphql(name = #source_id_field_name)]
-                pub source_id: Option<String>,
-                pub path: Vec<String>,
+                pub source_id: ::std::option::Option<::std::string::String>,
+                pub path: ::std::vec::Vec<::std::string::String>,
                 #[graphql(name = #entity_result_field_name)]
-                pub entity: Option<#struct_name>,
+                pub entity: ::std::option::Option<#struct_name>,
             }
         });
         quote! {
@@ -5799,9 +5801,12 @@ fn generate_graphql_operations_unfiltered(
                 async fn on_changed(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
-                    #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: Option<#key_type>,
-                #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
+                    #[__gom_catalogue_type(Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>)]
+                    #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: ::std::option::Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                    #[__gom_catalogue_type(Option<#key_type>)]
+                    #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: ::std::option::Option<#key_type>,
+                #[__gom_catalogue_type(Option<Vec<#key_type>>)]
+                #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: ::std::option::Option<::std::vec::Vec<#key_type>>,
                 #subscription_started_arg
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>>>> {
                     use ::graphql_orm::futures::StreamExt;
@@ -5815,14 +5820,14 @@ fn generate_graphql_operations_unfiltered(
                     )?;
                     let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                     db.ensure_entity_access(
-                        Some(ctx),
+                        ::std::option::Option::Some(ctx),
                         #entity_name_lit,
                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription,
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                     if _filter.as_ref().is_some_and(|filter| filter.dummy.is_some()) {
-                        return Err(::graphql_orm::graphql::errors::OrmPublicError::new(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
+                        return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
                     }
                     ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<#struct_name, #backend_marker>(ctx, #entity_result_field_name)?;
                     let keys = ::graphql_orm::graphql::subscriptions::admit_subscription_keys(
@@ -5842,24 +5847,24 @@ fn generate_graphql_operations_unfiltered(
                         let keys = keys.clone();
                         async move {
                             let witness = match result {
-                                Ok(witness) => witness,
+                                ::std::result::Result::Ok(witness) => witness,
                                 // Lost continuity or a closed event source: one error, then the stream ends.
-                                Err(error) => return Some(Err(error)),
+                                ::std::result::Result::Err(error) => return ::std::option::Option::Some(::std::result::Result::Err(error)),
                             };
                             // Host policies may buffer private diagnostics before denying an event.
                             // Cover every filter and release-proof drop, not only payload preparation.
                             // A poisoned error buffer ends the stream with one typed error.
                             let errors_before = match ::graphql_orm::graphql::errors::buffered_errors::count(ctx) {
-                                Ok(count) => count,
-                                Err(error) => return Some(Err(error)),
+                                ::std::result::Result::Ok(count) => count,
+                                ::std::result::Result::Err(error) => return ::std::option::Option::Some(::std::result::Result::Err(error)),
                             };
-                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>> = async move {
+                            let delivered: ::std::option::Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>> = async move {
                                 let event = witness.event.as_ref();
-                                if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
-                                if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
+                                if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return ::std::option::Option::None; }
+                                if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return ::std::option::Option::None; }
                                 if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
-                                if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
+                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return ::std::option::Option::None; }
+                                if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return ::std::option::Option::None; }
                                 let authorize_current = || async {
                                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                                     #subscription_scope_enforcement
@@ -5869,8 +5874,8 @@ fn generate_graphql_operations_unfiltered(
                                         && event.entity.as_ref().is_some_and(|entity|
                                             ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_subscription_key_values(entity))
                                             != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                        ) { return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
-                                    let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
+                                        ) { return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
+                                    let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { ::std::option::Option::None };
                                     let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
                                         .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
                                     if key.is_some() || keys.is_some() {
@@ -5878,7 +5883,7 @@ fn generate_graphql_operations_unfiltered(
                                     }
                                     ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
                                     // Query and field-policy awaits must not outlive current authority.
-                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
+                                    db.ensure_entity_access(::std::option::Option::Some(ctx), #entity_name_lit,
                                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
@@ -5887,10 +5892,10 @@ fn generate_graphql_operations_unfiltered(
                                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
                                     #struct_name::__gom_authorize_changed_operation(ctx)?;
-                                    Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
+                                    ::std::result::Result::Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                                 };
                                 match authorize_current().await {
-                                    Ok(row) => {
+                                    ::std::result::Result::Ok(row) => {
                                         let __gom_event = #changed_event {
                                             action: event.action,
                                             change_kind: event.change_kind,
@@ -5899,32 +5904,32 @@ fn generate_graphql_operations_unfiltered(
                                             source_entity: event.source_entity.clone(),
                                             source_id: event.source_id.clone(),
                                             path: event.path.clone(),
-                                            entity: Some(row),
+                                            entity: ::std::option::Option::Some(row),
                                         };
                                         let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_payload_value, ctx).await?;
                                         // Successful serialization can itself await or revoke authority.
                                         // Recheck the complete current release contract before yielding.
                                         match authorize_current().await {
-                                            Ok(_) => Some(prepared),
-                                            Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                                            ::std::result::Result::Ok(_) => ::std::option::Option::Some(prepared),
+                                            ::std::result::Result::Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); ::std::option::Option::None }
                                         }
                                     },
-                                    Err(error) => {
+                                    ::std::result::Result::Err(error) => {
                                         let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error);
                                         #key_only_delete_fallback
                                     }
                                 }
                             }.await;
                             if delivered.is_none() {
-                                if let Err(error) = ::graphql_orm::graphql::errors::buffered_errors::truncate(ctx, errors_before) {
-                                    return Some(Err(error));
+                                if let ::std::result::Result::Err(error) = ::graphql_orm::graphql::errors::buffered_errors::truncate(ctx, errors_before) {
+                                    return ::std::option::Option::Some(::std::result::Result::Err(error));
                                 }
                             }
-                            delivered.map(Ok)
+                            delivered.map(::std::result::Result::Ok)
                         }
                     });
                     #prepend_started_frame
-                    Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
+                    ::std::result::Result::Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
                         events, interval, move || {
                             let db = timer_db.clone();
                             async move {
@@ -5932,11 +5937,11 @@ fn generate_graphql_operations_unfiltered(
                                 #struct_name::__gom_authorize_changed_operation(ctx)?;
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                                     ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                if !db.can_access_entity(Some(ctx), #entity_name_lit,
+                                if !db.can_access_entity(::std::option::Option::Some(ctx), #entity_name_lit,
                                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await? {
-                                    return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                                    return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
                                 }
                                 // Current principal/scopes/assurance must survive the policy await.
                                 #struct_name::__gom_authorize_changed_operation(ctx)?;
@@ -5957,7 +5962,7 @@ fn generate_graphql_operations_unfiltered(
 
             impl #struct_name {
                 #[doc(hidden)]
-                fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
+                fn __gom_runtime_error(message: impl ::std::convert::Into<::std::string::String>) -> ::graphql_orm::sqlx::Error {
                     ::graphql_orm::sqlx::Error::Protocol(message.into())
                 }
 
@@ -5972,14 +5977,14 @@ fn generate_graphql_operations_unfiltered(
                     entity: &'a Self,
                     source_entity: &'a str,
                     source_id: &'a str,
-                    path: Vec<String>,
-                    visited: &'a mut ::std::collections::HashSet<String>,
+                    path: ::std::vec::Vec<::std::string::String>,
+                    visited: &'a mut ::std::collections::HashSet<::std::string::String>,
                     provenance: &'a [::graphql_orm::graphql::subscriptions::SubscriptionEventSource<#backend_marker>],
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
-                    Box::pin(async move {
+                    ::std::boxed::Box::pin(async move {
                         if provenance.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROVENANCE_HOPS
-                            || visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return Ok(()); }
-                        #(#propagation_blocks)* Ok(())
+                            || visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return ::std::result::Result::Ok(()); }
+                        #(#propagation_blocks)* ::std::result::Result::Ok(())
                     })
                 }
 
@@ -5997,13 +6002,13 @@ fn generate_graphql_operations_unfiltered(
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: #propagated_event_id,
                         #subscription_key_initializer
-                        source_entity: None, source_id: None, path: Vec::new(), entity: Some(entity.clone()),
+                        source_entity: ::std::option::Option::None, source_id: ::std::option::Option::None, path: ::std::vec::Vec::new(), entity: ::std::option::Option::Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
                     #queue_subscription_witness
                     #propagation_visited_seed
                     Self::__gom_propagate_changed_event(
-                        hook_ctx, action, entity, #entity_name_lit, &source_id, Vec::new(), &mut visited, &[],
+                        hook_ctx, action, entity, #entity_name_lit, &source_id, ::std::vec::Vec::new(), &mut visited, &[],
                     ).await
                 }
 
@@ -6018,19 +6023,19 @@ fn generate_graphql_operations_unfiltered(
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
                     let db = hook_ctx.database().clone();
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
-                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
+                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync))
                         .await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
                         &db,
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     #(#repository_create_field_checks)*
                     #created_key_init
                     let sql = Self::__gom_rebind_sql(#insert_sql, 1);
-                    let mut bind_values: Vec<SqlValue> = Vec::new();
+                    let mut bind_values: ::std::vec::Vec<SqlValue> = ::std::vec::Vec::new();
                     #prepend_pk_bind
                     #(#insert_binds_repo)*
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
                         entity_name: #entity_name_lit,
@@ -6038,14 +6043,14 @@ fn generate_graphql_operations_unfiltered(
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #created_key_id,
                         changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
-                        before_state: None,
-                        after_state: None,
+                        before_state: ::std::option::Option::None,
+                        after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     hook_ctx.execute(&sql, &bind_values).await?;
                     let entity = Self::__gom_fetch_created_by_id_on(hook_ctx, &created_pk).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                     #repository_post_image_check
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
                         entity_name: #entity_name_lit,
@@ -6053,15 +6058,15 @@ fn generate_graphql_operations_unfiltered(
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #created_key_id,
                         changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
-                        before_state: None,
-                        after_state: Some(::graphql_orm::graphql::orm::entity_state(&entity)?),
+                        before_state: ::std::option::Option::None,
+                        after_state: ::std::option::Option::Some(::graphql_orm::graphql::orm::entity_state(&entity)?),
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     Self::__gom_queue_changed_event(
                         hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Created,
                         &entity,
                     ).await?;
-                    Ok(entity)
+                    ::std::result::Result::Ok(entity)
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6072,7 +6077,7 @@ fn generate_graphql_operations_unfiltered(
                 async fn __gom_fetch_by_id_on(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     id: &#key_type,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     Self::__gom_fetch_by_id_locking(hook_ctx, id, #write_read_lock_suffix).await
                 }
 
@@ -6085,7 +6090,7 @@ fn generate_graphql_operations_unfiltered(
                 async fn __gom_fetch_created_by_id_on(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     id: &#key_type,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     Self::__gom_fetch_by_id_locking(hook_ctx, id, "").await
                 }
 
@@ -6095,9 +6100,9 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     id: &#key_type,
                     lock_suffix: &str,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow};
-                    let sql = Self::__gom_rebind_sql(&format!(
+                    let sql = Self::__gom_rebind_sql(&::std::format!(
                         "SELECT {} FROM {}{} WHERE {}{}",
                         Self::column_names().join(", "),
                         #sql_table_name,
@@ -6116,7 +6121,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let entity = context.insert::<Self>(input).await?;
                     context.commit_and_emit().await?;
-                    Ok(entity)
+                    ::std::result::Result::Ok(entity)
                 }
 
             }
@@ -6127,7 +6132,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     input: Self::CreateInput,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Self>> {
-                    Box::pin(async move { Self::__gom_insert_with_mutation_context(hook_ctx, input).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_insert_with_mutation_context(hook_ctx, input).await })
                 }
             }
 
@@ -6190,7 +6195,7 @@ fn generate_graphql_operations_unfiltered(
 
             impl #struct_name {
                 #[doc(hidden)]
-                fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
+                fn __gom_runtime_error(message: impl ::std::convert::Into<::std::string::String>) -> ::graphql_orm::sqlx::Error {
                     ::graphql_orm::sqlx::Error::Protocol(message.into())
                 }
 
@@ -6199,11 +6204,11 @@ fn generate_graphql_operations_unfiltered(
                     db: &::graphql_orm::db::Database<#backend_marker>,
                 ) -> ::graphql_orm::Result<()> {
                     if db.entity_policy().is_none() {
-                        return Err(Self::__gom_runtime_error(
+                        return ::std::result::Result::Err(Self::__gom_runtime_error(
                             "composite repository mutations require an explicit entity policy provider",
                         ));
                     }
-                    Ok(())
+                    ::std::result::Result::Ok(())
                 }
 
                 #[doc(hidden)]
@@ -6212,13 +6217,13 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 #[doc(hidden)]
-                fn __gom_key_where_clause_at(start: usize) -> String {
+                fn __gom_key_where_clause_at(start: usize) -> ::std::string::String {
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS
                         .iter()
                         .enumerate()
-                        .map(|(index, column)| format!(
+                        .map(|(index, column)| ::std::format!(
                             "{} = {}",
                             dialect.quote_identifier_path(column),
                             dialect.placeholder(start + index),
@@ -6228,7 +6233,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 #[doc(hidden)]
-                fn __gom_event_id(key: &#key_type) -> String {
+                fn __gom_event_id(key: &#key_type) -> ::std::string::String {
                     ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_key_values(key))
                 }
 
@@ -6236,7 +6241,7 @@ fn generate_graphql_operations_unfiltered(
                 async fn __gom_fetch_by_key_on(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &#key_type,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     Self::__gom_fetch_by_key_locking(hook_ctx, key, #write_read_lock_suffix).await
                 }
 
@@ -6248,7 +6253,7 @@ fn generate_graphql_operations_unfiltered(
                 async fn __gom_fetch_created_by_key_on(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &#key_type,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     Self::__gom_fetch_by_key_locking(hook_ctx, key, "").await
                 }
 
@@ -6257,7 +6262,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &#key_type,
                     lock_suffix: &str,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, OrmBackend, SqlDialect};
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     let columns = Self::column_names().iter()
@@ -6269,7 +6274,7 @@ fn generate_graphql_operations_unfiltered(
                             }
                         })
                         .collect::<Vec<_>>().join(", ");
-                    let sql = format!(
+                    let sql = ::std::format!(
                         "SELECT {columns} FROM {}{} WHERE {}{}",
                         dialect.render_table_identifier_path(#table_name),
                         #upsert_read_lock_hint,
@@ -6278,7 +6283,7 @@ fn generate_graphql_operations_unfiltered(
                     );
                     let rows = hook_ctx.fetch_rows(&sql, &Self::__gom_key_values(key)).await?;
                     if rows.len() > 1 {
-                        return Err(Self::__gom_runtime_error("complete composite key matched more than one row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("complete composite key matched more than one row"));
                     }
                     rows.first().map(<Self as FromSqlRow<#backend_marker>>::from_row).transpose()
                 }
@@ -6287,25 +6292,25 @@ fn generate_graphql_operations_unfiltered(
                 async fn __gom_queue_changed_event(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     action: ::graphql_orm::graphql::orm::ChangeAction,
-                    entity: Option<&Self>,
+                    entity: ::std::option::Option<&Self>,
                 ) -> ::graphql_orm::Result<()> {
-                    if let Some(entity) = entity {
+                    if let ::std::option::Option::Some(entity) = entity {
                         #search_write_maintenance
                         let id = Self::__gom_entity_key(entity);
                         let source_id = ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_key_values(&id));
                         let event = #changed_event {
                             action, change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                             id: source_id.clone(), key: id,
-                            source_entity: None, source_id: None, path: Vec::new(),
-                            entity: Some(entity.clone()),
+                            source_entity: ::std::option::Option::None, source_id: ::std::option::Option::None, path: ::std::vec::Vec::new(),
+                            entity: ::std::option::Option::Some(entity.clone()),
                         };
                         hook_ctx.queue_event(event.clone());
                         #queue_subscription_witness
                         #propagation_visited_seed
                         Self::__gom_propagate_changed_event(hook_ctx, action, entity, #entity_name_lit,
-                            &source_id, Vec::new(), &mut visited, &[]).await?;
+                            &source_id, ::std::vec::Vec::new(), &mut visited, &[]).await?;
                     }
-                    Ok(())
+                    ::std::result::Result::Ok(())
                 }
 
                 #[doc(hidden)]
@@ -6325,11 +6330,11 @@ fn generate_graphql_operations_unfiltered(
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
-                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
+                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync))
                         .await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
                         &db,
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     #(#repository_create_field_checks)*
                     let key = #key_type { #(#key_from_input)* };
@@ -6338,38 +6343,38 @@ fn generate_graphql_operations_unfiltered(
                         &[#(#upsert_insert_column_literals),*],
                         &[#(#upsert_insert_value_literals),*],
                     ), 1);
-                    let mut bind_values: Vec<SqlValue> = Vec::new();
+                    let mut bind_values: ::std::vec::Vec<SqlValue> = ::std::vec::Vec::new();
                     #(#insert_binds_repo)*
                     let changes = ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values);
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(&key), changes: changes.clone(),
-                        before_state: None, after_state: None,
+                        before_state: ::std::option::Option::None, after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let result = hook_ctx.execute(&sql, &bind_values,).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                        return Err(Self::__gom_runtime_error("composite-key insert did not affect exactly one row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("composite-key insert did not affect exactly one row"));
                     }
                     let entity = Self::__gom_fetch_created_by_key_on(hook_ctx, &key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
-                    hook_ctx.__ensure_written_row(None, #entity_name_lit,
+                    hook_ctx.__ensure_written_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                        &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(&key), changes,
-                        before_state: None, after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                        before_state: ::std::option::Option::None, after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Created, Some(&entity)).await?;
-                    Ok(entity)
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Created, ::std::option::Option::Some(&entity)).await?;
+                    ::std::result::Result::Ok(entity)
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6387,11 +6392,11 @@ fn generate_graphql_operations_unfiltered(
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
-                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
+                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync))
                         .await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
                         &db,
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     #(#repository_create_field_checks)*
                     let key = #key_type { #(#key_from_input)* };
@@ -6402,49 +6407,49 @@ fn generate_graphql_operations_unfiltered(
                         &[#(#upsert_insert_value_literals),*],
                         &[#(#insert_if_absent_conflict_literals),*],
                     ), 1);
-                    let mut bind_values: Vec<SqlValue> = Vec::new();
+                    let mut bind_values: ::std::vec::Vec<SqlValue> = ::std::vec::Vec::new();
                     #(#insert_binds_repo)*
                     let changes = ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values);
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(&key), changes: changes.clone(),
-                        before_state: None, after_state: None,
+                        before_state: ::std::option::Option::None, after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let result = hook_ctx.execute(&sql, &bind_values,).await?;
                     match <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) {
                         0 => {
                             let existing = #fetch_existing_after_conflict
                                 .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
-                            db.ensure_writable_row(None, #entity_name_lit,
+                            db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                                 <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                                 ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                                &existing as &(dyn ::std::any::Any + Send + Sync),
+                                &existing as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                             ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                            return Ok(::graphql_orm::graphql::orm::InsertIfAbsentOutcome::AlreadyPresent(existing));
+                            return ::std::result::Result::Ok(::graphql_orm::graphql::orm::InsertIfAbsentOutcome::AlreadyPresent(existing));
                         }
                         1 => {}
-                        _ => return Err(Self::__gom_runtime_error("insert-if-absent affected more than one row")),
+                        _ => return ::std::result::Result::Err(Self::__gom_runtime_error("insert-if-absent affected more than one row")),
                     }
                     let entity = Self::__gom_fetch_created_by_key_on(hook_ctx, &key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
-                    hook_ctx.__ensure_written_row(None, #entity_name_lit,
+                    hook_ctx.__ensure_written_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                        &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(&key), changes,
-                        before_state: None, after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                        before_state: ::std::option::Option::None, after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Created, Some(&entity)).await?;
-                    Ok(::graphql_orm::graphql::orm::InsertIfAbsentOutcome::Inserted(entity))
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Created, ::std::option::Option::Some(&entity)).await?;
+                    ::std::result::Result::Ok(::graphql_orm::graphql::orm::InsertIfAbsentOutcome::Inserted(entity))
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6455,72 +6460,72 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &#key_type,
                     mut input: #update_input,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     let __gom_write_tracker = hook_ctx.__track_writes();
-                    let __gom_result: ::graphql_orm::Result<Option<Self>> = async {
+                    let __gom_result: ::graphql_orm::Result<::std::option::Option<Self>> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
-                    let Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
-                        return Ok(None);
+                    let ::std::option::Option::Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
+                        return ::std::result::Result::Ok(::std::option::Option::None);
                     };
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        &current_entity as &(dyn ::std::any::Any + Send + Sync),
+                        &current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_update_with_context(
                         &mut write_ctx,
-                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                        ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                         &db,
-                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     Self::__gom_authorize_repository_update_field_writes(
                         &db,
-                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                         &input,
                     ).await?;
-                    let mut set_clauses: Vec<String> = Vec::new();
-                    let mut changed_fields: Vec<&str> = Vec::new();
-                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                    let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                    let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
                     #update_assignments_repo_call
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
-                        *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
+                        *clause = ::std::format!("{} = {rhs}", dialect.quote_identifier_path(column));
                     }
                     if #has_updated_at_column {
-                        set_clauses.push(format!(
+                        set_clauses.push(::std::format!(
                             "{} = {}",
                             dialect.quote_identifier("updated_at"),
                             Self::__gom_current_updated_at_expr(),
                         ));
                     }
-                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                         set_clauses.push(assignment);
                     }
                     if set_clauses.is_empty() {
-                        return Err(Self::__gom_runtime_error("No fields to update"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                     }
                     Self::__gom_require_managed_version_headroom(&current_entity)?;
                     let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                     let changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(key), changes: changes.clone(),
-                        before_state: Some(before_state.clone()), after_state: None,
+                        before_state: ::std::option::Option::Some(before_state.clone()), after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let key_start = values.len() + 1;
-                    let sql = Self::__gom_rebind_sql(&format!(
+                    let sql = Self::__gom_rebind_sql(&::std::format!(
                         "UPDATE {} SET {} WHERE {}{}",
                         dialect.render_table_identifier_path(#table_name),
                         set_clauses.join(", "),
@@ -6530,23 +6535,23 @@ fn generate_graphql_operations_unfiltered(
                     values.extend(Self::__gom_key_values(key));
                     let result = hook_ctx.execute(&sql, &values,).await?;
                     match <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) {
-                        0 => return Ok(None),
+                        0 => return ::std::result::Result::Ok(::std::option::Option::None),
                         1 => {}
-                        _ => return Err(Self::__gom_runtime_error("complete composite key updated more than one row")),
+                        _ => return ::std::result::Result::Err(Self::__gom_runtime_error("complete composite key updated more than one row")),
                     }
                     let entity = Self::__gom_fetch_by_key_on(hook_ctx, key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                     #repository_post_image_check
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(key), changes,
-                        before_state: Some(before_state), after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                        before_state: ::std::option::Option::Some(before_state), after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity)).await?;
-                    Ok(Some(entity))
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, ::std::option::Option::Some(&entity)).await?;
+                    ::std::result::Result::Ok(::std::option::Option::Some(entity))
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6563,25 +6568,25 @@ fn generate_graphql_operations_unfiltered(
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
-                    let Some(entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
-                        return Ok(false);
+                    let ::std::option::Option::Some(entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
+                        return ::std::result::Result::Ok(false);
                     };
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                        &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let before_state = Self::__gom_capture_entity_state(&entity)?;
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: Self::__gom_event_id(key), changes: Vec::new(),
-                        before_state: Some(before_state.clone()), after_state: None,
+                        id: Self::__gom_event_id(key), changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state.clone()), after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
-                    let sql = format!(
+                    let sql = ::std::format!(
                         "DELETE FROM {} WHERE {}",
                         dialect.render_table_identifier_path(#table_name),
                         Self::__gom_key_where_clause_at(1),
@@ -6589,20 +6594,20 @@ fn generate_graphql_operations_unfiltered(
                     let result = hook_ctx.execute(&sql, &Self::__gom_key_values(key),
                     ).await?;
                     match <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) {
-                        0 => return Ok(false),
+                        0 => return ::std::result::Result::Ok(false),
                         1 => {}
-                        _ => return Err(Self::__gom_runtime_error("complete composite key deleted more than one row")),
+                        _ => return ::std::result::Result::Err(Self::__gom_runtime_error("complete composite key deleted more than one row")),
                     }
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: Self::__gom_event_id(key), changes: Vec::new(),
-                        before_state: Some(before_state), after_state: None,
+                        id: Self::__gom_event_id(key), changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state), after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Deleted, Some(&entity)).await?;
-                    Ok(true)
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Deleted, ::std::option::Option::Some(&entity)).await?;
+                    ::std::result::Result::Ok(true)
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6623,7 +6628,7 @@ fn generate_graphql_operations_unfiltered(
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
                     if where_input.is_empty() {
-                        return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
                     }
                     let query = EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input);
@@ -6633,15 +6638,15 @@ fn generate_graphql_operations_unfiltered(
                     let maximum = usize::try_from(limit.get())
                         .map_err(|_| Self::__gom_runtime_error("bounded update limit conversion overflow"))?;
                     if rows.len() > maximum {
-                        return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
+                        return ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
                             maximum: limit.get(),
                         });
                     }
                     for row in &rows {
-                        db.ensure_writable_row(None, #entity_name_lit,
+                        db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                             <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                             ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                            row as &(dyn ::std::any::Any + Send + Sync),
+                            row as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     }
                     let selected = u32::try_from(rows.len())
@@ -6655,9 +6660,9 @@ fn generate_graphql_operations_unfiltered(
                         }
                     }
                     if affected != selected {
-                        return Err(Self::__gom_runtime_error("bounded update cardinality changed"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update cardinality changed"));
                     }
-                    Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+                    ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6677,7 +6682,7 @@ fn generate_graphql_operations_unfiltered(
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
                     if where_input.is_empty() {
-                        return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
                     }
                     let query = EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input);
@@ -6687,15 +6692,15 @@ fn generate_graphql_operations_unfiltered(
                     let maximum = usize::try_from(limit.get())
                         .map_err(|_| Self::__gom_runtime_error("bounded delete limit conversion overflow"))?;
                     if rows.len() > maximum {
-                        return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
+                        return ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
                             maximum: limit.get(),
                         });
                     }
                     for row in &rows {
-                        db.ensure_writable_row(None, #entity_name_lit,
+                        db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                             <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                             ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                            row as &(dyn ::std::any::Any + Send + Sync),
+                            row as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     }
                     let selected = u32::try_from(rows.len())
@@ -6709,9 +6714,9 @@ fn generate_graphql_operations_unfiltered(
                         }
                     }
                     if affected != selected {
-                        return Err(Self::__gom_runtime_error("bounded delete cardinality changed"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("bounded delete cardinality changed"));
                     }
-                    Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+                    ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6731,56 +6736,56 @@ fn generate_graphql_operations_unfiltered(
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
                     if expected.is_empty() {
-                        return Err(Self::__gom_runtime_error("conditional update requires a non-empty typed expected predicate"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("conditional update requires a non-empty typed expected predicate"));
                     }
                     if expected.requires_in_memory_filtering(<#backend_marker as OrmBackend>::DIALECT) {
-                        return Err(Self::__gom_runtime_error("conditional update predicate must be fully database-renderable"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("conditional update predicate must be fully database-renderable"));
                     }
-                    let Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
-                        return Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound);
+                    let ::std::option::Option::Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
+                        return ::std::result::Result::Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound);
                     };
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        &current_entity as &(dyn ::std::any::Any + Send + Sync),
+                        &current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_update_with_context(
                         &mut write_ctx,
-                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                        ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                         &db,
-                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     Self::__gom_authorize_repository_update_field_writes(
                         &db,
-                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                         &input,
                     ).await?;
-                    let mut set_clauses: Vec<String> = Vec::new();
-                    let mut changed_fields: Vec<&str> = Vec::new();
-                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                    let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                    let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
                     #update_assignments_repo_call
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
-                        *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
+                        *clause = ::std::format!("{} = {rhs}", dialect.quote_identifier_path(column));
                     }
                     if #has_updated_at_column {
-                        set_clauses.push(format!(
+                        set_clauses.push(::std::format!(
                             "{} = {}",
                             dialect.quote_identifier("updated_at"),
                             Self::__gom_current_updated_at_expr(),
                         ));
                     }
-                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                         set_clauses.push(assignment);
                     }
                     if set_clauses.is_empty() {
-                        return Err(Self::__gom_runtime_error("No fields to update"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                     }
                     let expected_query = EntityQuery::<Self, #backend_marker>::new().filter(&expected);
                     let (delete_sql, expected_values) = expected_query.try_build_delete_sql()?;
@@ -6790,18 +6795,18 @@ fn generate_graphql_operations_unfiltered(
                     Self::__gom_require_managed_version_headroom(&current_entity)?;
                     let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                     let changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(key), changes: changes.clone(),
-                        before_state: Some(before_state.clone()), after_state: None,
+                        before_state: ::std::option::Option::Some(before_state.clone()), after_state: ::std::option::Option::None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let key_start = values.len() + 1;
                     let expected_start = key_start + <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS.len();
                     let expected_clause = Self::__gom_rebind_sql(expected_clause, expected_start);
-                    let sql = Self::__gom_rebind_sql(&format!(
+                    let sql = Self::__gom_rebind_sql(&::std::format!(
                         "UPDATE {} SET {} WHERE {}{} AND ({expected_clause})",
                         dialect.render_table_identifier_path(#table_name),
                         set_clauses.join(", "),
@@ -6814,27 +6819,27 @@ fn generate_graphql_operations_unfiltered(
                     match <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) {
                         0 => {
                             return if Self::__gom_fetch_by_key_on(hook_ctx, key).await?.is_some() {
-                                Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::PredicateConflict)
+                                ::std::result::Result::Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::PredicateConflict)
                             } else {
-                                Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound)
+                                ::std::result::Result::Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound)
                             };
                         }
                         1 => {}
-                        _ => return Err(Self::__gom_runtime_error("conditional complete-key update affected more than one row")),
+                        _ => return ::std::result::Result::Err(Self::__gom_runtime_error("conditional complete-key update affected more than one row")),
                     }
                     let entity = Self::__gom_fetch_by_key_on(hook_ctx, key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                     #repository_post_image_check
-                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                    hook_ctx.run_mutation_hook(::std::option::Option::None, &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
                         entity_name: #entity_name_lit, table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: Self::__gom_event_id(key), changes,
-                        before_state: Some(before_state), after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                        before_state: ::std::option::Option::Some(before_state), after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity)).await?;
-                    Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::Updated(entity))
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, ::std::option::Option::Some(&entity)).await?;
+                    ::std::result::Result::Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::Updated(entity))
                 }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -6849,7 +6854,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let entity = context.insert::<Self>(input).await?;
                     context.commit_and_emit().await?;
-                    Ok(entity)
+                    ::std::result::Result::Ok(entity)
                 }
 
                 pub async fn insert_if_absent(
@@ -6861,19 +6866,19 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let outcome = context.insert_if_absent::<Self>(input).await?;
                     context.commit_and_emit().await?;
-                    Ok(outcome)
+                    ::std::result::Result::Ok(outcome)
                 }
 
                 pub async fn update_by_key(
                     db: &::graphql_orm::db::Database<#backend_marker>, key: &#key_type, input: #update_input,
-                ) -> ::graphql_orm::Result<Option<Self>> {
+                ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     let mut context = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                 ).await?;
                     let entity = context.update_by_key::<Self>(key, input).await?;
                     context.commit_and_emit().await?;
-                    Ok(entity)
+                    ::std::result::Result::Ok(entity)
                 }
 
                 pub async fn delete_by_key(
@@ -6885,7 +6890,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let deleted = context.delete_by_key::<Self>(key).await?;
                     context.commit_and_emit().await?;
-                    Ok(deleted)
+                    ::std::result::Result::Ok(deleted)
                 }
 
                 pub async fn update_where_bounded(
@@ -6900,7 +6905,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let outcome = context.update_where_bounded::<Self>(where_input, input, limit).await?;
                     context.commit_and_emit().await?;
-                    Ok(outcome)
+                    ::std::result::Result::Ok(outcome)
                 }
 
                 pub async fn delete_where_bounded(
@@ -6914,7 +6919,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let outcome = context.delete_where_bounded::<Self>(where_input, limit).await?;
                     context.commit_and_emit().await?;
-                    Ok(outcome)
+                    ::std::result::Result::Ok(outcome)
                 }
 
                 pub async fn update_if(
@@ -6929,7 +6934,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                     let outcome = context.update_if::<Self>(key, expected, input).await?;
                     context.commit_and_emit().await?;
-                    Ok(outcome)
+                    ::std::result::Result::Ok(outcome)
                 }
 
                 #upsert_repository_method
@@ -6940,7 +6945,7 @@ fn generate_graphql_operations_unfiltered(
                 fn insert_in_mutation_context<'a>(
                     context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>, input: Self::CreateInput,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Self>> {
-                    Box::pin(async move { Self::__gom_insert_with_mutation_context(context, input).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_insert_with_mutation_context(context, input).await })
                 }
             }
 
@@ -6950,7 +6955,7 @@ fn generate_graphql_operations_unfiltered(
                     context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     input: Self::CreateInput,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::InsertIfAbsentOutcome<Self>>> {
-                    Box::pin(async move { Self::__gom_insert_if_absent_with_mutation_context(context, input).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_insert_if_absent_with_mutation_context(context, input).await })
                 }
             }
 
@@ -6958,19 +6963,19 @@ fn generate_graphql_operations_unfiltered(
                 type Key = #key_type;
                 fn find_by_key_in_mutation_context<'a>(
                     context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>, key: &'a Self::Key,
-                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Option<Self>>> {
-                    Box::pin(async move {
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::std::option::Option<Self>>> {
+                    ::std::boxed::Box::pin(async move {
                         let entity = Self::__gom_fetch_by_key_on(context, key).await?;
-                        if let Some(entity) = entity.as_ref() {
-                            if !context.database().can_read_row(None, #entity_name_lit,
+                        if let ::std::option::Option::Some(entity) = entity.as_ref() {
+                            if !context.database().can_read_row(::std::option::Option::None, #entity_name_lit,
                                 <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                 ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                                entity as &(dyn ::std::any::Any + Send + Sync),
+                                entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                             ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                                return Ok(None);
+                                return ::std::result::Result::Ok(::std::option::Option::None);
                             }
                         }
-                        Ok(entity)
+                        ::std::result::Result::Ok(entity)
                     })
                 }
             }
@@ -6982,8 +6987,8 @@ fn generate_graphql_operations_unfiltered(
                     context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &'a Self::Key,
                     input: Self::UpdateInput,
-                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Option<Self>>> {
-                    Box::pin(async move { Self::__gom_update_by_key_with_mutation_context(context, key, input).await })
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::std::option::Option<Self>>> {
+                    ::std::boxed::Box::pin(async move { Self::__gom_update_by_key_with_mutation_context(context, key, input).await })
                 }
             }
 
@@ -6993,7 +6998,7 @@ fn generate_graphql_operations_unfiltered(
                     context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &'a Self::Key,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<bool>> {
-                    Box::pin(async move { Self::__gom_delete_by_key_with_mutation_context(context, key).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_delete_by_key_with_mutation_context(context, key).await })
                 }
             }
 
@@ -7006,7 +7011,7 @@ fn generate_graphql_operations_unfiltered(
                     input: Self::UpdateInput,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
-                    Box::pin(async move { Self::__gom_update_where_bounded_with_mutation_context(context, where_input, input, limit).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_update_where_bounded_with_mutation_context(context, where_input, input, limit).await })
                 }
             }
 
@@ -7017,7 +7022,7 @@ fn generate_graphql_operations_unfiltered(
                     where_input: Self::WhereInput,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
-                    Box::pin(async move { Self::__gom_delete_where_bounded_with_mutation_context(context, where_input, limit).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_delete_where_bounded_with_mutation_context(context, where_input, limit).await })
                 }
             }
 
@@ -7031,7 +7036,7 @@ fn generate_graphql_operations_unfiltered(
                     expected: Self::Expected,
                     input: Self::UpdateInput,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::PredicateUpdateOutcome<Self>>> {
-                    Box::pin(async move { Self::__gom_update_if_with_mutation_context(context, key, expected, input).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_update_if_with_mutation_context(context, key, expected, input).await })
                 }
             }
 
@@ -7059,7 +7064,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                 if where_input.is_empty() {
-                    return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
                 }
                 let query = EntityQuery::<Self, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input);
@@ -7069,14 +7074,14 @@ fn generate_graphql_operations_unfiltered(
                 let maximum = usize::try_from(limit.get())
                     .map_err(|_| Self::__gom_runtime_error("bounded update limit conversion overflow"))?;
                 if rows.len() > maximum {
-                    return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
+                    return ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
                 }
                 let db = hook_ctx.database().clone();
                 for row in &rows {
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        row as &(dyn ::std::any::Any + Send + Sync),
+                        row as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
                 let selected = u32::try_from(rows.len())
@@ -7090,9 +7095,9 @@ fn generate_graphql_operations_unfiltered(
                     }
                 }
                 if affected != selected {
-                    return Err(Self::__gom_runtime_error("bounded update cardinality changed"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update cardinality changed"));
                 }
-                Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+                ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -7110,7 +7115,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                 if where_input.is_empty() {
-                    return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
                 }
                 let query = EntityQuery::<Self, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input);
@@ -7120,14 +7125,14 @@ fn generate_graphql_operations_unfiltered(
                 let maximum = usize::try_from(limit.get())
                     .map_err(|_| Self::__gom_runtime_error("bounded delete limit conversion overflow"))?;
                 if rows.len() > maximum {
-                    return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
+                    return ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
                 }
                 let db = hook_ctx.database().clone();
                 for row in &rows {
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        row as &(dyn ::std::any::Any + Send + Sync),
+                        row as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
                 let selected = u32::try_from(rows.len())
@@ -7141,9 +7146,9 @@ fn generate_graphql_operations_unfiltered(
                     }
                 }
                 if affected != selected {
-                    return Err(Self::__gom_runtime_error("bounded delete cardinality changed"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("bounded delete cardinality changed"));
                 }
-                Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+                ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -7168,7 +7173,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let outcome = context.update_where_bounded::<Self>(where_input, input, limit).await?;
                 context.commit_and_emit().await?;
-                Ok(outcome)
+                ::std::result::Result::Ok(outcome)
             }
 
             pub async fn delete_where_bounded(
@@ -7181,7 +7186,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let outcome = context.delete_where_bounded::<Self>(where_input, limit).await?;
                 context.commit_and_emit().await?;
-                Ok(outcome)
+                ::std::result::Result::Ok(outcome)
             }
         }
     } else {
@@ -7201,7 +7206,7 @@ fn generate_graphql_operations_unfiltered(
                     where_input: Self::WhereInput, input: Self::UpdateInput,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
-                    Box::pin(async move { Self::__gom_update_where_bounded_with_mutation_context(context, where_input, input, limit).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_update_where_bounded_with_mutation_context(context, where_input, input, limit).await })
                 }
             }
             impl ::graphql_orm::graphql::orm::MutationContextBoundedDeleteWhere<#backend_marker> for #struct_name {
@@ -7210,7 +7215,7 @@ fn generate_graphql_operations_unfiltered(
                     context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     where_input: Self::WhereInput, limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
-                    Box::pin(async move { Self::__gom_delete_where_bounded_with_mutation_context(context, where_input, limit).await })
+                    ::std::boxed::Box::pin(async move { Self::__gom_delete_where_bounded_with_mutation_context(context, where_input, limit).await })
                 }
             }
         }
@@ -7705,7 +7710,7 @@ fn generate_graphql_operations_unfiltered(
             fn generated_graphql_operations(
             ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {
                 static OPERATIONS: ::std::sync::OnceLock<
-                    Box<[::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor]>
+                    ::std::boxed::Box<[::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor]>
                 > = ::std::sync::OnceLock::new();
                 OPERATIONS.get_or_init(|| {
                     let mut operations = ::std::vec::Vec::from([
@@ -7747,9 +7752,12 @@ fn generate_graphql_operations_unfiltered(
             async fn on_changed(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
-                #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: Option<#key_type>,
-                #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
+                #[__gom_catalogue_type(Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>)]
+                #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: ::std::option::Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                #[__gom_catalogue_type(Option<#key_type>)]
+                #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: ::std::option::Option<#key_type>,
+                #[__gom_catalogue_type(Option<Vec<#key_type>>)]
+                #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: ::std::option::Option<::std::vec::Vec<#key_type>>,
                 #subscription_started_arg
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>>>> {
                 use ::graphql_orm::futures::StreamExt;
@@ -7763,7 +7771,7 @@ fn generate_graphql_operations_unfiltered(
                 )?;
                 let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
@@ -7771,7 +7779,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                     if _filter.as_ref().is_some_and(|filter| filter.dummy.is_some()) {
-                        return Err(::graphql_orm::graphql::errors::OrmPublicError::new(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
+                        return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
                     }
                     ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<#struct_name, #backend_marker>(ctx, #entity_result_field_name)?;
                     let keys = ::graphql_orm::graphql::subscriptions::admit_subscription_keys(
@@ -7791,24 +7799,24 @@ fn generate_graphql_operations_unfiltered(
                         let keys = keys.clone();
                         async move {
                             let witness = match result {
-                                Ok(witness) => witness,
+                                ::std::result::Result::Ok(witness) => witness,
                                 // Lost continuity or a closed event source: one error, then the stream ends.
-                                Err(error) => return Some(Err(error)),
+                                ::std::result::Result::Err(error) => return ::std::option::Option::Some(::std::result::Result::Err(error)),
                             };
                             // Host policies may buffer private diagnostics before denying an event.
                             // Cover every filter and release-proof drop, not only payload preparation.
                             // A poisoned error buffer ends the stream with one typed error.
                             let errors_before = match ::graphql_orm::graphql::errors::buffered_errors::count(ctx) {
-                                Ok(count) => count,
-                                Err(error) => return Some(Err(error)),
+                                ::std::result::Result::Ok(count) => count,
+                                ::std::result::Result::Err(error) => return ::std::option::Option::Some(::std::result::Result::Err(error)),
                             };
-                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>> = async move {
+                            let delivered: ::std::option::Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>> = async move {
                                 let event = witness.event.as_ref();
-                                if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
-                                if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
+                                if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return ::std::option::Option::None; }
+                                if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return ::std::option::Option::None; }
                                 if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
-                                if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
+                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return ::std::option::Option::None; }
+                                if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return ::std::option::Option::None; }
                                 let authorize_current = || async {
                                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                                     #subscription_scope_enforcement
@@ -7818,8 +7826,8 @@ fn generate_graphql_operations_unfiltered(
                                         && event.entity.as_ref().is_some_and(|entity|
                                             ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_subscription_key_values(entity))
                                             != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                        ) { return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
-                                    let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
+                                        ) { return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
+                                    let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { ::std::option::Option::None };
                                     let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
                                         .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
                                     if key.is_some() || keys.is_some() {
@@ -7827,7 +7835,7 @@ fn generate_graphql_operations_unfiltered(
                                     }
                                     ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
                                     // Query and field-policy awaits must not outlive current authority.
-                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
+                                    db.ensure_entity_access(::std::option::Option::Some(ctx), #entity_name_lit,
                                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
@@ -7836,10 +7844,10 @@ fn generate_graphql_operations_unfiltered(
                                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
                                     #struct_name::__gom_authorize_changed_operation(ctx)?;
-                                    Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
+                                    ::std::result::Result::Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                                 };
                                 match authorize_current().await {
-                                    Ok(row) => {
+                                    ::std::result::Result::Ok(row) => {
                                         let __gom_event = #changed_event {
                                             action: event.action,
                                             change_kind: event.change_kind,
@@ -7848,32 +7856,32 @@ fn generate_graphql_operations_unfiltered(
                                             source_entity: event.source_entity.clone(),
                                             source_id: event.source_id.clone(),
                                             path: event.path.clone(),
-                                            entity: Some(row),
+                                            entity: ::std::option::Option::Some(row),
                                         };
                                         let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_payload_value, ctx).await?;
                                         // Successful serialization can itself await or revoke authority.
                                         // Recheck the complete current release contract before yielding.
                                         match authorize_current().await {
-                                            Ok(_) => Some(prepared),
-                                            Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                                            ::std::result::Result::Ok(_) => ::std::option::Option::Some(prepared),
+                                            ::std::result::Result::Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); ::std::option::Option::None }
                                         }
                                     },
-                                    Err(error) => {
+                                    ::std::result::Result::Err(error) => {
                                         let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error);
                                         #key_only_delete_fallback
                                     }
                                 }
                             }.await;
                             if delivered.is_none() {
-                                if let Err(error) = ::graphql_orm::graphql::errors::buffered_errors::truncate(ctx, errors_before) {
-                                    return Some(Err(error));
+                                if let ::std::result::Result::Err(error) = ::graphql_orm::graphql::errors::buffered_errors::truncate(ctx, errors_before) {
+                                    return ::std::option::Option::Some(::std::result::Result::Err(error));
                                 }
                             }
-                            delivered.map(Ok)
+                            delivered.map(::std::result::Result::Ok)
                         }
                     });
                     #prepend_started_frame
-                    Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
+                    ::std::result::Result::Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
                         events, interval, move || {
                             let db = timer_db.clone();
                             async move {
@@ -7881,11 +7889,11 @@ fn generate_graphql_operations_unfiltered(
                                 #struct_name::__gom_authorize_changed_operation(ctx)?;
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                                     ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                if !db.can_access_entity(Some(ctx), #entity_name_lit,
+                                if !db.can_access_entity(::std::option::Option::Some(ctx), #entity_name_lit,
                                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await? {
-                                    return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                                    return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
                                 }
                                 // Current principal/scopes/assurance must survive the policy await.
                                 #struct_name::__gom_authorize_changed_operation(ctx)?;
@@ -7914,15 +7922,15 @@ fn generate_graphql_operations_unfiltered(
                 entity: &'a Self,
                 source_entity: &'a str,
                 source_id: &'a str,
-                path: Vec<String>,
-                visited: &'a mut ::std::collections::HashSet<String>,
+                path: ::std::vec::Vec<::std::string::String>,
+                visited: &'a mut ::std::collections::HashSet<::std::string::String>,
                 provenance: &'a [::graphql_orm::graphql::subscriptions::SubscriptionEventSource<#backend_marker>],
             ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
-                Box::pin(async move {
+                ::std::boxed::Box::pin(async move {
                     if provenance.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROVENANCE_HOPS
-                            || visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return Ok(()); }
+                            || visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return ::std::result::Result::Ok(()); }
                     #(#propagation_blocks)*
-                    Ok(())
+                    ::std::result::Result::Ok(())
                 })
             }
 
@@ -7932,7 +7940,7 @@ fn generate_graphql_operations_unfiltered(
             && !entity_meta.append_only
         {
             let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
-                #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
                 #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
                 pub struct #changed_event {
                     pub action: ::graphql_orm::graphql::orm::ChangeAction,
@@ -7941,12 +7949,12 @@ fn generate_graphql_operations_unfiltered(
                     pub id: #subscription_identity_type,
                     #subscription_extra_key_field
                     #[graphql(name = #source_entity_field_name)]
-                    pub source_entity: Option<String>,
+                    pub source_entity: ::std::option::Option<::std::string::String>,
                     #[graphql(name = #source_id_field_name)]
-                    pub source_id: Option<String>,
-                    pub path: Vec<String>,
+                    pub source_id: ::std::option::Option<::std::string::String>,
+                    pub path: ::std::vec::Vec<::std::string::String>,
                     #[graphql(name = #entity_result_field_name)]
-                    pub entity: Option<#struct_name>,
+                    pub entity: ::std::option::Option<#struct_name>,
                 }
             });
             quote! {
@@ -8108,15 +8116,15 @@ fn generate_graphql_operations_unfiltered(
         #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
         pub struct #result_type {
             pub success: bool,
-            pub error: Option<String>,
+            pub error: ::std::option::Option<::std::string::String>,
             #result_error_code_field
             #[graphql(name = #entity_result_field_name)]
-            pub entity: Option<#struct_name>,
+            pub entity: ::std::option::Option<#struct_name>,
         }
     });
     let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
         /// Subscription change event for this entity.
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
         #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
         pub struct #changed_event {
             pub action: ::graphql_orm::graphql::orm::ChangeAction,
@@ -8124,12 +8132,12 @@ fn generate_graphql_operations_unfiltered(
             pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
             pub id: #pk_type,
             #[graphql(name = #source_entity_field_name)]
-            pub source_entity: Option<String>,
+            pub source_entity: ::std::option::Option<::std::string::String>,
             #[graphql(name = #source_id_field_name)]
-            pub source_id: Option<String>,
-            pub path: Vec<String>,
+            pub source_id: ::std::option::Option<::std::string::String>,
+            pub path: ::std::vec::Vec<::std::string::String>,
             #[graphql(name = #entity_result_field_name)]
-            pub entity: Option<#struct_name>,
+            pub entity: ::std::option::Option<#struct_name>,
         }
     });
     let delete_many_result_object = crate::wrapper_object::wrapper_object(quote! {
@@ -8139,10 +8147,10 @@ fn generate_graphql_operations_unfiltered(
         pub struct #delete_many_result_type {
             pub success: bool,
             /// Failures after commit; success and count still describe the committed write.
-            pub notification_errors: Option<Vec<::graphql_orm::graphql::orm::NotificationError>>,
-            pub error: Option<String>,
+            pub notification_errors: ::std::option::Option<::std::vec::Vec<::graphql_orm::graphql::orm::NotificationError>>,
+            pub error: ::std::option::Option<::std::string::String>,
             /// Application refusal code, or the safe database error category.
-            pub error_code: Option<String>,
+            pub error_code: ::std::option::Option<::std::string::String>,
             #[graphql(name = #deleted_count_field_name)]
             pub deleted_count: i64,
         }
@@ -8154,10 +8162,10 @@ fn generate_graphql_operations_unfiltered(
         pub struct #update_many_result_type {
             pub success: bool,
             /// Failures after commit; success and count still describe the committed write.
-            pub notification_errors: Option<Vec<::graphql_orm::graphql::orm::NotificationError>>,
-            pub error: Option<String>,
+            pub notification_errors: ::std::option::Option<::std::vec::Vec<::graphql_orm::graphql::orm::NotificationError>>,
+            pub error: ::std::option::Option<::std::string::String>,
             /// Application refusal code, or the safe database error category.
-            pub error_code: Option<String>,
+            pub error_code: ::std::option::Option<::std::string::String>,
             #[graphql(name = #affected_count_field_name)]
             pub affected_count: i64,
         }
@@ -8245,15 +8253,15 @@ fn generate_graphql_operations_unfiltered(
         impl #result_type {
             /// Create a successful result with the entity
             pub fn ok(entity: #struct_name) -> Self {
-                Self { success: true, error: None, #result_error_code_none entity: Some(entity) }
+                Self { success: true, error: ::std::option::Option::None, #result_error_code_none entity: ::std::option::Option::Some(entity) }
             }
             /// Create an error result
-            pub fn err(msg: impl Into<String>) -> Self {
-                Self { success: false, error: Some(msg.into()), #result_error_code_none entity: None }
+            pub fn err(msg: impl ::std::convert::Into<::std::string::String>) -> Self {
+                Self { success: false, error: ::std::option::Option::Some(msg.into()), #result_error_code_none entity: ::std::option::Option::None }
             }
             /// A refusal that wrote nothing, with its code under `mutation_error_codes`.
             #[doc(hidden)]
-            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl Into<String>) -> Self {
+            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl ::std::convert::Into<::std::string::String>) -> Self {
                 #[allow(unused_mut)]
                 let mut result = Self::err(msg);
                 #refusal_error_code
@@ -8270,7 +8278,7 @@ fn generate_graphql_operations_unfiltered(
             /// A refusal carried from another step with its already rendered
             /// code, kept under `mutation_error_codes`.
             #[doc(hidden)]
-            pub fn __gom_rejected(msg: impl Into<String>, code: Option<String>) -> Self {
+            pub fn __gom_rejected(msg: impl ::std::convert::Into<::std::string::String>, code: ::std::option::Option<::std::string::String>) -> Self {
                 #[allow(unused_mut)]
                 let mut result = Self::err(msg);
                 #rejected_error_code
@@ -8278,13 +8286,13 @@ fn generate_graphql_operations_unfiltered(
             }
             /// This result's `errorCode` under `mutation_error_codes`, else `None`.
             #[doc(hidden)]
-            pub fn __gom_error_code(&self) -> Option<String> {
+            pub fn __gom_error_code(&self) -> ::std::option::Option<::std::string::String> {
                 #result_error_code_get
             }
             /// A committed delete, which returns no entity.
             #[doc(hidden)]
             pub fn __gom_deleted() -> Self {
-                Self { success: true, error: None, #result_error_code_none entity: None }
+                Self { success: true, error: ::std::option::Option::None, #result_error_code_none entity: ::std::option::Option::None }
             }
         }
 
@@ -8298,22 +8306,22 @@ fn generate_graphql_operations_unfiltered(
 
         impl #delete_many_result_type {
             pub fn ok(deleted_count: i64) -> Self {
-                Self { notification_errors: None, success: true, error: None, error_code: None, deleted_count }
+                Self { notification_errors: ::std::option::Option::None, success: true, error: ::std::option::Option::None, error_code: ::std::option::Option::None, deleted_count }
             }
-            pub fn err(msg: impl Into<String>) -> Self {
-                Self { notification_errors: None, success: false, error: Some(msg.into()), error_code: None, deleted_count: 0 }
+            pub fn err(msg: impl ::std::convert::Into<::std::string::String>) -> Self {
+                Self { notification_errors: ::std::option::Option::None, success: false, error: ::std::option::Option::Some(msg.into()), error_code: ::std::option::Option::None, deleted_count: 0 }
             }
             /// Create a refusal payload preserving the GraphQL message and string code.
             pub fn from_graphql_error(error: ::graphql_orm::async_graphql::Error) -> Self {
                 let error_code = error.extensions.as_ref().and_then(|ext| ext.get("code")).and_then(|value| match value {
-                    ::graphql_orm::async_graphql::Value::String(code) => Some(code.clone()),
-                    _ => None,
+                    ::graphql_orm::async_graphql::Value::String(code) => ::std::option::Option::Some(code.clone()),
+                    _ => ::std::option::Option::None,
                 });
                 Self { error_code, ..Self::err(error.message) }
             }
             /// A refusal that wrote nothing; its code is kept under `mutation_error_codes`.
             #[doc(hidden)]
-            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl Into<String>) -> Self {
+            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl ::std::convert::Into<::std::string::String>) -> Self {
                 #[allow(unused_mut)]
                 let mut result = Self::err(msg);
                 #refusal_error_code
@@ -8326,22 +8334,22 @@ fn generate_graphql_operations_unfiltered(
 
         impl #update_many_result_type {
             pub fn ok(affected_count: i64) -> Self {
-                Self { notification_errors: None, success: true, error: None, error_code: None, affected_count }
+                Self { notification_errors: ::std::option::Option::None, success: true, error: ::std::option::Option::None, error_code: ::std::option::Option::None, affected_count }
             }
-            pub fn err(msg: impl Into<String>) -> Self {
-                Self { notification_errors: None, success: false, error: Some(msg.into()), error_code: None, affected_count: 0 }
+            pub fn err(msg: impl ::std::convert::Into<::std::string::String>) -> Self {
+                Self { notification_errors: ::std::option::Option::None, success: false, error: ::std::option::Option::Some(msg.into()), error_code: ::std::option::Option::None, affected_count: 0 }
             }
             /// Create a refusal payload preserving the GraphQL message and string code.
             pub fn from_graphql_error(error: ::graphql_orm::async_graphql::Error) -> Self {
                 let error_code = error.extensions.as_ref().and_then(|ext| ext.get("code")).and_then(|value| match value {
-                    ::graphql_orm::async_graphql::Value::String(code) => Some(code.clone()),
-                    _ => None,
+                    ::graphql_orm::async_graphql::Value::String(code) => ::std::option::Option::Some(code.clone()),
+                    _ => ::std::option::Option::None,
                 });
                 Self { error_code, ..Self::err(error.message) }
             }
             /// A refusal that wrote nothing; its code is kept under `mutation_error_codes`.
             #[doc(hidden)]
-            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl Into<String>) -> Self {
+            pub fn __gom_refusal(code: ::graphql_orm::graphql::errors::OrmErrorCode, msg: impl ::std::convert::Into<::std::string::String>) -> Self {
                 #[allow(unused_mut)]
                 let mut result = Self::err(msg);
                 #refusal_error_code
@@ -8397,7 +8405,7 @@ fn generate_graphql_operations_unfiltered(
         /// Provides static async methods for common database operations.
         impl #struct_name {
             #[doc(hidden)]
-            fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
+            fn __gom_runtime_error(message: impl ::std::convert::Into<::std::string::String>) -> ::graphql_orm::sqlx::Error {
                 ::graphql_orm::sqlx::Error::Protocol(message.into())
             }
 
@@ -8407,17 +8415,17 @@ fn generate_graphql_operations_unfiltered(
             fn __gom_emit_changed_event(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
-                entity: Option<&Self>,
+                entity: ::std::option::Option<&Self>,
             ) {
-                if let Some(entity) = entity {
+                if let ::std::option::Option::Some(entity) = entity {
                     let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
-                        source_entity: None,
-                        source_id: None,
-                        path: Vec::new(),
-                        entity: Some(entity.clone()),
+                        source_entity: ::std::option::Option::None,
+                        source_id: ::std::option::Option::None,
+                        path: ::std::vec::Vec::new(),
+                        entity: ::std::option::Option::Some(entity.clone()),
                     };
                     db.emit_event(event.clone());
                     #emit_subscription_witness
@@ -8433,19 +8441,19 @@ fn generate_graphql_operations_unfiltered(
             async fn __gom_queue_changed_event(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
-                entity: Option<&Self>,
+                entity: ::std::option::Option<&Self>,
             ) -> ::graphql_orm::Result<()> {
-                if let Some(entity) = entity {
+                if let ::std::option::Option::Some(entity) = entity {
                     #search_write_maintenance
                     let source_id = #pk_id_for_entity;
                     let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
-                        source_entity: None,
-                        source_id: None,
-                        path: Vec::new(),
-                        entity: Some(entity.clone()),
+                        source_entity: ::std::option::Option::None,
+                        source_id: ::std::option::Option::None,
+                        path: ::std::vec::Vec::new(),
+                        entity: ::std::option::Option::Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
                     #queue_subscription_witness
@@ -8456,12 +8464,12 @@ fn generate_graphql_operations_unfiltered(
                         entity,
                         #entity_name_lit,
                         &source_id,
-                        Vec::new(),
+                        ::std::vec::Vec::new(),
                         &mut visited,
                         &[],
                     ).await?;
                 }
-                Ok(())
+                ::std::result::Result::Ok(())
             }
 
             #[doc(hidden)]
@@ -8476,7 +8484,7 @@ fn generate_graphql_operations_unfiltered(
             pub(crate) async fn __gom_fetch_by_id_on(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
-            ) -> ::graphql_orm::Result<Option<Self>> {
+            ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                 Self::__gom_fetch_by_id_locking(hook_ctx, id, #write_read_lock_suffix).await
             }
 
@@ -8489,7 +8497,7 @@ fn generate_graphql_operations_unfiltered(
             pub(crate) async fn __gom_fetch_created_by_id_on(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
-            ) -> ::graphql_orm::Result<Option<Self>> {
+            ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                 Self::__gom_fetch_by_id_locking(hook_ctx, id, "").await
             }
 
@@ -8499,11 +8507,11 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
                 lock_suffix: &str,
-            ) -> ::graphql_orm::Result<Option<Self>> {
+            ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, SqlValue};
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!(
+                    &::std::format!(
                         "SELECT {} FROM {}{} WHERE {} = ?{}",
                         <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
                         #sql_table_name,
@@ -8537,23 +8545,23 @@ fn generate_graphql_operations_unfiltered(
                 );
                 db.run_before_create_with_context(
                     &mut write_ctx,
-                    &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
                     &db,
-                    &input as &(dyn ::std::any::Any + Send + Sync),
+                    &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await?;
                 #(#repository_create_field_checks)*
                 #created_pk_init
                 let sql = Self::__gom_rebind_sql(#insert_sql, 1);
-                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
                 #prepend_pk_bind
                 #(#insert_binds_repo)*
 
-                let before_state = None;
+                let before_state = ::std::option::Option::None;
                 hook_ctx
                     .run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Created,
@@ -8563,7 +8571,7 @@ fn generate_graphql_operations_unfiltered(
                             id: #created_pk_id_string,
                             changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                             before_state,
-                            after_state: None,
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -8573,11 +8581,11 @@ fn generate_graphql_operations_unfiltered(
                 let entity = Self::__gom_fetch_created_by_id_on(hook_ctx, &created_pk).await?
                     .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                 #repository_post_image_check
-                let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
+                let after_state = ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?);
 
                 hook_ctx
                     .run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Created,
@@ -8586,7 +8594,7 @@ fn generate_graphql_operations_unfiltered(
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
                             changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
-                            before_state: None,
+                            before_state: ::std::option::Option::None,
                             after_state,
                         },
                     )
@@ -8596,10 +8604,10 @@ fn generate_graphql_operations_unfiltered(
                 Self::__gom_queue_changed_event(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Created,
-                    Some(&entity),
+                    ::std::option::Option::Some(&entity),
                 ).await?;
 
-                Ok(entity)
+                ::std::result::Result::Ok(entity)
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -8614,23 +8622,23 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
                 mut input: #update_input,
-            ) -> ::graphql_orm::Result<Option<Self>> {
+            ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                     let __gom_write_tracker = hook_ctx.__track_writes();
-                    let __gom_result: ::graphql_orm::Result<Option<Self>> = async {
+                    let __gom_result: ::graphql_orm::Result<::std::option::Option<Self>> = async {
                 hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let current_entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
-                let Some(current_entity) = current_entity else {
-                    return Ok(None);
+                let ::std::option::Option::Some(current_entity) = current_entity else {
+                    return ::std::result::Result::Ok(::std::option::Option::None);
                 };
                 let db = hook_ctx.database().clone();
                 db.ensure_writable_row(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    &current_entity as &(dyn ::std::any::Any + Send + Sync),
+                    &current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                     #entity_name_lit,
@@ -8638,42 +8646,42 @@ fn generate_graphql_operations_unfiltered(
                 );
                 db.run_before_update_with_context(
                     &mut write_ctx,
-                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                    &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                    &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                     &db,
-                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                    &input as &(dyn ::std::any::Any + Send + Sync),
+                    ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                    &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await?;
                 Self::__gom_authorize_repository_update_field_writes(
                     &db,
-                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                    ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                     &input,
                 ).await?;
 
-                let mut set_clauses: Vec<String> = Vec::new();
-                let mut changed_fields: Vec<&str> = Vec::new();
-                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
 
                 #update_assignments_repo_call
 
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                    set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                 }
-                if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
                 }
 
                 if set_clauses.is_empty() {
-                    return Err(Self::__gom_runtime_error("No fields to update"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                 }
 
                 Self::__gom_require_managed_version_headroom(&current_entity)?;
                 let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -8682,33 +8690,33 @@ fn generate_graphql_operations_unfiltered(
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_current,
                         changes: mutation_changes.clone(),
-                        before_state: Some(before_state.clone()),
-                        after_state: None,
+                        before_state: ::std::option::Option::Some(before_state.clone()),
+                        after_state: ::std::option::Option::None,
                     },
                 )
                 .await
                 .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("UPDATE {} SET {} WHERE {} = ?{}", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_managed_version_guard()),
+                    &::std::format!("UPDATE {} SET {} WHERE {} = ?{}", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_managed_version_guard()),
                     1,
                 );
                 values.push(#pk_bind_value_ref);
 
                 let result = hook_ctx.execute(&sql, &values).await?;
                 if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                    return Err(Self::__gom_runtime_error("authorized update did not affect the exact locked row"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("authorized update did not affect the exact locked row"));
                 }
 
                 let entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
-                let Some(entity) = entity else {
-                    return Ok(None);
+                let ::std::option::Option::Some(entity) = entity else {
+                    return ::std::result::Result::Ok(::std::option::Option::None);
                 };
                 #repository_post_image_check
-                let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
+                let after_state = ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?);
 
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -8717,7 +8725,7 @@ fn generate_graphql_operations_unfiltered(
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
                         changes: mutation_changes,
-                        before_state: Some(before_state),
+                        before_state: ::std::option::Option::Some(before_state),
                         after_state,
                     },
                 )
@@ -8727,10 +8735,10 @@ fn generate_graphql_operations_unfiltered(
                 Self::__gom_queue_changed_event(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                    Some(&entity),
+                    ::std::option::Option::Some(&entity),
                 ).await?;
 
-                Ok(Some(entity))
+                ::std::result::Result::Ok(::std::option::Option::Some(entity))
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -8749,7 +8757,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
                 if where_input.is_empty() {
-                    return Err(Self::__gom_runtime_error("Where filter is required for bulk update and must not be empty"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("Where filter is required for bulk update and must not be empty"));
                 }
 
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
@@ -8758,20 +8766,20 @@ fn generate_graphql_operations_unfiltered(
                     .await?;
 
                 if matched_entities.is_empty() {
-                    return Ok(0);
+                    return ::std::result::Result::Ok(0);
                 }
                 let db = hook_ctx.database().clone();
                 for entity in &matched_entities {
                     db.ensure_writable_row(
-                        None,
+                        ::std::option::Option::None,
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        entity as &(dyn ::std::any::Any + Send + Sync),
+                        entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
                 let original_input = input;
-                let mut row_plans = Vec::with_capacity(matched_entities.len());
+                let mut row_plans = ::std::vec::Vec::with_capacity(matched_entities.len());
                 for policy_entity in &matched_entities {
                     let mut input = original_input.clone();
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
@@ -8780,39 +8788,39 @@ fn generate_graphql_operations_unfiltered(
                     );
                     db.run_before_update_with_context(
                         &mut write_ctx,
-                        Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                        ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                         &db,
-                        Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                        &input as &(dyn ::std::any::Any + Send + Sync),
+                        ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                        &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await?;
                     Self::__gom_authorize_repository_update_field_writes(
                         &db,
-                        Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                         &input,
                     ).await?;
 
-                    let mut set_clauses: Vec<String> = Vec::new();
-                    let mut changed_fields: Vec<&str> = Vec::new();
-                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                    let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                    let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
 
                     #update_assignments_repo_call
 
                     if #has_updated_at_column {
-                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                        set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                     }
-                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                         set_clauses.push(assignment);
                     }
 
                     if set_clauses.is_empty() {
-                        return Err(Self::__gom_runtime_error("No fields to update"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                     }
 
                     let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                    let sql = Self::__gom_rebind_sql(&format!(
+                    let sql = Self::__gom_rebind_sql(&::std::format!(
                         "UPDATE {} SET {} WHERE {} = ?{}",
                         #sql_table_name,
                         set_clauses.join(", "),
@@ -8826,7 +8834,7 @@ fn generate_graphql_operations_unfiltered(
                 }
                 for (entity, (_, _, mutation_changes)) in matched_entities.iter().zip(&row_plans) {
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -8835,8 +8843,8 @@ fn generate_graphql_operations_unfiltered(
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
                             changes: mutation_changes.clone(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -8849,7 +8857,7 @@ fn generate_graphql_operations_unfiltered(
                     row_values.push(#pk_bind_value_for_entity);
                     let result = hook_ctx.execute(sql, &row_values).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                        return Err(Self::__gom_runtime_error("authorized bulk update did not affect an exact locked row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("authorized bulk update did not affect an exact locked row"));
                     }
                     affected = affected.checked_add(1)
                         .ok_or_else(|| Self::__gom_runtime_error("bulk update affected-row count overflow"))?;
@@ -8860,7 +8868,7 @@ fn generate_graphql_operations_unfiltered(
                         .ok_or_else(|| Self::__gom_runtime_error("authorized bulk update row disappeared before after-hook"))?;
                     #repository_post_image_check
                         hook_ctx.run_mutation_hook(
-                            None,
+                            ::std::option::Option::None,
                             &::graphql_orm::graphql::orm::MutationEvent {
                                 phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                                 action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -8869,8 +8877,8 @@ fn generate_graphql_operations_unfiltered(
                                 metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                                 id: #pk_id_for_entity,
                                 changes: mutation_changes.clone(),
-                                before_state: Some(Self::__gom_capture_entity_state(&previous)?),
-                                after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                                before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&previous)?),
+                                after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                             },
                         )
                         .await
@@ -8878,11 +8886,11 @@ fn generate_graphql_operations_unfiltered(
                         Self::__gom_queue_changed_event(
                             hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                            Some(&entity),
+                            ::std::option::Option::Some(&entity),
                         ).await?;
                 }
 
-                Ok(affected)
+                ::std::result::Result::Ok(affected)
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -8899,21 +8907,21 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 let entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
-                let Some(entity) = entity else {
-                    return Ok(false);
+                let ::std::option::Option::Some(entity) = entity else {
+                    return ::std::result::Result::Ok(false);
                 };
                 let db = hook_ctx.database().clone();
                 db.ensure_writable_row(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    &entity as &(dyn ::std::any::Any + Send + Sync),
+                    &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let before_state = Self::__gom_capture_entity_state(&entity)?;
 
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -8921,26 +8929,26 @@ fn generate_graphql_operations_unfiltered(
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
-                        changes: Vec::new(),
-                        before_state: Some(before_state.clone()),
-                        after_state: None,
+                        changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state.clone()),
+                        after_state: ::std::option::Option::None,
                     },
                 )
                 .await
                 .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                    &::std::format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let values = [#pk_bind_value_ref];
                 let result = hook_ctx.execute(&sql, &values).await?;
                 if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                    return Err(Self::__gom_runtime_error("authorized delete did not affect the exact locked row"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("authorized delete did not affect the exact locked row"));
                 }
 
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -8948,9 +8956,9 @@ fn generate_graphql_operations_unfiltered(
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
-                        changes: Vec::new(),
-                        before_state: Some(before_state),
-                        after_state: None,
+                        changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state),
+                        after_state: ::std::option::Option::None,
                     },
                 )
                 .await
@@ -8959,10 +8967,10 @@ fn generate_graphql_operations_unfiltered(
                 Self::__gom_queue_changed_event(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                    Some(&entity),
+                    ::std::option::Option::Some(&entity),
                 ).await?;
 
-                Ok(true)
+                ::std::result::Result::Ok(true)
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -8980,7 +8988,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 if where_input.is_empty() {
-                    return Err(Self::__gom_runtime_error("Where filter is required for bulk delete and must not be empty"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("Where filter is required for bulk delete and must not be empty"));
                 }
 
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
@@ -8989,23 +8997,23 @@ fn generate_graphql_operations_unfiltered(
                     .await?;
 
                 if matched_entities.is_empty() {
-                    return Ok(0);
+                    return ::std::result::Result::Ok(0);
                 }
 
                 let db = hook_ctx.database().clone();
                 for entity in &matched_entities {
                     db.ensure_writable_row(
-                        None,
+                        ::std::option::Option::None,
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        entity as &(dyn ::std::any::Any + Send + Sync),
+                        entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
 
                 for entity in &matched_entities {
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -9013,9 +9021,9 @@ fn generate_graphql_operations_unfiltered(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
-                            changes: Vec::new(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            changes: ::std::vec::Vec::new(),
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -9023,7 +9031,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                    &::std::format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let mut deleted = 0_i64;
@@ -9031,7 +9039,7 @@ fn generate_graphql_operations_unfiltered(
                     let values = [#pk_bind_value_for_entity];
                     let result = hook_ctx.execute(&sql, &values).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                        return Err(Self::__gom_runtime_error("authorized bulk delete did not affect an exact locked row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("authorized bulk delete did not affect an exact locked row"));
                     }
                     deleted = deleted.checked_add(1)
                         .ok_or_else(|| Self::__gom_runtime_error("bulk delete affected-row count overflow"))?;
@@ -9039,7 +9047,7 @@ fn generate_graphql_operations_unfiltered(
 
                 for entity in matched_entities {
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -9047,9 +9055,9 @@ fn generate_graphql_operations_unfiltered(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
-                            changes: Vec::new(),
-                            before_state: Some(Self::__gom_capture_entity_state(&entity)?),
-                            after_state: None,
+                            changes: ::std::vec::Vec::new(),
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -9057,11 +9065,11 @@ fn generate_graphql_operations_unfiltered(
                     Self::__gom_queue_changed_event(
                         hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                        Some(&entity),
+                        ::std::option::Option::Some(&entity),
                     ).await?;
                 }
 
-                Ok(deleted)
+                ::std::result::Result::Ok(deleted)
             }.await;
                     __gom_write_tracker.finish(&__gom_result);
                     __gom_result
@@ -9084,15 +9092,15 @@ fn generate_graphql_operations_unfiltered(
                 // schema policy is the one the pool stands for.
                 let __gom_pool_database;
                 let db = match (provider as &dyn ::std::any::Any).downcast_ref::<::graphql_orm::db::Database<#backend_marker>>() {
-                    Some(db) => db,
-                    None => {
+                    ::std::option::Option::Some(db) => db,
+                    ::std::option::Option::None => {
                         // Boxed: this future is embedded in every caller's.
                         __gom_pool_database = ::std::boxed::Box::new(::graphql_orm::db::Database::<#backend_marker>::__gom_default_for_pool(provider.pool().clone()));
                         &*__gom_pool_database
                     }
                 };
                 db.ensure_entity_access(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -9105,19 +9113,19 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let entity = Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?;
                 hook_ctx.commit_and_emit().await?;
-                Ok(entity)
+                ::std::result::Result::Ok(entity)
             }
 
             /// Insert multiple entity records transactionally using the generated create input.
             pub async fn insert_many<I>(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 inputs: I,
-            ) -> ::graphql_orm::Result<Vec<Self>>
+            ) -> ::graphql_orm::Result<::std::vec::Vec<Self>>
             where
-                I: IntoIterator<Item = #create_input>,
+                I: ::std::iter::IntoIterator<Item = #create_input>,
             {
                 db.ensure_entity_access(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -9125,21 +9133,21 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
-                let inputs: Vec<#create_input> = inputs.into_iter().collect();
+                let inputs: ::std::vec::Vec<#create_input> = inputs.into_iter().collect();
                 if inputs.is_empty() {
-                    return Ok(Vec::new());
+                    return ::std::result::Result::Ok(::std::vec::Vec::new());
                 }
 
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                 ).await?;
-                let mut entities = Vec::with_capacity(inputs.len());
+                let mut entities = ::std::vec::Vec::with_capacity(inputs.len());
                 for input in inputs {
                     entities.push(Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?);
                 }
                 hook_ctx.commit_and_emit().await?;
-                Ok(entities)
+                ::std::result::Result::Ok(entities)
             }
 
             #upsert_repository_method
@@ -9153,7 +9161,7 @@ fn generate_graphql_operations_unfiltered(
             /// Fetch all entities through a `Database` handle without exposing the raw pool type.
             pub async fn find_all(
                 db: &::graphql_orm::db::Database<#backend_marker>,
-            ) -> ::graphql_orm::Result<Vec<Self>> {
+            ) -> ::graphql_orm::Result<::std::vec::Vec<Self>> {
                 ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                     .fetch_all(db)
                     .await
@@ -9163,7 +9171,7 @@ fn generate_graphql_operations_unfiltered(
             pub async fn find_many(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
-            ) -> ::graphql_orm::Result<Vec<Self>> {
+            ) -> ::graphql_orm::Result<::std::vec::Vec<Self>> {
                 ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input)
                     .fetch_all(db)
@@ -9182,11 +9190,11 @@ fn generate_graphql_operations_unfiltered(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
                 mut input: #update_input,
-            ) -> ::graphql_orm::Result<Option<Self>> {
+            ) -> ::graphql_orm::Result<::std::option::Option<Self>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 db.ensure_entity_access(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -9199,21 +9207,21 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let current_entity = EntityQuery::<Self, #backend_marker>::new()
                     .where_clause(
-                        &format!("{} = {}", #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_placeholder(1)),
+                        &::std::format!("{} = {}", #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_placeholder(1)),
                         #pk_bind_value_ref
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
                     .await?;
 
-                let Some(current_entity) = current_entity else {
-                    return Ok(None);
+                let ::std::option::Option::Some(current_entity) = current_entity else {
+                    return ::std::result::Result::Ok(::std::option::Option::None);
                 };
                 db.ensure_writable_row(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    &current_entity as &(dyn ::std::any::Any + Send + Sync),
+                    &current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::repository_in_transaction(
                     #entity_name_lit,
@@ -9221,42 +9229,42 @@ fn generate_graphql_operations_unfiltered(
                 );
                 db.run_before_update_with_context(
                     &mut write_ctx,
-                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                    &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                    &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                     db,
-                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
-                    &input as &(dyn ::std::any::Any + Send + Sync),
+                    ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                    &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await?;
                 Self::__gom_authorize_repository_update_field_writes(
                     db,
-                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                    ::std::option::Option::Some(&current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                     &input,
                 ).await?;
 
-                let mut set_clauses: Vec<String> = Vec::new();
-                let mut changed_fields: Vec<&str> = Vec::new();
-                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
 
                 #update_assignments_repo_call
 
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                    set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                 }
-                if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
                 }
 
                 if set_clauses.is_empty() {
-                    return Err(Self::__gom_runtime_error("No fields to update"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                 }
 
                 Self::__gom_require_managed_version_headroom(&current_entity)?;
                 let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -9265,34 +9273,34 @@ fn generate_graphql_operations_unfiltered(
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_current,
                         changes: mutation_changes.clone(),
-                        before_state: Some(before_state.clone()),
-                        after_state: None,
+                        before_state: ::std::option::Option::Some(before_state.clone()),
+                        after_state: ::std::option::Option::None,
                     },
                 )
                 .await
                 .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("UPDATE {} SET {} WHERE {} = ?{}", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_managed_version_guard()),
+                    &::std::format!("UPDATE {} SET {} WHERE {} = ?{}", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_managed_version_guard()),
                     1,
                 );
                 values.push(#pk_bind_value_ref);
 
                 let result = hook_ctx.execute(&sql, &values).await?;
                 if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                    return Err(Self::__gom_runtime_error("authorized update did not affect the exact locked row"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("authorized update did not affect the exact locked row"));
                 }
 
                 let entity = Self::__gom_fetch_by_id_on(&mut hook_ctx, id).await?;
 
-                let Some(entity) = entity else {
-                    return Ok(None);
+                let ::std::option::Option::Some(entity) = entity else {
+                    return ::std::result::Result::Ok(::std::option::Option::None);
                 };
                 #repository_post_image_check
-                let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
+                let after_state = ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?);
 
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -9301,7 +9309,7 @@ fn generate_graphql_operations_unfiltered(
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
                         changes: mutation_changes,
-                        before_state: Some(before_state),
+                        before_state: ::std::option::Option::Some(before_state),
                         after_state,
                     },
                 )
@@ -9310,11 +9318,11 @@ fn generate_graphql_operations_unfiltered(
                 Self::__gom_queue_changed_event(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                    Some(&entity),
+                    ::std::option::Option::Some(&entity),
                 ).await?;
                 hook_ctx.commit_and_emit().await?;
 
-                Ok(Some(entity))
+                ::std::result::Result::Ok(::std::option::Option::Some(entity))
             }
 
             /// Update multiple entities matching a typed where filter.
@@ -9323,7 +9331,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input: #where_input,
                 input: #update_input,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_update_where_with_auth(db, where_input, input, None, None, None, None).await
+                Self::__gom_update_where_with_auth(db, where_input, input, ::std::option::Option::None, ::std::option::Option::None, ::std::option::Option::None, ::std::option::Option::None).await
             }
 
             #[doc(hidden)]
@@ -9331,16 +9339,16 @@ fn generate_graphql_operations_unfiltered(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
                 input: #update_input,
-                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-                graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
-                notification_rows: Option<&mut Vec<Self>>,
-                __gom_outcome: Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
+                auth_context: ::std::option::Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+                graphql_ctx: ::std::option::Option<&::graphql_orm::async_graphql::Context<'_>>,
+                notification_rows: ::std::option::Option<&mut ::std::vec::Vec<Self>>,
+                __gom_outcome: ::std::option::Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
             ) -> ::graphql_orm::Result<i64> {
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
                 if where_input.is_empty() {
-                    return Err(Self::__gom_runtime_error("Where filter is required for bulk update and must not be empty"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("Where filter is required for bulk update and must not be empty"));
                 }
 
                 let access_surface = if graphql_ctx.is_some() {
@@ -9377,7 +9385,7 @@ fn generate_graphql_operations_unfiltered(
                 .await?;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
-                    return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
+                    return ::std::result::Result::Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
                         ::graphql_orm::graphql::errors::OrmPublicError::with_message(
                             ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
                             "notify_with bulk writes are limited to 1000 rows",
@@ -9385,7 +9393,7 @@ fn generate_graphql_operations_unfiltered(
                     ));
                 }
                 if matched_entities.is_empty() {
-                    return Ok(0);
+                    return ::std::result::Result::Ok(0);
                 }
                 let original_input = input;
                 #[allow(unused_mut)]
@@ -9395,12 +9403,12 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_client_input = &original_input;
                     #(#update_client_supplied)*
                 }
-                let mut row_inputs = Vec::with_capacity(matched_entities.len());
+                let mut row_inputs = ::std::vec::Vec::with_capacity(matched_entities.len());
                 #[allow(unused_mut)]
                 let mut __gom_omitted_fields: ::std::collections::HashSet<&'static str> = ::std::collections::HashSet::new();
                 for policy_entity in &matched_entities {
                     let mut input = original_input.clone();
-                    if let Some(ctx) = graphql_ctx {
+                    if let ::std::option::Option::Some(ctx) = graphql_ctx {
                         let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::graphql_in_transaction(
                             ctx,
                             #entity_name_lit,
@@ -9408,8 +9416,8 @@ fn generate_graphql_operations_unfiltered(
                         );
                         db.run_before_update_with_context(
                             &mut write_ctx,
-                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                            &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                            ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                            &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                         #(#update_runtime_policy_checks)*
                     } else {
@@ -9419,49 +9427,49 @@ fn generate_graphql_operations_unfiltered(
                         );
                         db.run_before_update_with_context(
                             &mut write_ctx,
-                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                            &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                            ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                            &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                         <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
                             db,
-                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                            &input as &(dyn ::std::any::Any + Send + Sync),
+                            ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                            &input as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await?;
                         Self::__gom_authorize_repository_update_field_writes(
                             db,
-                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
+                            ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                             &input,
                         ).await?;
                     }
 
                     row_inputs.push(input);
                 }
-                let mut row_plans = Vec::with_capacity(matched_entities.len());
+                let mut row_plans = ::std::vec::Vec::with_capacity(matched_entities.len());
                 for input in row_inputs {
                     #[allow(unused_mut)]
                     let mut input = input;
                     // Preserve legacy operation-wide omission without repeating callbacks.
                     #(#update_bulk_omission_checks)*
 
-                    let mut set_clauses: Vec<String> = Vec::new();
-                    let mut changed_fields: Vec<&str> = Vec::new();
-                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                    let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                    let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
 
                     #update_assignments_repo_call
 
                     if #has_updated_at_column {
-                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                        set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                     }
-                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                         set_clauses.push(assignment);
                     }
 
                     if set_clauses.is_empty() {
-                        return Err(Self::__gom_runtime_error("No fields to update"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                     }
 
                     let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                    let sql = Self::__gom_rebind_sql(&format!(
+                    let sql = Self::__gom_rebind_sql(&::std::format!(
                         "UPDATE {} SET {} WHERE {} = ?{}",
                         #sql_table_name,
                         set_clauses.join(", "),
@@ -9484,15 +9492,15 @@ fn generate_graphql_operations_unfiltered(
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
                             changes: mutation_changes.clone(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
                     .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
 
-                if let Some(outcome) = __gom_outcome {
+                if let ::std::option::Option::Some(outcome) = __gom_outcome {
                     outcome.write_attempted();
                 }
                 let mut affected = 0_i64;
@@ -9501,13 +9509,13 @@ fn generate_graphql_operations_unfiltered(
                     row_values.push(#pk_bind_value_for_entity);
                     let result = hook_ctx.execute(sql, &row_values).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                        return Err(Self::__gom_runtime_error("authorized bulk update did not affect an exact locked row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("authorized bulk update did not affect an exact locked row"));
                     }
                     affected = affected.checked_add(1)
                         .ok_or_else(|| Self::__gom_runtime_error("bulk update affected-row count overflow"))?;
                 }
 
-                let mut committed_rows = Vec::new();
+                let mut committed_rows = ::std::vec::Vec::new();
                 for (previous, (_, _, mutation_changes)) in matched_entities.into_iter().zip(row_plans) {
                     let entity = Self::__gom_fetch_by_id_on(&mut hook_ctx, &previous.#pk_field).await?
                         .ok_or_else(|| Self::__gom_runtime_error("authorized bulk update row disappeared before after-hook"))?;
@@ -9516,7 +9524,7 @@ fn generate_graphql_operations_unfiltered(
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         access_surface,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                        &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                         hook_ctx.run_mutation_hook(
                             graphql_ctx,
@@ -9528,8 +9536,8 @@ fn generate_graphql_operations_unfiltered(
                                 metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                                 id: #pk_id_for_entity,
                                 changes: mutation_changes.clone(),
-                                before_state: Some(Self::__gom_capture_entity_state(&previous)?),
-                                after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                                before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&previous)?),
+                                after_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(&entity)?),
                             },
                         )
                         .await
@@ -9537,14 +9545,14 @@ fn generate_graphql_operations_unfiltered(
                         Self::__gom_queue_changed_event(
                             &mut hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                            Some(&entity),
+                            ::std::option::Option::Some(&entity),
                         ).await?;
                         if notification_rows.is_some() { committed_rows.push(entity); }
                 }
                 hook_ctx.commit_and_emit_tracked(__gom_outcome).await?;
 
-                if let Some(rows) = notification_rows { rows.extend(committed_rows); }
-                Ok(affected)
+                if let ::std::option::Option::Some(rows) = notification_rows { rows.extend(committed_rows); }
+                ::std::result::Result::Ok(affected)
             }
 
             /// Delete a single entity by primary key.
@@ -9556,7 +9564,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 db.ensure_entity_access(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -9569,25 +9577,25 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let entity = EntityQuery::<Self, #backend_marker>::new()
                     .where_clause(
-                        &format!("{} = {}", #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_placeholder(1)),
+                        &::std::format!("{} = {}", #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_placeholder(1)),
                         #pk_bind_value_ref
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
                     .await?;
 
-                let Some(entity) = entity else {
-                    return Ok(false);
+                let ::std::option::Option::Some(entity) = entity else {
+                    return ::std::result::Result::Ok(false);
                 };
                 db.ensure_writable_row(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    &entity as &(dyn ::std::any::Any + Send + Sync),
+                    &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let before_state = Self::__gom_capture_entity_state(&entity)?;
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -9595,26 +9603,26 @@ fn generate_graphql_operations_unfiltered(
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
-                        changes: Vec::new(),
-                        before_state: Some(before_state.clone()),
-                        after_state: None,
+                        changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state.clone()),
+                        after_state: ::std::option::Option::None,
                     },
                 )
                 .await
                 .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                    &::std::format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let values = [#pk_bind_value_ref];
                 let result = hook_ctx.execute(&sql, &values).await?;
                 if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                    return Err(Self::__gom_runtime_error("authorized delete did not affect the exact locked row"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("authorized delete did not affect the exact locked row"));
                 }
 
                 hook_ctx.run_mutation_hook(
-                    None,
+                    ::std::option::Option::None,
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -9622,9 +9630,9 @@ fn generate_graphql_operations_unfiltered(
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
-                        changes: Vec::new(),
-                        before_state: Some(before_state),
-                        after_state: None,
+                        changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state),
+                        after_state: ::std::option::Option::None,
                     },
                 )
                 .await
@@ -9632,11 +9640,11 @@ fn generate_graphql_operations_unfiltered(
                 Self::__gom_queue_changed_event(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                    Some(&entity),
+                    ::std::option::Option::Some(&entity),
                 ).await?;
                 hook_ctx.commit_and_emit().await?;
 
-                Ok(true)
+                ::std::result::Result::Ok(true)
             }
 
             /// Delete multiple entities matching a typed where filter.
@@ -9644,7 +9652,7 @@ fn generate_graphql_operations_unfiltered(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_delete_where_with_auth(db, where_input, None, None, None, None).await
+                Self::__gom_delete_where_with_auth(db, where_input, ::std::option::Option::None, ::std::option::Option::None, ::std::option::Option::None, ::std::option::Option::None).await
             }
 
             /// Delete every row for this entity.
@@ -9655,7 +9663,7 @@ fn generate_graphql_operations_unfiltered(
             pub async fn delete_all(
                 db: &::graphql_orm::db::Database<#backend_marker>,
             ) -> ::graphql_orm::Result<i64> {
-                Self::__gom_delete_matching_with_auth(db, #where_input::default(), None, None, true, None, None).await
+                Self::__gom_delete_matching_with_auth(db, #where_input::default(), ::std::option::Option::None, ::std::option::Option::None, true, ::std::option::Option::None, ::std::option::Option::None).await
             }
 
             /// Replace every row for this entity in one transaction.
@@ -9667,14 +9675,14 @@ fn generate_graphql_operations_unfiltered(
             pub async fn replace_all<I>(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 inputs: I,
-            ) -> ::graphql_orm::Result<Vec<Self>>
+            ) -> ::graphql_orm::Result<::std::vec::Vec<Self>>
             where
-                I: IntoIterator<Item = #create_input>,
+                I: ::std::iter::IntoIterator<Item = #create_input>,
             {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
 
                 db.ensure_entity_access(
-                    None,
+                    ::std::option::Option::None,
                     #entity_name_lit,
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -9682,7 +9690,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
-                let inputs: Vec<#create_input> = inputs.into_iter().collect();
+                let inputs: ::std::vec::Vec<#create_input> = inputs.into_iter().collect();
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -9693,17 +9701,17 @@ fn generate_graphql_operations_unfiltered(
 
                 for entity in &existing_entities {
                     db.ensure_writable_row(
-                        None,
+                        ::std::option::Option::None,
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                        entity as &(dyn ::std::any::Any + Send + Sync),
+                        entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
 
                 for entity in &existing_entities {
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -9711,9 +9719,9 @@ fn generate_graphql_operations_unfiltered(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
-                            changes: Vec::new(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            changes: ::std::vec::Vec::new(),
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -9722,21 +9730,21 @@ fn generate_graphql_operations_unfiltered(
 
                 if !existing_entities.is_empty() {
                     let sql = Self::__gom_rebind_sql(
-                        &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                        &::std::format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                         1,
                     );
                     for entity in &existing_entities {
                         let values = [#pk_bind_value_for_entity];
                         let result = hook_ctx.execute(&sql, &values).await?;
                         if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                            return Err(Self::__gom_runtime_error("replace_all did not delete an exact locked row"));
+                            return ::std::result::Result::Err(Self::__gom_runtime_error("replace_all did not delete an exact locked row"));
                         }
                     }
                 }
 
                 for entity in &existing_entities {
                     hook_ctx.run_mutation_hook(
-                        None,
+                        ::std::option::Option::None,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                             action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -9744,9 +9752,9 @@ fn generate_graphql_operations_unfiltered(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
-                            changes: Vec::new(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            changes: ::std::vec::Vec::new(),
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -9754,27 +9762,27 @@ fn generate_graphql_operations_unfiltered(
                     Self::__gom_queue_changed_event(
                         &mut hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                        Some(entity),
+                        ::std::option::Option::Some(entity),
                     ).await?;
                 }
 
-                let mut inserted = Vec::with_capacity(inputs.len());
+                let mut inserted = ::std::vec::Vec::with_capacity(inputs.len());
                 for input in inputs {
                     inserted.push(Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?);
                 }
 
                 hook_ctx.commit_and_emit().await?;
-                Ok(inserted)
+                ::std::result::Result::Ok(inserted)
             }
 
             #[doc(hidden)]
             pub(crate) async fn __gom_delete_where_with_auth(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
-                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-                graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
-                notification_rows: Option<&mut Vec<Self>>,
-                __gom_outcome: Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
+                auth_context: ::std::option::Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+                graphql_ctx: ::std::option::Option<&::graphql_orm::async_graphql::Context<'_>>,
+                notification_rows: ::std::option::Option<&mut ::std::vec::Vec<Self>>,
+                __gom_outcome: ::std::option::Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
             ) -> ::graphql_orm::Result<i64> {
                 Self::__gom_delete_matching_with_auth(db, where_input, auth_context, graphql_ctx, false, notification_rows, __gom_outcome).await
             }
@@ -9783,18 +9791,18 @@ fn generate_graphql_operations_unfiltered(
             pub(crate) async fn __gom_delete_matching_with_auth(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
-                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-                graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
+                auth_context: ::std::option::Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+                graphql_ctx: ::std::option::Option<&::graphql_orm::async_graphql::Context<'_>>,
                 allow_empty_filter: bool,
-                notification_rows: Option<&mut Vec<Self>>,
-                __gom_outcome: Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
+                notification_rows: ::std::option::Option<&mut ::std::vec::Vec<Self>>,
+                __gom_outcome: ::std::option::Option<&::graphql_orm::graphql::errors::MutationOutcomeTracker>,
             ) -> ::graphql_orm::Result<i64> {
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 let filter_is_empty = where_input.is_empty();
                 if filter_is_empty && !allow_empty_filter {
-                    return Err(Self::__gom_runtime_error("Where filter is required for bulk delete and must not be empty"));
+                    return ::std::result::Result::Err(Self::__gom_runtime_error("Where filter is required for bulk delete and must not be empty"));
                 }
 
                 let access_surface = if graphql_ctx.is_some() {
@@ -9831,7 +9839,7 @@ fn generate_graphql_operations_unfiltered(
                 .await?;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
-                    return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
+                    return ::std::result::Result::Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
                         ::graphql_orm::graphql::errors::OrmPublicError::with_message(
                             ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
                             "notify_with bulk writes are limited to 1000 rows",
@@ -9839,7 +9847,7 @@ fn generate_graphql_operations_unfiltered(
                     ));
                 }
                 if matched_entities.is_empty() {
-                    return Ok(0);
+                    return ::std::result::Result::Ok(0);
                 }
 
                 for entity in &matched_entities {
@@ -9852,9 +9860,9 @@ fn generate_graphql_operations_unfiltered(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
-                            changes: Vec::new(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            changes: ::std::vec::Vec::new(),
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -9862,10 +9870,10 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                    &::std::format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
-                if let Some(outcome) = __gom_outcome {
+                if let ::std::option::Option::Some(outcome) = __gom_outcome {
                     outcome.write_attempted();
                 }
                 let mut deleted = 0_i64;
@@ -9873,7 +9881,7 @@ fn generate_graphql_operations_unfiltered(
                     let values = [#pk_bind_value_for_entity];
                     let result = hook_ctx.execute(&sql, &values).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
-                        return Err(Self::__gom_runtime_error("authorized bulk delete did not affect an exact locked row"));
+                        return ::std::result::Result::Err(Self::__gom_runtime_error("authorized bulk delete did not affect an exact locked row"));
                     }
                     deleted = deleted.checked_add(1)
                         .ok_or_else(|| Self::__gom_runtime_error("bulk delete affected-row count overflow"))?;
@@ -9889,9 +9897,9 @@ fn generate_graphql_operations_unfiltered(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #pk_id_for_entity,
-                            changes: Vec::new(),
-                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
-                            after_state: None,
+                            changes: ::std::vec::Vec::new(),
+                            before_state: ::std::option::Option::Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: ::std::option::Option::None,
                         },
                     )
                     .await
@@ -9899,13 +9907,13 @@ fn generate_graphql_operations_unfiltered(
                     Self::__gom_queue_changed_event(
                         &mut hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                        Some(entity),
+                        ::std::option::Option::Some(entity),
                     ).await?;
                 }
                 hook_ctx.commit_and_emit_tracked(__gom_outcome).await?;
 
-                if let Some(rows) = notification_rows { rows.extend(matched_entities); }
-                Ok(deleted)
+                if let ::std::option::Option::Some(rows) = notification_rows { rows.extend(matched_entities); }
+                ::std::result::Result::Ok(deleted)
             }
 
             /// Count entities matching the given filter

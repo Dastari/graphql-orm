@@ -120,14 +120,23 @@ fn aggregate_resolver_uses_qualified_standard_library_names() {
 #[test]
 fn write_and_changed_resolvers_use_qualified_names() {
     let file = generated(false);
-    for method in ["create", "upsert", "update", "update_many", "delete", "delete_many"] {
+    for method in [
+        "create",
+        "upsert",
+        "update",
+        "update_many",
+        "delete",
+        "delete_many",
+    ] {
         assert_resolver_on(&file, "RecordMutations", method);
     }
     assert_resolver_on(&file, "RecordSubscriptions", "on_changed");
 
-    let event = file.items.iter().find(|item| {
-        matches!(item, Item::Struct(item) if item.ident == "RecordChangedEvent")
-    }).expect("generated change event");
+    let event = file
+        .items
+        .iter()
+        .find(|item| matches!(item, Item::Struct(item) if item.ident == "RecordChangedEvent"))
+        .expect("generated change event");
     assert_qualified(event.to_token_stream());
 }
 
@@ -233,7 +242,10 @@ fn query_hygiene_trybuild_fixture_matches_the_generator() {
             Item::Struct(item) => {
                 matches!(
                     item.ident.to_string().as_str(),
-                    "RecordQueries" | "RecordKeysetOrderByInput" | "RecordMutations" | "RecordSubscriptions"
+                    "RecordQueries"
+                        | "RecordKeysetOrderByInput"
+                        | "RecordMutations"
+                        | "RecordSubscriptions"
                 )
             }
             Item::Impl(implementation) => {

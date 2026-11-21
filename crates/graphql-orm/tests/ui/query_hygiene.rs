@@ -28,7 +28,11 @@ mod model {
     }
 
     pub fn check_shadowed_roots() {
-        let _ = (shadowed::RecordQueries, shadowed::RecordMutations, shadowed::RecordSubscriptions);
+        let _ = (
+            shadowed::RecordQueries,
+            shadowed::RecordMutations,
+            shadowed::RecordSubscriptions,
+        );
     }
 }
 
