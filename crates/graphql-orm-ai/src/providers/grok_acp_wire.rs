@@ -40,6 +40,14 @@ fn rejected() -> ProviderError {
 /// Deployment-owned bounded newline transport. No protocol logic or tool
 /// execution belongs here. Never log frames or stderr. Both methods must be
 /// cancellation-safe; writes must serialize concurrent cancellation frames.
+///
+/// A `write_frame` future may be dropped before it completes. When the frame
+/// carried resolved entity-reference data and its freshness bound passed
+/// during the write, the wire process never calls this transport's
+/// `write_frame` again and the provider kills the process tree. From the
+/// moment the future is dropped, no byte of that frame that the process has
+/// not yet received may reach it: the implementation must discard what it
+/// buffered and must not flush it later, from `Drop` or otherwise.
 #[async_trait]
 pub trait AiGrokAcpWireTransport: Send + Sync {
     /// Writes one complete newline-terminated frame with a bounded deadline.
@@ -74,12 +82,125 @@ struct State {
     broker: AiGrokAcpSdkBroker,
 }
 
+/// The process's transport behind a one-way write fence.
+///
+/// Every frame the wire process writes passes through here, one at a time.
+/// When a write that carries resolved entity-reference data is stopped
+/// before it completes, the fence is poisoned and every later write is
+/// refused, including `session/cancel` and session deletion: the transport
+/// may hold part of that frame, and another write could push the remainder
+/// through. A poisoned process can only be killed.
+struct FencedTransport {
+    inner: Arc<dyn AiGrokAcpWireTransport>,
+    writer: Mutex<()>,
+    poisoned: std::sync::atomic::AtomicBool,
+}
+
+/// Poisons the fence if the transport write it guards began and did not run
+/// to completion.
+struct PoisonUnlessComplete<'a> {
+    fence: &'a FencedTransport,
+    /// Set when the transport write is first polled. Until then the
+    /// transport has been given nothing and there is nothing to fence.
+    began: std::sync::atomic::AtomicBool,
+    complete: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for PoisonUnlessComplete<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.began.load(Ordering::SeqCst) && !self.complete.load(Ordering::SeqCst) {
+            self.fence.poison();
+        }
+    }
+}
+
+impl FencedTransport {
+    fn poison(&self) {
+        self.poisoned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Writes a frame that carries resolved data, under the freshness
+    /// `deadline` of its dispatch.
+    ///
+    /// The order matters. The writer lock is taken first, however long that
+    /// waits, and the fence is checked for poison. Only then, with the lock
+    /// held, does the shared start check run around the transport write
+    /// itself: the deadline is compared with the clock immediately before the
+    /// transport is first polled, so a write that queued for the lock past
+    /// its deadline is reported as [`ResolvedWrite::NotStarted`] and the
+    /// caller sends the marker frame. "Began" therefore means the transport
+    /// write was polled while this call held the lock.
+    ///
+    /// Once the transport write has been polled, anything other than its
+    /// successful completion poisons the fence before the lock is released:
+    /// expiry of the deadline, a transport error, or this future being
+    /// dropped. No queued write can then follow the partial frame.
+    ///
+    /// [`ResolvedWrite::NotStarted`]: crate::entity_references::ResolvedWrite::NotStarted
+    async fn write_resolved_frame(
+        &self,
+        frame: Vec<u8>,
+        deadline: std::time::Instant,
+    ) -> crate::entity_references::ResolvedWrite<Result<(), ProviderError>> {
+        use crate::entity_references::ResolvedWrite;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let _writer = self.writer.lock().await;
+        if self.is_poisoned() {
+            return ResolvedWrite::Completed(Err(rejected()));
+        }
+        // Declared after the lock guard, so it is dropped, and poisons,
+        // first.
+        let guard = PoisonUnlessComplete {
+            fence: self,
+            began: AtomicBool::new(false),
+            complete: AtomicBool::new(false),
+        };
+        let mut write = std::pin::pin!(self.inner.write_frame(frame));
+        // The helper polls this only after its own start check passed, so
+        // the guard is armed exactly when the transport is first polled.
+        let transport_write = std::future::poll_fn(|context| {
+            guard.began.store(true, Ordering::SeqCst);
+            write.as_mut().poll(context)
+        });
+        let outcome =
+            crate::entity_references::write_resolved_before(deadline, transport_write).await;
+        // A write the transport reported as failed may be partial too, so
+        // only success disarms the guard.
+        if matches!(outcome, ResolvedWrite::Completed(Ok(()))) {
+            guard.complete.store(true, Ordering::SeqCst);
+        }
+        outcome
+    }
+}
+
+#[async_trait]
+impl AiGrokAcpWireTransport for FencedTransport {
+    async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+        let _writer = self.writer.lock().await;
+        if self.is_poisoned() {
+            return Err(rejected());
+        }
+        self.inner.write_frame(frame).await
+    }
+    async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+        self.inner.read_frame().await
+    }
+}
+
 /// Upstream-owned ACP state machine using only a trusted bounded wire transport.
 /// This performs protocol normalization, never launches a process or executes
 /// application tools. Construction does not authorize provider admission.
 pub struct AiGrokAcpWireProcess {
     registration: Arc<AiGrokAcpRegistration>,
+    /// The fence, as the transport every protocol path writes through.
     transport: Arc<dyn AiGrokAcpWireTransport>,
+    fence: Arc<FencedTransport>,
     cwd: String,
     state: Arc<Mutex<State>>,
     session: Arc<SyncMutex<Option<String>>>,
@@ -111,9 +232,15 @@ impl AiGrokAcpWireProcess {
             FRAME,
             TOTAL,
         )?;
+        let fence = Arc::new(FencedTransport {
+            inner: transport,
+            writer: Mutex::new(()),
+            poisoned: std::sync::atomic::AtomicBool::new(false),
+        });
         Ok(Self {
             registration,
-            transport,
+            transport: fence.clone(),
+            fence,
             cwd,
             state: Arc::new(Mutex::new(State {
                 serial: 0,
@@ -530,6 +657,169 @@ impl AiGrokAcpWireProcess {
     }
 }
 
+/// What a prompt is built from: plain text, or the dispatch input that may
+/// hold resolved entity-reference text.
+enum PromptText {
+    Plain(Vec<String>),
+    Dispatch(super::grok_acp_provider::AiGrokAcpPromptInput),
+}
+
+impl AiGrokAcpWireProcess {
+    /// Writes the one `session/prompt` frame and normalizes the turn.
+    async fn send_prompt(
+        &self,
+        input: PromptText,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let maximum = self.registration.maximum_input_bytes();
+        // Admission is decided on the marker text, which holds no reference
+        // data, before any protocol state changes.
+        match &input {
+            PromptText::Plain(text) => Self::literal_prompt(text.clone(), maximum)?,
+            PromptText::Dispatch(input) => Self::literal_prompt(input.unavailable_text(), maximum)?,
+        };
+        let mut state = self.state.clone().lock_owned().await;
+        if state.prompted {
+            return Err(rejected());
+        }
+        state.prompted = true;
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| rejected())?
+            .clone()
+            .ok_or_else(rejected)?;
+        let id = Self::next_id(&mut state)?;
+        let response_id = format!("grok-{}", uuid::Uuid::new_v4());
+        state.broker.bind_prompt(response_id.clone())?;
+        // The complete escaped frame, checked against the wire ceiling.
+        let frame = |text: Vec<String>| -> Result<Vec<u8>, ProviderError> {
+            let prompt = Self::literal_prompt(text, maximum)?;
+            let mut bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}})).map_err(|_| rejected())?;
+            bytes.push(b'\n');
+            if bytes.len() > FRAME {
+                return Err(ProviderError::InvalidRequest);
+            }
+            Ok(bytes)
+        };
+        let (bytes, resolved) = match input {
+            PromptText::Plain(text) => (frame(text)?, None),
+            PromptText::Dispatch(input) => {
+                // The one read of resolved reference text. It happens here,
+                // with the session ready and the prompt slot taken. Resolved
+                // text that is stale, over the input ceiling or whose frame
+                // is over the wire ceiling is replaced by the all-marker text
+                // before anything is rejected.
+                let markers = frame(input.unavailable_text())?;
+                let (text, deadline) =
+                    input.into_wire_text(|candidate| frame(candidate.to_vec()).is_ok());
+                let resolved = deadline.and_then(|deadline| Some((frame(text).ok()?, deadline)));
+                (markers, resolved)
+            }
+        };
+        let mut written = false;
+        if let Some((resolved, deadline)) = resolved {
+            // The freshness deadline bounds when this write may begin. The
+            // fence checks it after encoding and after any wait for the
+            // writer lock, immediately before the transport is given a byte,
+            // and polls it before every later poll of the write.
+            match self.fence.write_resolved_frame(resolved, deadline).await {
+                crate::entity_references::ResolvedWrite::Completed(result) => {
+                    result?;
+                    written = true;
+                }
+                // Stale before the transport write began, whether on
+                // arrival or after queuing for the writer: nothing was
+                // written, and the turn continues with the all-marker frame.
+                crate::entity_references::ResolvedWrite::NotStarted => {}
+                // The write began and the deadline passed before it
+                // completed. The transport may hold part of the frame, so
+                // this writer is disabled for good: `session/cancel`,
+                // deletion and every other write now refuse, and the
+                // provider kills the process tree when the turn fails.
+                crate::entity_references::ResolvedWrite::Abandoned => {
+                    self.fence.poison();
+                    return Err(classified(Failure::Timeout));
+                }
+            }
+        }
+        if !written {
+            self.transport.write_frame(bytes).await?;
+        }
+        let transport = self.transport.clone();
+        let registration = self.registration.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            yield ProviderEvent::ResponseStarted{response_id:Some(response_id.clone())};
+            let mut tool_ids=ToolNotifications::default();
+            let mut retry_notifications=0;
+            loop {
+                let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
+                if value.get("method").is_none(){
+                    if Self::internal_reload(&value,&mut state)? {continue;}
+                    if value["id"]!=id||value.get("error").is_some(){Err(classified(Failure::ProtocolResponse))?;}
+                    let result=&value["result"];
+                    if state.broker.has_pending_calls() || !tool_ids.awaiting_rejection.is_empty(){Err(classified(Failure::ProtocolToolLifecycle))?;}
+                    let category=result["_meta"]["cancellationCategory"].as_str();
+                    if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
+                        if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
+                    }
+                    let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
+                    // Native stationarity is a metered EndTurn. Decode usage first,
+                    // then preserve the provider stream's text-before-usage ordering.
+                    let stationary = result["stopReason"]=="end_turn" && category==Some("action_stationarity");
+                    if stationary && result["_meta"].get("completionKind").is_none() {
+                        yield ProviderEvent::TextDelta{text:STATIONARITY_EXPLANATION.to_owned()};
+                    }
+                    yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
+                    if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
+                    if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
+                    if result["stopReason"]!="end_turn"||(!stationary && result["_meta"].get("cancellationCategory").is_some())||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
+                    yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;
+                }
+                if value["method"]=="_x.ai/mcp/sdk_call" {
+                    let response=match state.broker.accept(&bytes).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))? {
+                        AiGrokAcpSdkInbound::Response(response)=>response,
+                        AiGrokAcpSdkInbound::InvalidToolCall(call)=>{
+                            let call_id=call.call_id().to_owned();
+                            let arguments=call.rejected_arguments().clone();
+                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
+                            let result=responder.reject_invalid_arguments(call).await?;
+                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
+                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
+                            response
+                        }
+                        AiGrokAcpSdkInbound::ToolCall(call)=>{
+                            let call_id=call.call_id().to_owned();
+                            let arguments=call.arguments().clone();
+                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
+                            let result=responder.respond(call).await?;
+                            responder.authorize_delivery(&result).await?;
+                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
+                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
+                            response
+                        }
+                    };
+                    transport.write_frame(response).await?;
+                } else {
+                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="retry_state" {
+                        Self::retry_notification(&value,&session,&mut retry_notifications,MAX_RETRY_NOTIFICATIONS)?;
+                        continue;
+                    }
+                    if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
+                        let update=&value["params"]["update"];
+                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(classified(Failure::ProtocolModelMismatch))?;}
+                        continue;
+                    }
+                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="model_changed" {
+                        let update=&value["params"]["update"];
+                        if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(classified(Failure::ProtocolModelMismatch))?;}
+                    }
+                    if let Some(text)=Self::notification(&value,Some(&session),false,&mut tool_ids)? { yield ProviderEvent::TextDelta{text}; }
+                }
+            }
+        }))
+    }
+}
 #[async_trait]
 impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
     async fn create_empty_session(&self) -> Result<AiProviderSessionCursor, ProviderError> {
@@ -617,94 +907,15 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         input: Vec<String>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        let prompt = Self::literal_prompt(input, self.registration.maximum_input_bytes())?;
-        let mut state = self.state.clone().lock_owned().await;
-        if state.prompted {
-            return Err(rejected());
-        }
-        state.prompted = true;
-        let session = self
-            .session
-            .lock()
-            .map_err(|_| rejected())?
-            .clone()
-            .ok_or_else(rejected)?;
-        let id = Self::next_id(&mut state)?;
-        let response_id = format!("grok-{}", uuid::Uuid::new_v4());
-        state.broker.bind_prompt(response_id.clone())?;
-        Self::send(self.transport.as_ref(),json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}})).await?;
-        let transport = self.transport.clone();
-        let registration = self.registration.clone();
-        Ok(Box::pin(async_stream::try_stream! {
-            yield ProviderEvent::ResponseStarted{response_id:Some(response_id.clone())};
-            let mut tool_ids=ToolNotifications::default();
-            let mut retry_notifications=0;
-            loop {
-                let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
-                if value.get("method").is_none(){
-                    if Self::internal_reload(&value,&mut state)? {continue;}
-                    if value["id"]!=id||value.get("error").is_some(){Err(classified(Failure::ProtocolResponse))?;}
-                    let result=&value["result"];
-                    if state.broker.has_pending_calls() || !tool_ids.awaiting_rejection.is_empty(){Err(classified(Failure::ProtocolToolLifecycle))?;}
-                    let category=result["_meta"]["cancellationCategory"].as_str();
-                    if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
-                        if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
-                    }
-                    let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
-                    // Native stationarity is a metered EndTurn. Decode usage first,
-                    // then preserve the provider stream's text-before-usage ordering.
-                    let stationary = result["stopReason"]=="end_turn" && category==Some("action_stationarity");
-                    if stationary && result["_meta"].get("completionKind").is_none() {
-                        yield ProviderEvent::TextDelta{text:STATIONARITY_EXPLANATION.to_owned()};
-                    }
-                    yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
-                    if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
-                    if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
-                    if result["stopReason"]!="end_turn"||(!stationary && result["_meta"].get("cancellationCategory").is_some())||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
-                    yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;
-                }
-                if value["method"]=="_x.ai/mcp/sdk_call" {
-                    let response=match state.broker.accept(&bytes).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))? {
-                        AiGrokAcpSdkInbound::Response(response)=>response,
-                        AiGrokAcpSdkInbound::InvalidToolCall(call)=>{
-                            let call_id=call.call_id().to_owned();
-                            let arguments=call.rejected_arguments().clone();
-                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
-                            let result=responder.reject_invalid_arguments(call).await?;
-                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
-                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
-                            response
-                        }
-                        AiGrokAcpSdkInbound::ToolCall(call)=>{
-                            let call_id=call.call_id().to_owned();
-                            let arguments=call.arguments().clone();
-                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
-                            let result=responder.respond(call).await?;
-                            responder.authorize_delivery(&result).await?;
-                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
-                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
-                            response
-                        }
-                    };
-                    transport.write_frame(response).await?;
-                } else {
-                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="retry_state" {
-                        Self::retry_notification(&value,&session,&mut retry_notifications,MAX_RETRY_NOTIFICATIONS)?;
-                        continue;
-                    }
-                    if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
-                        let update=&value["params"]["update"];
-                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(classified(Failure::ProtocolModelMismatch))?;}
-                        continue;
-                    }
-                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="model_changed" {
-                        let update=&value["params"]["update"];
-                        if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(classified(Failure::ProtocolModelMismatch))?;}
-                    }
-                    if let Some(text)=Self::notification(&value,Some(&session),false,&mut tool_ids)? { yield ProviderEvent::TextDelta{text}; }
-                }
-            }
-        }))
+        self.send_prompt(PromptText::Plain(input), responder).await
+    }
+    async fn prompt_dispatch(
+        &self,
+        input: super::grok_acp_provider::AiGrokAcpPromptInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.send_prompt(PromptText::Dispatch(input), responder)
+            .await
     }
     async fn cancel(&self) -> Result<(), ProviderError> {
         let session = self
@@ -817,6 +1028,103 @@ pub(crate) mod tests {
             )
         }
     }
+    /// Launches real wire processes that answer one prompt with a text-free
+    /// terminal, and keeps every transport so a test can read the frames
+    /// that were written. The first process creates the session; each later
+    /// one resumes it.
+    #[cfg(feature = "sqlite")]
+    #[derive(Default)]
+    pub(crate) struct ReferenceWireFactory {
+        wires: SyncMutex<Vec<Arc<Wire>>>,
+    }
+    #[cfg(feature = "sqlite")]
+    impl ReferenceWireFactory {
+        /// The decoded text of every `session/prompt` frame written so far,
+        /// one entry per frame.
+        pub(crate) fn prompts(&self) -> Vec<String> {
+            self.wires
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|wire| wire.writes.lock().unwrap().clone())
+                .filter(|frame| frame["method"] == "session/prompt")
+                .map(|frame| {
+                    frame["params"]["prompt"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|block| {
+                            let literal = block["text"].as_str().unwrap();
+                            serde_json::from_str::<String>(literal.split_once('\n').unwrap().1)
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .collect()
+        }
+        /// Every frame written so far, as text.
+        pub(crate) fn frames(&self) -> String {
+            let processes = self.wires.lock().unwrap().len();
+            (0..processes)
+                .map(|process| self.process_frames(process))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        /// Every frame the `process`-th launched process wrote, as text.
+        pub(crate) fn process_frames(&self, process: usize) -> String {
+            self.wires.lock().unwrap()[process]
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+    #[async_trait]
+    #[cfg(feature = "sqlite")]
+    impl super::super::grok_acp_provider::AiGrokAcpProcessFactory for ReferenceWireFactory {
+        fn admits(&self, _: &AiGrokAcpRegistration) -> bool {
+            true
+        }
+        async fn launch(
+            &self,
+            registration: Arc<AiGrokAcpRegistration>,
+        ) -> Result<super::super::grok_acp_provider::AiGrokAcpLaunchedProcess, ProviderError>
+        {
+            let terminal = json!({"stopReason":"end_turn","_meta":{"usage":usage()}});
+            let reads = if self.wires.lock().unwrap().is_empty() {
+                // The run's first process creates the session.
+                let mut reads = new_session_reads();
+                reads.push(response(9, terminal));
+                reads
+            } else {
+                // A later process resumes the same cursor. Grok replays the
+                // session's history as notifications, which are discarded.
+                let mut reads = initialization();
+                reads.extend([
+                    update("agent_message_chunk", "completed earlier"),
+                    response(3, config()),
+                    response(4, terminal),
+                ]);
+                reads
+            };
+            let wire = Arc::new(Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            });
+            self.wires.lock().unwrap().push(wire.clone());
+            let process = AiGrokAcpWireProcess::new(registration, wire, "/private/empty".into())?;
+            Ok(
+                super::super::grok_acp_provider::AiGrokAcpLaunchedProcess::new(
+                    Arc::new(process),
+                    || {},
+                ),
+            )
+        }
+    }
     struct NoTools;
     #[async_trait]
     impl ProviderDynamicToolResponder for NoTools {
@@ -872,6 +1180,357 @@ pub(crate) mod tests {
             response(8, config()),
         ]);
         reads
+    }
+    /// Runs one dispatch prompt on a fresh session and returns the decoded
+    /// text of the `session/prompt` frame, with the number of frames written
+    /// for the prompt.
+    async fn dispatch_prompt_text(
+        registration: AiGrokAcpRegistration,
+        input: super::super::grok_acp_provider::AiGrokAcpPromptInput,
+    ) -> (String, usize) {
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let wire = Arc::new(Wire {
+            reads: SyncMutex::new(reads.into()),
+            writes: SyncMutex::new(vec![]),
+        });
+        let process = AiGrokAcpWireProcess::new(
+            Arc::new(registration),
+            wire.clone(),
+            "/private/empty".into(),
+        )
+        .unwrap();
+        process.create_empty_session().await.unwrap();
+        let mut stream = process
+            .prompt_dispatch(input, Arc::new(NoTools))
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let prompts = wire
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|frame| frame["method"] == "session/prompt")
+            .map(|frame| {
+                frame["params"]["prompt"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| {
+                        let literal = block["text"].as_str().unwrap();
+                        serde_json::from_str::<String>(literal.split_once('\n').unwrap().1).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>();
+        (prompts[0].clone(), prompts.len())
+    }
+    fn dispatch_input(
+        resolved: String,
+        write_deadline: Option<std::time::Instant>,
+    ) -> super::super::grok_acp_provider::AiGrokAcpPromptInput {
+        super::super::grok_acp_provider::AiGrokAcpPromptInput::for_test(
+            vec![
+                ("question".to_owned(), None),
+                ("MARKER".to_owned(), Some(resolved)),
+            ],
+            write_deadline,
+        )
+    }
+    #[tokio::test]
+    async fn dispatch_prompt_writes_resolved_text_only_while_fresh_and_within_the_frame_ceiling() {
+        let soon = || Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let registration = super::super::grok_acp_provider::tests::registration;
+
+        // Fresh and small: the resolved text is written, in one frame.
+        let (text, frames) =
+            dispatch_prompt_text(registration(), dispatch_input("RESOLVED".into(), soon())).await;
+        assert_eq!((text.as_str(), frames), ("question\nRESOLVED", 1));
+
+        // The freshness bound passed before the write: the marker text.
+        let expired = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+        let (text, frames) = dispatch_prompt_text(
+            registration(),
+            dispatch_input("RESOLVED".into(), Some(expired)),
+        )
+        .await;
+        assert_eq!((text.as_str(), frames), ("question\nMARKER", 1));
+
+        // No bound at all (a value that holds nothing resolved to send).
+        let (text, _) =
+            dispatch_prompt_text(registration(), dispatch_input("RESOLVED".into(), None)).await;
+        assert_eq!(text, "question\nMARKER");
+
+        // Over the registered input ceiling: the marker text, not a refusal.
+        let (text, _) = dispatch_prompt_text(
+            registration(),
+            dispatch_input("R".repeat(32 * 1024), soon()),
+        )
+        .await;
+        assert_eq!(text, "question\nMARKER");
+    }
+    /// The freshness bound passes after the resolved frame was encoded and
+    /// before its write starts: the all-marker frame goes out and the turn
+    /// completes.
+    #[tokio::test]
+    async fn a_deadline_that_expires_between_encoding_and_writing_sends_the_marker_frame() {
+        let registration = super::super::grok_acp_provider::tests::registration();
+        // Fresh when the text is taken and the frame is encoded; the seam
+        // then lets more than the bound pass before the write's start check.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        crate::entity_references::DELAY_BEFORE_RESOLVED_WRITE
+            .set(std::time::Duration::from_millis(700));
+        let (text, frames) = dispatch_prompt_text(
+            registration,
+            dispatch_input("RESOLVED".into(), Some(deadline)),
+        )
+        .await;
+        crate::entity_references::DELAY_BEFORE_RESOLVED_WRITE.set(std::time::Duration::ZERO);
+        assert_eq!((text.as_str(), frames), ("question\nMARKER", 1));
+    }
+
+    /// A transport whose write of a frame containing `RESOLVED` accepts part
+    /// of the frame and then never completes.
+    struct StallingWire {
+        wire: Wire,
+        /// Every call to `write_frame`, complete or not, as text.
+        attempts: SyncMutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl AiGrokAcpWireTransport for StallingWire {
+        async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+            let text = String::from_utf8(frame.clone()).unwrap();
+            let stall = text.contains("RESOLVED");
+            self.attempts.lock().unwrap().push(text);
+            if stall {
+                std::future::pending::<()>().await;
+            }
+            self.wire.write_frame(frame).await
+        }
+        async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+            self.wire.read_frame().await
+        }
+    }
+
+    /// The freshness bound passes while the resolved write is in progress and
+    /// the writer stays pending: the turn fails, and the writer is disabled
+    /// for good. `session/cancel`, session deletion and a second prompt are
+    /// all refused without reaching the transport, so nothing can push the
+    /// remainder of the frame through.
+    #[tokio::test]
+    async fn a_resolved_write_still_pending_at_the_deadline_fails_the_turn_and_disables_the_writer()
+    {
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let transport = Arc::new(StallingWire {
+            wire: Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            },
+            attempts: SyncMutex::new(vec![]),
+        });
+        let process = AiGrokAcpWireProcess::new(
+            Arc::new(super::super::grok_acp_provider::tests::registration()),
+            transport.clone(),
+            "/private/empty".into(),
+        )
+        .unwrap();
+        let cursor = process.create_empty_session().await.unwrap();
+        let before = transport.attempts.lock().unwrap().len();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let error = process
+            .prompt_dispatch(
+                dispatch_input("RESOLVED".into(), Some(deadline)),
+                Arc::new(NoTools),
+            )
+            .await
+            .err()
+            .expect("the abandoned write should fail the turn");
+        assert!(matches!(error, ProviderError::Classified(Failure::Timeout)));
+        assert!(
+            std::time::Instant::now() >= deadline,
+            "the write was in progress until the deadline"
+        );
+        // The transport saw the resolved frame once, and no marker frame was
+        // written after it.
+        let attempts = transport.attempts.lock().unwrap().clone();
+        assert_eq!(attempts.len(), before + 1);
+        assert!(attempts[before].contains("RESOLVED"));
+
+        // No later call reaches the writer.
+        assert!(process.cancel().await.is_err());
+        assert!(process.delete_session(&cursor).await.is_err());
+        assert!(
+            process
+                .prompt(vec!["again".into()], Arc::new(NoTools))
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.attempts.lock().unwrap().len(), before + 1);
+        assert!(
+            !transport
+                .wire
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|frame| frame["method"] == "session/cancel"
+                    || frame["method"] == "session/prompt"),
+            "nothing completed on the writer after the abandoned frame"
+        );
+    }
+
+    /// A transport whose write of `session/cancel` holds the writer until it
+    /// is released.
+    struct GatedWire {
+        wire: Wire,
+        release: tokio::sync::Notify,
+        /// Every call to `write_frame`, complete or not, as text.
+        attempts: SyncMutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl AiGrokAcpWireTransport for GatedWire {
+        async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+            let text = String::from_utf8(frame.clone()).unwrap();
+            let gated = text.contains("session/cancel");
+            self.attempts.lock().unwrap().push(text);
+            if gated {
+                self.release.notified().await;
+            }
+            self.wire.write_frame(frame).await
+        }
+        async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+            self.wire.read_frame().await
+        }
+    }
+
+    /// Review regression: a resolved prompt queues for the writer lock while
+    /// a concurrent `session/cancel` holds it, and the lock is released only
+    /// after the freshness deadline. The prompt was fresh when it was encoded
+    /// and when it began to wait. It must not reach the transport: the start
+    /// check runs again once the lock is held, and the separately encoded
+    /// marker frame goes out.
+    #[tokio::test]
+    async fn a_resolved_write_that_queued_for_the_writer_past_its_deadline_sends_the_marker_frame()
+    {
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let transport = Arc::new(GatedWire {
+            wire: Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            },
+            release: tokio::sync::Notify::new(),
+            attempts: SyncMutex::new(vec![]),
+        });
+        let process = AiGrokAcpWireProcess::new(
+            Arc::new(super::super::grok_acp_provider::tests::registration()),
+            transport.clone(),
+            "/private/empty".into(),
+        )
+        .unwrap();
+        process.create_empty_session().await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        // The cancel write takes the writer lock and holds it.
+        let cancel = process.cancel();
+        // The prompt arrives while fresh, encodes its resolved frame and
+        // queues for the lock.
+        let prompt = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(std::time::Instant::now() < deadline, "fresh on arrival");
+            process
+                .prompt_dispatch(
+                    dispatch_input("RESOLVED".into(), Some(deadline)),
+                    Arc::new(NoTools),
+                )
+                .await
+        };
+        // The lock is released after the deadline has passed.
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            assert!(std::time::Instant::now() >= deadline);
+            transport.release.notify_one();
+        };
+        let (cancelled, prompted, ()) = tokio::join!(cancel, prompt, release);
+        cancelled.expect("the cancel write completes once released");
+        assert!(prompted.is_ok(), "the turn continues with markers");
+
+        let attempts = transport.attempts.lock().unwrap().clone();
+        assert!(
+            !attempts.iter().any(|frame| frame.contains("RESOLVED")),
+            "the resolved frame never reached the transport"
+        );
+        let prompts = attempts
+            .iter()
+            .filter(|frame| frame.contains(r#""method":"session/prompt""#))
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 1, "one prompt frame was written");
+        assert!(prompts[0].contains("MARKER"));
+        // The cancel frame was handed to the transport before the prompt.
+        let position = |needle: &str| attempts.iter().position(|frame| frame.contains(needle));
+        assert!(position("session/cancel") < position("session/prompt"));
+        // Nothing was poisoned: an ordinary write still goes through.
+        assert!(!process.fence.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn a_resolved_frame_over_the_wire_ceiling_is_replaced_by_the_marker_frame() {
+        // The largest input ceiling a registration may declare. Quotes double
+        // when the text becomes a literal and double again inside the frame,
+        // so this text passes the input ceiling (about 10 MiB as a literal)
+        // while its complete escaped frame (about 20 MiB) exceeds 16 MiB.
+        let registration = AiGrokAcpRegistration::new(
+            "grok-test".into(),
+            "grok-4.7".into(),
+            "a".repeat(64),
+            "1.0.40".into(),
+            "reviewed-test-only".into(),
+            crate::ModelReasoningEffortProfile::new(
+                "grok-4.7",
+                [crate::ModelReasoningEffort::Low],
+                crate::ModelReasoningEffort::Low,
+            )
+            .unwrap(),
+            crate::ModelReasoningEffort::Low,
+            "Use only authorized read capabilities.".into(),
+            super::super::grok_acp_provider::tests::registration()
+                .tools()
+                .to_vec(),
+            FRAME as u64,
+            2_048,
+            8,
+        )
+        .unwrap()
+        .with_usage_model("grok-4.7-build".into())
+        .unwrap()
+        .with_retained_namespace("d".repeat(64))
+        .unwrap();
+        let resolved = "\"".repeat(5 * 1024 * 1024);
+        assert!(
+            AiGrokAcpWireProcess::literal_prompt(vec![resolved.clone()], FRAME as u64).is_ok(),
+            "the text is within the input ceiling"
+        );
+        let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let (text, frames) =
+            dispatch_prompt_text(registration, dispatch_input(resolved, deadline)).await;
+        assert_eq!((text.as_str(), frames), ("question\nMARKER", 1));
     }
     #[test]
     fn human_text_cannot_become_native_commands_file_references_or_metadata() {
