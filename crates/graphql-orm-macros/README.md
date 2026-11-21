@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.191.0 aligns with the ORM's
+[read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
+Existing generated reads work through the snapshot context.
+
+In version 0.190.0, `GraphQLOperations` reports malformed keyset orders at
+the keyset attribute. Use `field asc|desc [nulls first|last]` for each
+comma-separated entry and end the order with the complete primary key.
+See the [migration guide](../../MIGRATION.md#01890-to-01900-generated-query-resolvers).
+
 Version 0.189.0 qualifies generated root search filters with the entity table
 (#799). See the [migration guide](../../MIGRATION.md#01880-to-01890-root-search-filter-binding).
 

@@ -12,7 +12,6 @@ supersedes: []
 
 ## 0.151.2 to 0.152.0: opt-in entity references on local-process adapters
 
-The version is a placeholder for the next minor after the breaking release.
 No public signature changed, and there is no GraphQL SDL, persistent schema,
 AI schema module or data migration change.
 

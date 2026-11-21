@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.152.0 (placeholder: the next minor after the breaking release)
+## Unreleased - 0.152.0
 
 Opt-in entity references on the local-harness and Grok ACP adapters (#721).
 No GraphQL SDL, persistent schema or data migration change, and no AI schema

@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.28.1
+
+- The optional ORM adapter refuses target clears and restores from a read
+  snapshot callback before it reaches the database (#831).
+
 ## Unreleased - 0.28.0 (breaking release)
 
 The backup part of the single breaking release. See the
