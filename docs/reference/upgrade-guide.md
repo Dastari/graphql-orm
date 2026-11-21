@@ -70,10 +70,16 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; **`graphql-orm-ai-tool-profiles` 0.27.1**; **`graphql-orm-ai` 0.151.2**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+### workspace-2026.11.21.2
+
+Commit `3111331f3a31` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.2)
+
+Packages (changed in bold): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; **`graphql-orm-ai-tool-profiles` 0.27.1**; **`graphql-orm-ai` 0.151.2**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **Action needed** — ORM/macros 0.190.0: fix any keyset order with an incomplete null-order clause or trailing tokens (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)
-- **No action** — ORM/macros 0.190.0: generated queries, Changed subscriptions and the NodeId object field return field errors when required schema data is missing (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)
+- **No action** — ORM/macros 0.190.0: generated query resolver emission is shared across writable and read-only entity profiles (#723), and generated queries, Changed subscriptions and the NodeId object field return field errors when required schema data is missing (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)
 - **No action** — ORM/macros 0.189.0: generated root search qualifies client filter columns with the entity table and keeps native search helper columns distinct from entity columns (#799). [Migration](../../MIGRATION.md#01880-to-01890-root-search-filter-binding)
 - **No action** — AI tool profiles 0.27.1: replayable subscriptions reuse compiled plan and condition validators (#543). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0271-subscription-validator-reuse)
 - **No action** — AI 0.151.2: skill content protection emits fixed debug reason codes and the proposal registry reuses validators (#543). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-skill-content-protection-diagnostics)
