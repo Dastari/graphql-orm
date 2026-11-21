@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
+
 In version 0.190.0, generated query roots, Changed subscriptions and the
 NodeId object field return field errors when required schema data is missing.
 The generated `schema_builder(database)` registers the data for its roots.

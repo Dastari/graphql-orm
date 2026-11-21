@@ -70,7 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.195.0, `graphql-orm-macros` 0.195.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **No action** — ORM/macros 0.195.0 groups selected integration-test targets (#771). Application hosts can upgrade without configuration changes. [Migration](../../MIGRATION.md#01950-integration-test-consolidation)
 
 ### workspace-2026.11.21.2
 

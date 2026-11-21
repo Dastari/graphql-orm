@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.195.0: integration test consolidation
+
+**No action** for application hosts. For individual integration tests in source
+checkouts, use the [grouped test selectors](docs/development/testing.md).
+
+
 ## 0.189.0 to 0.190.0: generated query resolvers
 
 Upgrade ORM and macros together.

@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.195.0
+
+- Consolidated selected PostgreSQL, SQL Server and SQLite integration test binaries.
+  See the [test lanes](docs/development/testing.md) for the grouped selectors.
+
+
 ## Unreleased - ORM/macros 0.190.0
 
 - **Fixed (generated queries, #542 and #723).** Query resolver emission is shared
