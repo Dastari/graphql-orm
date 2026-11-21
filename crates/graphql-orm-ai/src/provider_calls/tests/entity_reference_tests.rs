@@ -7,11 +7,7 @@
 
 use super::*;
 
-#[cfg(any(
-    feature = "local-harness",
-    feature = "provider-codex-app-server",
-    feature = "provider-grok-acp"
-))]
+#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
 #[path = "entity_reference_local_transport_tests.rs"]
 mod local_transport;
 
