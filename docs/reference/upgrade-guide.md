@@ -70,7 +70,15 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.188.0, `graphql-orm-macros` 0.188.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.188.0, `graphql-orm-macros` 0.188.0; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.0; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **No action** — AI 0.152.0 (placeholder, the next minor after the breaking release): the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01511-to-01520-opt-in-entity-references-on-local-process-adapters)
+
+### workspace-2026.11.21.1
+
+Commit `5c92c045f810` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.1)
+
+Packages (changed in bold): **`graphql-orm` 0.188.0, `graphql-orm-macros` 0.188.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.151.1**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
 
 - **Action needed** — ORM/macros 0.188.0: read predicates bind every column to the row it describes: through the table path at the root of a statement (`"records"."owner_id" = ?`) and through an alias that no table or alias in scope has, such as `__gom_row_1`, inside relation, `not_related`, closure and count subqueries. Policies built with the `ReadPredicate` constructors and generated where inputs admit the same rows (#796). Act if a table lacks a column a read policy names (schema drift, an unapplied migration): such a column used to resolve against an outer row, and the read now fails. Act if you implement `ReadVisibilityFilter` by hand: its SQL may now only be a single-row expression (no `SELECT`/`FROM`/`JOIN`/`WITH`/set operators, comments, `U&` forms or adjacent strings; use `related`, `not_related` or closures to read another table), and wherever its predicate is evaluated in a correlated subquery every column must be written as `__gom_self.<column>` with `table_name` returning the table. Act too if a PostgreSQL policy names a mixed-case column declared without quotes, if a policy is near the 1 MiB rendered-size budget, if a table is named `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` or `__gom_closure_<n>`, or if you compare relation-count ordering SQL text. [Migration](../../MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01880)
 
@@ -116,7 +124,6 @@ No action:
 - **No action** — router 0.17.0: the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default (#764). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
 - **No action** — AI 0.151.1: warnings-denied Clippy and Rustdoc lanes pass for `postgres,provider-openai` and `mssql`; the changes are test-only gating and a doc link, with no runtime, API or persistence change (#814). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01510-to-01511-lint-and-documentation-lanes)
-- **No action** — AI 0.152.0 (placeholder, the next minor after the breaking release): the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01511-to-01520-opt-in-entity-references-on-local-process-adapters)
 
 ### workspace-2026.11.20.1
 
