@@ -707,14 +707,14 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
         // The process is ready. Decide now, against the current time, whether
         // the resolution is still fresh. A resolved frame over the request
         // ceiling is not sent either; the marker frame is.
-        let resolved_frame = resolved_deadline
-            .filter(|deadline| std::time::Instant::now() < *deadline)
-            .and_then(|deadline| {
-                encode_request_frame(&request, &references)
-                    .ok()
-                    .filter(|frame| fits(frame))
-                    .map(|frame| (frame, deadline))
-            });
+        let mut resolved_frame = None;
+        if let Some(deadline) = resolved_deadline
+            && std::time::Instant::now() < deadline
+            && let Ok(frame) = encode_request_frame(&request, &references)
+            && fits(&frame)
+        {
+            resolved_frame = Some((frame, deadline));
+        }
         drop(references);
         let (frame, write_deadline) = match resolved_frame {
             // The write itself must finish inside the freshness bound.
