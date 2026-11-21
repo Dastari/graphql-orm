@@ -1,5 +1,6 @@
 mod mutations;
 mod queries;
+pub(crate) mod standard_paths;
 
 use super::*;
 use crate::backend::{
@@ -1520,6 +1521,19 @@ fn ensure_pure_update_assignments(
     Ok(())
 }
 
+fn capture_client_supplied(
+    fields: &[proc_macro2::TokenStream],
+    input: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        let __gom_client_supplied: ::std::collections::HashSet<&'static str> = {
+            let input = &#input;
+            let fields: &[::std::option::Option<&'static str>] = &[#(#fields),*];
+            fields.iter().flatten().copied().collect()
+        };
+    }
+}
+
 fn generate_graphql_operations_unfiltered(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -2045,6 +2059,19 @@ fn generate_graphql_operations_unfiltered(
         Some((_, _, column)) => quote! { ::std::option::Option::Some(#column) },
         None => quote! { ::std::option::Option::None },
     };
+    let version_assignment = |target: proc_macro2::TokenStream| {
+        if managed_version_field.is_some() {
+            quote! {
+                if let ::std::option::Option::Some(assignment) = #target::__gom_managed_version_assignment() {
+                    set_clauses.push(assignment);
+                }
+            }
+        } else {
+            quote! {}
+        }
+    };
+    let repository_version_assignment = version_assignment(quote! { Self });
+    let graphql_version_assignment = version_assignment(quote! { #struct_name });
     // Managed versions advance on every generated write. CAS-only versions (bare
     // `version`) keep their historical behaviour: only compare-and-swap advances them.
     let managed_version_helper_methods = if let Some((version_ident, _, version_column)) =
@@ -3136,9 +3163,7 @@ fn generate_graphql_operations_unfiltered(
             let graphql_create_asks = !keyless || graphql_include_in_create;
             let graphql_create_condition = if keyless && is_option_type(field_type) {
                 create_client_supplied.push(quote! {
-                    if input.#field_name.is_some() {
-                        __gom_client_supplied.insert(#graphql_name);
-                    }
+                    input.#field_name.is_some().then_some(#graphql_name)
                 });
                 quote! { __gom_client_supplied.contains(#graphql_name) }
             } else {
@@ -3670,9 +3695,7 @@ fn generate_graphql_operations_unfiltered(
             let graphql_update_asks = !keyless || graphql_include_in_update;
             let graphql_update_condition = if keyless {
                 update_client_supplied.push(quote! {
-                    if __gom_client_input.#field_name.is_some() {
-                        __gom_client_supplied.insert(#graphql_name);
-                    }
+                    input.#field_name.is_some().then_some(#graphql_name)
                 });
                 quote! { __gom_client_supplied.contains(#graphql_name) }
             } else {
@@ -4087,6 +4110,13 @@ fn generate_graphql_operations_unfiltered(
     )?;
     // The GraphQL resolver shares the repository helper only when the two lists
     // are token-identical and cannot leave the helper early.
+    // Capture membership before the host can rewrite the input. The bulk
+    // helper uses the same snapshot for every independently transformed row.
+    let create_client_supplied = capture_client_supplied(&create_client_supplied, quote! { input });
+    let update_where_client_supplied =
+        capture_client_supplied(&update_client_supplied, quote! { original_input });
+    let update_client_supplied = capture_client_supplied(&update_client_supplied, quote! { input });
+
     let update_assignments_shared_with_graphql = update_field_checks_graphql.len()
         == update_field_checks_repo.len()
         && update_field_checks_graphql
@@ -4191,6 +4221,21 @@ fn generate_graphql_operations_unfiltered(
             })
         })
     });
+
+    let implicit_updated_at = |target: proc_macro2::TokenStream| {
+        if has_updated_at_column {
+            quote! {
+                set_clauses.push(::std::format!(
+                    #updated_at_assignment,
+                    #target::__gom_current_updated_at_expr(),
+                ));
+            }
+        } else {
+            quote! {}
+        }
+    };
+    let repository_updated_at = implicit_updated_at(quote! { Self });
+    let graphql_updated_at = implicit_updated_at(quote! { #struct_name });
 
     if upsert_config.is_some() {
         if upsert_update_columns.is_empty() && !has_updated_at_column {
@@ -5294,9 +5339,7 @@ fn generate_graphql_operations_unfiltered(
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
                         *clause = ::std::format!("{} = {rhs}", dialect.quote_identifier_path(column));
                     }
-                    if #has_updated_at_column {
-                        set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
-                    }
+                    #repository_updated_at
                     let before_state = current_entity
                         .as_ref()
                         .map(Self::__gom_capture_entity_state)
@@ -6588,9 +6631,7 @@ fn generate_graphql_operations_unfiltered(
                             Self::__gom_current_updated_at_expr(),
                         ));
                     }
-                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
-                        set_clauses.push(assignment);
-                    }
+                    #repository_version_assignment
                     if set_clauses.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                     }
@@ -6862,9 +6903,7 @@ fn generate_graphql_operations_unfiltered(
                             Self::__gom_current_updated_at_expr(),
                         ));
                     }
-                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
-                        set_clauses.push(assignment);
-                    }
+                    #repository_version_assignment
                     if set_clauses.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
                     }
@@ -8181,8 +8220,8 @@ fn generate_graphql_operations_unfiltered(
             pk_bind_value: &pk_bind_value,
             update_policy_checks: &update_policy_checks,
             update_assignments_graphql_call: &update_assignments_graphql_call,
-            has_updated_at_column,
-            updated_at_assignment,
+            updated_at_assignment: &graphql_updated_at,
+            version_assignment: &graphql_version_assignment,
             table_name,
             pk_id_for_id: &pk_id_for_id,
             sql_table_name: &sql_table_name,
@@ -8785,12 +8824,8 @@ fn generate_graphql_operations_unfiltered(
 
                 #update_assignments_repo_call
 
-                if #has_updated_at_column {
-                    set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
-                }
-                if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
-                    set_clauses.push(assignment);
-                }
+                #repository_updated_at
+                #repository_version_assignment
 
                 if set_clauses.is_empty() {
                     return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
@@ -8927,12 +8962,8 @@ fn generate_graphql_operations_unfiltered(
 
                     #update_assignments_repo_call
 
-                    if #has_updated_at_column {
-                        set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
-                    }
-                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
-                        set_clauses.push(assignment);
-                    }
+                    #repository_updated_at
+                    #repository_version_assignment
 
                     if set_clauses.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
@@ -9368,12 +9399,8 @@ fn generate_graphql_operations_unfiltered(
 
                 #update_assignments_repo_call
 
-                if #has_updated_at_column {
-                    set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
-                }
-                if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
-                    set_clauses.push(assignment);
-                }
+                #repository_updated_at
+                #repository_version_assignment
 
                 if set_clauses.is_empty() {
                     return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));
@@ -9515,13 +9542,7 @@ fn generate_graphql_operations_unfiltered(
                     return ::std::result::Result::Ok(0);
                 }
                 let original_input = input;
-                #[allow(unused_mut)]
-                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
-                    ::std::collections::HashSet::new();
-                {
-                    let __gom_client_input = &original_input;
-                    #(#update_client_supplied)*
-                }
+                #update_where_client_supplied
                 let mut row_inputs = ::std::vec::Vec::with_capacity(matched_entities.len());
                 #[allow(unused_mut)]
                 let mut __gom_omitted_fields: ::std::collections::HashSet<&'static str> = ::std::collections::HashSet::new();
@@ -9576,12 +9597,8 @@ fn generate_graphql_operations_unfiltered(
 
                     #update_assignments_repo_call
 
-                    if #has_updated_at_column {
-                        set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
-                    }
-                    if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
-                        set_clauses.push(assignment);
-                    }
+                    #repository_updated_at
+                    #repository_version_assignment
 
                     if set_clauses.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("No fields to update"));

@@ -119,7 +119,13 @@ fn aggregate_resolver_uses_qualified_standard_library_names() {
 
 #[test]
 fn write_and_changed_resolvers_use_qualified_names() {
-    let file = generated(false);
+    let mut input: syn::DeriveInput = syn::parse_str(ENTITY_SOURCE).unwrap();
+    if cfg!(feature = "mssql") {
+        input
+            .attrs
+            .push(parse_quote!(#[graphql_entity(schema_policy = "external_writable")]));
+    }
+    let file = syn::parse2(generate_graphql_operations(&input).unwrap()).unwrap();
     for method in [
         "create",
         "upsert",

@@ -17,7 +17,7 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
     pub(in crate::operations) create_input: &'a syn::Ident,
-    pub(in crate::operations) create_client_supplied: &'a [TokenStream],
+    pub(in crate::operations) create_client_supplied: &'a TokenStream,
     pub(in crate::operations) upsert_policy_checks_graphql: &'a [TokenStream],
     pub(in crate::operations) created_pk_init: &'a TokenStream,
     pub(in crate::operations) pk_id_for_entity: &'a TokenStream,
@@ -104,10 +104,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
-                #[allow(unused_mut)]
-                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
-                    ::std::collections::HashSet::new();
-                #(#create_client_supplied)*
+                #create_client_supplied
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,

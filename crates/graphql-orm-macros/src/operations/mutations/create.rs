@@ -21,7 +21,7 @@ pub(in crate::operations) struct CreateInput<'a> {
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
-    pub(in crate::operations) create_client_supplied: &'a [TokenStream],
+    pub(in crate::operations) create_client_supplied: &'a TokenStream,
     pub(in crate::operations) created_key_init: &'a TokenStream,
     pub(in crate::operations) insert_sql: &'a str,
     pub(in crate::operations) create_policy_checks: &'a [TokenStream],
@@ -134,10 +134,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
-                #[allow(unused_mut)]
-                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
-                    ::std::collections::HashSet::new();
-                #(#create_client_supplied)*
+                #create_client_supplied
                 db.run_before_create(
                     ::std::option::Option::Some(ctx),
                     #entity_name_lit,

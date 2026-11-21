@@ -29,13 +29,13 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
-    pub(in crate::operations) update_client_supplied: &'a [TokenStream],
+    pub(in crate::operations) update_client_supplied: &'a TokenStream,
     pub(in crate::operations) sql_dialect: &'a TokenStream,
     pub(in crate::operations) pk_bind_value: &'a TokenStream,
     pub(in crate::operations) update_policy_checks: &'a [TokenStream],
     pub(in crate::operations) update_assignments_graphql_call: &'a TokenStream,
-    pub(in crate::operations) has_updated_at_column: bool,
-    pub(in crate::operations) updated_at_assignment: &'a str,
+    pub(in crate::operations) updated_at_assignment: &'a TokenStream,
+    pub(in crate::operations) version_assignment: &'a TokenStream,
     pub(in crate::operations) table_name: &'a str,
     pub(in crate::operations) pk_id_for_id: &'a TokenStream,
     pub(in crate::operations) sql_table_name: &'a str,
@@ -89,8 +89,8 @@ pub(in crate::operations) fn update(
         pk_bind_value,
         update_policy_checks,
         update_assignments_graphql_call,
-        has_updated_at_column,
         updated_at_assignment,
+        version_assignment,
         table_name,
         pk_id_for_id,
         sql_table_name,
@@ -176,13 +176,7 @@ pub(in crate::operations) fn update(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #update_input = input.into();
-                #[allow(unused_mut)]
-                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
-                    ::std::collections::HashSet::new();
-                {
-                    let __gom_client_input = &input;
-                    #(#update_client_supplied)*
-                }
+                #update_client_supplied
                 #transaction_start
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
@@ -254,12 +248,8 @@ pub(in crate::operations) fn update(
                 #update_assignments_graphql_call
 
                 // Update timestamp column when this entity defines one
-                if #has_updated_at_column {
-                    set_clauses.push(::std::format!(#updated_at_assignment, #struct_name::__gom_current_updated_at_expr()));
-                }
-                if let ::std::option::Option::Some(assignment) = #struct_name::__gom_managed_version_assignment() {
-                    set_clauses.push(assignment);
-                }
+                #updated_at_assignment
+                #version_assignment
 
                 if set_clauses.is_empty() {
                     return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "No fields to update"));
