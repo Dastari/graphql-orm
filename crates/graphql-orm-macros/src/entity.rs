@@ -4230,6 +4230,9 @@ fn generate_entity_tokens(
 
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
+    let mut search_column_names: Vec<String> = Vec::new();
+    let mut projected_column_names = std::collections::HashSet::new();
+    let sql_table = backend_render_identifier_path(backend, &table_name);
     let mut column_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut constraint_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut primary_key_cols: Vec<String> = Vec::new();
@@ -5235,6 +5238,12 @@ fn generate_entity_tokens(
             .unwrap_or_else(|| rust_name.clone());
         let db_col_sql = backend_render_identifier_path(backend, &db_col);
         let db_col_identity = backend_quote_identifier_path(backend, &db_col);
+        let column_part = crate::backend::identifier_path_parts(backend, &db_col_sql)
+            .last()
+            .unwrap_or(&db_col_sql);
+        let qualified_db_col_sql = format!("{sql_table}.{column_part}");
+        projected_column_names
+            .insert(relation_column_identity(backend, &db_col, true).to_ascii_lowercase());
         let constraint_type = option_inner_type(field_type).unwrap_or(field_type);
         let constraint_type_name = quote! { #constraint_type }.to_string().replace(' ', "");
         let numeric_constraint_type = matches!(
@@ -5528,8 +5537,12 @@ fn generate_entity_tokens(
                     "ST_AsGeoJSON({}, 9, 8)::text AS {}",
                     db_col_sql, db_col_sql
                 ));
+                search_column_names.push(format!(
+                    "ST_AsGeoJSON({qualified_db_col_sql}, 9, 8)::text AS {column_part}"
+                ));
             } else {
                 column_names.push(db_col_sql.clone());
+                search_column_names.push(qualified_db_col_sql.clone());
             }
             quote! {
                 Some(::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid))
@@ -5538,9 +5551,13 @@ fn generate_entity_tokens(
             column_names.push(format!(
                 "CAST({db_col_sql} AS DECIMAL(19,4)) AS {db_col_sql}"
             ));
+            search_column_names.push(format!(
+                "CAST({qualified_db_col_sql} AS DECIMAL(19,4)) AS {column_part}"
+            ));
             quote! { None }
         } else {
             column_names.push(db_col_sql.clone());
+            search_column_names.push(qualified_db_col_sql.clone());
             quote! { None }
         };
         let search_tokens = if let Some(search) = &field_meta.search {
@@ -6083,6 +6100,19 @@ fn generate_entity_tokens(
         }
     };
     let searchable_entity_impl = if has_search {
+        let unused_projection_name = |base: &str| {
+            let mut name = base.to_owned();
+            for suffix in 1..=projected_column_names.len() {
+                if !projected_column_names.contains(&name) {
+                    break;
+                }
+                name = format!("{base}_{suffix}");
+            }
+            name
+        };
+        let key_column = unused_projection_name("__gom_search_pk");
+        let score_column = unused_projection_name("__gom_search_score");
+
         let search_key = if search_pk_is_bytes {
             quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#search_pk_field) }
         } else {
@@ -6092,6 +6122,12 @@ fn generate_entity_tokens(
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+                const SEARCH_KEY_COLUMN: &'static str = #key_column;
+                const SEARCH_SCORE_COLUMN: &'static str = #score_column;
+
+                fn search_projection() -> &'static [&'static str] {
+                    &[#(#search_column_names),*]
+                }
 
                 fn search_key(&self) -> String {
                     #search_key
@@ -6809,6 +6845,14 @@ fn generate_entity_tokens(
 
             fn to_sql_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 self.__gom_sql_conditions(false, None)
+            }
+
+            fn to_sql_search_conditions(
+                &self,
+                backend: ::graphql_orm::graphql::orm::DatabaseBackend,
+                table: &str,
+            ) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                self.__gom_sql_conditions(self.requires_in_memory_filtering(backend), Some(table))
             }
 
             fn is_empty(&self) -> bool {

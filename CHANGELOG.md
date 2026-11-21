@@ -23,6 +23,14 @@ for historical context.
   Backend prerequisites and refused writes have typed errors.
   See the [migration guide](MIGRATION.md#01900-read-snapshot-transactions).
 
+## Unreleased - ORM/macros 0.189.0
+
+- **Fixed (security, #799):** generated root search filters qualify each
+  column with the entity table. A same-named column from the native search
+  join can no longer change which rows match or make the query ambiguous.
+  Native search also qualifies entity projections and chooses helper key and
+  score names that are distinct from the entity's columns.
+
 ## Unreleased - ORM/macros 0.188.0
 
 Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row).

@@ -70,12 +70,15 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.0; `graphql-orm-ai` 0.151.1; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.1**; `graphql-orm-ai-tool-profiles` 0.27.0; `graphql-orm-ai` 0.151.1; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-- **No action** — ORM/macros 0.190.0: use
+- **No action** — ORM/macros 0.190.0 and backup 0.28.1: use
   `Database::read_snapshot_transaction` or its auth-aware counterpart
-  to opt in to policy-aware snapshot reads (#831).
-  [Migration](../../MIGRATION.md#01900-read-snapshot-transactions)
+  to opt in to policy-aware snapshot reads (#831). The optional ORM backup
+  adapter refuses restore writes inside the snapshot callback.
+  [ORM migration](../../MIGRATION.md#01900-read-snapshot-transactions) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0280-to-0281-read-snapshot-write-refusal)
+
+- **No action** — ORM/macros 0.189.0: generated root search qualifies client filter columns with the entity table and keeps native search helper columns distinct from entity columns (#799). [Migration](../../MIGRATION.md#01880-to-01890-root-search-filter-binding)
 
 ### workspace-2026.11.21.1
 

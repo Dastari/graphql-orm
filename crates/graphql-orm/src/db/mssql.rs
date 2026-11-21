@@ -810,7 +810,11 @@ impl MssqlPool {
         let begin = format!(
             "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
              SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION; {}",
-            restore_gate("Transaction", "ROLLBACK TRANSACTION;", isolation == "SNAPSHOT")
+            restore_gate(
+                "Transaction",
+                "ROLLBACK TRANSACTION;",
+                isolation == "SNAPSHOT"
+            )
         );
         // A failed begin may have changed the isolation level; never reuse it.
         let begun = self
@@ -1435,7 +1439,9 @@ impl MssqlTransaction {
     }
 }
 
-fn classify_read_snapshot_start_error(error: sqlx::Error) -> crate::graphql::orm::ReadSnapshotError {
+fn classify_read_snapshot_start_error(
+    error: sqlx::Error,
+) -> crate::graphql::orm::ReadSnapshotError {
     use crate::graphql::orm::{MssqlBackend, ReadSnapshotError};
 
     if error
@@ -2229,7 +2235,12 @@ mod tests {
         use crate::graphql::orm::ReadSnapshotError;
 
         let server_error = |number| {
-            sqlx::Error::Database(Box::new(MssqlServerError::new(number, 1, 16, "server error")))
+            sqlx::Error::Database(Box::new(MssqlServerError::new(
+                number,
+                1,
+                16,
+                "server error",
+            )))
         };
         assert!(matches!(
             classify_read_snapshot_start_error(server_error(3952)),

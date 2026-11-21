@@ -14,6 +14,9 @@ Version 0.190.0 aligns with the ORM's
 [read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
 Existing generated reads work through the snapshot context.
 
+Version 0.189.0 qualifies generated root search filters with the entity table
+(#799). See the [migration guide](../../MIGRATION.md#01880-to-01890-root-search-filter-binding).
+
 Version 0.188.0 generates a macro-only `ReadVisibilityFilter` hook and `table_name` for where
 inputs. The first renders each filter column as `row.<column>` for the row it is given, the column
 delimited as generated DDL and DML address it, so read predicates and related-row filters bind to

@@ -17,6 +17,13 @@ read helpers. Before opting in, configure WAL on SQLite or
 `ALLOW_SNAPSHOT_ISOLATION ON` on SQL Server.
 See [snapshot transactions](crates/graphql-orm/README.md#read-snapshot-transactions).
 
+## 0.188.0 to 0.189.0: root search filter binding
+
+**No action** — generated root search qualifies client filter columns with the
+entity table (#799). Search filters, search input, and stored documents require
+no migration. If you snapshot generated search SQL, update the table-qualified
+filter and projection references.
+
 ## 0.187.0 to 0.188.0: read-predicate columns bound to their row
 
 Upgrade ORM and macros together. Read predicates now bind every column to
