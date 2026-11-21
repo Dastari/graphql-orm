@@ -10,6 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.152.0 (placeholder for the next minor after the breaking release) adds an opt-in for resolved [entity references](docs/entity-references.md#adapters-for-a-local-process) on the local-harness and Grok ACP adapters. It is off by default: a registration opts in with `with_resolved_entity_reference_delivery` and a freshness bound, and until then, and always on the Codex app-server adapter and the direct runtime dispatch methods, every reference is the unavailable marker. No signature, GraphQL SDL or schema change. See the [migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters) before opting in: a local process retains what it is sent.
 Version 0.151.2 emits fixed skill content-protection reason codes in debug
 tracing and reuses compiled proposal validators.
 See the [migration guide](MIGRATION.md#01512-skill-content-protection-diagnostics).
