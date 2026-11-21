@@ -444,6 +444,7 @@ impl MigrationBackend for super::PostgresBackend {
 
 #[cfg(feature = "sqlite")]
 async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate::Result<()> {
+    super::ensure_sql_write_allowed()?;
     let mut transaction = pool.begin().await?;
     let exists: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -633,6 +634,7 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
 
 #[cfg(feature = "postgres")]
 async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::Result<()> {
+    super::ensure_sql_write_allowed()?;
     let mut transaction = pool.begin().await?;
     let schema_name: String = sqlx::query_scalar("SELECT pg_catalog.current_schema()")
         .fetch_one(&mut *transaction)
@@ -930,6 +932,8 @@ where
 {
     use sqlx::Connection;
 
+    super::ensure_sql_write_allowed()?;
+
     // Runtime preparation only diagnoses unproven rewrite tables; live-DDL
     // preflight independently refuses reserved-name collisions without mutation.
     let live_unique = statements
@@ -1212,6 +1216,7 @@ async fn apply_postgres_migration_statements_transactionally<S>(
 where
     S: AsRef<str>,
 {
+    super::ensure_sql_write_allowed()?;
     let mut tx = pool.begin().await?;
     if let Some(plan) = owned {
         // Cooperative migration serialization plus table locks keep catalog validation
