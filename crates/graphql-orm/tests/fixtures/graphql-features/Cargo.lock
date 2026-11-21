@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",

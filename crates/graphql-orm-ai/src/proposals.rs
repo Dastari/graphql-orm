@@ -1,6 +1,11 @@
 //! AI-owned structured proposal staging contracts.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    panic::AssertUnwindSafe,
+    sync::{Arc, OnceLock},
+};
 
 use agql_auth::AuthPrincipal;
 use async_graphql::{Context, Enum, ErrorExtensions, InputObject, Object, SimpleObject};
@@ -152,10 +157,25 @@ pub struct ValidatedAiProposal {
     pub draft: AiProposalDraft,
 }
 
+#[derive(Clone)]
+struct RegisteredProposalType {
+    descriptor: AiProposalTypeDescriptor,
+    // A descriptor and its schema are immutable once registered. Compile on
+    // first validation so malformed legacy descriptors still fail at the
+    // same boundary. Built-in validation preserves the catalog's unwind traits.
+    validator: Arc<OnceLock<Option<AssertUnwindSafe<jsonschema::Validator>>>>,
+}
+
+impl fmt::Debug for RegisteredProposalType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.descriptor, formatter)
+    }
+}
+
 /// Proposal registry. Registration never grants application mutation access.
 #[derive(Clone, Debug, Default)]
 pub struct AiProposalCatalog {
-    descriptors: BTreeMap<AiProposalTypeId, AiProposalTypeDescriptor>,
+    descriptors: BTreeMap<AiProposalTypeId, RegisteredProposalType>,
 }
 
 impl AiProposalCatalog {
@@ -181,21 +201,28 @@ impl AiProposalCatalog {
                 "proposal descriptor limits are invalid".to_owned(),
             ));
         }
-        self.descriptors.insert(descriptor.id.clone(), descriptor);
+        self.descriptors.insert(
+            descriptor.id.clone(),
+            RegisteredProposalType {
+                descriptor,
+                validator: Arc::default(),
+            },
+        );
         Ok(())
     }
 
     /// Returns one registered proposal descriptor.
     pub fn descriptor(&self, id: &AiProposalTypeId) -> Option<&AiProposalTypeDescriptor> {
-        self.descriptors.get(id)
+        self.descriptors.get(id).map(|entry| &entry.descriptor)
     }
 
     /// Validates model output and provenance against a registered contract.
     pub fn validate(&self, draft: AiProposalDraft) -> Result<ValidatedAiProposal, AiError> {
-        let descriptor = self
+        let entry = self
             .descriptors
             .get(&draft.proposal_type)
             .ok_or(AiError::NotFound)?;
+        let descriptor = &entry.descriptor;
         let payload_bytes = serde_json::to_vec(&draft.payload).map_err(|_| {
             AiError::InvalidInput("proposal payload is not serializable".to_owned())
         })?;
@@ -207,9 +234,18 @@ impl AiProposalCatalog {
             ));
         }
 
-        let validator = jsonschema::validator_for(&descriptor.schema).map_err(|_| {
-            AiError::InvalidConfiguration("registered proposal schema is invalid".to_owned())
-        })?;
+        let validator = entry
+            .validator
+            .get_or_init(|| {
+                jsonschema::validator_for(&descriptor.schema)
+                    .ok()
+                    .map(AssertUnwindSafe)
+            })
+            .as_ref()
+            .map(|validator| &validator.0)
+            .ok_or_else(|| {
+                AiError::InvalidConfiguration("registered proposal schema is invalid".to_owned())
+            })?;
         if !validator.is_valid(&draft.payload) {
             return Err(AiError::InvalidInput(
                 "proposal payload does not match the registered schema".to_owned(),
@@ -490,4 +526,80 @@ fn proposal_service(context: &Context<'_>) -> async_graphql::Result<Arc<dyn AiPr
 
 fn extend(error: AiError) -> async_graphql::Error {
     error.extend()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn draft(proposal_type: AiProposalTypeId, payload: serde_json::Value) -> AiProposalDraft {
+        AiProposalDraft {
+            proposal_type,
+            session_id: AiSessionId(Uuid::nil()),
+            run_id: AiRunId(Uuid::nil()),
+            scope: AiScope::new("workspace", "inventory"),
+            payload,
+            sources: Vec::new(),
+            item_count: 1,
+        }
+    }
+
+    #[test]
+    fn proposal_validators_are_reused_across_catalog_clones() {
+        let descriptor = AiProposalTypeDescriptor::new(
+            "inventory.review",
+            "1",
+            json!({"$schema": JSON_SCHEMA_2020_12, "type": "string"}),
+        )
+        .unwrap();
+        let id = descriptor.id.clone();
+        let mut catalog = AiProposalCatalog::new();
+        catalog.register(descriptor).unwrap();
+        let cloned = catalog.clone();
+
+        let original = &catalog.descriptors[&id].validator;
+        assert!(original.get().is_none());
+        catalog
+            .validate(draft(id.clone(), json!("review")))
+            .unwrap();
+        assert!(matches!(
+            cloned.validate(draft(id.clone(), json!(42))),
+            Err(AiError::InvalidInput(message))
+                if message == "proposal payload does not match the registered schema"
+        ));
+        let cached = original.get().and_then(Option::as_ref).unwrap();
+        let cloned_cached = cloned.descriptors[&id]
+            .validator
+            .get()
+            .and_then(Option::as_ref)
+            .unwrap();
+        assert!(std::ptr::eq(cached, cloned_cached));
+    }
+
+    #[test]
+    fn malformed_registered_proposal_schema_remains_refused_at_validation() {
+        let mut descriptor = AiProposalTypeDescriptor::new(
+            "inventory.review",
+            "1",
+            json!({"$schema": JSON_SCHEMA_2020_12, "type": "string"}),
+        )
+        .unwrap();
+        descriptor.schema["type"] = json!("invalid_type");
+        let id = descriptor.id.clone();
+        let mut catalog = AiProposalCatalog::new();
+        catalog.register(descriptor).unwrap();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                catalog.validate(draft(id.clone(), json!("review"))),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "registered proposal schema is invalid"
+            ));
+        }
+        assert!(matches!(
+            catalog.descriptors[&id].validator.get(),
+            Some(None)
+        ));
+    }
 }
