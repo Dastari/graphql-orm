@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.151.0 to 0.151.1: lint and documentation lanes
+
+AI 0.151.0 to 0.151.1. **No action.** A test-only re-export and its dead-code
+allowances are compiled only with the `sqlite` feature, and one intra-doc link
+that did not resolve in SQL Server builds is plain text. No Rust API, GraphQL
+SDL, configuration, authorization, persistence or runtime change, and no data
+migration is needed.
+
 ## 0.150.2 to 0.151.0: breaking release
 
 AI 0.150.2 to 0.151.0. **Action needed.** This is the AI part of the single
