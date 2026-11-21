@@ -2594,9 +2594,6 @@ fn safe_reason(value: &str) -> String {
     }
 }
 
-fn map_protection(error: crate::ContentProtectionError) -> AiError {
-    match error {
-        crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
-        _ => AiError::PersistenceFailed,
-    }
+pub(super) fn map_protection(error: crate::ContentProtectionError) -> AiError {
+    crate::content_protection::map_orm_protection_error("attachment", error)
 }

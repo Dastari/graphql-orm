@@ -1296,11 +1296,8 @@ fn limit_with_lookahead(limit: usize) -> Result<i64, AiError> {
         .map_err(|_| AiError::InvalidConfiguration("invalid compaction limits".to_owned()))
 }
 
-fn map_protection(error: crate::ContentProtectionError) -> AiError {
-    match error {
-        crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
-        _ => AiError::PersistenceFailed,
-    }
+pub(super) fn map_protection(error: crate::ContentProtectionError) -> AiError {
+    crate::content_protection::map_orm_protection_error("context_compaction", error)
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
