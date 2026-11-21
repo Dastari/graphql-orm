@@ -182,8 +182,9 @@ reads the query root's type registry, so:
 - a generated relation is left out when a `SimpleObject` getter on the same
   struct serves the same name: on a `compose_complex_object` entity, a
   relation field without `#[graphql(skip)]`; anywhere, another field renamed
-  to it. With a `#[graphql(flatten)]` field the
-  derive cannot see the served names, so no relation of that entity is listed;
+  to it. With a `#[graphql(flatten)]` field or a `#[graphql(derived(...))]`
+  getter the derive does not know every served name, so no relation of that
+  entity is listed;
 - a declared key the schema does not resolve is not listed, and neither is
   any key of a type marked `unresolvable`;
 - an entity whose type the schema does not register has no entry, even when
@@ -219,6 +220,14 @@ back by the server.
 
 Handwritten `#[graphql(entity)]` resolvers and handwritten relationship fields
 are not listed; that needs an explicit per-field annotation and is a follow-up.
+
+The catalogue reflects ORM-generated mounting and cannot observe handwritten
+dispatch. A host that writes a type's `#[Object]` implementation itself, for
+example by flattening the generated relation wrapper and adding its own method
+for the same field name, is responsible for keeping that object consistent
+with what the catalogue says. Consumers must not treat an entry as proof of
+enforcement for a type whose object implementation the host wrote.
+
 See the [catalogue README](../../../crates/graphql-orm-operation-catalog/README.md#relation-and-entity-resolvers)
 for the document format, its RFC 8785 fingerprint, and
 [what each export discloses](../../../crates/graphql-orm-operation-catalog/README.md#what-an-export-discloses).

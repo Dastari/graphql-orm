@@ -1250,9 +1250,11 @@ pub(crate) fn generate_graphql_relations(
 /// struct's own fields, or `None` when they cannot be known here.
 ///
 /// A `#[graphql(flatten)]` field serves the fields of another type, which
-/// this derive cannot see, and an attribute this function cannot read may
-/// rename or hide a field. Both give `None`, and the caller then treats every
-/// relation as possibly shadowed.
+/// this derive cannot see; a `#[graphql(derived(...))]` entry serves a
+/// further getter under its own name, even beside a skipped base field; and
+/// an attribute this function cannot read may rename or hide a field. Each
+/// gives `None`, and the caller then treats every relation as possibly
+/// shadowed.
 fn simple_object_getter_names(
     fields: &[crate::entity::ParsedField],
     rename_fields: Option<&str>,
@@ -1281,8 +1283,9 @@ fn simple_object_getter_names(
                     syn::Meta::List(_) => false,
                 };
                 let path = option.path();
-                if path.is_ident("flatten") {
-                    // `flatten = false` is not accepted by async-graphql.
+                if path.is_ident("flatten") || path.is_ident("derived") {
+                    // `flatten = false` is not accepted by async-graphql, and
+                    // a derived getter is served whatever the base field is.
                     return None;
                 }
                 skipped |= enabled && (path.is_ident("skip") || path.is_ident("skip_output"));
@@ -1344,6 +1347,19 @@ mod object_visibility_tests {
             getters("id: String, #[graphql(flatten)] more: More,", None),
             None
         );
+        // A derived getter is served under its own name, also when the base
+        // field is skipped.
+        for derived in [
+            r#"#[graphql(derived(name = "other", into = "String"))] base: String,"#,
+            r#"#[graphql(skip, owned, derived(name = "other", into = "String"))] base: String,"#,
+            r#"#[graphql(derived(name = "a", into = "String"), derived(name = "b", into = "String"))] base: String,"#,
+        ] {
+            assert_eq!(
+                getters(&format!("id: String, {derived}"), None),
+                None,
+                "{derived}"
+            );
+        }
     }
 
     /// A relation whose name a `SimpleObject` getter also serves is not in
@@ -1394,6 +1410,11 @@ mod object_visibility_tests {
             "#[graphql(skip)] {relation} kept: Option<Target>, #[graphql(flatten)] #[skip_db] more: More,"
         ));
         assert!(!flattened.contains("\"kept\""), "{flattened}");
+
+        let derived = witness(&format!(
+            "#[graphql(skip)] {relation} kept: Option<Target>, #[graphql(skip, owned, derived(name = \"kept\", into = \"String\"))] label: String,"
+        ));
+        assert!(!derived.contains("\"kept\""), "{derived}");
     }
 
     #[test]

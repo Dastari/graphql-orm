@@ -316,12 +316,26 @@ and their absence says nothing about whether the schema serves them:
   also serves (on a composed object, a relation field without
   `#[graphql(skip)]`; anywhere, a field renamed to the relation's name). Which of the two the schema serves is
   async-graphql's choice, so the entry is left out. If the struct has a
-  `#[graphql(flatten)]` field, the derive cannot see the names it serves, and
-  no relation of that entity is listed;
+  `#[graphql(flatten)]` field or a `#[graphql(derived(...))]` getter, the
+  derive does not know every name the object serves, and no relation of that
+  entity is listed;
 - handwritten entity resolvers (`#[graphql(entity)]` in a host's own object).
 
 Nothing proves what a handwritten resolver resolves or enforces. Listing them
 is a follow-up that needs an explicit per-field annotation.
+
+### What the catalogue cannot observe
+
+The resolver catalogue reflects how the ORM's generated code mounts resolvers.
+It cannot observe dispatch a host writes by hand. A host that writes the
+`#[Object]` implementation of a type itself, for example one that flattens the
+generated relation wrapper and adds its own method serving the same field
+name, decides what that field resolves to, and is responsible for keeping the
+object consistent with what the catalogue says about it.
+
+A consumer must therefore not treat an entry as proof of enforcement for a
+type whose object implementation the host wrote. For every type, an entry is
+descriptive metadata from a trusted host, as the rest of the catalogue is.
 
 ## Canonical JSON encodings
 

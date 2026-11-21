@@ -321,10 +321,52 @@ mod catalogued {
     #[graphql_complex_object]
     impl CatLoose {}
 
+    /// A skipped base field with a derived getter named like a relation:
+    /// async-graphql serves `ledger` from `ledger_label`.
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        SimpleObject,
+        Clone,
+        Debug,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[graphql(complex)]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "tbl_cat_derived",
+        plural = "CatDerivedRows",
+        auth = "none"
+    )]
+    #[graphql_orm(compose_complex_object)]
+    pub struct CatDerived {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[sortable]
+        pub id: String,
+        pub ledger_id: String,
+        pub sealed_id: String,
+        #[graphql(skip, owned, derived(name = "ledger", into = "String"))]
+        pub ledger_label: String,
+        #[graphql(skip)]
+        #[relation(target = "CatLedger", from = "ledger_id", to = "id", emit_fk = false)]
+        pub ledger: Option<CatLedger>,
+        #[graphql(skip)]
+        #[relation(target = "CatSealed", from = "sealed_id", to = "id", emit_fk = false)]
+        pub sealed: Option<CatSealed>,
+    }
+
+    #[graphql_complex_object]
+    impl CatDerived {}
+
     schema_roots! {
         backend: "sqlite",
         query_custom_ops: [],
-        entities: [CatOwner, CatLedger, CatSealed, CatListed, CatNote, CatStub, CatLoose],
+        entities: [
+            CatOwner, CatLedger, CatSealed, CatListed, CatNote, CatStub, CatLoose, CatDerived,
+        ],
     }
 }
 
@@ -915,6 +957,56 @@ async fn a_relation_shadowed_by_a_simple_object_getter_is_not_listed() {
         .relation("CatLoose", field_name("sealed"))
         .expect("the skipped relation is listed");
     assert_eq!(sealed.target, "CatSealed");
+}
+
+/// A `derived(...)` getter is served under its own name even when its base
+/// field is skipped. The relations derive does not compute those names, so
+/// an entity that declares one has no relation in the mount witness: neither
+/// the relation the getter shadows nor the one beside it is listed.
+#[tokio::test]
+async fn relations_of_an_entity_with_a_derived_getter_are_not_listed() {
+    let sdl = federation_sdl().await;
+    let start = sdl.find("type CatDerived ").expect("CatDerived is served");
+    let derived = &sdl[start..start + sdl[start..].find("\n}").unwrap()];
+    assert!(
+        derived
+            .lines()
+            .any(|line| line.trim().starts_with("ledger:")),
+        "the derived getter is served: {derived}"
+    );
+    assert!(catalogued::CatDerived::__gom_mounted_relation_fields().is_empty());
+    let mut shadowed = catalogued::CatDerived::__gom_shadowed_relation_fields().to_vec();
+    shadowed.sort();
+    let mut declared = vec![field_name("ledger"), field_name("sealed")];
+    declared.sort();
+    assert_eq!(shadowed, declared);
+
+    let resolvers = resolvers();
+    assert!(
+        resolvers
+            .relation("CatDerived", field_name("ledger"))
+            .is_none()
+    );
+    assert!(
+        resolvers
+            .relations
+            .iter()
+            .all(|relation| relation.type_name != "CatDerived")
+    );
+    // The semantic catalogue still describes both declared relationships.
+    let semantic = catalogued::graphql_orm_semantic_catalog()
+        .entities
+        .iter()
+        .find(|entity| entity.entity_name == "CatDerived")
+        .unwrap();
+    assert_eq!(
+        semantic
+            .fields
+            .iter()
+            .filter(|field| field.relationship.is_some())
+            .count(),
+        2
+    );
 }
 
 /// An entity the schema does not register is not matched to another type
