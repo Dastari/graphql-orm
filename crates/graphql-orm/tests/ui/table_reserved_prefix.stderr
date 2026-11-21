@@ -1,0 +1,23 @@
+error: table `__gom_row_1` is not allowed: `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` and `__gom_closure_<n>` (with any `_<suffix>`) are the row aliases and common table expressions that generated read-policy SQL renders
+  --> tests/ui/table_reserved_prefix.rs:10:8
+   |
+10 | struct AliasRow {
+   |        ^^^^^^^^
+
+error: table `main."__GOM_Closure_1"` is not allowed: `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` and `__gom_closure_<n>` (with any `_<suffix>`) are the row aliases and common table expressions that generated read-policy SQL renders
+  --> tests/ui/table_reserved_prefix.rs:18:8
+   |
+18 | struct ClosureRow {
+   |        ^^^^^^^^^^
+
+error: table `[__gom_closure_2_t]` is not allowed: `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` and `__gom_closure_<n>` (with any `_<suffix>`) are the row aliases and common table expressions that generated read-policy SQL renders
+  --> tests/ui/table_reserved_prefix.rs:26:8
+   |
+26 | struct ReachedRow {
+   |        ^^^^^^^^^^
+
+error: table `__gom_self` is not allowed: `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` and `__gom_closure_<n>` (with any `_<suffix>`) are the row aliases and common table expressions that generated read-policy SQL renders
+  --> tests/ui/table_reserved_prefix.rs:34:8
+   |
+34 | struct SelfRow {
+   |        ^^^^^^^
