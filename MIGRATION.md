@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.191.0 to 0.192.0: propagated parent actions
+
+**No action.** Relations continue to use the source mutation's action by
+default. To report child creates and deletes as `UPDATED` on a surviving
+parent, set `propagate_change_action = "updated"` on the relation alongside
+`propagate_change = "up"` and use `UPDATED` in the parent's subscription filter.
+
 ## 0.190.0 to 0.191.0: read snapshot transactions
 
 **No action.** The snapshot runner is opt-in and uses the existing generated

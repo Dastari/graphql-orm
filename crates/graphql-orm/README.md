@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
+See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
+
 Version 0.191.0 adds [read snapshot transactions](#read-snapshot-transactions)
 for policy-aware reads on SQLite, PostgreSQL, and SQL Server.
 
