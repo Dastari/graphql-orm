@@ -12,9 +12,9 @@ supersedes: []
 
 ## 0.28.0 to 0.28.1: read snapshot write refusal
 
-**No action.** Use backup and ORM from the same reviewed workspace revision
-when enabling the optional ORM adapter. Restore writes, including target
-clears, are refused inside a read snapshot callback (#831).
+**No action.** Use backup 0.28.1 and ORM 0.191.0 from the same reviewed
+workspace revision when enabling the optional ORM adapter. A read snapshot
+callback refuses restore writes, including target clears (#831).
 
 ## 0.27.2 to 0.28.0: breaking release
 
