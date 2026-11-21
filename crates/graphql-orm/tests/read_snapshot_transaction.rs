@@ -262,42 +262,67 @@ impl Drop for SnapshotDirectory {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_checks_file_backed_attached_databases() -> graphql_orm::Result<()> {
-    use graphql_orm::sqlx::{self, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions}};
+    use graphql_orm::sqlx::{
+        self,
+        sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    };
 
     let directory = SnapshotDirectory::new();
-    let pool = SqlitePoolOptions::new().max_connections(1).connect_with(
-        SqliteConnectOptions::new().filename(directory.0.join("main.sqlite"))
-            .create_if_missing(true).journal_mode(SqliteJournalMode::Wal),
-    ).await?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(directory.0.join("main.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await?;
     let db = Database::new(pool);
     sqlx::query(r#"ATTACH DATABASE ? AS "archive.""copy""#)
-        .bind(directory.0.join("archive.sqlite").to_string_lossy().as_ref())
-        .execute(db.pool()).await?;
+        .bind(
+            directory
+                .0
+                .join("archive.sqlite")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .execute(db.pool())
+        .await?;
     sqlx::query(r#"PRAGMA "archive.""copy".journal_mode = delete"#)
-        .execute(db.pool()).await?;
+        .execute(db.pool())
+        .await?;
 
     assert!(matches!(
-        db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) })).await,
+        db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) }))
+            .await,
         Err(ReadSnapshotError::SqliteWalRequired),
     ));
 
     sqlx::query(r#"PRAGMA "archive.""copy".journal_mode = wal"#)
-        .execute(db.pool()).await?;
+        .execute(db.pool())
+        .await?;
     sqlx::query(r#"PRAGMA "archive.""copy".locking_mode = exclusive"#)
-        .execute(db.pool()).await?;
+        .execute(db.pool())
+        .await?;
     assert!(matches!(
-        db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) })).await,
+        db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) }))
+            .await,
         Err(ReadSnapshotError::SqliteNormalLockingRequired),
     ));
 
     sqlx::query(r#"PRAGMA "archive.""copy".locking_mode = normal"#)
-        .execute(db.pool()).await?;
+        .execute(db.pool())
+        .await?;
     sqlx::query("ATTACH DATABASE ':memory:' AS scratch")
-        .execute(db.pool()).await?;
+        .execute(db.pool())
+        .await?;
     sqlx::query("CREATE TEMP TABLE scratch_rows (id INTEGER)")
-        .execute(db.pool()).await?;
+        .execute(db.pool())
+        .await?;
     assert_eq!(
-        db.read_snapshot_transaction(|_| Box::pin(async { Ok("entered") })).await.unwrap(),
+        db.read_snapshot_transaction(|_| Box::pin(async { Ok("entered") }))
+            .await
+            .unwrap(),
         "entered",
     );
     db.pool().close().await;
@@ -491,7 +516,11 @@ async fn mssql_requires_snapshot_isolation_and_allows_concurrent_commits() {
             )
             .await
             .unwrap();
-        assert_eq!(rows.len(), 1, "expected the physical connection for the session");
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected the physical connection for the session"
+        );
         (
             rows[0].try_get::<i32, _>("session_id").unwrap(),
             rows[0].try_get::<String, _>("connect_time").unwrap(),
