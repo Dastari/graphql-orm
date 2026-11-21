@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.192.0 adds derive-level opt-outs for generated mutations and Changed
+subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+Generated mutations and entity getters return a curated field error when the
+schema lacks the database.
+
 Version 0.191.0 adds [read snapshot transactions](#read-snapshot-transactions)
 for policy-aware reads on SQLite, PostgreSQL, and SQL Server.
 

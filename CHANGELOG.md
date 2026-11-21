@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.192.0
+
+- **Added (#677).** `GraphQLOperations` accepts `mutations = false` and
+  `subscriptions = false` on `graphql_entity`. Omitted roots do not appear
+  in the schema or catalogues. Repository and transaction writes remain available.
+- **Fixed (#542).** Generated writes and entity scalar getters return a
+  GraphQL field error when a hand-built schema is missing its database.
+  Generated writes and Changed subscriptions qualify their Rust paths.
+  Mutation-shape conflicts point to the shape declaration, and implicit
+  update timestamps use the backend's identifier delimiters. Dependent
+  deletes use boundaries declared by the direct mutation emitters.
+- **Refactored (#723).** The create, upsert, update and delete families emit
+  their GraphQL resolvers from separate modules.
+
 ## Unreleased - ORM/macros 0.191.0
 
 - **Added (#831):** `Database::read_snapshot_transaction` runs multiple
