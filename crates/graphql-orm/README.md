@@ -927,13 +927,22 @@ let (account, accounts) = db
 
 - SQLite uses a deferred `BEGIN` in WAL mode. The first database read
   establishes the snapshot, and writers on other connections can commit
-  while that snapshot is open. Use SQLite's normal locking and private
-  caches. Rollback-journal readers take a SHARED lock that can block a
-  concurrent commit, so the runner returns `ReadSnapshotError::SqliteWalRequired`
-  before invoking the callback.
-- PostgreSQL uses `REPEATABLE READ READ ONLY` and the same transaction-local
-  RLS settings as `transaction_with_auth`. PostgreSQL still takes normal
-  read locks, which can conflict with DDL.
+  while that snapshot is open. The runner checks normal locking and returns
+  `ReadSnapshotError::SqliteNormalLockingRequired` for exclusive locking.
+  Shared-cache connections and non-WAL attached databases are unsupported.
+  Rollback-journal readers take a SHARED lock that can block a concurrent
+  commit, so the runner returns `ReadSnapshotError::SqliteWalRequired`
+  when the primary database uses a mode other than WAL.
+- PostgreSQL uses `REPEATABLE READ READ ONLY` with the same transaction-local
+  RLS settings as `transaction_with_auth`. It provides a consistent snapshot
+  with repeatable-read isolation. A read-only observer can still see a
+  result with no equivalent serial order, even when concurrent writers use
+  `SERIALIZABLE`. Hosts that need a serializable read can use PostgreSQL's
+  `SERIALIZABLE READ ONLY DEFERRABLE` in a separate transaction. It lets
+  ordinary data writers proceed and may wait for a safe snapshot before its
+  first read. Both modes take normal read locks that can conflict with DDL.
+  See [PostgreSQL transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html)
+  and [transaction characteristics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
 - SQL Server uses `SNAPSHOT` after checking the current database setting.
   `ReadSnapshotError::MssqlSnapshotIsolationRequired` means
   `ALLOW_SNAPSHOT_ISOLATION` is disabled or transitioning. Snapshot reads

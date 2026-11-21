@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.28.0 to 0.28.1: read snapshot write refusal
+
+**No action.** Use backup and ORM from the same reviewed workspace revision
+when enabling the optional ORM adapter. Restore writes, including target
+clears, are refused inside a read snapshot callback (#831).
+
 ## 0.27.2 to 0.28.0: breaking release
 
 Backup 0.27.2 to 0.28.0: result and error types, and target clear on

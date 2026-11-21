@@ -292,6 +292,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
         rows: &[BackupRow],
         context: &RestoreContext,
     ) -> crate::Result<ImportReport> {
+        super::ensure_sql_write_allowed()?;
         import_table_rows(self.pool(), entity, rows, context).await
     }
 

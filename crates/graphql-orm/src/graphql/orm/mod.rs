@@ -34,9 +34,9 @@ mod read_snapshot;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use read_snapshot::ReadSnapshotContext;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-pub(crate) use read_snapshot::{
-    SNAPSHOT_WRITE_REFUSED, ensure_sql_write_allowed, ensure_write_allowed,
-};
+pub use read_snapshot::ensure_sql_write_allowed;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub(crate) use read_snapshot::{SNAPSHOT_WRITE_REFUSED, ensure_write_allowed};
 mod read_authorization;
 mod restore_marker;
 mod rls;

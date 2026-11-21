@@ -761,6 +761,8 @@ pub enum ReadSnapshotError {
     UnsupportedBackend,
     /// SQLite needs WAL to let other connections commit while the reader runs.
     SqliteWalRequired,
+    /// SQLite requires normal locking to let other connections write.
+    SqliteNormalLockingRequired,
     /// SQL Server must have `ALLOW_SNAPSHOT_ISOLATION` fully enabled.
     MssqlSnapshotIsolationRequired,
     /// The current task already has a managed transaction.
@@ -778,6 +780,9 @@ impl std::fmt::Display for ReadSnapshotError {
                 "read snapshot transactions are unsupported by this backend"
             }
             Self::SqliteWalRequired => "SQLite read snapshot transactions require WAL journal mode",
+            Self::SqliteNormalLockingRequired => {
+                "SQLite read snapshot transactions require normal locking mode"
+            }
             Self::MssqlSnapshotIsolationRequired => {
                 "SQL Server read snapshot transactions require ALLOW_SNAPSHOT_ISOLATION ON"
             }

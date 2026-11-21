@@ -769,9 +769,9 @@ impl MssqlPool {
     pub(crate) async fn begin_read_snapshot(
         &self,
     ) -> Result<MssqlTransaction, crate::graphql::orm::ReadSnapshotError> {
-        use crate::graphql::orm::{MssqlBackend, ReadSnapshotError};
+        use crate::graphql::orm::ReadSnapshotError;
 
-        let classify = crate::db::classify_read_snapshot_error::<MssqlBackend>;
+        let classify = classify_read_snapshot_start_error;
         let mut lease = self.acquire().await.map_err(classify)?;
         let rows = self
             .bounded(fetch_rows_with_client(
@@ -810,7 +810,7 @@ impl MssqlPool {
         let begin = format!(
             "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
              SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION; {}",
-            restore_gate("Transaction", "ROLLBACK TRANSACTION;")
+            restore_gate("Transaction", "ROLLBACK TRANSACTION;", isolation == "SNAPSHOT")
         );
         // A failed begin may have changed the isolation level; never reuse it.
         let begun = self
@@ -1077,7 +1077,14 @@ fn restore_marker_from_row(row: &MssqlRow) -> crate::Result<(String, i64)> {
 /// so it waits for every holder of the shared lock to finish, and nothing
 /// takes the shared lock while it runs. The marker covers a restore whose
 /// session died: its lock is gone, its partial rows are not.
-fn restore_gate(owner: &str, undo: &str) -> String {
+fn restore_gate(owner: &str, undo: &str, preserve_snapshot_refusal: bool) -> String {
+    // A snapshot can be disabled between admission and the marker read.
+    // Preserve that server number before the usual marker-error translation.
+    let rethrow_snapshot_refusal = if preserve_snapshot_refusal {
+        "IF @gorm_restore_error = 3952 BEGIN THROW; END;"
+    } else {
+        ""
+    };
     let release = if owner == "Session" {
         format!(
             "EXEC sp_releaseapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockOwner = 'Session';"
@@ -1092,7 +1099,7 @@ fn restore_gate(owner: &str, undo: &str) -> String {
          DECLARE @gorm_restore_present BIT, @gorm_restore_error INT; BEGIN TRY \
          EXEC sp_executesql N'SELECT @present = CASE WHEN EXISTS (SELECT 1 FROM [dbo].[__graphql_orm_restore_marker]) THEN 1 ELSE 0 END', \
          N'@present BIT OUTPUT', @present = @gorm_restore_present OUTPUT; \
-         END TRY BEGIN CATCH SET @gorm_restore_error = ERROR_NUMBER(); {release} {undo} \
+         END TRY BEGIN CATCH SET @gorm_restore_error = ERROR_NUMBER(); {rethrow_snapshot_refusal}{release} {undo} \
          RAISERROR(N'{RESTORE_UNAVAILABLE}: marker read failed with error %d', 16, 1, @gorm_restore_error); RETURN; END CATCH; \
          IF @gorm_restore_present IS NULL OR @gorm_restore_present <> 0 BEGIN {release} {undo} \
          RAISERROR(N'{RESTORE_REFUSAL}: a restore marker is present', 16, 1); RETURN; END;"
@@ -1113,7 +1120,7 @@ fn restore_gated(sql: &str, release_inline: bool) -> String {
     if requires_own_batch(sql) {
         return sql.to_string();
     }
-    let gate = restore_gate("Session", "");
+    let gate = restore_gate("Session", "", false);
     if release_inline {
         format!(
             "{RELEASE_SESSION_RESTORE_LOCK} {gate}\n{sql}\n;EXEC sp_releaseapplock @Resource = N'{RESTORE_LOCK_RESOURCE}', @LockOwner = 'Session';"
@@ -1425,6 +1432,20 @@ impl MssqlTransaction {
             self.lease.take();
         }
         failure.error
+    }
+}
+
+fn classify_read_snapshot_start_error(error: sqlx::Error) -> crate::graphql::orm::ReadSnapshotError {
+    use crate::graphql::orm::{MssqlBackend, ReadSnapshotError};
+
+    if error
+        .as_database_error()
+        .and_then(|error| error.try_downcast_ref::<MssqlServerError>())
+        .is_some_and(|error| error.number() == 3952)
+    {
+        ReadSnapshotError::MssqlSnapshotIsolationRequired
+    } else {
+        crate::db::classify_read_snapshot_error::<MssqlBackend>(error)
     }
 }
 
@@ -2201,6 +2222,23 @@ mod tests {
         )
         .expect_err("a read-only pool must reject DML before connecting");
         assert!(error.to_string().contains("physically read-only"));
+    }
+
+    #[test]
+    fn snapshot_start_classifies_server_error_3952() {
+        use crate::graphql::orm::ReadSnapshotError;
+
+        let server_error = |number| {
+            sqlx::Error::Database(Box::new(MssqlServerError::new(number, 1, 16, "server error")))
+        };
+        assert!(matches!(
+            classify_read_snapshot_start_error(server_error(3952)),
+            ReadSnapshotError::MssqlSnapshotIsolationRequired,
+        ));
+        assert!(matches!(
+            classify_read_snapshot_start_error(server_error(3953)),
+            ReadSnapshotError::Transaction(_),
+        ));
     }
 
     #[test]

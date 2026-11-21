@@ -685,6 +685,14 @@ impl TransactionBackend for SqliteBackend {
                 tx.rollback().await.map_err(classify)?;
                 return Err(super::ReadSnapshotError::SqliteWalRequired);
             }
+            let locking: String = sqlx::query_scalar("PRAGMA main.locking_mode")
+                .fetch_one(tx.as_mut())
+                .await
+                .map_err(classify)?;
+            if !locking.eq_ignore_ascii_case("normal") {
+                tx.rollback().await.map_err(classify)?;
+                return Err(super::ReadSnapshotError::SqliteNormalLockingRequired);
+            }
             Ok(tx)
         })
     }

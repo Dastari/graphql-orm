@@ -183,20 +183,39 @@ async fn check_snapshot(reader: &Database, writer: &Database, auth: Option<&DbAu
                         .await,
                     Err(ReadSnapshotError::NestedTransaction),
                 ));
-                let Err(TransactionError::Rejected(error)) = db
-                    .transaction::<(), _>(TransactionMode::Default, |_| {
-                        Box::pin(async { panic!("nested callback entered") })
-                    })
-                    .await
-                else {
-                    panic!("nested write transaction was not refused");
-                };
-                assert_eq!(error.code, OrmErrorCode::Conflict);
                 Ok(())
             })
         })
         .await
         .unwrap();
+
+    let db = writer_after.clone();
+    let result = reader
+        .read_snapshot_transaction(|_| {
+            Box::pin(async move {
+                let nested = db.transaction::<(), _>(TransactionMode::Default, |_| {
+                    Box::pin(async { panic!("nested callback entered") })
+                }).await.unwrap_err();
+                assert_eq!(nested.public_error().code, OrmErrorCode::Forbidden);
+                Ok(())
+            })
+        })
+        .await;
+    assert!(matches!(result, Err(ReadSnapshotError::WriteRefused)));
+
+    let db = writer_after.clone();
+    let result = reader
+        .read_snapshot_transaction(|_| {
+            Box::pin(async move {
+                let nested = db.retention_transaction_with_auth::<(), _>(None, |_| {
+                    Box::pin(async { panic!("nested retention callback entered") })
+                }).await.unwrap_err();
+                assert_eq!(nested.public_error().code, OrmErrorCode::Forbidden);
+                Ok(())
+            })
+        })
+        .await;
+    assert!(matches!(result, Err(ReadSnapshotError::WriteRefused)));
 
     assert_eq!(SnapshotRow::count_all(&writer_after).await.unwrap(), 2);
     assert_eq!(
@@ -225,7 +244,9 @@ async fn sqlite_requires_wal_and_allows_concurrent_commits() {
         Err::<(), _>(ReadSnapshotError::SqliteWalRequired),
     ));
 
-    use graphql_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    use graphql_orm::sqlx::sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqliteLockingMode, SqlitePoolOptions,
+    };
     let directory = std::env::temp_dir().join(format!(
         "graphql-orm-snapshot-{}",
         graphql_orm::uuid::Uuid::new_v4()
@@ -254,6 +275,23 @@ async fn sqlite_requires_wal_and_allows_concurrent_commits() {
         Err::<(), _>(ReadSnapshotError::SqliteWalRequired),
     ));
     rollback.pool().close().await;
+    let exclusive = Database::new(
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                options.clone().journal_mode(SqliteJournalMode::Wal)
+                    .locking_mode(SqliteLockingMode::Exclusive),
+            )
+            .await
+            .unwrap(),
+    );
+    assert!(matches!(
+        exclusive
+            .read_snapshot_transaction(|_| Box::pin(async { panic!("callback entered") }))
+            .await,
+        Err::<(), _>(ReadSnapshotError::SqliteNormalLockingRequired),
+    ));
+    exclusive.pool().close().await;
     let pool = SqlitePoolOptions::new()
         .max_connections(2)
         .connect_with(options.journal_mode(SqliteJournalMode::Wal))
@@ -353,9 +391,12 @@ async fn mssql_requires_snapshot_isolation_and_allows_concurrent_commits() {
         .schema_policy(SchemaPolicy::ExternalWritable)
         .build();
     let reader = Database::new(
-        graphql_orm::db::mssql::MssqlPool::connect_ado(&owned.connection_string)
-            .await
-            .unwrap(),
+        graphql_orm::db::mssql::MssqlPool::connect_ado_with(
+            &owned.connection_string,
+            graphql_orm::db::mssql::MssqlPoolOptions::default().max_connections(1),
+        )
+        .await
+        .unwrap(),
     );
     assert!(matches!(
         reader
@@ -370,6 +411,21 @@ async fn mssql_requires_snapshot_isolation_and_allows_concurrent_commits() {
     .await
     .unwrap();
     setup(&writer).await;
+    let connection_state = async || {
+        let rows = reader.pool().fetch_rows(
+            "SELECT CAST(session_id AS int) AS session_id,              CAST(transaction_isolation_level AS int) AS isolation_level              FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
+            &[],
+        ).await.unwrap();
+        (rows[0].try_get::<i32, _>("session_id").unwrap(),
+         rows[0].try_get::<i32, _>("isolation_level").unwrap())
+    };
+    let (session_id, isolation) = connection_state().await;
+    assert_eq!(isolation, 2, "reader starts at READ COMMITTED");
     check_snapshot(&reader, &writer, None).await;
+    assert_eq!(
+        connection_state().await,
+        (session_id, 2),
+        "the same pooled session returned to READ COMMITTED",
+    );
     owned.cleanup().unwrap();
 }

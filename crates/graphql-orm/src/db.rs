@@ -1986,6 +1986,8 @@ where
             Result<T, crate::graphql::errors::OrmPublicError>,
         >,
     {
+        crate::graphql::orm::ensure_write_allowed()
+            .map_err(crate::graphql::orm::TransactionError::Rejected)?;
         if ORM_TRANSACTION_ACTIVE
             .try_with(|active| *active)
             .unwrap_or(false)
@@ -2057,6 +2059,8 @@ where
     /// SQLite uses a deferred transaction in WAL mode, fixing the snapshot at
     /// its first database read. Rollback-journal mode is refused because its
     /// shared read lock can prevent a concurrent writer from committing.
+    /// The primary database must use normal locking and a private cache.
+    /// Attached databases outside WAL mode are unsupported.
     /// PostgreSQL uses `REPEATABLE READ READ ONLY`; SQL Server requires
     /// `ALLOW_SNAPSHOT_ISOLATION ON` and uses `SNAPSHOT`.
     ///
@@ -2189,6 +2193,8 @@ where
             Result<T, crate::graphql::errors::OrmPublicError>,
         >,
     {
+        crate::graphql::orm::ensure_write_allowed()
+            .map_err(crate::graphql::orm::TransactionError::Rejected)?;
         if ORM_TRANSACTION_ACTIVE
             .try_with(|active| *active)
             .unwrap_or(false)

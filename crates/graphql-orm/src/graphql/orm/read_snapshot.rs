@@ -27,7 +27,9 @@ pub(crate) fn ensure_write_allowed() -> Result<(), OrmPublicError> {
     }
 }
 
-pub(crate) fn ensure_sql_write_allowed() -> crate::Result<()> {
+/// Refuse a companion crate's database write on the snapshot callback's task.
+#[doc(hidden)]
+pub fn ensure_sql_write_allowed() -> crate::Result<()> {
     ensure_write_allowed().map_err(crate::graphql::errors::sqlx_error_from_public)
 }
 

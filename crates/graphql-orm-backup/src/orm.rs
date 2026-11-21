@@ -20,7 +20,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy, EntityBackupDescriptor,
     EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
-    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode, stable_schema_hash,
+    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode, ensure_sql_write_allowed, stable_schema_hash,
 };
 use graphql_orm::sqlx::Row as _;
 use graphql_orm_storage::{BlobStore, StorageByteStream};
@@ -191,6 +191,7 @@ impl OrmBackupAdapter {
     /// Returns [`BackupError`] if a column policy override is invalid or any
     /// clear statement or transaction fails.
     pub async fn clear_restore_target(&self) -> Result<(), BackupError> {
+        ensure_sql_write_allowed().map_err(database_error("clear restore target"))?;
         let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
             right
@@ -408,6 +409,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError> {
+        ensure_sql_write_allowed().map_err(database_error("restore rows"))?;
         let context = orm_restore_context(&context)?;
         let current_snapshot = self.current_schema_snapshot().await?;
         if backup_schema.backend != current_snapshot.backend
@@ -461,6 +463,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         _changes: Vec<BackupChangeExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        ensure_sql_write_allowed().map_err(database_error("restore incremental rows"))?;
         Err(BackupError::UnsupportedOperation {
             operation: "incremental restore requires a graphql-orm change journal integration"
                 .to_string(),

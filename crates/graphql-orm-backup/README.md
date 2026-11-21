@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.28.1 guards the optional ORM adapter against writes inside
+[read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
+Use the adapter with ORM 0.190.0 from the same workspace revision.
+
 Version 0.28.0 (**breaking release**) reports deleted snapshot ids in
 `PruneResult` and `DeleteSnapshotResult`, refuses an unadmitted snapshot with
 the dedicated `BackupError::SnapshotNotAdmitted`, and marks those three types
