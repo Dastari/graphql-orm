@@ -195,6 +195,7 @@ pub struct AiLocalHarnessRegistration {
     sandbox_profile: String,
     limits: AiLocalHarnessLimits,
     capabilities: ProviderCapabilities,
+    resolved_entity_reference_delivery: Option<Duration>,
 }
 
 impl std::fmt::Debug for AiLocalHarnessRegistration {
@@ -210,6 +211,10 @@ impl std::fmt::Debug for AiLocalHarnessRegistration {
             .field("sandbox_profile", &"<deployment-reviewed>")
             .field("limits", &self.limits)
             .field("capabilities", &self.capabilities)
+            .field(
+                "resolved_entity_reference_delivery",
+                &self.resolved_entity_reference_delivery,
+            )
             .finish()
     }
 }
@@ -252,9 +257,52 @@ impl AiLocalHarnessRegistration {
             sandbox_profile: sandbox_profile.into(),
             limits,
             capabilities,
+            resolved_entity_reference_delivery: None,
         };
         registration.validate()?;
         Ok(registration)
+    }
+
+    /// Opts this registration in to receiving what entity references
+    /// resolved to. Off by default: without this call the harness process is
+    /// sent the unavailable marker for every reference, whatever the
+    /// deployment's [`crate::AiEntityReferenceRegistry`] resolves.
+    ///
+    /// `maximum_age` bounds the time from the start of resolution to the
+    /// completion of the one stdin write that carries the data. It covers
+    /// the host hook, process launch and the write. A request whose
+    /// resolution is older than that when the process is ready is written
+    /// with markers, and a write still in progress at the bound is abandoned
+    /// and the process terminated.
+    ///
+    /// Opting in is a disclosure decision the crate cannot check. Reference
+    /// data written to the process is outside the crate from then on: the
+    /// host must make sure the harness, its sandbox and any log or transcript
+    /// it keeps may hold that data and are cleaned up under the host's
+    /// retention rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when `maximum_age` is
+    /// zero or exceeds
+    /// [`crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`].
+    pub fn with_resolved_entity_reference_delivery(
+        mut self,
+        maximum_age: Duration,
+    ) -> Result<Self, ProviderError> {
+        if maximum_age.is_zero() || maximum_age > crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid entity-reference delivery age".to_owned(),
+            ));
+        }
+        self.resolved_entity_reference_delivery = Some(maximum_age);
+        Ok(self)
+    }
+
+    /// The freshness bound of resolved entity-reference delivery, or `None`
+    /// when the registration has not opted in and receives markers only.
+    pub const fn resolved_entity_reference_delivery(&self) -> Option<Duration> {
+        self.resolved_entity_reference_delivery
     }
 
     fn validate(&self) -> Result<(), ProviderError> {
@@ -531,11 +579,13 @@ pub trait AiLocalHarnessDriver: Send + Sync {
     /// Starts one already-authorized request and consumes what its entity
     /// references resolved to for this one dispatch.
     ///
-    /// [`AiLocalHarnessProvider`] calls this method, never [`Self::stream`].
-    /// The default discards everything resolved and calls [`Self::stream`]
-    /// with a plain request in which every entity reference is the
-    /// unavailable marker, so a driver written before this method existed
-    /// keeps sending markers.
+    /// [`AiLocalHarnessProvider`] calls this method only for a registration
+    /// that opted in with
+    /// [`AiLocalHarnessRegistration::with_resolved_entity_reference_delivery`];
+    /// otherwise it calls [`Self::stream`] with markers. The default discards
+    /// everything resolved and calls [`Self::stream`] with a plain request in
+    /// which every entity reference is the unavailable marker, so a driver
+    /// written before this method existed keeps sending markers.
     ///
     /// A driver that overrides it must move `dispatch` into the one write
     /// that delivers the request to the harness process: serialize each JSON
@@ -544,6 +594,13 @@ pub trait AiLocalHarnessDriver: Send + Sync {
     /// `wire_json` returns into anything that is cloned, stored, logged,
     /// queued or retried. [`crate::ModelDispatchRequest`] is not `Clone`, so
     /// a second write needs a second dispatch, which resolves again.
+    ///
+    /// It must also honour the registration's freshness bound: take
+    /// [`crate::ModelDispatchReferences::write_deadline`] for
+    /// [`AiLocalHarnessRegistration::resolved_entity_reference_delivery`],
+    /// compare it with the current time once the process is ready, send
+    /// markers if it has passed, and abandon a write that is still in
+    /// progress when it passes.
     ///
     /// # Errors
     ///
@@ -607,8 +664,8 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
         dispatch: crate::ModelDispatchRequest,
     ) -> Result<ProviderEventStream, ProviderError> {
         // `request` holds handles only. `references` is what they resolved to
-        // for this dispatch; it is read while the one stdin frame is encoded
-        // and dropped before the process is launched.
+        // for this dispatch. It is read at most once, after the process is
+        // ready and immediately before the one stdin write.
         let (request, references) = dispatch.into_parts();
         validate_registered_request(&registration, &request)?;
         let limits = registration.limits();
@@ -624,17 +681,22 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             frame.len() <= limits.maximum_request_bytes()
                 && frame.len() <= limits.maximum_frame_bytes()
         };
-        let mut encoded = encode_request_frame(&request, &references)?;
-        drop(references);
-        if !fits(&encoded) {
-            // The frame with resolved reference data exceeds the registered
-            // request ceiling. Send every reference as the marker instead,
-            // and refuse the request only if that does not fit either.
-            let (request, markers) = crate::ModelDispatchRequest::withholding(request).into_parts();
-            encoded = encode_request_frame(&request, &markers)?;
-            if !fits(&encoded) {
-                return Err(ProviderError::InvalidRequest);
-            }
+        // Resolved data may be written only if the registration opted in,
+        // and only until this instant, which is counted from the start of
+        // resolution in the executor.
+        let resolved_deadline = registration
+            .resolved_entity_reference_delivery()
+            .and_then(|maximum_age| references.write_deadline(maximum_age));
+        // The frame that is sent whenever resolved data is not: every
+        // reference is the marker. It must fit, and it is what the request is
+        // refused or admitted on before any process is launched.
+        let marker_frame = {
+            let (request, markers) =
+                crate::ModelDispatchRequest::withholding(request.clone()).into_parts();
+            encode_request_frame(&request, &markers)?
+        };
+        if !fits(&marker_frame) {
+            return Err(ProviderError::InvalidRequest);
         }
 
         let startup_deadline = tokio::time::Instant::now() + limits.startup_timeout();
@@ -642,10 +704,31 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             timeout_until(startup_deadline, self.launcher.launch(registration.clone()))
                 .await
                 .map_err(map_process_error)?;
-        if let Err(error) = timeout_until(startup_deadline, process.write_stdin(&encoded)).await {
+        // The process is ready. Decide now, against the current time, whether
+        // the resolution is still fresh. A resolved frame over the request
+        // ceiling is not sent either; the marker frame is.
+        let resolved_frame = resolved_deadline
+            .filter(|deadline| std::time::Instant::now() < *deadline)
+            .and_then(|deadline| {
+                encode_request_frame(&request, &references)
+                    .ok()
+                    .filter(|frame| fits(frame))
+                    .map(|frame| (frame, deadline))
+            });
+        drop(references);
+        let (frame, write_deadline) = match resolved_frame {
+            // The write itself must finish inside the freshness bound.
+            Some((frame, deadline)) => (
+                frame,
+                startup_deadline.min(tokio::time::Instant::from_std(deadline)),
+            ),
+            None => (marker_frame, startup_deadline),
+        };
+        if let Err(error) = timeout_until(write_deadline, process.write_stdin(&frame)).await {
             stop_process(process.as_mut(), limits.shutdown_timeout()).await;
             return Err(map_process_error(error));
         }
+        drop(frame);
         if let Err(error) = timeout_until(startup_deadline, process.close_stdin()).await {
             stop_process(process.as_mut(), limits.shutdown_timeout()).await;
             return Err(map_process_error(error));
@@ -708,17 +791,26 @@ impl AiProvider for AiLocalHarnessProvider {
         dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // Everything is validated against the handle-only request. The
-        // dispatch value, which alone holds what the request's entity
-        // references resolved to, is moved to the driver unsplit: the driver
-        // either consumes it in its one write to the harness process or, by
-        // default, discards it and sends the unavailable marker.
+        // Everything is validated against the handle-only request. For a
+        // registration that opted in to resolved delivery, the dispatch
+        // value, which alone holds what the request's entity references
+        // resolved to, is moved to the driver unsplit: the driver either
+        // consumes it in its one write to the harness process or, by default,
+        // discards it and sends the unavailable marker.
         context.validate_request(&ProviderKind::LocalHarness, dispatch.request())?;
         let registration = self
             .registry
             .registration(&dispatch.request().model)
             .ok_or(ProviderError::Unsupported)?;
         validate_registered_request(&registration, dispatch.request())?;
+        if registration.resolved_entity_reference_delivery().is_none() {
+            // Not opted in: the driver is given a plain request with markers
+            // and never sees the dispatch value.
+            return self
+                .driver
+                .stream(registration, dispatch.into_unavailable_request())
+                .await;
+        }
         self.driver.stream_dispatch(registration, dispatch).await
     }
 }

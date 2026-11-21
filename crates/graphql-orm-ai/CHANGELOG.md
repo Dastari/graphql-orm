@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-20
+last_reviewed: 2026-11-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,18 +12,18 @@ supersedes: []
 
 ## Unreleased - 0.152.0 (placeholder: the next minor after the breaking release)
 
-Entity references on the local-process adapters (#721). No GraphQL SDL,
-persistent schema or data migration change, and no AI schema module change.
-See the [migration guide](MIGRATION.md#01510-to-01520-entity-references-on-local-process-adapters)
+Opt-in entity references on the local-harness and Grok ACP adapters (#721).
+No GraphQL SDL, persistent schema or data migration change, and no AI schema
+module change. See the [migration guide](MIGRATION.md#01510-to-01520-opt-in-entity-references-on-local-process-adapters)
 and [entity references](docs/entity-references.md#adapters-for-a-local-process).
 
-- **Behaviour:** the local-harness, Grok ACP and Codex app-server adapters send what an entity reference resolved to, where they used to send the unavailable marker. The executor already resolved on these paths for the run's rehydrated principal at every dispatch; the adapter discarded the result. Each adapter now writes resolved data in exactly one place: the harness stdin frame, the Grok `session/prompt` frame, and the Codex `turn/start` frame. A retry, a later turn and a stateless continuation are new dispatches and resolve again, so revoked access yields the marker from the next dispatch on. A missing, denied, failed or oversized reference is still the one marker.
-- **Security:** nothing that is cloned, compared, queued, logged or persisted on these paths holds resolved data. The harness driver receives the non-`Clone` `ModelDispatchRequest` and drops its resolutions before it launches the process. The Grok process receives the new `AiGrokAcpPromptInput`, which is neither `Clone` nor `Serialize`, prints only a block count, and yields its resolved text only by being consumed. `AiCodexAppServerTurnInput` stays `Clone`: its text, its `input()` accessor and its `Debug` output hold the marker, and the resolutions ride in a one-use slot shared by all clones, which the first `AiCodexAppServerProtocolActor::start_turn` encoding empties. A second encoding of the turn, or an encoding of a clone, writes the marker.
-- **Added:** `AiLocalHarnessDriver::stream_dispatch` and `AiGrokAcpRunProcess::prompt_dispatch`, both with defaults that discard resolved data and call the existing `stream` and `prompt` with markers, and `AiGrokAcpPromptInput` (`into_wire_text`, `into_unavailable_text`). Host-written drivers and processes keep sending the marker until they override the new method.
-- **Behaviour:** if the resolved form of a request would exceed a bound the adapter enforces (harness `maximum_request_bytes`, Grok `maximum_input_bytes`, the Codex text and frame bounds), every reference of that request is sent as the marker; the request is not refused.
-- **Behaviour:** a tool-free Codex app-server turn accepts entity-reference blocks. It used to reject a request carrying one as `Unsupported`, like any other JSON block; other JSON blocks are still rejected. `AiJsonLinesLocalHarnessDriver::stream`, called directly with a plain request, writes an entity-reference handle block as the marker.
+- **Added (off by default):** `AiLocalHarnessRegistration::with_resolved_entity_reference_delivery` and `AiGrokAcpRegistration::with_resolved_entity_reference_delivery` opt one local provider registration in to receiving what an entity reference resolved to. Without the call nothing changes: the adapter sends the unavailable marker for every reference, including in a deployment that already has an `AiEntityReferenceRegistry`. The executor already resolved on these paths for the run's rehydrated principal at every dispatch; the adapter discarded the result, and still does unless opted in.
+- **Security:** with the opt-in, resolved data is written in exactly one place: the harness stdin frame or the Grok `session/prompt` frame. Nothing that is cloned, compared, queued, logged or persisted on these paths holds it. The harness driver receives the non-`Clone` `ModelDispatchRequest`; the Grok process receives the new `AiGrokAcpPromptInput`, which is neither `Clone` nor `Serialize`, prints only a block count, and yields its resolved text only by being consumed. A retry, a later turn, a resumed Grok session and a stateless continuation are new dispatches and resolve again, so revoked access yields the marker from the next dispatch on.
+- **Security (freshness bound):** the opt-in takes the longest time allowed from the start of resolution to the completion of that one write, at most `AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE` (60 seconds). It covers the host hook, launch admission, process launch, Grok session resume and the write. A resolution older than the bound when the process is ready is sent as markers; a write still in progress at the bound is abandoned and fails the turn. `ModelDispatchReferences::write_deadline` exposes the bound to custom adapters.
+- **Added:** `AiLocalHarnessDriver::stream_dispatch` and `AiGrokAcpRunProcess::prompt_dispatch`, both with defaults that discard resolved data and call the existing `stream` and `prompt` with markers, and `AiGrokAcpPromptInput` (`into_wire_text`, `unavailable_text`, `into_unavailable_text`). Host-written drivers and processes keep receiving the marker until they override the new method, even with the opt-in.
+- **Behaviour:** a request is admitted on its all-marker form. If the resolved form would exceed a bound the adapter enforces (harness `maximum_request_bytes` and frame limit; Grok `maximum_input_bytes`, or 16 MiB for the complete escaped JSON-RPC frame), every reference of that request is sent as the marker, and the request is refused only if the all-marker form does not fit. `AiJsonLinesLocalHarnessDriver::stream`, called directly with a plain request, writes an entity-reference handle block as the marker.
+- **Unchanged:** the Codex app-server adapter sends the marker for every reference and has no opt-in. Its turn input is `Clone` and its protocol actor returns encoded frames to the host, so resolved delivery needs a consuming dispatch signature, a breaking change tracked in #828.
 - **Decision:** `AiRuntime::dispatch_provider`, `stream_provider`, their dynamic-tool variants and `submit_provider_background` keep their signatures and keep sending the marker, permanently. They take no principal, and references are resolved only for a principal the executor or the background-submission service has just rehydrated for the run.
-- **Note:** Codex and Grok sessions are provider-retained. Reference data a turn sent stays in the agent's thread until the session is deleted; revocation stops further sends only.
 
 ## Unreleased - 0.151.0 (breaking release)
 

@@ -1,18 +1,18 @@
 //! Entity references on the adapters that deliver a request to a local
-//! process: the JSON-lines local harness, the Codex app-server and Grok ACP.
+//! process and may send resolved data: the JSON-lines local harness and Grok
+//! ACP. The Codex app-server adapter sends markers only.
 //!
 //! Each test registers the real adapter with the runtime, drives it through
 //! `AiProviderCallExecutor`, and asserts on the bytes the adapter's own
-//! protocol code wrote for the process: the harness stdin frame, the
-//! `turn/start` frame the Codex protocol actor encoded, and the
-//! `session/prompt` frame the Grok wire process wrote.
+//! protocol code wrote for the process: the harness stdin frame and the
+//! frames the Grok wire process wrote.
 
 use super::*;
 
 /// Rewrites a plan sealed for the fixture's mock provider as one for a
 /// local-process adapter, which registers as [`ProviderKind::LocalHarness`].
 /// The Grok tests seal their own plan with the registration's tools.
-#[cfg(any(feature = "local-harness", feature = "provider-codex-app-server"))]
+#[cfg(feature = "local-harness")]
 fn for_local_process(mut plan: AiProviderCallPlan) -> AiProviderCallPlan {
     plan.provider_kind = ProviderKind::LocalHarness;
     plan.budget.provider_kind = ProviderKind::LocalHarness;
@@ -89,6 +89,8 @@ mod local_harness {
     struct Launcher {
         turns: std::sync::Mutex<VecDeque<Vec<ProviderEvent>>>,
         frames: Frames,
+        /// How long the process takes to become ready.
+        launch_delay: std::time::Duration,
     }
 
     struct Process {
@@ -102,6 +104,7 @@ mod local_harness {
             &self,
             _registration: Arc<AiLocalHarnessRegistration>,
         ) -> Result<Box<dyn AiLocalHarnessProcess>, AiLocalHarnessProcessError> {
+            tokio::time::sleep(self.launch_delay).await;
             let turn = self
                 .turns
                 .lock()
@@ -151,9 +154,17 @@ mod local_harness {
         }
     }
 
-    fn registration(maximum_request_bytes: usize) -> AiLocalHarnessRegistration {
+    /// A freshness bound no test reaches by accident.
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// A registration that opted in to resolved delivery with the bound
+    /// `delivery`, or that did not opt in.
+    fn registration(
+        maximum_request_bytes: usize,
+        delivery: Option<std::time::Duration>,
+    ) -> AiLocalHarnessRegistration {
         let limits = AiLocalHarnessLimits::default();
-        AiLocalHarnessRegistration::new(
+        let registration = AiLocalHarnessRegistration::new(
             "mock-model",
             "/opt/reviewed/bin/synthetic-harness",
             vec!["--json-lines".to_owned()],
@@ -185,7 +196,13 @@ mod local_harness {
                 ..ProviderCapabilities::default()
             },
         )
-        .expect("registration should validate")
+        .expect("registration should validate");
+        match delivery {
+            Some(maximum_age) => registration
+                .with_resolved_entity_reference_delivery(maximum_age)
+                .expect("the delivery bound should validate"),
+            None => registration,
+        }
     }
 
     struct Harness {
@@ -193,17 +210,32 @@ mod local_harness {
         frames: Frames,
     }
 
-    /// The real provider and JSON-lines driver over a fake process launcher.
+    /// The real provider and JSON-lines driver over a fake process launcher,
+    /// for a registration that opted in to resolved delivery.
     async fn harness(
         turns: impl IntoIterator<Item = Vec<ProviderEvent>>,
         maximum_request_bytes: usize,
+    ) -> Harness {
+        harness_with(
+            turns,
+            registration(maximum_request_bytes, Some(FRESH)),
+            std::time::Duration::ZERO,
+        )
+        .await
+    }
+
+    async fn harness_with(
+        turns: impl IntoIterator<Item = Vec<ProviderEvent>>,
+        registration: AiLocalHarnessRegistration,
+        launch_delay: std::time::Duration,
     ) -> Harness {
         let frames = Frames::default();
         let driver = AiJsonLinesLocalHarnessDriver::new(Arc::new(Launcher {
             turns: std::sync::Mutex::new(turns.into_iter().collect()),
             frames: frames.clone(),
+            launch_delay,
         }));
-        let provider = harness_provider(Arc::new(driver), maximum_request_bytes);
+        let provider = harness_provider(Arc::new(driver), registration);
         Harness {
             references: references_for(MockProvider::new(Vec::new()), Some(provider)).await,
             frames,
@@ -212,11 +244,10 @@ mod local_harness {
 
     fn harness_provider(
         driver: Arc<dyn AiLocalHarnessDriver>,
-        maximum_request_bytes: usize,
+        registration: AiLocalHarnessRegistration,
     ) -> Arc<dyn crate::AiProvider> {
         Arc::new(AiLocalHarnessProvider::new(
-            AiLocalHarnessRegistry::new([registration(maximum_request_bytes)])
-                .expect("registry should validate"),
+            AiLocalHarnessRegistry::new([registration]).expect("registry should validate"),
             driver,
         ))
     }
@@ -354,6 +385,79 @@ mod local_harness {
         assert_unavailable(&written[0]);
     }
 
+    /// Default off: a registration that has not opted in is sent the marker
+    /// by the built-in driver, although the deployment has a registry and
+    /// the executor resolved the reference.
+    #[tokio::test]
+    async fn a_registration_that_has_not_opted_in_receives_the_marker() {
+        let Harness { references, frames } = harness_with(
+            [text_turn()],
+            registration(1024 * 1024, None),
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let fixture = &references.fixture;
+        let plan = for_local_process(with_reference(plan(fixture), &references.registry));
+        executor(fixture)
+            .execute(&fixture.lease, plan)
+            .await
+            .expect("the call should complete");
+        assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+        let written = self::frames(&frames);
+        assert_eq!(written.len(), 1);
+        assert_unavailable(&written[0]);
+    }
+
+    /// The freshness bound runs from resolution to the write. A process that
+    /// takes longer than the bound to become ready is sent the marker frame;
+    /// the resolution is not written late.
+    #[tokio::test]
+    async fn a_resolution_older_than_the_freshness_bound_is_sent_as_the_marker() {
+        let Harness { references, frames } = harness_with(
+            [text_turn()],
+            registration(1024 * 1024, Some(std::time::Duration::from_millis(40))),
+            std::time::Duration::from_millis(400),
+        )
+        .await;
+        let fixture = &references.fixture;
+        let plan = for_local_process(with_reference(plan(fixture), &references.registry));
+        executor(fixture)
+            .execute(&fixture.lease, plan)
+            .await
+            .expect("the call should complete with the marker");
+        assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+        let written = self::frames(&frames);
+        assert_eq!(written.len(), 1);
+        assert_unavailable(&written[0]);
+    }
+
+    /// The opt-in rejects a zero bound and one above the crate ceiling.
+    #[test]
+    fn the_delivery_bound_is_validated() {
+        let base = || registration(1024 * 1024, None);
+        assert!(base().resolved_entity_reference_delivery().is_none());
+        assert!(
+            base()
+                .with_resolved_entity_reference_delivery(std::time::Duration::ZERO)
+                .is_err()
+        );
+        assert!(
+            base()
+                .with_resolved_entity_reference_delivery(
+                    crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE
+                        + std::time::Duration::from_millis(1)
+                )
+                .is_err()
+        );
+        assert_eq!(
+            base()
+                .with_resolved_entity_reference_delivery(FRESH)
+                .expect("a bound within the ceiling validates")
+                .resolved_entity_reference_delivery(),
+            Some(FRESH)
+        );
+    }
+
     /// A driver that does not implement `stream_dispatch` receives a plain
     /// request in which the reference is the marker, although the executor
     /// resolved it.
@@ -376,7 +480,10 @@ mod local_harness {
         let driver = Arc::new(Legacy(std::sync::Mutex::new(Vec::new())));
         let references = references_for(
             MockProvider::new(Vec::new()),
-            Some(harness_provider(driver.clone(), 1024 * 1024)),
+            Some(harness_provider(
+                driver.clone(),
+                registration(1024 * 1024, Some(FRESH)),
+            )),
         )
         .await;
         let fixture = &references.fixture;
@@ -392,100 +499,6 @@ mod local_harness {
     }
 }
 
-#[cfg(feature = "provider-codex-app-server")]
-mod codex_app_server {
-    use super::*;
-    use crate::providers::{
-        AI_CODEX_APP_SERVER_PROTOCOL_V2, AiCodexAppServerProvider, AiCodexAppServerRegistration,
-        AiCodexAppServerRunLimits, AiCodexAppServerRunPool, ExecutorActorCapture,
-        ExecutorActorFactory,
-    };
-
-    fn codex_plan(
-        fixture: &Fixture,
-        registry: &crate::AiEntityReferenceRegistry,
-    ) -> AiProviderCallPlan {
-        let mut plan = plan(fixture);
-        plan.request.continuation_mode = ModelContinuationMode::StatelessReplay;
-        for_local_process(with_reference(plan, registry))
-    }
-
-    fn lines(lines: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
-        lines.lock().expect("capture should lock").clone()
-    }
-
-    /// Revoke, then retry a cloned plan, with the turn cloned in between.
-    ///
-    /// The provider builds a cloneable turn and hands it to the process,
-    /// which encodes `turn/start` with the real protocol actor. The first
-    /// encoding carries the resolved value. A second encoding of the same
-    /// turn, and an encoding of a clone taken before the first, carry the
-    /// marker: the resolution is single-use. `Debug` output of the turn and
-    /// its public input text never hold the value. After revocation the
-    /// retried plan's turn encodes the marker the first time too.
-    #[tokio::test]
-    async fn the_codex_turn_is_resolved_once_and_a_retry_after_revocation_sends_the_marker() {
-        let capture = Arc::new(ExecutorActorCapture::default());
-        let registration = AiCodexAppServerRegistration::new(
-            "mock-profile",
-            "mock-model",
-            "a".repeat(64),
-            "1.0.0",
-            "isolated-test",
-            AI_CODEX_APP_SERVER_PROTOCOL_V2,
-        )
-        .expect("registration should validate");
-        let provider = Arc::new(AiCodexAppServerProvider::new(
-            Arc::new(registration),
-            AiCodexAppServerRunPool::new(
-                Arc::new(ExecutorActorFactory(capture.clone())),
-                AiCodexAppServerRunLimits::default(),
-            ),
-        ));
-        let References {
-            fixture,
-            access,
-            calls,
-            registry,
-        } = references_for(MockProvider::new(Vec::new()), Some(provider)).await;
-        let executor = executor(&fixture);
-        let first = codex_plan(&fixture, &registry);
-        let retry = attempt(first.clone(), &fixture, 2);
-
-        let result = executor
-            .execute(&fixture.lease, first)
-            .await
-            .expect("the first turn should complete");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let frames = lines(&capture.frames);
-        assert_eq!(frames.len(), 1);
-        assert_resolved(&frames[0]);
-        let replays = lines(&capture.replays);
-        assert_eq!(replays.len(), 2);
-        assert_unavailable(&replays[0]);
-        assert_unavailable(&replays[1]);
-        let observed = lines(&capture.observed);
-        assert_handles_only("the queued turn", &observed[0]);
-        assert!(observed[0].contains(r#"\"status\":\"unavailable\""#));
-        assert_handles_only("the call result", &format!("{result:?}"));
-        assert_handles_only("persisted state", &persisted_state(&fixture).await);
-
-        access.store(false, Ordering::SeqCst);
-        executor
-            .execute(&fixture.lease, retry)
-            .await
-            .expect("the retried turn should complete");
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "the retry resolved again");
-        let frames = lines(&capture.frames);
-        assert_eq!(frames.len(), 2);
-        assert_unavailable(&frames[1]);
-        for replay in lines(&capture.replays) {
-            assert_unavailable(&replay);
-        }
-        assert_handles_only("persisted state", &persisted_state(&fixture).await);
-    }
-}
-
 #[cfg(feature = "provider-grok-acp")]
 mod grok_acp {
     use super::*;
@@ -495,38 +508,45 @@ mod grok_acp {
         references: References,
         factory: Arc<ReferenceWireFactory>,
         registration: Arc<AiGrokAcpRegistration>,
+        /// The run's lease, shared by every turn of the run.
+        lease: Arc<Mutex<AiRunLease>>,
     }
 
     /// The real provider over the real ACP wire process and a fake transport.
-    async fn grok() -> Grok {
+    /// `delivery` is the registration's opt-in to resolved delivery.
+    async fn grok(delivery: Option<std::time::Duration>) -> Grok {
         let seed = fixture(vec![]).await;
         let tools = tool_plan(&seed).request.tools;
-        let registration = Arc::new(
-            AiGrokAcpRegistration::new(
-                "mock-profile".into(),
-                "grok-4.7".into(),
-                "a".repeat(64),
-                "1.0.40".into(),
-                "test-wire-only".into(),
-                crate::ModelReasoningEffortProfile::new(
-                    "grok-4.7",
-                    [crate::ModelReasoningEffort::Low],
-                    crate::ModelReasoningEffort::Low,
-                )
-                .expect("effort profile should validate"),
+        let registration = AiGrokAcpRegistration::new(
+            "mock-profile".into(),
+            "grok-4.7".into(),
+            "a".repeat(64),
+            "1.0.40".into(),
+            "test-wire-only".into(),
+            crate::ModelReasoningEffortProfile::new(
+                "grok-4.7",
+                [crate::ModelReasoningEffort::Low],
                 crate::ModelReasoningEffort::Low,
-                "Use authorized tools".into(),
-                tools,
-                16384,
-                2048,
-                8,
             )
-            .expect("registration should validate")
-            .with_usage_model("grok-4.7-build".into())
-            .expect("usage model should validate")
-            .with_retained_namespace("d".repeat(64))
-            .expect("namespace should validate"),
-        );
+            .expect("effort profile should validate"),
+            crate::ModelReasoningEffort::Low,
+            "Use authorized tools".into(),
+            tools,
+            16384,
+            2048,
+            8,
+        )
+        .expect("registration should validate")
+        .with_usage_model("grok-4.7-build".into())
+        .expect("usage model should validate")
+        .with_retained_namespace("d".repeat(64))
+        .expect("namespace should validate");
+        let registration = Arc::new(match delivery {
+            Some(maximum_age) => registration
+                .with_resolved_entity_reference_delivery(maximum_age)
+                .expect("the delivery bound should validate"),
+            None => registration,
+        });
         let factory = Arc::new(ReferenceWireFactory::default());
         let provider = Arc::new(
             AiGrokAcpProvider::new(
@@ -579,16 +599,18 @@ mod grok_acp {
         )
         .await
         .expect("input message should insert");
+        let lease = Arc::new(Mutex::new(references.fixture.lease.clone()));
         Grok {
             references,
             factory,
             registration,
+            lease,
         }
     }
 
-    /// One retained Grok turn carrying the reference, through
-    /// `execute_with_provider_session`.
-    async fn execute(grok: &Grok) -> AiProviderCallResult {
+    /// The `number`-th retained Grok turn of the run, carrying the reference,
+    /// through `execute_with_provider_session`.
+    async fn execute(grok: &Grok, number: u32) -> AiProviderCallResult {
         let fixture = &grok.references.fixture;
         let sessions = Arc::new(
             OrmAiProviderSessionService::new(
@@ -603,7 +625,7 @@ mod grok_acp {
             )
             .expect("provider-session service should validate"),
         );
-        let mut base = tool_plan(fixture);
+        let mut base = attempt(tool_plan(fixture), fixture, number);
         base.request.model = "grok-4.7".into();
         base.request.instructions.clear();
         base.request.reasoning_effort = crate::ModelReasoningEffort::Low;
@@ -638,7 +660,7 @@ mod grok_acp {
         .expect("descriptor should validate");
         executor(fixture)
             .execute_with_provider_session(
-                Arc::new(Mutex::new(fixture.lease.clone())),
+                grok.lease.clone(),
                 plan,
                 AiProviderSessionTurnPlan::new(descriptor, "d".repeat(64))
                     .expect("session plan should validate"),
@@ -653,13 +675,15 @@ mod grok_acp {
             .expect("the retained Grok turn should complete")
     }
 
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// The executor resolves the reference for the run's principal and the
     /// real wire process writes the value in its one `session/prompt` frame
     /// and in no other frame. Nothing resolved is persisted or printed.
     #[tokio::test]
     async fn the_grok_prompt_frame_carries_the_resolved_reference_once() {
-        let grok = grok().await;
-        let result = execute(&grok).await;
+        let grok = grok(Some(FRESH)).await;
+        let result = execute(&grok, 1).await;
         assert_eq!(grok.references.calls.load(Ordering::SeqCst), 1);
         let prompts = grok.factory.prompts();
         assert_eq!(prompts.len(), 1, "one process, one prompt write");
@@ -676,17 +700,83 @@ mod grok_acp {
         );
     }
 
-    /// With access revoked before the turn is dispatched, the same handle is
-    /// resolved for the run's principal, denied, and written as the marker.
+    /// Default off: a registration that has not opted in is sent the marker,
+    /// although the deployment has a registry and the executor resolved the
+    /// reference.
     #[tokio::test]
-    async fn a_grok_turn_dispatched_after_revocation_sends_the_marker() {
-        let grok = grok().await;
-        grok.references.access.store(false, Ordering::SeqCst);
-        execute(&grok).await;
+    async fn a_grok_registration_that_has_not_opted_in_receives_the_marker() {
+        let grok = grok(None).await;
+        execute(&grok, 1).await;
         assert_eq!(grok.references.calls.load(Ordering::SeqCst), 1);
         let prompts = grok.factory.prompts();
         assert_eq!(prompts.len(), 1);
         assert_unavailable(&prompts[0]);
         assert_handles_only("every written frame", &grok.factory.frames());
+    }
+
+    /// With access revoked before the turn is dispatched, the same handle is
+    /// resolved for the run's principal, denied, and written as the marker.
+    #[tokio::test]
+    async fn a_grok_turn_dispatched_after_revocation_sends_the_marker() {
+        let grok = grok(Some(FRESH)).await;
+        grok.references.access.store(false, Ordering::SeqCst);
+        execute(&grok, 1).await;
+        assert_eq!(grok.references.calls.load(Ordering::SeqCst), 1);
+        let prompts = grok.factory.prompts();
+        assert_eq!(prompts.len(), 1);
+        assert_unavailable(&prompts[0]);
+        assert_handles_only("every written frame", &grok.factory.frames());
+    }
+
+    /// Same session: a successful turn, then revocation, then a second turn
+    /// that resumes the same cursor in a new process.
+    ///
+    /// The first turn writes the resolved value. The run's process is then
+    /// closed, as when a run parks or its worker restarts. After revocation
+    /// the second turn resolves again, the new process resumes the retained
+    /// cursor, and its prompt carries the marker. No frame of the second
+    /// process (initialize, `session/resume`, `session/prompt`) and no
+    /// crate-persisted row holds the value.
+    #[tokio::test]
+    async fn a_grok_session_resumed_after_revocation_sends_the_marker() {
+        let grok = grok(Some(FRESH)).await;
+        let fixture = &grok.references.fixture;
+        execute(&grok, 1).await;
+        assert_eq!(grok.references.calls.load(Ordering::SeqCst), 1);
+        assert_resolved(&grok.factory.prompts()[0]);
+        assert_handles_only("persisted state", &persisted_state(fixture).await);
+
+        let binding = crate::AiProviderRunBinding::from_lease(&*grok.lease.lock().await)
+            .expect("the lease should bind");
+        fixture
+            .runtime
+            .close_provider_run(
+                &ProviderKind::LocalHarness,
+                &binding,
+                crate::AiProviderRunCloseReason::Parked,
+            )
+            .await
+            .expect("the run's process should close");
+        grok.references.access.store(false, Ordering::SeqCst);
+
+        let result = execute(&grok, 2).await;
+        assert_eq!(
+            grok.references.calls.load(Ordering::SeqCst),
+            2,
+            "the resumed turn resolved again"
+        );
+        let prompts = grok.factory.prompts();
+        assert_eq!(prompts.len(), 2);
+        assert_unavailable(&prompts[1]);
+        let resumed = grok.factory.process_frames(1);
+        assert!(resumed.contains(r#""method":"session/resume""#));
+        assert!(
+            resumed.contains(r#""sessionId":"session-1""#),
+            "the second process resumed the first turn's cursor"
+        );
+        assert!(!resumed.contains(r#""method":"session/new""#));
+        assert_handles_only("the resumed process's frames", &resumed);
+        assert_handles_only("the resumed turn's result", &format!("{result:?}"));
+        assert_handles_only("persisted state", &persisted_state(fixture).await);
     }
 }

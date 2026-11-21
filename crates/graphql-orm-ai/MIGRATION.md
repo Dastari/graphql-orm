@@ -3,51 +3,84 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-20
+last_reviewed: 2026-11-21
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## 0.151.0 to 0.152.0: entity references on local-process adapters
+## 0.151.0 to 0.152.0: opt-in entity references on local-process adapters
 
-**No action** for most hosts. The version is a placeholder for the next minor
-after the breaking release. No public signature changed, and there is no
-GraphQL SDL, persistent schema, AI schema module or data migration change.
+The version is a placeholder for the next minor after the breaking release.
+No public signature changed, and there is no GraphQL SDL, persistent schema,
+AI schema module or data migration change.
 
-What changes without any host step:
+**Nothing changes on upgrade.** The local-harness, Grok ACP and Codex
+app-server adapters keep sending the unavailable marker for every entity
+reference, including in a deployment that already has an
+`AiEntityReferenceRegistry` installed.
 
-- A deployment that has an `AiEntityReferenceRegistry` installed and runs
-  turns through `AiProviderCallExecutor` on the built-in local-harness driver,
-  Grok ACP wire process or Codex app-server protocol actor now sends resolved
-  reference data to that local process, where it sent the unavailable marker
-  before. Resolution uses the same hook and the same rehydrated run principal
-  as every other adapter. **Action needed** only if a deployment relied on
-  these adapters never receiving reference data: do not install the registry
-  in that runtime, or have the hook return `None` for it.
-- The sealed egress estimate and budget of a plan already reserved the bytes
-  a handle may resolve to, on these adapters too. Nothing changes there.
-- Codex and Grok sessions are provider-retained. Data a turn sent stays in the
-  agent's thread until the session is deleted; see
-  [entity references](docs/entity-references.md#what-the-crate-cannot-recall).
+**Action needed to adopt:** a host that wants a local process to receive what
+a reference resolved to opts in on that provider's registration:
 
-Host-written process code keeps sending the marker until it opts in:
+```rust
+let harness = AiLocalHarnessRegistration::new(/* ... */)?
+    .with_resolved_entity_reference_delivery(Duration::from_secs(10))?;
+let grok = AiGrokAcpRegistration::new(/* ... */)?
+    .with_resolved_entity_reference_delivery(Duration::from_secs(20))?;
+```
+
+Decide these before opting in:
+
+1. **What the process retains.** Data written to a local process is outside
+   the crate, and revoking access later does not remove it.
+   - Grok keeps the session, including reference data a prompt sent, in its
+     retained session files, and later turns of that session continue from
+     it. The data stays until the session is deleted
+     (`AiGrokAcpDeletionService`, or session retention). Size your retention
+     for that.
+   - A harness process is launched per request, but anything the harness
+     executable logs or writes in its sandbox holds the data until the host
+     removes it. Check the harness's logging and the sandbox's lifetime.
+2. **The freshness bound.** The argument is the longest time allowed from the
+   start of resolution to the completion of the one write that carries the
+   data, at most 60 seconds
+   (`AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`). It covers the host hook,
+   launch admission, process launch, Grok session resume and the write. Set
+   it a little above the provider's normal start-up time. Access revoked
+   after resolution can still reach the process for at most this long. A
+   resolution older than the bound is sent as markers, so a bound that is
+   too small shows up as markers, not as errors.
+3. **Egress.** Resolved reference data is one more data source of the
+   request. The sealed egress estimate and budget of a plan already reserve
+   the bytes a handle may resolve to; the disclosure decision for the local
+   destination is the host's.
+
+The opt-in is not part of a registration identity or session fingerprint.
+Adding or removing it does not rebind sessions.
+
+Host-written process code keeps receiving the marker, even with the opt-in,
+until it takes the dispatch value:
 
 - `AiLocalHarnessDriver` has a new defaulted method `stream_dispatch`. A
   driver that wants resolved data overrides it, serializes each JSON input
   block through `ModelDispatchReferences::wire_json` into its one write to the
-  process, and drops the dispatch value.
+  process, honours `ModelDispatchReferences::write_deadline`, and drops the
+  dispatch value.
 - `AiGrokAcpRunProcess` has a new defaulted method `prompt_dispatch`. A
-  process that wants resolved data overrides it and passes
-  `AiGrokAcpPromptInput::into_wire_text` to its one `session/prompt` write.
-- An `AiCodexAppServerRunProcess` gets resolved data by encoding `turn/start`
-  with `AiCodexAppServerProtocolActor::start_turn`, once per turn.
-  `AiCodexAppServerTurnInput::input` always returns marker text.
+  process that wants resolved data overrides it, calls
+  `AiGrokAcpPromptInput::into_wire_text` immediately before its one
+  `session/prompt` write, and abandons the write at the returned deadline.
 
-The direct runtime dispatch methods (`AiRuntime::dispatch_provider`,
-`stream_provider`, their dynamic-tool variants, `submit_provider_background`)
-are unchanged and send the marker permanently.
+Not available:
+
+- The Codex app-server adapter has no opt-in and sends the marker. Resolved
+  delivery there needs a breaking signature change, tracked in #828.
+- The direct runtime dispatch methods (`AiRuntime::dispatch_provider`,
+  `stream_provider`, their dynamic-tool variants,
+  `submit_provider_background`) are unchanged and send the marker
+  permanently.
 
 ## 0.150.2 to 0.151.0: breaking release
 

@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.187.0, `graphql-orm-macros` 0.187.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.151.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.187.0, `graphql-orm-macros` 0.187.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
 
 This is the single **breaking release**: every change that breaks hosts or invalidates stored fingerprints, bindings, approvals or sessions. The [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) has one section for it, in upgrade order; the entry numbers below are that section's.
 
@@ -113,6 +113,7 @@ No action:
 - **No action** — ORM/macros 0.187.0: opt-in key-only deletes; review key-existence disclosure before adopting them (#666). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — router 0.17.0: the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default (#764). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
+- **No action** — AI 0.152.0 (placeholder, the next minor after the breaking release): the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01510-to-01520-opt-in-entity-references-on-local-process-adapters)
 
 ### workspace-2026.11.20.1
 

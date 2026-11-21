@@ -66,9 +66,7 @@ pub use codex_version_readiness::{
 mod codex_app_server;
 
 #[cfg(all(test, feature = "provider-codex-app-server", feature = "sqlite"))]
-pub(crate) use codex_app_server::tests::{
-    ExecutorActorCapture, ExecutorActorFactory, canonical_dynamic_tool_catalog,
-};
+pub(crate) use codex_app_server::tests::canonical_dynamic_tool_catalog;
 
 #[cfg(all(test, feature = "provider-openai-core"))]
 pub(crate) use mock::MockBackgroundRetrievalFailure;

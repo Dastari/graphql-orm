@@ -32,6 +32,12 @@ pub const AI_ENTITY_REFERENCE_ENVELOPE_RESERVED_BYTES: u64 = 512;
 /// Largest per-block reservation the estimator honours.
 const MAXIMUM_BLOCK_RESERVED_BYTES: u64 = 1024 * 1024;
 
+/// Longest time a local-process provider registration may allow between the
+/// resolution of a dispatch's entity references and the completion of the one
+/// write that delivers them to the process.
+pub const AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
 /// Message-block kind of a stored entity-reference handle.
 pub const AI_ENTITY_REFERENCE_BLOCK_KIND: &str = "entity_reference";
 /// Provenance tag carried by every resolved reference.
@@ -674,13 +680,6 @@ fn is_envelope(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some(AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE)
 }
 
-/// Whether a JSON input value is an entity-reference envelope: a handle, a
-/// marker or a resolved reference.
-#[cfg(feature = "provider-codex-app-server")]
-pub(crate) fn is_entity_reference_envelope(value: &Value) -> bool {
-    is_envelope(value)
-}
-
 /// Bytes an envelope reserves for resolved data, as recorded in the block.
 fn envelope_reserved_bytes(value: &Value) -> u64 {
     value
@@ -811,6 +810,10 @@ impl AiEntityReferenceRegistry {
 pub struct ModelDispatchReferences {
     entries: Vec<(AiEntityReferenceInput, Value)>,
     anonymous: Value,
+    /// Taken immediately before the first host hook call of this dispatch.
+    resolved_at: std::time::Instant,
+    /// Whether any entry carries resolved data, as opposed to a marker.
+    holds_resolved_data: bool,
 }
 
 impl std::fmt::Debug for ModelDispatchReferences {
@@ -830,7 +833,29 @@ impl ModelDispatchReferences {
         Self {
             entries: Vec::new(),
             anonymous: anonymous_unavailable_wire_envelope(),
+            resolved_at: std::time::Instant::now(),
+            holds_resolved_data: false,
         }
+    }
+
+    /// The instant by which the one transport write that carries this
+    /// dispatch's resolved data must have completed, for an adapter that may
+    /// send it for at most `maximum_age` after resolution.
+    ///
+    /// The age is counted from the moment the executor started resolving,
+    /// before the first host hook call, so it also covers the resolution
+    /// itself. `None` means the value holds no resolved data: every reference
+    /// is already the unavailable marker and no deadline applies.
+    ///
+    /// An adapter that does not write at once (one that launches, resumes or
+    /// queues for a local process first) must compare this instant with the
+    /// current time immediately before its write, send the marker form if it
+    /// has passed, and abandon a write that is still in progress when it
+    /// passes.
+    pub fn write_deadline(&self, maximum_age: std::time::Duration) -> Option<std::time::Instant> {
+        self.holds_resolved_data
+            .then(|| self.resolved_at.checked_add(maximum_age))
+            .flatten()
     }
 
     /// Returns the JSON an adapter must send for one JSON input value.
@@ -934,7 +959,7 @@ impl ModelDispatchRequest {
             .iter()
             .map(|_| AiEntityReferenceOutcome::Unavailable)
             .collect();
-        Self::assemble(request, slots, outcomes)
+        Self::assemble(request, slots, outcomes, std::time::Instant::now())
     }
 
     /// Resolves every reference of `request` for `principal`, now.
@@ -955,6 +980,9 @@ impl ModelDispatchRequest {
         mut request: ModelRequest,
     ) -> Self {
         withhold_request_entity_references(&mut request);
+        // The freshness of everything resolved below is counted from here,
+        // before the first hook call.
+        let resolved_at = std::time::Instant::now();
         let slots = dispatch_slots(&request);
         let handles = slots
             .iter()
@@ -969,7 +997,7 @@ impl ModelDispatchRequest {
                 .map(|_| AiEntityReferenceOutcome::Unavailable)
                 .collect(),
         };
-        Self::assemble(request, slots, outcomes)
+        Self::assemble(request, slots, outcomes, resolved_at)
     }
 
     /// Pairs each distinct handle with what is sent for it. A reference that
@@ -979,7 +1007,9 @@ impl ModelDispatchRequest {
         request: ModelRequest,
         slots: Vec<DispatchSlot>,
         outcomes: Vec<AiEntityReferenceOutcome>,
+        resolved_at: std::time::Instant,
     ) -> Self {
+        let mut holds_resolved_data = false;
         let entries = slots
             .into_iter()
             .zip(outcomes)
@@ -993,6 +1023,7 @@ impl ModelDispatchRequest {
                     | AiEntityReferenceOutcome::Unavailable
                     | AiEntityReferenceOutcome::TooLarge => None,
                 };
+                holds_resolved_data |= resolved.is_some();
                 let wire = resolved.unwrap_or_else(|| {
                     Some(unavailable_wire_envelope(&reference))
                         .filter(|marker| wire_cost(marker) <= allowance)
@@ -1006,6 +1037,8 @@ impl ModelDispatchRequest {
             references: ModelDispatchReferences {
                 entries,
                 anonymous: anonymous_unavailable_wire_envelope(),
+                resolved_at,
+                holds_resolved_data,
             },
         }
     }
@@ -1046,10 +1079,7 @@ impl ModelDispatchRequest {
     /// the one write that delivers the turn, where it passes each marker
     /// block through [`ModelDispatchReferences::wire_json`], which accepts a
     /// marker as well as a handle.
-    #[cfg_attr(
-        not(any(feature = "provider-codex-app-server", feature = "provider-grok-acp")),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "provider-grok-acp"), allow(dead_code))]
     pub(crate) fn into_unavailable_parts(self) -> (ModelRequest, ModelDispatchReferences) {
         let mut request = self.request;
         let mark = |blocks: &mut [ModelInputBlock]| {
@@ -1075,53 +1105,6 @@ impl ModelDispatchRequest {
         }
         mark(&mut request.input);
         (request, self.references)
-    }
-}
-
-/// Carries one dispatch's resolutions through a cloneable turn value to the
-/// single write that delivers the turn to a local agent process.
-///
-/// The Codex app-server process seam takes a cloneable turn input by value,
-/// so the resolutions cannot travel beside it. They travel inside it, in a
-/// slot that every clone of the turn shares and that is emptied by the first
-/// reader. Cloning the turn therefore copies no resolved data and cannot make
-/// it readable twice: whichever copy is encoded first takes the resolutions,
-/// and every later encoding, of that copy or of any other, finds the slot
-/// empty and writes the unavailable marker. The slot is not `Serialize`, its
-/// `Debug` output prints nothing it holds, and it compares equal to any other
-/// slot, so equality of two turns is decided by their handle-only content.
-#[cfg(feature = "provider-codex-app-server")]
-#[derive(Clone, Default)]
-pub(crate) struct OneUseDispatchReferences(Arc<std::sync::Mutex<Option<ModelDispatchReferences>>>);
-
-#[cfg(feature = "provider-codex-app-server")]
-impl OneUseDispatchReferences {
-    /// A slot holding `references` until the first [`Self::take`].
-    pub(crate) fn new(references: ModelDispatchReferences) -> Self {
-        Self(Arc::new(std::sync::Mutex::new(Some(references))))
-    }
-
-    /// Removes and returns the resolutions. Every later call, on this value
-    /// or on any clone of it, returns `None`.
-    pub(crate) fn take(&self) -> Option<ModelDispatchReferences> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-}
-
-#[cfg(feature = "provider-codex-app-server")]
-impl std::fmt::Debug for OneUseDispatchReferences {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("OneUseDispatchReferences(<redacted>)")
-    }
-}
-
-#[cfg(feature = "provider-codex-app-server")]
-impl PartialEq for OneUseDispatchReferences {
-    fn eq(&self, _other: &Self) -> bool {
-        true
     }
 }
 

@@ -530,13 +530,27 @@ impl AiGrokAcpWireProcess {
     }
 }
 
+/// What a prompt is built from: plain text, or the dispatch input that may
+/// hold resolved entity-reference text.
+enum PromptText {
+    Plain(Vec<String>),
+    Dispatch(super::grok_acp_provider::AiGrokAcpPromptInput),
+}
+
 impl AiGrokAcpWireProcess {
     /// Writes the one `session/prompt` frame and normalizes the turn.
     async fn send_prompt(
         &self,
-        prompt: Vec<Value>,
+        input: PromptText,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let maximum = self.registration.maximum_input_bytes();
+        // Admission is decided on the marker text, which holds no reference
+        // data, before any protocol state changes.
+        match &input {
+            PromptText::Plain(text) => Self::literal_prompt(text.clone(), maximum)?,
+            PromptText::Dispatch(input) => Self::literal_prompt(input.unavailable_text(), maximum)?,
+        };
         let mut state = self.state.clone().lock_owned().await;
         if state.prompted {
             return Err(rejected());
@@ -551,7 +565,48 @@ impl AiGrokAcpWireProcess {
         let id = Self::next_id(&mut state)?;
         let response_id = format!("grok-{}", uuid::Uuid::new_v4());
         state.broker.bind_prompt(response_id.clone())?;
-        Self::send(self.transport.as_ref(),json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}})).await?;
+        // The complete escaped frame, checked against the wire ceiling.
+        let frame = |text: Vec<String>| -> Result<Vec<u8>, ProviderError> {
+            let prompt = Self::literal_prompt(text, maximum)?;
+            let mut bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}})).map_err(|_| rejected())?;
+            bytes.push(b'\n');
+            if bytes.len() > FRAME {
+                return Err(ProviderError::InvalidRequest);
+            }
+            Ok(bytes)
+        };
+        let (bytes, write_deadline) = match input {
+            PromptText::Plain(text) => (frame(text)?, None),
+            PromptText::Dispatch(input) => {
+                // The one read of resolved reference text. It happens here,
+                // with the session ready and the prompt slot taken, so the
+                // freshness bound is compared with the time of the write.
+                // Resolved text that is stale, over the input ceiling or
+                // whose frame is over the wire ceiling is replaced by the
+                // all-marker text before anything is rejected.
+                let markers = input.unavailable_text();
+                let (text, deadline) =
+                    input.into_wire_text(|candidate| frame(candidate.to_vec()).is_ok());
+                match deadline {
+                    Some(deadline) => match frame(text) {
+                        Ok(bytes) => (bytes, Some(deadline)),
+                        Err(_) => (frame(markers)?, None),
+                    },
+                    None => (frame(text)?, None),
+                }
+            }
+        };
+        match write_deadline {
+            // A frame that carries resolved data must be written inside the
+            // freshness bound, or not at all.
+            Some(deadline) => tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.transport.write_frame(bytes),
+            )
+            .await
+            .map_err(|_| classified(Failure::Timeout))??,
+            None => self.transport.write_frame(bytes).await?,
+        }
         let transport = self.transport.clone();
         let registration = self.registration.clone();
         Ok(Box::pin(async_stream::try_stream! {
@@ -713,23 +768,15 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         input: Vec<String>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        let prompt = Self::literal_prompt(input, self.registration.maximum_input_bytes())?;
-        self.send_prompt(prompt, responder).await
+        self.send_prompt(PromptText::Plain(input), responder).await
     }
     async fn prompt_dispatch(
         &self,
         input: super::grok_acp_provider::AiGrokAcpPromptInput,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // The one place resolved reference text is read: it is encoded into
-        // the `session/prompt` frame and moved into that single write. A
-        // prompt whose resolved form exceeds the registered input ceiling is
-        // sent with every reference as the unavailable marker instead.
-        let maximum = self.registration.maximum_input_bytes();
-        let text = input
-            .into_wire_text(|candidate| Self::literal_prompt(candidate.to_vec(), maximum).is_ok());
-        let prompt = Self::literal_prompt(text, maximum)?;
-        self.send_prompt(prompt, responder).await
+        self.send_prompt(PromptText::Dispatch(input), responder)
+            .await
     }
     async fn cancel(&self) -> Result<(), ProviderError> {
         let session = self
@@ -843,8 +890,9 @@ pub(crate) mod tests {
         }
     }
     /// Launches real wire processes that answer one prompt with a text-free
-    /// terminal, and keeps every transport so a test can read the
-    /// `session/prompt` frames that were written.
+    /// terminal, and keeps every transport so a test can read the frames
+    /// that were written. The first process creates the session; each later
+    /// one resumes it.
     #[cfg(feature = "sqlite")]
     #[derive(Default)]
     pub(crate) struct ReferenceWireFactory {
@@ -878,12 +926,20 @@ pub(crate) mod tests {
         }
         /// Every frame written so far, as text.
         pub(crate) fn frames(&self) -> String {
-            self.wires
+            let processes = self.wires.lock().unwrap().len();
+            (0..processes)
+                .map(|process| self.process_frames(process))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        /// Every frame the `process`-th launched process wrote, as text.
+        pub(crate) fn process_frames(&self, process: usize) -> String {
+            self.wires.lock().unwrap()[process]
+                .writes
                 .lock()
                 .unwrap()
                 .iter()
-                .flat_map(|wire| wire.writes.lock().unwrap().clone())
-                .map(|frame| frame.to_string())
+                .map(Value::to_string)
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -899,11 +955,23 @@ pub(crate) mod tests {
             registration: Arc<AiGrokAcpRegistration>,
         ) -> Result<super::super::grok_acp_provider::AiGrokAcpLaunchedProcess, ProviderError>
         {
-            let mut reads = new_session_reads();
-            reads.push(response(
-                9,
-                json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
-            ));
+            let terminal = json!({"stopReason":"end_turn","_meta":{"usage":usage()}});
+            let reads = if self.wires.lock().unwrap().is_empty() {
+                // The run's first process creates the session.
+                let mut reads = new_session_reads();
+                reads.push(response(9, terminal));
+                reads
+            } else {
+                // A later process resumes the same cursor. Grok replays the
+                // session's history as notifications, which are discarded.
+                let mut reads = initialization();
+                reads.extend([
+                    update("agent_message_chunk", "completed earlier"),
+                    response(3, config()),
+                    response(4, terminal),
+                ]);
+                reads
+            };
             let wire = Arc::new(Wire {
                 reads: SyncMutex::new(reads.into()),
                 writes: SyncMutex::new(vec![]),
@@ -973,6 +1041,145 @@ pub(crate) mod tests {
             response(8, config()),
         ]);
         reads
+    }
+    /// Runs one dispatch prompt on a fresh session and returns the decoded
+    /// text of the `session/prompt` frame, with the number of frames written
+    /// for the prompt.
+    async fn dispatch_prompt_text(
+        registration: AiGrokAcpRegistration,
+        input: super::super::grok_acp_provider::AiGrokAcpPromptInput,
+    ) -> (String, usize) {
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let wire = Arc::new(Wire {
+            reads: SyncMutex::new(reads.into()),
+            writes: SyncMutex::new(vec![]),
+        });
+        let process = AiGrokAcpWireProcess::new(
+            Arc::new(registration),
+            wire.clone(),
+            "/private/empty".into(),
+        )
+        .unwrap();
+        process.create_empty_session().await.unwrap();
+        let mut stream = process
+            .prompt_dispatch(input, Arc::new(NoTools))
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let prompts = wire
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|frame| frame["method"] == "session/prompt")
+            .map(|frame| {
+                frame["params"]["prompt"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| {
+                        let literal = block["text"].as_str().unwrap();
+                        serde_json::from_str::<String>(literal.split_once('\n').unwrap().1).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>();
+        (prompts[0].clone(), prompts.len())
+    }
+    fn dispatch_input(
+        resolved: String,
+        write_deadline: Option<std::time::Instant>,
+    ) -> super::super::grok_acp_provider::AiGrokAcpPromptInput {
+        super::super::grok_acp_provider::AiGrokAcpPromptInput::for_test(
+            vec![
+                ("question".to_owned(), None),
+                ("MARKER".to_owned(), Some(resolved)),
+            ],
+            write_deadline,
+        )
+    }
+    #[tokio::test]
+    async fn dispatch_prompt_writes_resolved_text_only_while_fresh_and_within_the_frame_ceiling() {
+        let soon = || Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let registration = super::super::grok_acp_provider::tests::registration;
+
+        // Fresh and small: the resolved text is written, in one frame.
+        let (text, frames) =
+            dispatch_prompt_text(registration(), dispatch_input("RESOLVED".into(), soon())).await;
+        assert_eq!((text.as_str(), frames), ("question\nRESOLVED", 1));
+
+        // The freshness bound passed before the write: the marker text.
+        let expired = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+        let (text, frames) = dispatch_prompt_text(
+            registration(),
+            dispatch_input("RESOLVED".into(), Some(expired)),
+        )
+        .await;
+        assert_eq!((text.as_str(), frames), ("question\nMARKER", 1));
+
+        // No bound at all (a value that holds nothing resolved to send).
+        let (text, _) =
+            dispatch_prompt_text(registration(), dispatch_input("RESOLVED".into(), None)).await;
+        assert_eq!(text, "question\nMARKER");
+
+        // Over the registered input ceiling: the marker text, not a refusal.
+        let (text, _) = dispatch_prompt_text(
+            registration(),
+            dispatch_input("R".repeat(32 * 1024), soon()),
+        )
+        .await;
+        assert_eq!(text, "question\nMARKER");
+    }
+    #[tokio::test]
+    async fn a_resolved_frame_over_the_wire_ceiling_is_replaced_by_the_marker_frame() {
+        // The largest input ceiling a registration may declare. Quotes double
+        // when the text becomes a literal and double again inside the frame,
+        // so this text passes the input ceiling (about 10 MiB as a literal)
+        // while its complete escaped frame (about 20 MiB) exceeds 16 MiB.
+        let registration = AiGrokAcpRegistration::new(
+            "grok-test".into(),
+            "grok-4.7".into(),
+            "a".repeat(64),
+            "1.0.40".into(),
+            "reviewed-test-only".into(),
+            crate::ModelReasoningEffortProfile::new(
+                "grok-4.7",
+                [crate::ModelReasoningEffort::Low],
+                crate::ModelReasoningEffort::Low,
+            )
+            .unwrap(),
+            crate::ModelReasoningEffort::Low,
+            "Use only authorized read capabilities.".into(),
+            super::super::grok_acp_provider::tests::registration()
+                .tools()
+                .to_vec(),
+            FRAME as u64,
+            2_048,
+            8,
+        )
+        .unwrap()
+        .with_usage_model("grok-4.7-build".into())
+        .unwrap()
+        .with_retained_namespace("d".repeat(64))
+        .unwrap();
+        let resolved = "\"".repeat(5 * 1024 * 1024);
+        assert!(
+            AiGrokAcpWireProcess::literal_prompt(vec![resolved.clone()], FRAME as u64).is_ok(),
+            "the text is within the input ceiling"
+        );
+        let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let (text, frames) =
+            dispatch_prompt_text(registration, dispatch_input(resolved, deadline)).await;
+        assert_eq!((text.as_str(), frames), ("question\nMARKER", 1));
     }
     #[test]
     fn human_text_cannot_become_native_commands_file_references_or_metadata() {
