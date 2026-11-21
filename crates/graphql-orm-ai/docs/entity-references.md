@@ -259,8 +259,11 @@ The rules that hold on both:
   for Grok the hook, launch admission, process launch, session resume and
   frame encoding.
   - The adapter compares the bound with the clock after the frame is encoded
-    and immediately before the write starts. If it has passed, the turn is
-    sent with markers; it does not fail.
+    and immediately before the write starts. On Grok that is after the
+    process's shared writer has been acquired, so a prompt that waited behind
+    another write (a `session/cancel`, for example) is checked again once the
+    wait is over. If the bound has passed, the turn is sent with markers; it
+    does not fail.
   - A write that has started may complete, so a write in progress when the
     bound passes can still deliver its frame.
   - If a started write has not completed when the bound passes, the adapter

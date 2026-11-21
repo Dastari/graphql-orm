@@ -33,8 +33,8 @@ pub const AI_ENTITY_REFERENCE_ENVELOPE_RESERVED_BYTES: u64 = 512;
 const MAXIMUM_BLOCK_RESERVED_BYTES: u64 = 1024 * 1024;
 
 /// Longest time a local-process provider registration may allow between the
-/// resolution of a dispatch's entity references and the completion of the one
-/// write that delivers them to the process.
+/// resolution of a dispatch's entity references and the moment the one write
+/// that delivers them to the process may begin.
 pub const AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE: std::time::Duration =
     std::time::Duration::from_secs(60);
 
@@ -839,8 +839,8 @@ impl ModelDispatchReferences {
     }
 
     /// The instant by which the one transport write that carries this
-    /// dispatch's resolved data must have completed, for an adapter that may
-    /// send it for at most `maximum_age` after resolution.
+    /// dispatch's resolved data must begin, for an adapter that may start
+    /// sending it for at most `maximum_age` after resolution.
     ///
     /// The age is counted from the moment the executor started resolving,
     /// before the first host hook call, so it also covers the resolution

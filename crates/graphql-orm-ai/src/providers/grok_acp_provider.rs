@@ -461,8 +461,8 @@ pub struct AiGrokAcpPromptInput {
     /// sent, and the resolved text when the block is an entity reference
     /// that resolved.
     blocks: Vec<(String, Option<String>)>,
-    /// When the write that carries resolved text must have completed. `None`
-    /// when the value holds no resolved text.
+    /// The latest instant at which the write that carries resolved text may
+    /// begin. `None` when the value holds no resolved text.
     write_deadline: Option<std::time::Instant>,
 }
 
@@ -534,7 +534,7 @@ impl AiGrokAcpPromptInput {
     }
 
     /// Returns the prompt text for the one `session/prompt` write, and the
-    /// instant by which that write must have completed.
+    /// instant by which that write must begin.
     ///
     /// Call this immediately before the write, when the process and session
     /// are ready. The text carries what each entity reference resolved to
@@ -544,8 +544,9 @@ impl AiGrokAcpPromptInput {
     /// admitted with, and the second value is `None`.
     ///
     /// The returned instant bounds when the write may begin. The caller must
-    /// compare it with the clock again after encoding the frame and
-    /// immediately before the write starts, and send
+    /// compare it with the clock again after encoding the frame, after any
+    /// wait for a shared writer, and immediately before the transport write
+    /// starts, and send
     /// [`Self::unavailable_text`] (taken before this call) if it has passed.
     /// A write that has started may complete. If it is still in progress at
     /// that instant the caller must stop it, fail the turn, never write to

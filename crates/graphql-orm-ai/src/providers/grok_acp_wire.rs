@@ -96,15 +96,20 @@ struct FencedTransport {
     poisoned: std::sync::atomic::AtomicBool,
 }
 
-/// Poisons the fence unless the write it guards ran to completion.
+/// Poisons the fence if the transport write it guards began and did not run
+/// to completion.
 struct PoisonUnlessComplete<'a> {
     fence: &'a FencedTransport,
-    complete: bool,
+    /// Set when the transport write is first polled. Until then the
+    /// transport has been given nothing and there is nothing to fence.
+    began: std::sync::atomic::AtomicBool,
+    complete: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for PoisonUnlessComplete<'_> {
     fn drop(&mut self) {
-        if !self.complete {
+        use std::sync::atomic::Ordering;
+        if self.began.load(Ordering::SeqCst) && !self.complete.load(Ordering::SeqCst) {
             self.fence.poison();
         }
     }
@@ -120,25 +125,57 @@ impl FencedTransport {
         self.poisoned.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Writes a frame that carries resolved data. If the returned future is
-    /// dropped after the transport was given the frame and before it
-    /// reported completion, the fence is poisoned before the writer lock is
-    /// released, so no queued write can follow the partial frame.
-    async fn write_resolved_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+    /// Writes a frame that carries resolved data, under the freshness
+    /// `deadline` of its dispatch.
+    ///
+    /// The order matters. The writer lock is taken first, however long that
+    /// waits, and the fence is checked for poison. Only then, with the lock
+    /// held, does the shared start check run around the transport write
+    /// itself: the deadline is compared with the clock immediately before the
+    /// transport is first polled, so a write that queued for the lock past
+    /// its deadline is reported as [`ResolvedWrite::NotStarted`] and the
+    /// caller sends the marker frame. "Began" therefore means the transport
+    /// write was polled while this call held the lock.
+    ///
+    /// Once the transport write has been polled, anything other than its
+    /// successful completion poisons the fence before the lock is released:
+    /// expiry of the deadline, a transport error, or this future being
+    /// dropped. No queued write can then follow the partial frame.
+    ///
+    /// [`ResolvedWrite::NotStarted`]: crate::entity_references::ResolvedWrite::NotStarted
+    async fn write_resolved_frame(
+        &self,
+        frame: Vec<u8>,
+        deadline: std::time::Instant,
+    ) -> crate::entity_references::ResolvedWrite<Result<(), ProviderError>> {
+        use crate::entity_references::ResolvedWrite;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let _writer = self.writer.lock().await;
         if self.is_poisoned() {
-            return Err(rejected());
+            return ResolvedWrite::Completed(Err(rejected()));
         }
         // Declared after the lock guard, so it is dropped, and poisons,
         // first.
-        let mut guard = PoisonUnlessComplete {
+        let guard = PoisonUnlessComplete {
             fence: self,
-            complete: false,
+            began: AtomicBool::new(false),
+            complete: AtomicBool::new(false),
         };
-        let result = self.inner.write_frame(frame).await;
-        // A write the transport reported as failed may be partial too.
-        guard.complete = result.is_ok();
-        result
+        let mut write = std::pin::pin!(self.inner.write_frame(frame));
+        // The helper polls this only after its own start check passed, so
+        // the guard is armed exactly when the transport is first polled.
+        let transport_write = std::future::poll_fn(|context| {
+            guard.began.store(true, Ordering::SeqCst);
+            write.as_mut().poll(context)
+        });
+        let outcome =
+            crate::entity_references::write_resolved_before(deadline, transport_write).await;
+        // A write the transport reported as failed may be partial too, so
+        // only success disarms the guard.
+        if matches!(outcome, ResolvedWrite::Completed(Ok(()))) {
+            guard.complete.store(true, Ordering::SeqCst);
+        }
+        outcome
     }
 }
 
@@ -682,22 +719,18 @@ impl AiGrokAcpWireProcess {
         };
         let mut written = false;
         if let Some((resolved, deadline)) = resolved {
-            // The freshness deadline bounds when this write may begin. It is
-            // checked again here, after encoding, on the first poll and
-            // before the transport is given a byte, and it is polled before
-            // every later poll of the write.
-            match crate::entity_references::write_resolved_before(
-                deadline,
-                self.fence.write_resolved_frame(resolved),
-            )
-            .await
-            {
+            // The freshness deadline bounds when this write may begin. The
+            // fence checks it after encoding and after any wait for the
+            // writer lock, immediately before the transport is given a byte,
+            // and polls it before every later poll of the write.
+            match self.fence.write_resolved_frame(resolved, deadline).await {
                 crate::entity_references::ResolvedWrite::Completed(result) => {
                     result?;
                     written = true;
                 }
-                // Stale before the write began: nothing was written, and the
-                // turn continues with the all-marker frame.
+                // Stale before the transport write began, whether on
+                // arrival or after queuing for the writer: nothing was
+                // written, and the turn continues with the all-marker frame.
                 crate::entity_references::ResolvedWrite::NotStarted => {}
                 // The write began and the deadline passed before it
                 // completed. The transport may hold part of the frame, so
@@ -1358,6 +1391,103 @@ pub(crate) mod tests {
                     || frame["method"] == "session/prompt"),
             "nothing completed on the writer after the abandoned frame"
         );
+    }
+
+    /// A transport whose write of `session/cancel` holds the writer until it
+    /// is released.
+    struct GatedWire {
+        wire: Wire,
+        release: tokio::sync::Notify,
+        /// Every call to `write_frame`, complete or not, as text.
+        attempts: SyncMutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl AiGrokAcpWireTransport for GatedWire {
+        async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+            let text = String::from_utf8(frame.clone()).unwrap();
+            let gated = text.contains("session/cancel");
+            self.attempts.lock().unwrap().push(text);
+            if gated {
+                self.release.notified().await;
+            }
+            self.wire.write_frame(frame).await
+        }
+        async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+            self.wire.read_frame().await
+        }
+    }
+
+    /// Review regression: a resolved prompt queues for the writer lock while
+    /// a concurrent `session/cancel` holds it, and the lock is released only
+    /// after the freshness deadline. The prompt was fresh when it was encoded
+    /// and when it began to wait. It must not reach the transport: the start
+    /// check runs again once the lock is held, and the separately encoded
+    /// marker frame goes out.
+    #[tokio::test]
+    async fn a_resolved_write_that_queued_for_the_writer_past_its_deadline_sends_the_marker_frame()
+    {
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let transport = Arc::new(GatedWire {
+            wire: Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            },
+            release: tokio::sync::Notify::new(),
+            attempts: SyncMutex::new(vec![]),
+        });
+        let process = AiGrokAcpWireProcess::new(
+            Arc::new(super::super::grok_acp_provider::tests::registration()),
+            transport.clone(),
+            "/private/empty".into(),
+        )
+        .unwrap();
+        process.create_empty_session().await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        // The cancel write takes the writer lock and holds it.
+        let cancel = process.cancel();
+        // The prompt arrives while fresh, encodes its resolved frame and
+        // queues for the lock.
+        let prompt = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(std::time::Instant::now() < deadline, "fresh on arrival");
+            process
+                .prompt_dispatch(
+                    dispatch_input("RESOLVED".into(), Some(deadline)),
+                    Arc::new(NoTools),
+                )
+                .await
+        };
+        // The lock is released after the deadline has passed.
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            assert!(std::time::Instant::now() >= deadline);
+            transport.release.notify_one();
+        };
+        let (cancelled, prompted, ()) = tokio::join!(cancel, prompt, release);
+        cancelled.expect("the cancel write completes once released");
+        assert!(prompted.is_ok(), "the turn continues with markers");
+
+        let attempts = transport.attempts.lock().unwrap().clone();
+        assert!(
+            !attempts.iter().any(|frame| frame.contains("RESOLVED")),
+            "the resolved frame never reached the transport"
+        );
+        let prompts = attempts
+            .iter()
+            .filter(|frame| frame.contains(r#""method":"session/prompt""#))
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 1, "one prompt frame was written");
+        assert!(prompts[0].contains("MARKER"));
+        // The cancel frame was handed to the transport before the prompt.
+        let position = |needle: &str| attempts.iter().position(|frame| frame.contains(needle));
+        assert!(position("session/cancel") < position("session/prompt"));
+        // Nothing was poisoned: an ordinary write still goes through.
+        assert!(!process.fence.is_poisoned());
     }
 
     #[tokio::test]
