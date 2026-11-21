@@ -1,7 +1,3 @@
-#![cfg(feature = "postgres")]
-
-use super::owned_postgres::{OwnedPostgres, POSTGRES_IMAGE};
-
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     CollectionId, DbAuthContext, FieldId, PostgresBackend, RelationCardinality, RelationId,
@@ -10,6 +6,8 @@ use graphql_orm::graphql::orm::{
     RuntimeRelationLimits, RuntimeRelationSelection, RuntimeRelationValue, RuntimeSchema,
     RuntimeValueKind,
 };
+
+use super::owned_postgres::{OwnedPostgres, POSTGRES_IMAGE};
 
 fn cid(value: &str) -> CollectionId {
     CollectionId::new(value).unwrap()
@@ -181,9 +179,6 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
 -> Result<(), Box<dyn std::error::Error>> {
     let owned = OwnedPostgres::start_ready("runtime-relation", POSTGRES_IMAGE).await?;
     let database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
-    let app_password = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
-    let (_, address) = owned.url.split_once('@').expect("owned PostgreSQL URL");
-    let app_url = format!("postgres://relation_reader:{app_password}@{address}");
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_relation_pg_customers (
             pg_customer_id BIGINT PRIMARY KEY,
@@ -261,9 +256,9 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     )
     .execute(database.pool())
     .await?;
+    let app_password = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
     graphql_orm::sqlx::query(&format!(
-        "CREATE ROLE relation_reader LOGIN PASSWORD '{}'",
-        app_password
+        "CREATE ROLE relation_reader LOGIN PASSWORD '{app_password}'"
     ))
     .execute(database.pool())
     .await?;
@@ -274,7 +269,17 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     )
     .execute(database.pool())
     .await?;
-    let app_database = Database::<PostgresBackend>::connect_postgres(&app_url).await?;
+    let app_options = database
+        .pool()
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("relation_reader")
+        .password(&app_password);
+    let app_pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .connect_with(app_options)
+        .await?;
+    let app_database = Database::<PostgresBackend>::new(app_pool);
 
     let tenant_a = DbAuthContext {
         tenant_id: Some("tenant-a".to_string()),

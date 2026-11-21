@@ -2318,6 +2318,7 @@ pub struct AiCompactGraphqlSubscriptionPlan {
 #[derive(Clone, Debug)]
 pub struct AiGraphqlSubscriptionCapability {
     base: AiGraphqlQueryCapability,
+    condition_values: Arc<BTreeMap<String, PlanSchema>>,
     maximum_duration_seconds: u32,
     maximum_events: u32,
 }
@@ -2389,7 +2390,7 @@ impl AiGraphqlSubscriptionCapability {
         {
             return Err(input_error("subscription observation bounds are invalid"));
         }
-        validate_subscription_condition(&self.base, &typed)?;
+        validate_subscription_condition(self, &typed)?;
         let query_plan = AiGraphqlQueryPlan {
             arguments: typed.arguments,
             fields: typed.fields,
@@ -2456,7 +2457,7 @@ impl AiGraphqlSubscriptionCapability {
             timeout_seconds: typed.timeout_seconds,
             maximum_events: typed.maximum_events,
         };
-        validate_subscription_condition(&self.base, &legacy)?;
+        validate_subscription_condition(self, &legacy)?;
         let compiled =
             self.base
                 .compile_typed_plan(expanded, &plan, GraphqlOperationKind::Subscription)?;
@@ -2900,7 +2901,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 subgraph_id,
                 &operation.field_name,
             ))?;
-            base.argument_schema = PlanSchema::new(subscription_plan_schema(
+            let (plan_schema, condition_values) = subscription_plan_schema(
                 &schema,
                 semantic_catalog,
                 operation,
@@ -2908,7 +2909,8 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 limits.query,
                 maximum_duration_seconds,
                 maximum_events,
-            )?);
+            )?;
+            base.argument_schema = PlanSchema::new(plan_schema);
             base.compact_argument_schema = PlanSchema::new(compact_subscription_plan_schema(
                 &schema,
                 semantic_catalog,
@@ -2925,9 +2927,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 continue;
             }
             for schema in [&base.argument_schema, &base.compact_argument_schema] {
-                jsonschema::validator_for(&schema.value).map_err(|_| {
-                    configuration_error("generated subscription plan schema is invalid")
-                })?;
+                schema.validator("generated subscription plan schema is invalid")?;
             }
             base.fingerprint = sha256_json(&json!({
                 "version": AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
@@ -2943,6 +2943,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
             }));
             let capability = AiGraphqlSubscriptionCapability {
                 base,
+                condition_values: Arc::new(condition_values),
                 maximum_duration_seconds,
                 maximum_events,
             };
@@ -4225,8 +4226,9 @@ fn subscription_plan_schema(
     limits: AiGraphqlQueryCapabilityLimits,
     maximum_duration_seconds: u32,
     maximum_events: u32,
-) -> Result<Value, AiError> {
+) -> Result<(Value, BTreeMap<String, PlanSchema>), AiError> {
     let mut plan = build_plan_schema(schema, catalog, operation, output, limits)?;
+    let mut condition_values = BTreeMap::new();
     let object = plan
         .as_object_mut()
         .ok_or_else(|| configuration_error("subscription plan schema is not an object"))?;
@@ -4291,6 +4293,9 @@ fn subscription_plan_schema(
                 "required": ["field", "operator", "value"],
                 "additionalProperties": false,
             }));
+            // Use the same standalone schema the condition check used to
+            // build per call. The cache is keyed only by admitted fields.
+            condition_values.insert(condition.field_name.clone(), PlanSchema::new(value_schema));
         }
         properties.insert("condition".to_owned(), json!({ "oneOf": alternatives }));
     }
@@ -4301,7 +4306,7 @@ fn subscription_plan_schema(
     required.retain(|value| value.as_str() != Some("maximumItems"));
     required.push(Value::String("timeoutSeconds".to_owned()));
     required.push(Value::String("maximumEvents".to_owned()));
-    Ok(plan)
+    Ok((plan, condition_values))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4395,7 +4400,7 @@ fn compact_subscription_plan_schema(
 }
 
 fn validate_subscription_condition(
-    capability: &AiGraphqlQueryCapability,
+    capability: &AiGraphqlSubscriptionCapability,
     plan: &AiGraphqlSubscriptionPlan,
 ) -> Result<(), AiError> {
     let Some(condition) = &plan.condition else {
@@ -4405,6 +4410,7 @@ fn validate_subscription_condition(
         return Err(input_error("subscription condition field must be selected"));
     }
     let observation = capability
+        .base
         .operation
         .subscription_observation
         .as_ref()
@@ -4419,23 +4425,11 @@ fn validate_subscription_condition(
             "subscription condition operator is not admitted",
         ));
     }
-    let QueryOutput::Entity { entity, .. } = &capability.output else {
-        return Err(input_error(
-            "subscription condition requires an entity event",
-        ));
-    };
-    let field = capability.schema.object_field(entity, &condition.field)?;
-    let value_schema = input_type_schema(
-        &capability.schema,
-        &capability.semantic_catalog,
-        &field.ty,
-        None,
-        capability.limits,
-        0,
-        &mut Vec::new(),
-    )?;
-    let validator = jsonschema::validator_for(&value_schema)
-        .map_err(|_| configuration_error("condition value schema is invalid"))?;
+    let validator = capability
+        .condition_values
+        .get(&condition.field)
+        .ok_or_else(|| configuration_error("condition value schema is missing"))?
+        .validator("condition value schema is invalid")?;
     if !validator.is_valid(&condition.value) {
         return Err(input_error(
             "subscription condition value has the wrong type",
@@ -11703,6 +11697,19 @@ mod tests {
         assert_eq!(catalog.capabilities().count(), 1);
         let capability = catalog.capabilities().next().expect("capability");
         assert_eq!(capability.field_name(), "ParentChanged");
+        assert!(
+            capability.base.argument_schema.validator.get().is_some(),
+            "catalogue validation should retain the compiled closed schema"
+        );
+        assert!(
+            capability
+                .base
+                .compact_argument_schema
+                .validator
+                .get()
+                .is_some(),
+            "catalogue validation should retain the compiled compact schema"
+        );
         let compiled = capability
             .compile(json!({
                 "arguments": { "id": "parent-1" },
@@ -11713,6 +11720,41 @@ mod tests {
                 "maximumEvents": 10
             }))
             .expect("bounded subscription plan");
+        let condition_schema = &capability.condition_values["id"];
+        let validator = condition_schema
+            .validator
+            .get()
+            .and_then(Option::as_ref)
+            .expect("closed plan cached the condition value validator");
+        let cloned = capability.clone();
+        let compact = json!({
+            "arguments": { "id": "parent-1" },
+            "selections": ["id", "name"],
+            "relationshipArguments": {},
+            "relationshipMaximumItems": {},
+            "condition": { "field": "id", "operator": "equal", "value": "parent-1" },
+            "timeoutSeconds": 60,
+            "maximumEvents": 10
+        });
+        let compact_compiled = cloned
+            .compile_compact(compact.clone())
+            .expect("bounded compact subscription plan");
+        assert_eq!(compact_compiled.condition(), compiled.condition());
+        assert_eq!(compact_compiled.variables(), compiled.variables());
+        assert!(std::ptr::eq(
+            validator,
+            cloned.condition_values["id"]
+                .validator
+                .get()
+                .and_then(Option::as_ref)
+                .expect("compact plan uses the same cached validator")
+        ));
+        let mut wrong_type = compact;
+        wrong_type["condition"]["value"] = json!(false);
+        assert!(matches!(
+            cloned.compile_compact(wrong_type),
+            Err(AiError::InvalidInput(_))
+        ));
         assert!(compiled.descriptor().document.starts_with("subscription "));
         assert_eq!(compiled.timeout_seconds(), 60);
         assert_eq!(compiled.maximum_events(), 10);

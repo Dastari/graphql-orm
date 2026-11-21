@@ -1,7 +1,11 @@
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 pub(crate) const POSTGRES_IMAGE: &str =
     "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065";
+pub(crate) const POSTGRES_16_IMAGE: &str =
+    "postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663";
+const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct OwnedPostgres {
     container_id: String,
@@ -11,14 +15,22 @@ pub(crate) struct OwnedPostgres {
 }
 
 impl OwnedPostgres {
-    #[allow(dead_code)] // The grouped runtime and repository tests use start_ready.
+    #[allow(dead_code)] // Some integration binaries use only PostgreSQL 16.
     pub(crate) fn start(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         Self::start_image(label, POSTGRES_IMAGE)
     }
 
+    #[allow(dead_code)] // Only fixtures that exercise PostgreSQL 16 use this image.
+    pub(crate) fn start_postgres_16(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_image(label, POSTGRES_16_IMAGE)
+    }
+
     fn start_image(label: &str, image: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let (mut owned, password, database) = Self::launch(label, image)?;
-        for _ in 0..120 {
+        let deadline = Instant::now() + READINESS_TIMEOUT;
+        while Instant::now() < deadline {
+            // The image's initialization server accepts Unix sockets before the
+            // final server listens on TCP.
             let ready = Command::new("docker")
                 .args([
                     "exec",
@@ -26,6 +38,8 @@ impl OwnedPostgres {
                     "pg_isready",
                     "-h",
                     "127.0.0.1",
+                    "-t",
+                    "1",
                     "-U",
                     "graphql_orm_owner",
                     "-d",
@@ -34,12 +48,16 @@ impl OwnedPostgres {
                 .output()?;
             if ready.status.success() {
                 owned.url = owned.loopback_url(&password, &database)?;
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(500));
                 return Ok(owned);
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(250));
         }
-        Err("owned PostgreSQL did not become ready".into())
+        Err(format!(
+            "owned PostgreSQL container {} did not accept TCP connections within {READINESS_TIMEOUT:?}",
+            owned.container_id
+        )
+        .into())
     }
 
     /// Wait for an authenticated connection through Docker's published port.
@@ -49,11 +67,10 @@ impl OwnedPostgres {
         image: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         use graphql_orm::sqlx::{Connection, PgConnection};
-        use std::time::Duration;
 
         let (mut owned, password, database) = Self::launch(label, image)?;
         owned.url = owned.loopback_url(&password, &database)?;
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(READINESS_TIMEOUT, async {
             let mut retry = tokio::time::interval(Duration::from_millis(250));
             loop {
                 retry.tick().await;
@@ -204,6 +221,7 @@ impl OwnedPostgres {
         ))
     }
 
+    #[allow(dead_code)] // Integration binaries can also rely on the drop guard.
     pub(crate) fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.has_exact_owned_identity() {
             return Err("refusing to clean up PostgreSQL without exact owned identity".into());

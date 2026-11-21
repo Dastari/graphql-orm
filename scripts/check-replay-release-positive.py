@@ -221,6 +221,12 @@ def check_orm_split(old, new):
         'cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test dependent_delete_repro -- --include-ignored --test-threads=1',
         'cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1',
     ]
+    # The naming features became build variables (#508): the same test under
+    # the same PascalCase-field, snake_case-argument contract.
+    old_case = "cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features --locked"
+    expected[expected.index(old_case)] = (
+        "GRAPHQL_ORM_FIELD_CASE=PascalCase GRAPHQL_ORM_ARGUMENT_CASE=snake_case "
+        "cargo test -p graphql-orm --no-default-features --features sqlite --test federation_entity_keys_case_features --locked")
     require(sorted(split) == sorted(expected), "ORM lane commands changed by the split")
     for line in [line for name in ORM_JOBS for line in new[name].splitlines()
                  if FIXTURE_MANIFEST in line and line.strip().startswith("cargo ")]:
@@ -302,6 +308,20 @@ def main():
         run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
 """
             require(current in body, "complete owned MSSQL execution is required")
+            body = body.replace(current, previous, 1)
+        if name == "ai-graphql-naming":
+            # The `graphql-case-pascal` feature became build variables (#508).
+            # The lane runs the same test under the same PascalCase contract.
+            previous = """      - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming --locked
+"""
+            current = """      - run: cargo test -p graphql-orm-ai --test graphql_naming --locked
+        env:
+          GRAPHQL_ORM_AI_CASE: PascalCase
+          GRAPHQL_ORM_RESOLVER_CASE: PascalCase
+          GRAPHQL_ORM_ARGUMENT_CASE: PascalCase
+          GRAPHQL_ORM_FIELD_CASE: PascalCase
+"""
+            require(current in body, "the AI naming lane must run under the PascalCase build variables")
             body = body.replace(current, previous, 1)
         if name == "router-msrv":
             check_msrv_expansion(body, old[name], (ROOT / "scripts/check-msrv.sh").read_text())

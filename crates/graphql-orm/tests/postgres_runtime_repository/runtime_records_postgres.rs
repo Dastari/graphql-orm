@@ -1,7 +1,4 @@
-#![cfg(feature = "postgres")]
 //! Owned disposable PostgreSQL conformance for runtime-row decoding.
-
-use super::{POSTGRES_16_IMAGE, owned_postgres::OwnedPostgres};
 
 use graphql_orm::graphql::orm::{
     CollectionId, FieldId, PostgresBackend, RuntimeCollection, RuntimeDateTime, RuntimeField,
@@ -10,7 +7,9 @@ use graphql_orm::graphql::orm::{
     RuntimeRecordErrorCode, RuntimeRowDecoder, RuntimeScalarOperator, RuntimeSchema, RuntimeValue,
     RuntimeValueKind, ValidatedRuntimeSchema,
 };
-use graphql_orm::sqlx::{Connection, PgConnection};
+use graphql_orm::sqlx::Connection;
+
+use super::owned_postgres::{OwnedPostgres, POSTGRES_16_IMAGE};
 
 const _: () = assert!(<PostgresBackend as RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED);
 
@@ -159,7 +158,7 @@ async fn decode_postgres(
 async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_closed()
 -> Result<(), Box<dyn std::error::Error>> {
     let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
-    let mut connection = PgConnection::connect(&owned.url).await?;
+    let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
     let schema = schema();
     let projection = projection(&schema);
     let postgres_record = decode_postgres(&mut connection, &projection).await?;
@@ -293,7 +292,7 @@ async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 async fn disposable_postgres_out_of_range_timestamps_are_typed_errors()
 -> Result<(), Box<dyn std::error::Error>> {
     let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
-    let mut connection = PgConnection::connect(&owned.url).await?;
+    let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
     let schema = schema();
     let projection = schema.resolve_projection_ids(&cid("customers"), &[fid("happened_at")])?;
     for literal in ["infinity", "-infinity", "294276-12-31 23:59:59+00"] {

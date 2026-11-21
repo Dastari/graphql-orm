@@ -87,6 +87,18 @@ pub const DEFAULT_SUBSCRIPTION_KEY_LIMIT: usize = 500;
 pub const DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 
+/// Retrieve the database registered for a generated resolver request.
+#[doc(hidden)]
+pub fn request_database<'ctx, B: OrmBackend>(
+    ctx: &async_graphql::Context<'ctx>,
+) -> async_graphql::Result<&'ctx Database<B>> {
+    ctx.data_opt::<Database<B>>().ok_or_else(|| {
+        async_graphql::Error::new(
+            "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",
+        )
+    })
+}
+
 pub struct Database<B: OrmBackend = DefaultBackend> {
     pool: B::Pool,
     mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
@@ -1483,6 +1495,10 @@ impl<B: OrmBackend> Database<B> {
                 crate::graphql::orm::EntityAccessSurface::Repository,
             )
             .await?;
+        visibility.validate_table(
+            B::DIALECT,
+            <P::Entity as crate::graphql::orm::DatabaseEntity>::TABLE_NAME,
+        )?;
         visibility.validate_identity(P::entity_type_id(), B::DIALECT)?;
         Ok(visibility)
     }
@@ -1503,6 +1519,7 @@ impl<B: OrmBackend> Database<B> {
         let visibility = self
             .read_visibility_for(T::metadata(), ctx, surface)
             .await?;
+        visibility.validate_table(B::DIALECT, T::TABLE_NAME)?;
         visibility.validate_identity(A::entity_type_id(), B::DIALECT)?;
         Ok(visibility)
     }

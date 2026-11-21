@@ -3,20 +3,284 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## ORM/macros 0.191.0 (unreleased)
+## 0.189.0 to 0.190.0: generated query resolvers
 
-**No action** for application consumers. Developers who select individual
-integration targets can find the grouped selectors in the
-[test lanes](docs/development/testing.md).
+Upgrade ORM and macros together.
 
-## Breaking release (unreleased)
+- **Action needed** if a keyset order has an incomplete null-order clause
+  (such as `x desc nulls`) or trailing tokens. Use
+  `field asc|desc [nulls first|last]` for each comma-separated entry, ending
+  with the complete primary key. The derive now rejects those declarations.
+- **No action** for valid declarations. Generated queries, Changed
+  subscriptions and the NodeId object field return a GraphQL field error
+  when required schema data is missing. Hand-built schemas still register
+  the matching `Database` and any generated Federation loaders they use.
+
+## 0.188.0 to 0.189.0: root search filter binding
+
+**No action** — generated root search qualifies client filter columns with the
+entity table (#799). Search filters, search input, and stored documents require
+no migration. If you snapshot generated search SQL, update the table-qualified
+filter and projection references.
+
+## 0.187.0 to 0.188.0: read-predicate columns bound to their row
+
+Upgrade ORM and macros together. Read predicates now bind every column to
+the row it describes (#796):
+
+- at the root of a statement, through the entity's table path, such as
+  `"records"."owner_id" = ?`;
+- inside relation, `not_related`, closure and count subqueries, through an
+  alias that no table or alias in scope has, such as
+  `__gom_row_1."owner_id"`.
+
+The governed row is a value inside the predicate, not text: the ORM's own
+predicates and generated filters never have a row name substituted into
+their SQL. Generated SQL text changes, but policies built with the
+`ReadPredicate` constructors and generated where inputs admit exactly the
+same rows. Hand-written filters are restricted, as described below.
+
+- **Missing physical columns fail the read. Action needed** only if a
+  table lacks a column that a read policy names, for example after schema
+  drift or before a migration is applied. Relation, `not_related` and
+  closure policies, generated related-row filters and relation-count
+  orderings evaluate the target's predicate inside a correlated subquery.
+  There, such a column used to resolve against an outer table that had a
+  column of that name, so the policy was evaluated against the wrong row.
+  The read now fails instead. Apply the pending migration.
+- **Hand-written `ReadVisibilityFilter`: single-row expressions only.
+  Action needed** if you implement `ReadVisibilityFilter` yourself and build
+  a policy from it with `ReadPredicate::from_filter`. A hand-written clause
+  may now only be a single-row boolean expression over the entity's own
+  columns and bound parameters. The ORM binds generated SQL structurally;
+  it cannot do that for SQL it did not write, where another table, alias or
+  spelling can capture a name. A filter is refused with
+  `AUTHORIZATION_MISCONFIGURED` when a clause holds, outside string
+  constants:
+  - `SELECT`, `FROM`, `JOIN`, `WITH`, `UNION`, `INTERSECT`, `EXCEPT`,
+    `VALUES` or `TABLE`, so no subquery and no alias of its own. This also
+    refuses `IS DISTINCT FROM`, `EXTRACT(... FROM ...)` and similar forms:
+    write the comparison another way, or use a generated filter;
+  - an unmatched parenthesis or bracket, or a semicolon. Each clause is
+    validated on its own before it is combined, so it can close neither its
+    own group nor the one it is composed into;
+  - a comment (`--`, `/* */`, and `#` on MySQL);
+  - a PostgreSQL `U&'...'` string or `U&"..."` identifier;
+  - two string constants separated only by whitespace, or a string
+    constant beside a dot;
+  - a delimited identifier that names the row qualifier or a generated
+    alias, such as `"__gom_self"` or `"__gom_row_1"`;
+  - a byte-order mark or other non-ASCII whitespace;
+  - on SQL Server, a `#` name;
+  - on SQLite, `rowid`, `_rowid_` or `oid`, and `IN` over anything but a
+    parenthesised list (`x IN t`, or `x IN (f(...))` for a function outside
+    SQLite's common scalar ones). This is conservative: a valid scalar call
+    such as `json_extract()` in the first list position is refused. Put a
+    constant or parameter first, or wrap the call in parentheses:
+    `x IN ((json_extract(doc, '$.a')), 2)`;
+  - a numbered or named placeholder (`?1`, `$1`, `@p1`, `:name`, `@name`,
+    `$name`), or a clause whose anonymous `?` placeholders and bind values
+    differ in number. Only `?` composes, because the statement numbers
+    placeholders in order across every predicate in it. A filter's
+    conditions share one flat list of bind values
+    (`DatabaseFilter::to_sql_conditions`); the total number of placeholders
+    across all of them must equal the number of values. A surplus value
+    used to be dropped silently;
+  - the bare word `__gom_self` with no dot after it, or an unclosed string,
+    identifier or dollar quote.
+
+  **Threat model.** Hand-written policy SQL is trusted host code. The ORM
+  guarantees that every clause it accepts is evaluated against exactly the
+  row it governs and cannot change how it composes with other policies, and
+  it refuses any construct its validator cannot classify with certainty.
+  SQL deliberately obfuscated to defeat that classification is outside the
+  guarantee. Known residuals:
+  - SQLite reads the bare words `true` and `false` as a column of that name
+    when one is visible: in the governed table or, inside a subquery, in an
+    enclosing one. Do not write the bare literals in a policy that such a
+    table can reach; compare with `1` and `0`.
+  - SQL Server compares identifiers with the catalog's collation. The
+    reserved-name check folds ASCII case only, so a table whose name equals
+    a generated alias only under a wider collation equivalence
+    (accent-insensitive, such as `__góm_visibility_1`, or
+    width-insensitive) is not recognised as reserved; do not name a table
+    that way.
+  - A filter that overrides the macro-only `__gom_row_bound_filter` hook is
+    rendered as generated code and is not validated.
+
+  A policy that reads another table uses the structured builders. Before:
+
+  ```rust
+  // Refused: a subquery in hand-written SQL.
+  struct OwnedByMember {
+      user: String,
+  }
+  impl DatabaseFilter for OwnedByMember {
+      fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+          (
+              vec![
+                  "EXISTS (SELECT 1 FROM members m WHERE m.team_id = records.team_id AND m.user_id = ?)"
+                      .to_owned(),
+              ],
+              vec![SqlValue::String(self.user.clone())],
+          )
+      }
+      // ...
+  }
+  let policy = ReadPredicate::from_filter::<Backend, _>(&OwnedByMember { user })?;
+  ```
+
+  After:
+
+  ```rust
+  let policy = ReadPredicate::related::<Backend, Record, Member>(
+      &[("team_id", "team_id")],
+      ReadPredicate::column::<Backend, Member>(
+          "user_id",
+          ReadPredicateOp::Eq,
+          SqlValue::String(user),
+      )?,
+  )?;
+  ```
+
+  `not_related`, `related_closure` and `related_closure_all` cover absence
+  and transitive relations the same way.
+- **Hand-written filters in correlated subqueries must bind every column.
+  Action needed** if a hand-written filter's predicate is evaluated inside
+  a correlated subquery. That happens in two ways:
+  - you pass the predicate as a relation, `not_related` or closure target;
+  - the predicate is an entity's own read policy
+    (`RowPolicy::read_visibility`), and a request uses a generated
+    related-row filter (`where: { relation: [...] }`) or a relation-count
+    ordering (`orderBy: [{ <Relation>Count: DESC }]`) whose target is that
+    entity. Both embed the target's policy in a subquery of the source
+    statement, without any call in your code.
+
+  There every column must be written as `__gom_self.<column>`
+  (`READ_PREDICATE_ROW`, a bare word followed by a dot), and `table_name`
+  must return the entity's table. A filter with an unqualified column
+  (`owner_id = ?`), a delimited one (`"owner_id" = ?`) or one qualified by
+  anything else (`records.owner_id = ?`) is now refused in those places
+  with `AUTHORIZATION_MISCONFIGURED`, instead of being evaluated with a
+  column that could resolve against an outer row. Earlier revisions of this
+  change documented that as a legacy fallback; it no longer exists. At the
+  root of a statement, where no enclosing row exists, an unqualified column
+  is still accepted. A word is read as a keyword only where its dialect
+  reads it as one: `LIKE`, `IN`, `BETWEEN`, `ESCAPE`, `COLLATE` and `END`
+  after an operand, `ILIKE`, `SIMILAR TO` and `IS [NOT] UNKNOWN` on
+  PostgreSQL, `GLOB` and `REGEXP` on SQLite. Anywhere else it counts as a
+  column, so `unknown = 0` is unbound. Numbers (also `.5`), bound
+  parameters, function calls, `NULL` and
+  the dialect's own constants (`TRUE`/`FALSE` except on SQL Server,
+  `CURRENT_TIMESTAMP`, and `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_USER`,
+  `LOCALTIMESTAMP` where the dialect has them) are not columns, so
+  `__gom_self.expires_at > CURRENT_TIMESTAMP` is bound. The default
+  `to_row_bound_filter_expression` returns
+  `to_filter_expression`, so writing the qualifier there is enough.
+  Generated where inputs need no change. Bulk writes do not accept
+  related-row filters, so write-target selection never evaluates a policy
+  in a relation subquery.
+- **`ReadPredicate` columns on PostgreSQL. Action needed** only if a
+  PostgreSQL entity declares a column without quotes in mixed case, such
+  as `db_column = "OwnerId"`, and a policy names it with
+  `ReadPredicate::column`, `is_null`, `is_not_null` or as a relation or
+  closure key. Generated DDL and DML write that column bare, which
+  PostgreSQL folds to `ownerid`; the predicate constructors quoted it
+  as `"OwnerId"`, which names a different column. They now fold it first,
+  as generated filters do. A column declared with quotes
+  (`db_column = "\"OwnerId\""`) keeps its case.
+- **Large policies. Action needed** only for a policy near the 1 MiB
+  rendered-size budget (`READ_PREDICATE_MAX_RENDERED_BYTES`) or the
+  per-statement relation budget. Each column term is longer by its
+  qualifier plus one byte. At the root that is the rendered table path, and
+  inside a subquery a row alias. Such a policy can now be refused with
+  `AUTHORIZATION_MISCONFIGURED` when it is built. Express a long list of
+  values on one column as `from_filter` with an `in_list`, which writes the
+  qualifier once.
+- **SQLite `rowid`, `_rowid_` and `oid`. Action needed** only if a SQLite
+  entity declares a column with one of those names and a read policy names
+  it. `ReadPredicate::column`, `is_null`, `is_not_null` and relation and
+  closure keys now refuse it with `AUTHORIZATION_MISCONFIGURED`, as
+  hand-written SQL does: every SQLite table has an implicit row id under
+  those names, so if the declared column were missing from the table,
+  SQLite would read the row id instead of failing the statement. Rename the
+  column. Other backends are unchanged.
+- **Table names read-policy SQL generates are reserved. Action needed**
+  only if an entity's table is named `__gom_self`, `__gom_row_<n>`,
+  `__gom_visibility_<n>`, `__gom_closure_<n>` or `__gom_closure_<n>_<suffix>`
+  (in any case, quoted or not, with or without a schema). Those are the row
+  aliases and closure expressions read-policy SQL renders; a table of such
+  a name could take an alias's place or be shadowed by a closure's common
+  table expression. The entity derive refuses the table with a compile
+  error. A hand-built `Entity` over such a table is refused with
+  `AUTHORIZATION_MISCONFIGURED` by every read-predicate constructor,
+  related-row filter and count ordering, and when a predicate is attached
+  to a statement over it, projections and aggregates included. Rename the table. Any other name, including
+  others that start with `__gom_`, is accepted.
+- **Relation-count ordering alias. Action needed** only if you compare the
+  SQL text of a relation-count ordering. The counted rows are now named by
+  an allocated alias (`__gom_visibility_<n>`) instead of the fixed
+  `__graphql_orm_order_relation`, so a table of that name is an ordinary
+  table. An ordering that was never authorized renders
+  `(SELECT COUNT(*) FROM <table> WHERE 1 = 0)`.
+- **Caller SQL beside a read policy. Action needed** only if a query that
+  a read policy is composed with also carries caller SQL as described
+  below. A policy is composed with a query when a row policy with a SQL
+  predicate applies to it, when `EntityQuery::with_read_visibility` is
+  called, and also when the query holds a generated related-row filter
+  (`where: { relation: [...] }`) or relation-count ordering, which embed
+  their target entity's policy in the query's own clause or ordering term.
+  The caller SQL concerned:
+  - has a different number of placeholders than bind values:
+    `EntityQuery::where_clause` or `where_values`, the public
+    `where_clauses` and `values` lists, or a hand-written `DatabaseFilter`
+    whose `to_sql_conditions` returns more or fewer values than its
+    conditions have placeholders; or
+  - on SQLite, writes a numbered or named placeholder (`?1`, `:name`,
+    `@name`, `$name`), or on SQL Server an `@name` variable, or on
+    PostgreSQL `$name`. Write the anonymous `?`. SQL Server `@@name`
+    system functions such as `@@SPID` are not parameters and stay
+    accepted.
+
+  The same holds for ordering terms, for a filter that returns an
+  expression of its own from `to_filter_expression` (each clause must hold
+  exactly its bind values), and for the filter of a `count()` inside a
+  transaction.
+
+  Such a query is now refused with `AUTHORIZATION_MISCONFIGURED` when it
+  is rendered (list, count, aggregate, projection, search, delete and
+  write-target statements). The policy and its bind values are kept apart
+  from the caller's clauses and values and composed only at render, after
+  the caller's are validated on their own. So after
+  `with_read_visibility`, `EntityQuery::where_clauses` and `values` hold
+  only the caller's own clauses and values, no longer the policy's; read
+  the rendered statement instead (`try_build_delete_sql` and the like). Before, the lists were flat and
+  shared: a clause `status = ?` with two values handed its second value to
+  the policy's placeholder after it, and on SQLite a caller's `?1` left the
+  policy's `?` reading the caller's first argument. PostgreSQL `$N` and SQL
+  Server `@pN` stay accepted: every one is renumbered in order when the
+  statement is rendered, and generated filters write them.
+
+  A query with no read policy is unchanged: its SQL is passed through as
+  written, so `status = ?1 OR previous_status = ?1` with one value still
+  works on SQLite. `ReadPredicate::from_filter` calls a hand-written filter
+  once, counts its placeholders with the lexer of the backend the predicate
+  is for (not the build's default backend, which differed in a build with
+  two backends), and builds the predicate from that one answer.
+- **SQLite bracketed names in trusted SQL. Action needed** only if a
+  trusted SQL fragment for SQLite holds `]]` inside a bracketed name.
+  Placeholder counting now closes a SQLite `[...]` name at its first `]`,
+  as SQLite does; it used to read `]]` as an escaped bracket, which only
+  SQL Server has. Fragments without `]]` count the same.
+
+## 0.186.0 to 0.187.0: breaking release
 
 This release collects every change that breaks hosts or invalidates stored
 fingerprints, bindings, approvals or sessions. It is the only breaking release
@@ -34,7 +298,7 @@ fingerprint.
 
 | Package | Version in this release |
 | --- | --- |
-| `graphql-orm`, `graphql-orm-macros` | 0.190.0 |
+| `graphql-orm`, `graphql-orm-macros` | 0.187.0 |
 | `graphql-orm-operation-catalog` | 0.10.0 |
 | `graphql-orm-ai-tool-profiles` | 0.27.0 |
 | `graphql-orm-ai` (AI schema module `0.83.0`) | 0.151.0 |
@@ -270,7 +534,7 @@ drops that index and creates the current composite one, and the drop is now
 `Destructive` (entry 1.1). Pass the plan's options through
 `AiSchemaModule::admit_index_replacements(&plan, options)`, which admits
 destructive steps only when every one is that known index replacement. See the
-[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased).
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release).
 
 ### Part 2: build configuration and Rust API
 
@@ -523,7 +787,7 @@ wildcard-free matches on `PruneResult`, `DeleteSnapshotResult` and
 `BackupError` of `graphql-orm-backup`. All three are now `#[non_exhaustive]`,
 the results gain `deleted_snapshot_ids`, and an unadmitted snapshot is refused
 with `BackupError::SnapshotNotAdmitted`. See the
-[backup migration guide](crates/graphql-orm-backup/MIGRATION.md#breaking-release-unreleased).
+[backup migration guide](crates/graphql-orm-backup/MIGRATION.md#0272-to-0280-breaking-release).
 
 ### Part 3: defaults and behaviour
 
@@ -748,7 +1012,7 @@ on an `@interfaceObject` type.
   protected selection into its own operation; the router does not null a
   refused field.
 - Keep subgraph guards and policies: the router check grants nothing.
-See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#breaking-release-unreleased).
+See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release).
 Anonymous development mode is unchanged.
 
 Releases before this one never enforced SDL `@authenticated` or
@@ -949,9 +1213,9 @@ Host steps:
    rebinds retained sessions, so decide before the upgrade's single rebind.
 4. Update exhaustive matches and struct literals, and any model guidance that
    names `planSchema`. Details: the
-   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
+   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
    and the
-   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#breaking-release-unreleased).
+   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0261-to-0270-breaking-release).
 
 ### Also in this release: no action
 
@@ -992,7 +1256,7 @@ router refused before sending any subgraph request carries
 `extensions.outcome: "refused"`, the value generated services send with
 `DatabaseBuilder::mutation_error_outcome(true)`, so a client handles both the
 same way. An absent `outcome` still means unknown. See the
-[router migration guide](crates/graphql-orm-router/MIGRATION.md#breaking-release-unreleased)
+[router migration guide](crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release)
 and the [shared vocabulary](docs/reference/graphql-orm/error-codes.md#router-refusal-outcome).
 
 #### Key-only delete signals per entity (#666)
@@ -1021,6 +1285,11 @@ under the new default identities (`InvalidConfiguration("generated input
 <Object>KeyInput.<field> differs from its canonical contract")`). Tool
 profiles accept the default `RuntimeInt64` and the legacy `Int`
 identity alike, and AI adopts them.
+
+## 0.185.0 to 0.186.0: Owned PostgreSQL test readiness
+
+**No action.** Upgrade ORM and macros together. The readiness check runs in the
+owned PostgreSQL test harness. No data migration is needed.
 
 ## 0.183.0 to 0.185.0: SQL Server filtered-index literals
 
