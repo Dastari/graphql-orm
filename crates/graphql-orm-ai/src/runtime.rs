@@ -1255,7 +1255,7 @@ impl AiRuntime {
     ///
     /// This entry point resolves no entity reference: each one in `request`
     /// is sent as the unavailable marker. Only
-    /// [`crate::AiProviderCallExecutor`] and the background-submission
+    /// `AiProviderCallExecutor` and the background-submission
     /// service resolve references, for the principal they rehydrate.
     pub async fn dispatch_provider(
         &self,

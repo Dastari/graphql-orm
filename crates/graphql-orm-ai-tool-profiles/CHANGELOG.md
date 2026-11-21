@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.27.1 (next patch after the breaking release)
+## Unreleased - 0.27.1
 
 - Replayable subscriptions reuse compiled plan and condition validators
   across closed and compact plans. Plan schemas, accepted conditions and
@@ -21,8 +21,8 @@ supersedes: []
 The tool-profiles part of the single breaking release, with operation catalogue
 0.10.0 and AI 0.151.0: operation fingerprint algorithm v2, capability index
 version 3 and compact signatures for broker version 2 (#683, #551). Host steps
-are in the root [migration guide](../../MIGRATION.md#breaking-release-unreleased)
-and the [migration guide](MIGRATION.md#breaking-release-unreleased).
+are in the root [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release)
+and the [migration guide](MIGRATION.md#0261-to-0270-breaking-release).
 
 - **Breaking (fingerprints, #683):** requires operation catalogue 0.10.0, whose generated-operation fingerprint algorithm is `graphql-orm-sha256-len-v2`. Operation contracts and tool manifests record that name. A manifest or contract bound under `graphql-orm-sha256-len-v1` is refused as stale; regenerate it. No Rust API change.
 - **Breaking (index, 5B):** `AI_CAPABILITY_INDEX_VERSION` is `3`. `AiCapabilityIndex::compile` groups every generated query root of one entity into one `AiCapabilityKind::GeneratedEntity` entry (shape `AiCapabilityOperationShape::Entity`) whose `operations` list each root (`AiCapabilityOperationMember`). The index and its limits count one entry per entity. Each root keeps its own `GeneratedQuery` entry, identity, capability fingerprint and entry fingerprint: `entry(root_id)` still resolves it, and `operation_entry` and `entity_entry_of` navigate between them. Roots without an entity stay standalone entries. Index and index-set fingerprints change once; the entity capability fingerprint (`AI_CAPABILITY_ENTITY_VERSION`) covers every root's ID and fingerprint.

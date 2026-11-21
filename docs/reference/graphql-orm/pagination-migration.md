@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -152,6 +152,47 @@ SqlValue::Int(bound))` validates the physical name against `Entity::columns()`,
 quotes it, and binds the value. It accepts private (`read = false, filter = false`)
 persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
 `Lt`, `Lte`, `Gt`, and `Gte`; NULL comparisons use ordinary SQL semantics.
+
+Every column a read predicate renders is bound to the row it describes, in
+`column`, `is_null`, `is_not_null`, the conditions `from_filter` renders
+from a generated filter, and relation keys and closure pointers:
+
+- At the root of a statement the entity's table path qualifies it:
+  `"records"."owner_id" > ?`.
+- Relation, `not_related` and closure predicates, generated related-row
+  filters and relation-count orderings evaluate a target's predicate inside
+  a correlated subquery. There the target row has an alias that no table
+  or alias in scope has, such as `__gom_row_1`, and its columns are written
+  through it.
+
+So a column that the target table does not physically have, after schema
+drift or before a migration is applied, fails the statement. Unqualified, it
+would resolve against an outer row on every backend. A table qualifier alone
+would not be enough on SQLite, which keeps searching outer scopes for
+another table exposing the same name (#796). The metadata check only covers
+`Entity::columns()`, so keep the physical schema migrated.
+
+The governed row is a value inside the predicate, not text. Generated where
+inputs render `row.<column>` for the row they are given, with the column
+delimited as generated DDL and DML address it, so a column may have any
+name. Aliases and closure names differ from every name in scope. The names
+themselves (`__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>`,
+`__gom_closure_<n>` and its suffixed forms) are reserved as table names:
+the entity derive refuses such a table, and read predicates refuse a
+hand-built entity over one.
+
+A hand-written `ReadVisibilityFilter` may only hold single-row boolean
+expressions over the entity's own columns and bound parameters: no
+`SELECT`, `FROM`, `JOIN`, `WITH` or set operator, no comment, no
+PostgreSQL `U&` form, no adjacent string constants, no delimited spelling
+of a generated name, and on SQLite no `rowid`, `_rowid_` or `oid`. Build a
+policy over another table with `related`, `not_related` or a closure.
+Write each column as `__gom_self.<column>` (`READ_PREDICATE_ROW`) and
+return the table from `table_name`. A filter that names a column any other
+way is accepted only at the root of a statement; it is refused with
+`AUTHORIZATION_MISCONFIGURED` as a relation, `not_related` or closure
+target, and as the policy of an entity that a generated related-row filter
+or relation-count ordering targets.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
 `predicate.not()?` uses SQL `NOT`: TRUE becomes FALSE, FALSE becomes TRUE,
@@ -466,9 +507,13 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     as a balanced binary tree of parenthesised pairs: `(a) OR ((b) OR (c))`.
     A list of `n` operands is about `log2(n)` levels deep, where the plain
     chain `a OR b OR c` would be `n` levels deep to the parser. A
-    50,000-term `or` of short terms is 18 levels deep and about 1 MB, within
-    the byte budget, and it builds and runs on all three backends. Operand
-    order, and therefore bind order, is unchanged.
+    25,000-term `or` of single-column tests is 16 levels deep and about
+    750 KB to 900 KB, within the byte budget, and it builds and runs on all
+    three backends. Operand order, and therefore bind order, is unchanged.
+    Each column term carries its table qualifier, so a term costs the length
+    of the rendered table path plus one byte more than an unqualified name
+    would. For a long list of values on one column, use `from_filter` with
+    an `in_list`, which writes the qualifier once.
   - **Why these values.** On the owned servers, each extra closure level
     multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
     1.1 s for two and 8 s for three, while four levels exhausted server

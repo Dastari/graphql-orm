@@ -10,11 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version 0.151.1 emits fixed skill content-protection reason codes in debug
+Version 0.151.2 emits fixed skill content-protection reason codes in debug
 tracing and reuses compiled proposal validators.
-See the [migration guide](MIGRATION.md#01511-skill-content-protection-diagnostics).
+See the [migration guide](MIGRATION.md#01512-skill-content-protection-diagnostics).
 
-AI 0.151.0 is the AI part of the single **breaking release**, with ORM/macros 0.190.0, operation catalogue 0.10.0 and AI tool profiles 0.27.0. Capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; large surfaces default to the fixed broker, with an opt-out. Fixed-broker provider sessions keep their binding across schema and catalogue changes after one rebind at the upgrade, and `capability_stale` and the new `selection_stale` are separate recoverable model-facing codes. Generated-operation fingerprints change once. `HighImpact` approvals always require recent MFA and the approval lifetime has a 7-day ceiling. AI schema module `0.83.0` adds three unique indexes; `AiSchemaModule::admit_index_replacements` admits an upgrade plan whose only destructive steps replace a legacy webhook-receipt index. The `graphql-case-pascal` feature becomes `GRAPHQL_ORM_AI_CASE=PascalCase`. See the [migration guide](MIGRATION.md#breaking-release-unreleased).
+Version `0.151.1` only clears warnings-denied Clippy and Rustdoc diagnostics for the `postgres,provider-openai` and `mssql` feature lanes; there is no runtime, API or persistence change and no migration is needed. See the [migration guide](MIGRATION.md#01510-to-01511-lint-and-documentation-lanes).
+
+AI 0.151.0 is the AI part of the single **breaking release**, with ORM/macros 0.187.0, operation catalogue 0.10.0 and AI tool profiles 0.27.0. Capability broker version 2: describe returns compact typed signatures and a new `describe_type` operation expands one named type at a time; discovery returns one entity capability per entity, with the root chosen per call by `operation` and authorized separately; large surfaces default to the fixed broker, with an opt-out. Fixed-broker provider sessions keep their binding across schema and catalogue changes after one rebind at the upgrade, and `capability_stale` and the new `selection_stale` are separate recoverable model-facing codes. Generated-operation fingerprints change once. `HighImpact` approvals always require recent MFA and the approval lifetime has a 7-day ceiling. AI schema module `0.83.0` adds three unique indexes; `AiSchemaModule::admit_index_replacements` admits an upgrade plan whose only destructive steps replace a legacy webhook-receipt index. The `graphql-case-pascal` feature becomes `GRAPHQL_ORM_AI_CASE=PascalCase`. See the [migration guide](MIGRATION.md#01502-to-01510-breaking-release).
 
 AI 0.150.1 memory-caps the test-owned PostgreSQL container used by its parity test; there is no runtime change. See the [migration guide](MIGRATION.md#01500-to-01501).
 

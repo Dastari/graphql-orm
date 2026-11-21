@@ -2,7 +2,7 @@ use super::core::{SearchIndexDef, SearchWeight, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect};
 use super::query::{
     DatabaseEntity, DatabaseFilter, DatabaseOrderBy, DatabaseSearchSchema, EntityQuery, FromSqlRow,
-    PageInput, PaginationConfig, PoolProvider, count_placeholders_for,
+    PageInput, PaginationConfig, PoolProvider,
 };
 use super::{DbAuthContext, OrmBackend, WriteBackend};
 use crate::graphql::filters::{SearchInput, SearchMode};
@@ -1341,26 +1341,25 @@ where
     }
 
     fn append_filter_sql(&self, sql: &mut String, values: &mut Vec<SqlValue>) {
-        let mut value_index = 0usize;
-        for clause in &self.query.where_clauses {
-            let placeholder_count = count_placeholders_for(B::DIALECT, clause);
-            let start_index = values.len() + 1;
-            let rendered = B::DIALECT.normalize_sql(clause, start_index);
-            sql.push_str(" AND (");
-            sql.push_str(&rendered);
-            sql.push(')');
-            // A clause that names more placeholders than it was given values
-            // takes the values there are. The statement then fails at the
-            // driver with a bind-count error instead of panicking here.
-            values.extend(
-                self.query
-                    .values
-                    .iter()
-                    .skip(value_index)
-                    .take(placeholder_count)
-                    .cloned(),
-            );
-            value_index += placeholder_count;
+        // The query's checked filter: the caller's clauses, each with its
+        // own values, and the attached read policies with theirs.
+        match self.query.checked_filter() {
+            Ok(Some(filter)) => {
+                let mut next_index = values.len() + 1;
+                let rendered = super::query::render_filter_expression(
+                    B::DIALECT,
+                    &filter,
+                    &mut next_index,
+                    values,
+                );
+                sql.push_str(" AND (");
+                sql.push_str(&rendered);
+                sql.push(')');
+            }
+            Ok(None) => {}
+            // The callers refuse such a query before rendering
+            // (`ensure_filter_valid`); match no row if one gets here.
+            Err(_) => sql.push_str(" AND (1 = 0)"),
         }
     }
 
