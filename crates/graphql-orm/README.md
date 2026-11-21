@@ -928,14 +928,15 @@ let (account, accounts) = db
     .await?;
 ```
 
-- SQLite uses a deferred `BEGIN` in WAL mode. The first database read
-  establishes the snapshot, and writers on other connections can commit
-  while that snapshot is open. The runner checks normal locking and returns
-  `ReadSnapshotError::SqliteNormalLockingRequired` for exclusive locking.
-  Shared-cache connections and non-WAL attached databases are unsupported.
-  Rollback-journal readers take a SHARED lock that can block a concurrent
-  commit, so the runner returns `ReadSnapshotError::SqliteWalRequired`
-  when the primary database uses a mode other than WAL.
+- SQLite uses a deferred `BEGIN`. The primary database and every
+  file-backed attachment must use WAL and normal locking. A rollback-journal
+  reader takes a SHARED lock that can block a concurrent commit, so the
+  runner returns `ReadSnapshotError::SqliteWalRequired` for a file outside WAL
+  mode and `ReadSnapshotError::SqliteNormalLockingRequired` for exclusive
+  locking. Temporary schemas and in-memory attachments are exempt. In WAL
+  mode the first read of each file establishes that file's snapshot, and
+  writers on other connections can commit while it is open. Shared-cache
+  connections are unsupported. See [SQLite WAL](https://www.sqlite.org/wal.html).
 - PostgreSQL uses `REPEATABLE READ READ ONLY` with the same transaction-local
   RLS settings as `transaction_with_auth`. It provides a consistent snapshot
   with repeatable-read isolation. A read-only observer can still see a

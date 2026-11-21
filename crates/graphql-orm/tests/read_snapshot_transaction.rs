@@ -238,6 +238,73 @@ async fn check_snapshot(reader: &Database, writer: &Database, auth: Option<&DbAu
 }
 
 #[cfg(feature = "sqlite")]
+struct SnapshotDirectory(std::path::PathBuf);
+
+#[cfg(feature = "sqlite")]
+impl SnapshotDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "graphql-orm-snapshot-{}",
+            graphql_orm::uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Drop for SnapshotDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_checks_file_backed_attached_databases() -> graphql_orm::Result<()> {
+    use graphql_orm::sqlx::{self, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions}};
+
+    let directory = SnapshotDirectory::new();
+    let pool = SqlitePoolOptions::new().max_connections(1).connect_with(
+        SqliteConnectOptions::new().filename(directory.0.join("main.sqlite"))
+            .create_if_missing(true).journal_mode(SqliteJournalMode::Wal),
+    ).await?;
+    let db = Database::new(pool);
+    sqlx::query(r#"ATTACH DATABASE ? AS "archive.""copy""#)
+        .bind(directory.0.join("archive.sqlite").to_string_lossy().as_ref())
+        .execute(db.pool()).await?;
+    sqlx::query(r#"PRAGMA "archive.""copy".journal_mode = delete"#)
+        .execute(db.pool()).await?;
+
+    assert!(matches!(
+        db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) })).await,
+        Err(ReadSnapshotError::SqliteWalRequired),
+    ));
+
+    sqlx::query(r#"PRAGMA "archive.""copy".journal_mode = wal"#)
+        .execute(db.pool()).await?;
+    sqlx::query(r#"PRAGMA "archive.""copy".locking_mode = exclusive"#)
+        .execute(db.pool()).await?;
+    assert!(matches!(
+        db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) })).await,
+        Err(ReadSnapshotError::SqliteNormalLockingRequired),
+    ));
+
+    sqlx::query(r#"PRAGMA "archive.""copy".locking_mode = normal"#)
+        .execute(db.pool()).await?;
+    sqlx::query("ATTACH DATABASE ':memory:' AS scratch")
+        .execute(db.pool()).await?;
+    sqlx::query("CREATE TEMP TABLE scratch_rows (id INTEGER)")
+        .execute(db.pool()).await?;
+    assert_eq!(
+        db.read_snapshot_transaction(|_| Box::pin(async { Ok("entered") })).await.unwrap(),
+        "entered",
+    );
+    db.pool().close().await;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_requires_wal_and_allows_concurrent_commits() {
     let memory = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
@@ -253,18 +320,7 @@ async fn sqlite_requires_wal_and_allows_concurrent_commits() {
     use graphql_orm::sqlx::sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqliteLockingMode, SqlitePoolOptions,
     };
-    let directory = std::env::temp_dir().join(format!(
-        "graphql-orm-snapshot-{}",
-        graphql_orm::uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir(&directory).unwrap();
-    struct Directory(std::path::PathBuf);
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let directory = Directory(directory);
+    let directory = SnapshotDirectory::new();
     let options = SqliteConnectOptions::new()
         .filename(directory.0.join("snapshot.sqlite"))
         .create_if_missing(true);
@@ -422,22 +478,33 @@ async fn mssql_requires_snapshot_isolation_and_allows_concurrent_commits() {
     .unwrap();
     setup(&writer).await;
     let connection_state = async || {
-        let rows = reader.pool().fetch_rows(
-            "SELECT CAST(session_id AS int) AS session_id,              CAST(transaction_isolation_level AS int) AS isolation_level              FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
-            &[],
-        ).await.unwrap();
+        let rows = reader
+            .pool()
+            .fetch_rows(
+                "SELECT CAST(s.session_id AS int) AS session_id,
+                        CONVERT(varchar(33), c.connect_time, 126) AS connect_time,
+                        CAST(s.transaction_isolation_level AS int) AS isolation_level
+                 FROM sys.dm_exec_sessions AS s
+                 JOIN sys.dm_exec_connections AS c ON c.session_id = s.session_id
+                 WHERE s.session_id = @@SPID AND c.parent_connection_id IS NULL",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "expected the physical connection for the session");
         (
             rows[0].try_get::<i32, _>("session_id").unwrap(),
+            rows[0].try_get::<String, _>("connect_time").unwrap(),
             rows[0].try_get::<i32, _>("isolation_level").unwrap(),
         )
     };
-    let (session_id, isolation) = connection_state().await;
+    let (session_id, connect_time, isolation) = connection_state().await;
     assert_eq!(isolation, 2, "reader starts at READ COMMITTED");
     check_snapshot(&reader, &writer, None).await;
     assert_eq!(
         connection_state().await,
-        (session_id, 2),
-        "the same pooled session returned to READ COMMITTED",
+        (session_id, connect_time, 2),
+        "the same pooled connection returned to READ COMMITTED",
     );
     owned.cleanup().unwrap();
 }

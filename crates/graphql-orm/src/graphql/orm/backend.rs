@@ -677,21 +677,15 @@ impl TransactionBackend for SqliteBackend {
         Box::pin(async move {
             let classify = crate::db::classify_read_snapshot_error::<Self>;
             let mut tx = pool.begin().await.map_err(classify)?;
-            let journal: String = sqlx::query_scalar("PRAGMA main.journal_mode")
-                .fetch_one(tx.as_mut())
+            require_sqlite_snapshot_schema(tx.as_mut(), "main").await?;
+            let databases: Vec<(i32, String, String)> = sqlx::query_as("PRAGMA database_list")
+                .fetch_all(tx.as_mut())
                 .await
                 .map_err(classify)?;
-            if !journal.eq_ignore_ascii_case("wal") {
-                tx.rollback().await.map_err(classify)?;
-                return Err(super::ReadSnapshotError::SqliteWalRequired);
-            }
-            let locking: String = sqlx::query_scalar("PRAGMA main.locking_mode")
-                .fetch_one(tx.as_mut())
-                .await
-                .map_err(classify)?;
-            if !locking.eq_ignore_ascii_case("normal") {
-                tx.rollback().await.map_err(classify)?;
-                return Err(super::ReadSnapshotError::SqliteNormalLockingRequired);
+            for (_, schema, file) in databases {
+                if schema != "main" && schema != "temp" && !file.is_empty() {
+                    require_sqlite_snapshot_schema(tx.as_mut(), &schema).await?;
+                }
             }
             Ok(tx)
         })
@@ -727,6 +721,33 @@ impl TransactionBackend for SqliteBackend {
         })
     }
 }
+#[cfg(feature = "sqlite")]
+async fn require_sqlite_snapshot_schema(
+    connection: &mut sqlx::SqliteConnection,
+    schema: &str,
+) -> Result<(), super::ReadSnapshotError> {
+    use super::ReadSnapshotError;
+
+    let classify = crate::db::classify_read_snapshot_error::<SqliteBackend>;
+    // SQLite returns raw schema names. Quote the entire name as one identifier.
+    let schema = DatabaseBackend::Sqlite.delimit_raw_identifier(schema);
+    let journal: String = sqlx::query_scalar(&format!("PRAGMA {schema}.journal_mode"))
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(classify)?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        return Err(ReadSnapshotError::SqliteWalRequired);
+    }
+    let locking: String = sqlx::query_scalar(&format!("PRAGMA {schema}.locking_mode"))
+        .fetch_one(connection)
+        .await
+        .map_err(classify)?;
+    if !locking.eq_ignore_ascii_case("normal") {
+        return Err(ReadSnapshotError::SqliteNormalLockingRequired);
+    }
+    Ok(())
+}
+
 #[cfg(feature = "sqlite")]
 impl SubscriptionBackend for SqliteBackend {}
 

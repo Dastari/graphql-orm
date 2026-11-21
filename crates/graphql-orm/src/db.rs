@@ -2059,8 +2059,8 @@ where
     /// SQLite uses a deferred transaction in WAL mode, fixing the snapshot at
     /// its first database read. Rollback-journal mode is refused because its
     /// shared read lock can prevent a concurrent writer from committing.
-    /// The primary database must use normal locking and a private cache.
-    /// Attached databases outside WAL mode are unsupported.
+    /// The primary database and every file-backed attachment must use WAL
+    /// and normal locking. Shared-cache connections are unsupported.
     /// PostgreSQL uses `REPEATABLE READ READ ONLY`; SQL Server requires
     /// `ALLOW_SNAPSHOT_ISOLATION ON` and uses `SNAPSHOT`.
     ///
