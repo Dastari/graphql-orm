@@ -758,11 +758,50 @@ impl MssqlPool {
         mode: crate::graphql::orm::TransactionMode,
     ) -> crate::Result<MssqlTransaction> {
         self.require_external_writable()?;
-        let mut lease = self.acquire().await?;
+        let lease = self.acquire().await?;
         let isolation = match mode {
             crate::graphql::orm::TransactionMode::Default => "READ COMMITTED",
             crate::graphql::orm::TransactionMode::StateMachine => "SERIALIZABLE",
         };
+        self.begin_transaction_on_lease(lease, isolation).await
+    }
+
+    pub(crate) async fn begin_read_snapshot(
+        &self,
+    ) -> Result<MssqlTransaction, crate::graphql::orm::ReadSnapshotError> {
+        use crate::graphql::orm::{MssqlBackend, ReadSnapshotError};
+
+        let classify = crate::db::classify_read_snapshot_error::<MssqlBackend>;
+        let mut lease = self.acquire().await.map_err(classify)?;
+        let rows = self
+            .bounded(fetch_rows_with_client(
+                &mut lease.client,
+                "SELECT CAST(snapshot_isolation_state AS INT) AS snapshot_state \
+                 FROM sys.databases WHERE database_id = DB_ID()",
+                &[],
+                self.options().typed_temporal_parameters,
+            ))
+            .await
+            .map_err(|failure| classify(failure.error))?;
+        let state = rows
+            .first()
+            .map(|row| row.try_get::<i32, _>("snapshot_state"))
+            .transpose()
+            .map_err(classify)?;
+        if state != Some(1) {
+            self.release(lease);
+            return Err(ReadSnapshotError::MssqlSnapshotIsolationRequired);
+        }
+        self.begin_transaction_on_lease(lease, "SNAPSHOT")
+            .await
+            .map_err(classify)
+    }
+
+    async fn begin_transaction_on_lease(
+        &self,
+        mut lease: Lease,
+        isolation: &str,
+    ) -> crate::Result<MssqlTransaction> {
         // Never nest inside a transaction raw SQL left open on this session:
         // its COMMIT would only decrement the count and nothing would be durable.
         // The transaction takes the shared restore lock in the batch that
@@ -789,6 +828,7 @@ impl MssqlPool {
     }
 
     fn require_external_writable(&self) -> crate::Result<()> {
+        crate::graphql::orm::ensure_sql_write_allowed()?;
         if self.access_mode() == MssqlAccessMode::ExternalWritable {
             Ok(())
         } else {
@@ -1320,6 +1360,7 @@ impl MssqlTransaction {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<MssqlWriteResult> {
+        crate::graphql::orm::ensure_sql_write_allowed()?;
         if self.failed {
             return Err(failed_transaction());
         }

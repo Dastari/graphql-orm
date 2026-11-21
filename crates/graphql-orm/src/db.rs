@@ -1031,6 +1031,11 @@ impl<B: OrmBackend> Database<B> {
         kind: crate::graphql::orm::EntityAccessKind,
         surface: crate::graphql::orm::EntityAccessSurface,
     ) -> async_graphql::Result<()> {
+        #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+        if kind == crate::graphql::orm::EntityAccessKind::Write {
+            crate::graphql::orm::ensure_write_allowed()
+                .map_err(OrmPublicError::into_graphql_error)?;
+        }
         if self
             .can_access_entity(ctx, entity_name, policy_key, kind, surface)
             .await?
@@ -2046,6 +2051,100 @@ where
             .await
     }
 
+    /// Run policy-aware ORM reads against one connection-pinned snapshot.
+    ///
+    /// The callback receives a [`ReadSnapshotContext`](crate::graphql::orm::ReadSnapshotContext).
+    /// SQLite uses a deferred transaction in WAL mode, fixing the snapshot at
+    /// its first database read. Rollback-journal mode is refused because its
+    /// shared read lock can prevent a concurrent writer from committing.
+    /// PostgreSQL uses `REPEATABLE READ READ ONLY`; SQL Server requires
+    /// `ALLOW_SNAPSHOT_ISOLATION ON` and uses `SNAPSHOT`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`ReadSnapshotError`](crate::graphql::orm::ReadSnapshotError)
+    /// for unsupported settings, nested transactions on the same task, write
+    /// attempts, and callback or transaction failures.
+    pub async fn read_snapshot_transaction<T, F>(
+        &self,
+        callback: F,
+    ) -> Result<T, crate::graphql::orm::ReadSnapshotError>
+    where
+        F: for<'tx> FnOnce(
+            &'tx mut crate::graphql::orm::ReadSnapshotContext<'_, B>,
+        ) -> futures::future::BoxFuture<'tx, Result<T, OrmPublicError>>,
+    {
+        self.read_snapshot_transaction_with_auth(None, callback)
+            .await
+    }
+
+    /// Run a read snapshot with the same transaction-local authorization
+    /// setup as [`Self::transaction_with_auth`].
+    ///
+    /// Generated and repository writes and ORM raw execution on the callback's
+    /// task are refused before SQL execution. The read capability exposes no
+    /// savepoints or post-commit actions. As with other ORM transactions,
+    /// driver handles and independently spawned tasks are outside its scope.
+    pub async fn read_snapshot_transaction_with_auth<T, F>(
+        &self,
+        auth: Option<&crate::graphql::orm::DbAuthContext>,
+        callback: F,
+    ) -> Result<T, crate::graphql::orm::ReadSnapshotError>
+    where
+        F: for<'tx> FnOnce(
+            &'tx mut crate::graphql::orm::ReadSnapshotContext<'_, B>,
+        ) -> futures::future::BoxFuture<'tx, Result<T, OrmPublicError>>,
+    {
+        use crate::graphql::orm::{ReadSnapshotContext, ReadSnapshotError, TransactionError};
+
+        if ORM_TRANSACTION_ACTIVE
+            .try_with(|active| *active)
+            .unwrap_or(false)
+        {
+            return Err(ReadSnapshotError::NestedTransaction);
+        }
+
+        ORM_TRANSACTION_ACTIVE
+            .scope(true, async move {
+                let mut tx = B::begin_read_snapshot(self.pool()).await?;
+                B::apply_auth_context_to_write_transaction(&mut tx, auth)
+                    .await
+                    .map_err(classify_read_snapshot_error::<B>)?;
+                let mut context = ReadSnapshotContext::new(self, tx);
+                let (result, write_refused) = crate::graphql::orm::SNAPSHOT_WRITE_REFUSED
+                    .scope(std::cell::Cell::new(false), async {
+                        let result = callback(&mut context).await;
+                        let refused =
+                            crate::graphql::orm::SNAPSHOT_WRITE_REFUSED.with(std::cell::Cell::get);
+                        (result, refused)
+                    })
+                    .await;
+
+                // A read transaction has no work to commit. End it without
+                // running the mutation runner's journal or post-commit machinery.
+                let ended = context.rollback().await;
+                if write_refused {
+                    log_failed_rollback(ended);
+                    return Err(ReadSnapshotError::WriteRefused);
+                }
+                match result {
+                    Ok(value) => {
+                        ended.map_err(classify_read_snapshot_error::<B>)?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        log_failed_rollback(ended);
+                        Err(ReadSnapshotError::Transaction(if error.is_retryable() {
+                            TransactionError::Retryable(error)
+                        } else {
+                            TransactionError::Rejected(error)
+                        }))
+                    }
+                }
+            })
+            .await
+    }
+
     /// Run ORM reads and mutations atomically without exposing a driver transaction.
     ///
     /// The callback must be boxed because its future borrows the transaction-bound
@@ -2181,6 +2280,13 @@ fn classify_transaction_error<B: TransactionBackend>(
             OrmPublicError::new(OrmErrorCode::InternalError).with_internal(internal),
         )
     }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub(crate) fn classify_read_snapshot_error<B: TransactionBackend>(
+    error: sqlx::Error,
+) -> crate::graphql::orm::ReadSnapshotError {
+    crate::graphql::orm::ReadSnapshotError::Transaction(classify_transaction_error::<B>(error))
 }
 
 #[cfg(feature = "sqlite")]

@@ -341,6 +341,7 @@ impl crate::db::Database {
     /// journaled writes fail: apply the schema target, or call
     /// [`Self::ensure_change_journal_recorder`] as the schema owner.
     pub async fn ensure_change_journal_table(&self) -> crate::Result<()> {
+        super::ensure_sql_write_allowed()?;
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
                 "change journal support requires the graphql-orm change-journal feature"
@@ -369,6 +370,7 @@ impl crate::db::Database {
         &self,
         entities: &[&'static EntityMetadata],
     ) -> crate::Result<()> {
+        super::ensure_sql_write_allowed()?;
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
                 "change journal support requires the graphql-orm change-journal feature"
@@ -470,6 +472,7 @@ pub async fn restore_backup_rows(
     rows_by_table: &BTreeMap<String, Vec<BackupRow>>,
     context: &RestoreContext,
 ) -> crate::Result<Vec<ImportReport>> {
+    super::ensure_sql_write_allowed()?;
     match compare_schema_snapshots(backup_snapshot, current_snapshot) {
         BackupCompatibility::Exact => {}
         BackupCompatibility::OlderSchema {

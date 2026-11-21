@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.190.0
+
+- **Added (#831):** `Database::read_snapshot_transaction` runs multiple
+  policy-aware reads against one pinned snapshot, with a companion runner for
+  transaction-local authorization. SQLite requires WAL, PostgreSQL uses
+  read-only repeatable read, and SQL Server requires snapshot isolation.
+  Backend prerequisites and refused writes have typed errors.
+  See the [migration guide](MIGRATION.md#01900-read-snapshot-transactions).
+
 ## Unreleased - ORM/macros 0.188.0
 
 Read predicates bind every column they render to their own row ([#796](https://github.com/Dastari/graphql-orm/issues/796)). See the [migration guide](MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row).

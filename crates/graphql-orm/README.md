@@ -904,6 +904,51 @@ select `TransactionMode::StateMachine` automatically; an upsert composed inside
 decision is fenced across every backend. See [runtime writes and repository
 operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
 
+## Read snapshot transactions
+
+Use `Database::read_snapshot_transaction` for related reads that need one
+consistent database snapshot. The callback receives a `ReadSnapshotContext`
+with entity queries, projections and primary-key lookups. Each
+uses the same ORM read policies as an ordinary transaction. If the request
+uses transaction-local database authorization, call
+`read_snapshot_transaction_with_auth` with its `DbAuthContext`.
+
+```rust,ignore
+let (account, accounts) = db
+    .read_snapshot_transaction(|tx| {
+        Box::pin(async move {
+            let account = tx.find_by_key::<Account>(&[SqlValue::Int(account_id)]).await?;
+            let accounts = tx.query::<Account>().count().await?;
+            Ok((account, accounts))
+        })
+    })
+    .await?;
+```
+
+- SQLite uses a deferred `BEGIN` in WAL mode. The first database read
+  establishes the snapshot, and writers on other connections can commit
+  while that snapshot is open. Use SQLite's normal locking and private
+  caches. Rollback-journal readers take a SHARED lock that can block a
+  concurrent commit, so the runner returns `ReadSnapshotError::SqliteWalRequired`
+  before invoking the callback.
+- PostgreSQL uses `REPEATABLE READ READ ONLY` and the same transaction-local
+  RLS settings as `transaction_with_auth`. PostgreSQL still takes normal
+  read locks, which can conflict with DDL.
+- SQL Server uses `SNAPSHOT` after checking the current database setting.
+  `ReadSnapshotError::MssqlSnapshotIsolationRequired` means
+  `ALLOW_SNAPSHOT_ISOLATION` is disabled or transitioning. Snapshot reads
+  can still take schema-stability locks. The shared restore lock allows
+  ordinary concurrent writers and excludes restores.
+
+The context exposes typed reads. The pinned driver connection, raw SQL,
+writes, savepoints and post-commit hooks are private to the ORM. Same-task
+ORM writes through a captured handle return a refusal, and the runner
+returns `ReadSnapshotError::WriteRefused` even if the callback catches it.
+Nested ORM transactions on that task are refused. Use the context for
+every read that must share the snapshot. Driver handles and spawned tasks
+have their own scope. Decisions that perform a write belong in
+`Database::transaction` with `TransactionMode::StateMachine`.
+
 ## Minimum entity
 
 ```rust

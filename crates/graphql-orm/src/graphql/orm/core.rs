@@ -753,6 +753,51 @@ pub enum TransactionError {
     Failed(crate::graphql::errors::OrmPublicError),
 }
 
+/// A read snapshot could not start or complete.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ReadSnapshotError {
+    /// The backend has no implementation of read snapshot transactions.
+    UnsupportedBackend,
+    /// SQLite needs WAL to let other connections commit while the reader runs.
+    SqliteWalRequired,
+    /// SQL Server must have `ALLOW_SNAPSHOT_ISOLATION` fully enabled.
+    MssqlSnapshotIsolationRequired,
+    /// The current task already has a managed transaction.
+    NestedTransaction,
+    /// The callback attempted an ORM write, even if it caught the refusal.
+    WriteRefused,
+    /// A callback, driver, transaction-local authorization, or transaction close failure.
+    Transaction(TransactionError),
+}
+
+impl std::fmt::Display for ReadSnapshotError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::UnsupportedBackend => {
+                "read snapshot transactions are unsupported by this backend"
+            }
+            Self::SqliteWalRequired => "SQLite read snapshot transactions require WAL journal mode",
+            Self::MssqlSnapshotIsolationRequired => {
+                "SQL Server read snapshot transactions require ALLOW_SNAPSHOT_ISOLATION ON"
+            }
+            Self::NestedTransaction => "nested ORM transactions are not supported",
+            Self::WriteRefused => "writes are forbidden inside a read snapshot transaction",
+            Self::Transaction(error) => return error.fmt(formatter),
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for ReadSnapshotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transaction(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Result of a single-statement typed conditional update.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConditionalUpdateOutcome<T> {
@@ -1172,6 +1217,24 @@ where
             max_limit: None,
             max_scanned_rows: None,
         }
+    }
+
+    pub(super) fn matching_primary_key(mut self, values: &[SqlValue]) -> crate::Result<Self> {
+        if values.len() != T::PRIMARY_KEYS.len() || values.is_empty() {
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::with_message(
+                    crate::graphql::errors::OrmErrorCode::InvalidInput,
+                    "a point read requires every primary-key value in key order",
+                ),
+            ));
+        }
+        for (column, value) in T::PRIMARY_KEYS.iter().zip(values) {
+            let column = B::DIALECT.render_identifier_path(column);
+            self.query = self
+                .query
+                .where_clause(&format!("{column} = ?"), value.clone());
+        }
+        Ok(self)
     }
 
     pub fn filter<F>(mut self, filter: F) -> Self
@@ -1844,6 +1907,7 @@ where
         db: &'tx crate::db::Database<B>,
         mode: TransactionMode,
     ) -> crate::Result<Self> {
+        super::ensure_sql_write_allowed()?;
         let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
         super::begin_change_journal_transaction(db, &mut tx).await?;
         Ok(Self::new_with_mode(db, tx, mode))
@@ -1857,6 +1921,7 @@ where
         mode: TransactionMode,
         auth: Option<&DbAuthContext>,
     ) -> crate::Result<Self> {
+        super::ensure_sql_write_allowed()?;
         let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
         B::apply_auth_context_to_write_transaction(&mut tx, auth).await?;
         super::begin_change_journal_transaction(db, &mut tx).await?;
@@ -2039,6 +2104,7 @@ where
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<B::WriteResult> {
+        super::ensure_sql_write_allowed()?;
         let result = B::execute_in_transaction(&mut self.tx, sql, values).await?;
         if statement_changed_rows(sql, B::rows_affected(&result)) {
             self.runtime_state.note_write();
@@ -2097,6 +2163,9 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
+        if super::ensure_write_allowed().is_err() {
+            return;
+        }
         self.deferred_events.push(Box::new(DeferredEvent { event }));
     }
 
@@ -2130,6 +2199,9 @@ where
         Fut: std::future::Future<Output = Result<(), E>> + Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
+        if super::ensure_write_allowed().is_err() {
+            return;
+        }
         self.deferred_actions.push(Box::new(DeferredAction {
             action: Some(action),
         }));
@@ -2248,6 +2320,8 @@ where
         event: &'a MutationEvent,
     ) -> async_graphql::Result<()>
 where {
+        super::ensure_write_allowed()
+            .map_err(crate::graphql::errors::OrmPublicError::into_graphql_error)?;
         if let Some(hook) = self.db.mutation_hook() {
             // Restore the origin even on refusal or cancellation, including nested hooks.
             struct HookDepth(std::sync::Arc<std::sync::atomic::AtomicUsize>);

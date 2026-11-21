@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.190.0: Read snapshot transactions
+
+**No action.** The snapshot runner is opt-in and uses the existing generated
+read helpers. Before opting in, configure WAL on SQLite or
+`ALLOW_SNAPSHOT_ISOLATION ON` on SQL Server.
+See [snapshot transactions](crates/graphql-orm/README.md#read-snapshot-transactions).
+
 ## 0.187.0 to 0.188.0: read-predicate columns bound to their row
 
 Upgrade ORM and macros together. Read predicates now bind every column to
