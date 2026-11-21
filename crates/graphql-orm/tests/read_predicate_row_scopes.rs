@@ -811,8 +811,8 @@ async fn policies_over_another_table_use_the_structured_builders() {
         ("listed", listed(), &["n2"][..]),
         ("closure", any(), &["n2", "n3"]),
     ];
-    // SQL Server's relation budget has no room for a relation inside two
-    // nested closures, each of which renders its target four times.
+    // The SQLite and PostgreSQL lane also exercises two nested closures
+    // around the generated relation target.
     if B::DIALECT != DatabaseBackend::Mssql {
         // No node on the way up is listed, inside a second closure: two
         // closures nested inside one another are the most allowed.

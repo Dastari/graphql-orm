@@ -336,6 +336,10 @@ enum Policy {
         sql: RowBoundSql,
         values: Vec<SqlValue>,
     },
+    Closure {
+        verdict: RowBoundSql,
+        values: Vec<SqlValue>,
+    },
     And(Vec<Policy>),
     Or(Vec<Policy>),
 }
@@ -351,7 +355,7 @@ impl Policy {
     /// Whether any leaf refers to the governed row.
     fn holds_row(&self) -> bool {
         match self {
-            Self::Sql { sql, .. } => sql.holds_row(),
+            Self::Sql { sql, .. } | Self::Closure { verdict: sql, .. } => sql.holds_row(),
             Self::And(children) | Self::Or(children) => children.iter().any(Self::holds_row),
         }
     }
@@ -362,6 +366,10 @@ impl Policy {
             Self::Sql { sql, values } => {
                 FilterExpression::trusted_fragment(sql.bind(row), values.clone())
             }
+            Self::Closure { verdict, values } => FilterExpression::trusted_fragment(
+                format!("{} = 1", verdict.bind(row)),
+                values.clone(),
+            ),
             Self::And(children) => {
                 FilterExpression::And(children.iter().map(|child| child.expression(row)).collect())
             }
@@ -414,6 +422,13 @@ impl Policy {
                 values.extend(own.iter().cloned());
                 sql.clone()
             }
+            Self::Closure {
+                verdict,
+                values: own,
+            } => {
+                values.extend(own.iter().cloned());
+                verdict.wrapped("", " = 1")
+            }
             Self::And(children) => {
                 let parts = children
                     .iter()
@@ -453,6 +468,7 @@ impl Policy {
     fn negatable(&self) -> bool {
         match self {
             Self::Sql { sql, .. } => sql.holds_row() || !sql.bind("").trim().is_empty(),
+            Self::Closure { .. } => true,
             Self::And(children) => !children.is_empty() && children.iter().all(Self::negatable),
             Self::Or(children) => children.iter().all(Self::negatable),
         }
@@ -1458,9 +1474,8 @@ pub enum ReadPredicateQuantifier {
 pub const READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH: u32 = 64;
 
 /// The largest rendered SQL, in bytes, that one [`ReadPredicate`] may hold on
-/// any backend. Relations, negations and closures inline their target (a
-/// closure four times), so composition can otherwise grow the statement
-/// geometrically. A predicate that would exceed it is refused with
+/// any backend. Composition embeds rendered SQL, so policies that duplicate
+/// their inputs can grow geometrically. A predicate over this limit is refused with
 /// `AUTHORIZATION_MISCONFIGURED` before it is rendered.
 pub const READ_PREDICATE_MAX_RENDERED_BYTES: usize = 1 << 20;
 
@@ -1520,8 +1535,7 @@ const MSSQL_MAX_RELATIONS: u32 = 9;
 /// SQLite and PostgreSQL ([`READ_PREDICATE_MAX_RELATIONS`] and
 /// [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`]). A closure walks and
 /// evaluates its target for every row it reaches, so it costs far more than
-/// one relation. Closures are counted as rendered: a closure inside a closure
-/// counts its inner closure four times, once per inlined copy.
+/// one relation. Closures are counted as rendered, once per SQL occurrence.
 pub const READ_PREDICATE_CLOSURE_RELATION_WEIGHT: u32 = CLOSURE_RELATION_WEIGHT;
 const CLOSURE_RELATION_WEIGHT: u32 = 16;
 
@@ -1768,6 +1782,71 @@ fn nesting(backend: DatabaseBackend, sql: &str) -> async_graphql::Result<Nesting
     Ok(deepest)
 }
 
+/// Columns of the governed row read by the target SQL. The lexer is
+/// also used for scope allocation. The SQL itself keeps its structural row
+/// references; the projection only gives those references a common row
+/// source for the anchor and the reached rows.
+fn closure_columns(
+    dialect: DatabaseBackend,
+    truth: &RowBoundSql,
+) -> async_graphql::Result<Option<Vec<String>>> {
+    let sql = truth.bind(READ_PREDICATE_ROW);
+    let tokens = sql_tokens(dialect, &sql)?;
+    let text = |token: &SqlToken| &sql[token.start..token.end];
+    let mut columns = std::collections::BTreeMap::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != SqlTokenKind::Word || text(token) != READ_PREDICATE_ROW {
+            continue;
+        }
+        let Some([dot, column]) = tokens.get(index + 1..index + 3) else {
+            return Ok(None);
+        };
+        if text(dot) != "."
+            || !matches!(
+                column.kind,
+                SqlTokenKind::Word | SqlTokenKind::QuotedIdentifier
+            )
+        {
+            return Ok(None);
+        }
+        let name = text(column);
+        let column = dialect.delimited_column_identifier(name);
+        let key = if dialect == DatabaseBackend::Postgres {
+            column.clone()
+        } else if column.is_ascii() {
+            delimited_name(&column)
+        } else {
+            // The database decides whether different non-ASCII spellings
+            // resolve to the same column. Do not introduce duplicate aliases.
+            return Ok(None);
+        };
+        if let Some(previous) = columns.insert(key, column.clone()) {
+            if previous != column && dialect == DatabaseBackend::Mssql {
+                // SQL Server may use a case-sensitive column collation.
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(columns.into_values().collect()))
+}
+
+fn closure_column_projection(columns: &[String], row: &str) -> String {
+    columns
+        .iter()
+        .map(|column| format!(", {row}.{column} AS {column}"))
+        .collect()
+}
+
+fn closure_anchor_projection(columns: &[String], origin: &str) -> RowBoundSql {
+    let mut sql = RowBoundSql::sql(format!("SELECT 1 AS {origin}"));
+    for column in columns {
+        sql.push_str(", ");
+        sql.push_row();
+        sql.push_str(&format!(".{column} AS {column}"));
+    }
+    sql
+}
+
 /// The SQL Server closure. SQL Server does not allow a common table
 /// expression inside a subquery, so the bounded walk is unrolled into a
 /// breadth-first search of nested derived tables, one per hop:
@@ -1786,29 +1865,31 @@ fn nesting(backend: DatabaseBackend, sql: &str) -> async_graphql::Result<Nesting
 ///    is not NULL and names no row, or when it is first reached at the bound
 ///    (the CTE's "at the bound and not seen before"). An all-NULL pointer
 ///    names no row and is complete: a root.
-/// 4. The authorized row's own truth is evaluated first, in a derived table
-///    with no FROM, over the governed row, which the enclosing context binds
-///    to the authorized row.
+/// 4. The governed row's projected columns are included with the matches
+///    for the depth-zero pointer. The projection marks that row so it
+///    contributes to the truth aggregate without counting as a key match.
+///    If the target cannot be projected, its own truth uses a separate
+///    correlated expression instead.
 ///
 /// Every row of `table` the walk reads has its own alias: `{prefix}_hK` in
-/// hop `K` and `{prefix}_t` where the target is evaluated, so a pointer, key
-/// or target column binds to that row or fails the statement (#796).
+/// hop `K` and `{prefix}_t` for target matches. Each projected column comes
+/// from that physical alias or the governed row. A missing pointer, key or
+/// target column therefore fails the statement (#796).
 ///
 /// The CTE form expands a pointer each time it is reached, but a later
 /// expansion only reaches pointers already reached earlier, so both forms see
 /// the same pointers, first depths and reached rows, and the verdict below is
 /// the CTE's. Each hop's `OUTER APPLY` carries `TOP (2147483647)`, which is
 /// no limit but keeps the hop a correlated lookup so the plan does not grow
-/// with join reordering. The target appears four times (twice per truth), as
-/// in the CTE form.
+/// with join reordering.
 fn render_mssql_closure(
     dialect: DatabaseBackend,
     table: &str,
     prefix: &str,
     keys: &[(&str, &str)],
     quantifier: ReadPredicateQuantifier,
-    predicate: &RowBoundSql,
-    false_rows: &RowBoundSql,
+    truth: &RowBoundSql,
+    columns_for_truth: Option<&[String]>,
     max_depth: u32,
 ) -> RowBoundSql {
     let columns = |render: &dyn Fn(usize, &str, &str) -> String, separator: &str| {
@@ -1926,11 +2007,46 @@ fn render_mssql_closure(
              THEN NULL ELSE 1 END"
         ),
     };
+    if let Some(columns) = columns_for_truth {
+        let input = format!("{prefix}_i");
+        let origin = format!("{prefix}_origin");
+        let verdict = match quantifier {
+            ReadPredicateQuantifier::Any => format!(
+                "CASE WHEN MAX({reached}.__gom_max) = 2 THEN 1 WHEN MAX({reached}.__gom_max) = 1 OR "
+            ),
+            ReadPredicateQuantifier::All => format!(
+                "CASE WHEN MIN({reached}.__gom_min) = 0 THEN 0 WHEN MIN({reached}.__gom_min) = 1 OR "
+            ),
+        };
+        let fallback = u8::from(quantifier == ReadPredicateQuantifier::All);
+        let mut clause = RowBoundSql::sql(format!(
+            "(SELECT {verdict}MAX(CASE WHEN {ambiguous}({followed} AND (\
+             {group}.__gom_depth = {max_depth} OR {reached}.__gom_rows = 0)) THEN 1 ELSE 0 END) = 1 \
+             THEN NULL ELSE {fallback} END FROM "
+        ));
+        clause.push(&walk);
+        clause.push_str(&format!(
+            " OUTER APPLY (SELECT MAX({truths}.__gom_truth) AS __gom_max, \
+             MIN({truths}.__gom_truth) AS __gom_min, \
+             COUNT(CASE WHEN {truths}.{origin} = 0 THEN 1 END) AS __gom_rows \
+             FROM (SELECT {target_truth} AS __gom_truth, {input}.{origin} FROM (",
+            target_truth = truth.bind(&input),
+        ));
+        clause.push(&closure_anchor_projection(columns, &origin));
+        clause.push_str(&format!(
+            " WHERE {group}.__gom_depth = 0 UNION ALL SELECT 0{reached_columns} \
+             FROM {table} AS {target} WHERE {step} AND {group}.__gom_depth < {max_depth}\
+             ) AS {input}) AS {truths}) AS {reached})",
+            reached_columns = closure_column_projection(columns, &target),
+            step = named_by(&target, &group),
+        ));
+        return clause;
+    }
     // In `truths` the target is the reached row `target`. `own` has no FROM
     // and comes first, so it sees no `__gom_` column of this subquery: its
     // target is the authorized row, as the enclosing context binds it.
     let mut clause = RowBoundSql::sql(format!("(SELECT {verdict} FROM (SELECT "));
-    clause.push(&truth(predicate, false_rows));
+    clause.push(truth);
     clause.push_str(&format!(
         " AS __gom_truth) AS {own} CROSS APPLY (\
          SELECT MAX({reached}.__gom_max) AS __gom_max, MIN({reached}.__gom_min) AS __gom_min, \
@@ -1943,8 +2059,8 @@ fn render_mssql_closure(
          OUTER APPLY (SELECT MAX({truths}.__gom_truth) AS __gom_max, \
          MIN({truths}.__gom_truth) AS __gom_min, COUNT(*) AS __gom_rows \
          FROM (SELECT {target_truth} AS __gom_truth FROM {table} AS {target} \
-         WHERE {step} AND {group}.__gom_depth < {max_depth}) AS {truths}) AS {reached}) AS {summary}) = 1",
-        target_truth = truth(predicate, false_rows).bind(&target),
+         WHERE {step} AND {group}.__gom_depth < {max_depth}) AS {truths}) AS {reached}) AS {summary})",
+        target_truth = truth.bind(&target),
         step = named_by(&target, &group),
     ));
     clause
@@ -2471,7 +2587,10 @@ impl ReadPredicate {
     /// `(source, target)` order of [`Self::related`]: one hop goes from a
     /// row to every row whose key columns equal this row's pointer columns.
     /// A parent chain is `&[("parent_id", "id")]`; swapping the pair walks
-    /// to descendants instead. Composite keys are supported, and columns are
+    /// to descendants instead. Each leaf has an unreachable step because its
+    /// non-NULL key matches no child pointer. A walk that reaches a leaf
+    /// cannot admit under `related_closure_all` or a negated
+    /// `related_closure`. Composite keys are supported, and columns are
     /// validated as for `related`. The closure is reflexive: it holds the
     /// row itself (depth 0) and every row reached in 1 to `max_depth` hops.
     /// A pointer reaches every row with an equal key, so with a non-unique
@@ -2518,9 +2637,12 @@ impl ReadPredicate {
     /// [`READ_PREDICATE_CLOSURE_MAX_DEPTH`], or
     /// [`READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH`] on SQL Server; the shorthand
     /// constructors use [`READ_PREDICATE_CLOSURE_DEFAULT_DEPTH`] on every
-    /// backend. The work per evaluated row is at most `max_depth` times the
-    /// rows the walk can reach. Hitting the
-    /// bound makes the walk incomplete: `All` is then never TRUE (it fails
+    /// backend. A hop bound does not cap how many rows a non-unique pointer
+    /// matches. Even when the walk deduplicates pointers at each level, the
+    /// join visits all fan-out matches before deduplicating. For example, a
+    /// count over N rows sharing a key can process on the order of
+    /// N² × `max_depth` matches. Index the key columns and prefer a unique key.
+    /// Hitting the bound makes the walk incomplete: `All` is then never TRUE (it fails
     /// closed), and `Any` is TRUE only if a matching row was found within
     /// the bound, otherwise UNKNOWN, so the row is not admitted and a
     /// negation does not admit it either.
@@ -2536,27 +2658,28 @@ impl ReadPredicate {
     ///
     /// **Rendering.** A correlated scalar subquery, used wherever the policy
     /// clause is applied: reads, counts, aggregates, keyset and connection
-    /// pages, search and subscription delivery re-reads. `target`'s bind
-    /// values appear four times, in order. SQLite and PostgreSQL render a
+    /// pages, search and subscription delivery re-reads. The renderer
+    /// projects the target's columns from the governed row and reached rows
+    /// into one row source where possible. Each truth expression keeps the
+    /// target's bind order, followed by the explicit FALSE test's binds
+    /// where needed. SQLite and PostgreSQL render a
     /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
     /// common table expression inside a subquery, so there the walk is
     /// unrolled into a breadth-first search with one nested derived table and
     /// one correlated `OUTER APPLY` lookup per hop. Each level keeps only the
-    /// distinct pointers reached so far, so the work per row stays bounded by
-    /// `max_depth` times the distinct pointers reached, whatever the fan-out.
+    /// distinct pointers reached so far.
     /// Both forms admit the same rows. No backend evaluates the closure in
     /// memory or for the whole table. Other backends are refused.
     ///
     /// **Composition limits.** A closure inside a closure evaluates the inner
-    /// walk for every row the outer walk reaches, and the target is inlined
-    /// four times, so cost multiplies with each level. At most
+    /// walk for every row the outer walk reaches, so execution cost can
+    /// multiply with each level. At most
     /// [`READ_PREDICATE_CLOSURE_MAX_NESTING`] closures may nest, through any
     /// relations, negations, `and` and `or`; the rendered SQL may not exceed
     /// [`READ_PREDICATE_MAX_RENDERED_BYTES`]. On SQL Server, the policy's
     /// subqueries may nest at most [`READ_PREDICATE_MSSQL_MAX_NESTING`]
-    /// levels. A closure at the default bound uses 67 levels and each
-    /// `related` around it adds two, leaving room for four such relations, or
-    /// one around a closure inside a closure.
+    /// levels. Each `related` around a closure adds two levels, and the
+    /// relation and weighted nesting budgets also apply.
     ///
     /// Refused with `AUTHORIZATION_MISCONFIGURED`: unsupported backends,
     /// `max_depth` outside the range above, a composition over the limits
@@ -2583,8 +2706,8 @@ impl ReadPredicate {
         if !(1..=limit).contains(&max_depth) || !target.policy.negatable() {
             return Err(invalid());
         }
-        // A closure inside closures multiplies the walk per level, and the
-        // target is inlined four times; refuse both before rendering.
+        // Nested closures multiply the work of the walk even when the SQL
+        // shares the target expression. Keep the independent depth cap.
         if target.cost.closures >= READ_PREDICATE_CLOSURE_MAX_NESTING {
             return Err(invalid());
         }
@@ -2620,15 +2743,46 @@ impl ReadPredicate {
         {
             return Err(invalid());
         }
-        // Like the target, its FALSE rows are SQL over the governed row:
-        // each is bound to the row the truth is taken for.
-        let (false_rows, false_values) = match explicit {
-            Some(((sql, values), _)) => (sql.wrapped("(", ")"), values),
-            None => (
-                relation.predicate.wrapped("NOT (", ")"),
+        // Preserve the explicit FALSE rendering of relations and compound
+        // policies, including negations. On backends with scalar booleans,
+        // native SQL negation needs only one evaluation of the target.
+        let (truth, truth_values) = match (&target.policy, B::DIALECT, explicit) {
+            (Policy::Closure { verdict, values }, _, _) => {
+                (verdict.wrapped("COALESCE(2 * ", ", 1)"), values.clone())
+            }
+            (_, _, Some(((sql, mut values), _))) => {
+                let mut all_values = relation.values.clone();
+                all_values.append(&mut values);
+                (
+                    truth(&relation.predicate, &sql.wrapped("(", ")")),
+                    all_values,
+                )
+            }
+            (_, DatabaseBackend::Postgres, None) => (
+                relation
+                    .predicate
+                    .wrapped("COALESCE(2 * ((", ")::integer), 1)"),
                 relation.values.clone(),
             ),
+            (_, DatabaseBackend::Sqlite, None) => (
+                relation
+                    .predicate
+                    .wrapped("COALESCE(2 * (NOT NOT (", ")), 1)"),
+                relation.values.clone(),
+            ),
+            (_, _, None) => {
+                let mut values = relation.values.clone();
+                values.extend(relation.values.iter().cloned());
+                (
+                    truth(
+                        &relation.predicate,
+                        &relation.predicate.wrapped("NOT (", ")"),
+                    ),
+                    values,
+                )
+            }
         };
+        let columns_for_truth = closure_columns(B::DIALECT, &truth)?;
         let negation = match target.negation {
             Negation::Unsupported => Negation::Unsupported,
             Negation::Sql | Negation::Explicit(..) => Negation::Sql,
@@ -2643,12 +2797,9 @@ impl ReadPredicate {
             CLOSURE_ALIASES[0],
             relation.scope.level(CLOSURE_ALIASES)
         );
-        // Each of the two truth expressions binds the target, then its
-        // FALSE rows.
-        let mut values = Vec::with_capacity((relation.values.len() + false_values.len()) * 2);
-        for _ in 0..2 {
-            values.extend(relation.values.iter().cloned());
-            values.extend(false_values.iter().cloned());
+        let mut values = truth_values;
+        if columns_for_truth.is_none() {
+            values.extend_from_within(..);
         }
         if dialect == DatabaseBackend::Mssql {
             let clause = render_mssql_closure(
@@ -2657,19 +2808,21 @@ impl ReadPredicate {
                 &cte,
                 keys,
                 quantifier,
-                &relation.predicate,
-                &false_rows,
+                &truth,
+                columns_for_truth.as_deref(),
                 max_depth,
             );
             return Ok(Self {
                 negation,
-                ..Self::fragment(
+                ..Self::measured(
                     TypeId::of::<T>(),
                     B::DIALECT,
                     Some(T::TABLE_NAME),
-                    clause,
-                    values,
-                    closures + 1,
+                    Policy::Closure {
+                        verdict: clause,
+                        values,
+                    },
+                    Some(closures + 1),
                 )?
             });
         }
@@ -2682,10 +2835,10 @@ impl ReadPredicate {
         };
         let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
         // The anchor has no FROM: its row is the one being authorized, the
-        // governed row, which the enclosing context binds. The step
-        // joins the reached row as `reached`, an alias unique to this
-        // closure, and evaluates the target (including any nested relation)
-        // on it, so a column it lacks fails the statement (#796).
+        // governed row, which the enclosing context binds. The step uses
+        // `reached` for the physical row. The target reads that same row,
+        // either through the projection or directly through `reached`.
+        // A missing column fails the statement (#796).
         let reached = format!("{cte}_t");
         let step = join(
             indexed(&|index, _, key| {
@@ -2741,8 +2894,19 @@ impl ReadPredicate {
                 "CASE WHEN MIN(__gom_truth) = 0 THEN 0 WHEN MIN(__gom_truth) = 1 OR {incomplete} THEN NULL ELSE 1 END"
             ),
         };
+        let reached_pointers = join(
+            indexed(&|_, pointer, _| {
+                format!("{reached}.{}", dialect.delimited_column_identifier(pointer))
+            }),
+            ", ",
+        );
+        let truth_column = if columns_for_truth.is_some() {
+            ""
+        } else {
+            ", __gom_truth"
+        };
         let mut clause = RowBoundSql::sql(format!(
-            "(WITH RECURSIVE {cte} ({columns}, __gom_depth, __gom_truth) AS (SELECT "
+            "(WITH RECURSIVE {cte} ({columns}, __gom_depth{truth_column}) AS (SELECT "
         ));
         for (index, (pointer, _)) in keys.iter().enumerate() {
             if index > 0 {
@@ -2754,30 +2918,52 @@ impl ReadPredicate {
                 dialect.delimited_column_identifier(pointer)
             ));
         }
-        clause.push_str(", 0, ");
-        clause.push(&truth(&relation.predicate, &false_rows));
+        clause.push_str(", 0");
+        if columns_for_truth.is_none() {
+            clause.push_str(", ");
+            clause.push(&truth);
+        }
         clause.push_str(&format!(
-            " UNION SELECT {reached_pointers}, {cte}.__gom_depth + 1, {reached_truth} \
-             FROM {cte} JOIN {table} AS {reached} ON {step} \
-             WHERE {cte}.__gom_depth < {max_depth}) \
-             SELECT {verdict} FROM {cte}) = 1",
-            reached_pointers = join(
-                indexed(&|_, pointer, _| {
-                    format!("{reached}.{}", dialect.delimited_column_identifier(pointer))
-                }),
-                ", ",
-            ),
-            reached_truth = truth(&relation.predicate, &false_rows).bind(&reached),
+            " UNION SELECT {reached_pointers}, {cte}.__gom_depth + 1"
         ));
+        if columns_for_truth.is_none() {
+            clause.push_str(&format!(", {}", truth.bind(&reached)));
+        }
+        clause.push_str(&format!(
+            " FROM {cte} JOIN {table} AS {reached} ON {step} \
+             WHERE {cte}.__gom_depth < {max_depth}) SELECT {verdict} FROM "
+        ));
+        if let Some(columns) = columns_for_truth {
+            // The walk needs only (pointer, depth). Joining each pointer
+            // below the bound once more recovers every reached input to
+            // MIN/MAX. Repeated matches do not affect these aggregates.
+            let input = format!("{cte}_i");
+            let truths = format!("{cte}_x");
+            let origin = format!("{cte}_origin");
+            clause.push_str(&format!(
+                "(SELECT {} AS __gom_truth FROM (",
+                truth.bind(&input)
+            ));
+            clause.push(&closure_anchor_projection(&columns, &origin));
+            clause.push_str(&format!(
+                " UNION ALL SELECT 0{reached_columns} FROM {cte} JOIN {table} AS {reached} ON {step} \
+                 WHERE {cte}.__gom_depth < {max_depth}) AS {input}) AS {truths})",
+                reached_columns = closure_column_projection(&columns, &reached),
+            ));
+        } else {
+            clause.push_str(&format!("{cte})"));
+        }
         Ok(Self {
             negation,
-            ..Self::fragment(
+            ..Self::measured(
                 TypeId::of::<T>(),
                 B::DIALECT,
                 Some(T::TABLE_NAME),
-                clause,
-                values,
-                closures + 1,
+                Policy::Closure {
+                    verdict: clause,
+                    values,
+                },
+                Some(closures + 1),
             )?
         })
     }

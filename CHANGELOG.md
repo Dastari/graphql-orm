@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - next ORM/macros minor
+
+- **Changed (#785, #778):** Closure read predicates can share target SQL
+  across the governed row and reached rows. The closure documentation now
+  describes incomplete descendant walks, cycle depth and non-unique-key
+  fan-out. See the [migration guide](MIGRATION.md#next-ormmacros-minor).
+
 ## Unreleased - ORM/macros 0.191.0
 
 - **Added (#831):** `Database::read_snapshot_transaction` runs multiple

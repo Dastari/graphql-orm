@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## Next ORM/macros minor
+
+- **No action** for policy definitions or data. Closure predicates can use
+  fewer SQL placeholders because the governed row and reached rows share
+  target SQL. Update any tests that assert the exact generated SQL or bind
+  list. See [closure read predicates](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
 ## 0.190.0 to 0.191.0: read snapshot transactions
 
 **No action.** The snapshot runner is opt-in and uses the existing generated

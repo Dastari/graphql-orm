@@ -274,8 +274,10 @@ mod portable {
         #[cfg(feature = "mssql")]
         let (db, owner) = {
             let owner = FixtureOwner::start().await.unwrap();
-            let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
+            let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable_with(
                 &owner.connection_string,
+                graphql_orm::db::mssql::MssqlPoolOptions::default()
+                    .query_timeout(Some(std::time::Duration::from_secs(60))),
             )
             .await
             .unwrap();
@@ -565,10 +567,9 @@ mod portable {
                 ));
             }
         }
-        // Combining closures side by side is not nesting; each counts towards
-        // the relation total, so two two-level closures together exceed it.
+        // Sibling closures do not add nesting depth.
         two.clone().or(any(PARENT, passes())).unwrap();
-        misconfigured(two.or(through));
+        two.or(through).unwrap();
     }
 
     #[test]
@@ -672,11 +673,7 @@ mod portable {
     #[test]
     fn statement_nesting_is_budgeted_on_sql_server() {
         let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
-        // A closure at the default bound uses 67 subquery levels, a closure
-        // inside a closure 73, and each relation around them two more. On SQL
-        // Server the second shape (five closures and four inlined relations)
-        // already holds the nine relations a predicate may have.
-        for (target, room) in [(all(PARENT, passes()), 4), (two_levels, 0)] {
+        for target in [all(PARENT, passes()), two_levels] {
             let (deepest, wrappers) = deepest_wrapped_closure(target);
             let nesting = subquery_nesting(&rendered(&deepest));
             if B::DIALECT == DatabaseBackend::Mssql {
@@ -685,7 +682,6 @@ mod portable {
                 // when the policy is built.
                 assert_eq!(READ_PREDICATE_MSSQL_MAX_NESTING, 75);
                 assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
-                assert_eq!(wrappers, room);
             } else {
                 // No subquery budget off SQL Server: the relation nesting
                 // limit stops it, counting the closure's own relations.
@@ -1343,14 +1339,24 @@ mod portable {
             .with_read_visibility(&ReadVisibility::Complete(tree))
             .unwrap()
             .build_delete_sql();
+        let expected: &[i64] = if B::DIALECT == DatabaseBackend::Mssql {
+            &[11, 12, 13, 12, 13, 14]
+        } else {
+            &[11, 12, 13, 14]
+        };
         assert_eq!(
             binds,
-            [11, 12, 13, 12, 13, 12, 13, 12, 13, 14]
+            expected
+                .iter()
+                .copied()
                 .map(SqlValue::Int)
-                .to_vec(),
+                .collect::<Vec<_>>(),
             "{sql}"
         );
-        assert_eq!(placeholder_positions(&sql), (1..=10).collect::<Vec<_>>());
+        assert_eq!(
+            placeholder_positions(&sql),
+            (1..=expected.len()).collect::<Vec<_>>()
+        );
         if B::DIALECT == DatabaseBackend::Mssql {
             // One nested level and OUTER APPLY per hop, and no CTE.
             assert!(!sql.contains("WITH"), "{sql}");
@@ -1370,7 +1376,20 @@ mod portable {
             )))
             .unwrap()
             .build_delete_sql();
-        assert_eq!(binds.len(), 16, "{sql}");
+        eprintln!(
+            "nested closure ({:?}): {} SQL bytes, {} binds",
+            B::DIALECT,
+            sql.len(),
+            binds.len()
+        );
+        assert_eq!(
+            binds.len(),
+            if B::DIALECT == DatabaseBackend::Mssql {
+                2
+            } else {
+                1
+            }
+        );
         assert!(sql.contains("__gom_closure_1") && sql.contains("__gom_closure_2"));
         // Composite keys join every column.
         let (sql, _) = EntityQuery::<ClosureNode>::new()

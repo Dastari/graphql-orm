@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+The next ORM/macros minor aligns with the ORM's
+[closure predicate rendering update](../../MIGRATION.md#next-ormmacros-minor).
+
 Version 0.191.0 aligns with the ORM's
 [read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
 Existing generated reads work through the snapshot context.

@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+The next ORM/macros minor shares target SQL across the governed and reached
+rows where their target columns can be projected. See the
+[closure reference](../../docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures)
+for descendant walks and the cost of non-unique target keys.
+
 Version 0.191.0 adds [read snapshot transactions](#read-snapshot-transactions)
 for policy-aware reads on SQLite, PostgreSQL, and SQL Server.
 
