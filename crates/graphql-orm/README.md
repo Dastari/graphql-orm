@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+In version 0.190.0, generated query roots, Changed subscriptions and the
+NodeId object field return field errors when required schema data is missing.
+The generated `schema_builder(database)` registers the data for its roots.
+See the [migration guide](../../MIGRATION.md#01890-to-01900-generated-query-resolvers).
+
 Version 0.189.0 qualifies generated root search filters with the entity table
 (#799). See the [migration guide](../../MIGRATION.md#01880-to-01890-root-search-filter-binding).
 

@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## 0.189.0 to 0.190.0: generated query resolvers
+
+Upgrade ORM and macros together.
+
+- **Action needed** if a keyset order has an incomplete null-order clause
+  (such as `x desc nulls`) or trailing tokens. Use
+  `field asc|desc [nulls first|last]` for each comma-separated entry, ending
+  with the complete primary key. The derive now rejects those declarations.
+- **No action** for valid declarations. Generated queries, Changed
+  subscriptions and the NodeId object field return a GraphQL field error
+  when required schema data is missing. Hand-built schemas still register
+  the matching `Database` and any generated Federation loaders they use.
+
 ## 0.188.0 to 0.189.0: root search filter binding
 
 **No action** — generated root search qualifies client filter columns with the
