@@ -4179,6 +4179,10 @@ fn generate_graphql_operations_unfiltered(
         }
     };
 
+    let updated_at_assignment = match backend {
+        BackendKind::Mssql => "[updated_at] = {}",
+        BackendKind::Sqlite | BackendKind::Postgres => r#""updated_at" = {}"#,
+    };
     let has_updated_at_column = fields.iter().any(|field| {
         field.ident.as_ref().is_some_and(|ident| {
             parse_field_metadata(field).is_ok_and(|meta| {
@@ -5291,7 +5295,7 @@ fn generate_graphql_operations_unfiltered(
                         *clause = ::std::format!("{} = {rhs}", dialect.quote_identifier_path(column));
                     }
                     if #has_updated_at_column {
-                        set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                        set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
                     }
                     let before_state = current_entity
                         .as_ref()
@@ -8178,6 +8182,7 @@ fn generate_graphql_operations_unfiltered(
             update_policy_checks: &update_policy_checks,
             update_assignments_graphql_call: &update_assignments_graphql_call,
             has_updated_at_column,
+            updated_at_assignment,
             table_name,
             pk_id_for_id: &pk_id_for_id,
             sql_table_name: &sql_table_name,
@@ -8781,7 +8786,7 @@ fn generate_graphql_operations_unfiltered(
                 #update_assignments_repo_call
 
                 if #has_updated_at_column {
-                    set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                    set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
                 }
                 if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
@@ -8923,7 +8928,7 @@ fn generate_graphql_operations_unfiltered(
                     #update_assignments_repo_call
 
                     if #has_updated_at_column {
-                        set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                        set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
                     }
                     if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                         set_clauses.push(assignment);
@@ -9364,7 +9369,7 @@ fn generate_graphql_operations_unfiltered(
                 #update_assignments_repo_call
 
                 if #has_updated_at_column {
-                    set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                    set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
                 }
                 if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
@@ -9572,7 +9577,7 @@ fn generate_graphql_operations_unfiltered(
                     #update_assignments_repo_call
 
                     if #has_updated_at_column {
-                        set_clauses.push(::std::format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
+                        set_clauses.push(::std::format!(#updated_at_assignment, Self::__gom_current_updated_at_expr()));
                     }
                     if let ::std::option::Option::Some(assignment) = Self::__gom_managed_version_assignment() {
                         set_clauses.push(assignment);
@@ -10723,4 +10728,37 @@ fn keyset_order_fingerprint(parts: &[(syn::Ident, syn::Type, String, bool, bool)
         })
         .collect::<Vec<_>>();
     format!("v1:{}", parts.join(","))
+}
+
+#[cfg(test)]
+#[test]
+fn generated_updates_quote_the_implicit_timestamp_column() {
+    use quote::ToTokens;
+
+    let policy = writable_fixture_arguments();
+    let input = syn::parse_quote! {
+        #[graphql_entity(table = "timestamp_records", #policy)]
+        struct TimestampRecord {
+            #[primary_key]
+            id: String,
+            title: String,
+            #[graphql_orm(db_column = "updated_at")]
+            modified: i64,
+        }
+    };
+    let backend = resolve_backend(None, proc_macro2::Span::call_site(), "test").unwrap();
+    let expected = if backend == BackendKind::Mssql {
+        "[updated_at] = {}"
+    } else {
+        r#""updated_at" = {}"#
+    };
+    let quoted = syn::LitStr::new(expected, proc_macro2::Span::call_site())
+        .to_token_stream()
+        .to_string();
+    let generated = generate_graphql_operations(&input).unwrap().to_string();
+    assert!(
+        generated.contains(&quoted),
+        "missing quoted timestamp assignment"
+    );
+    assert!(!generated.contains(r#""updated_at = {}""#));
 }

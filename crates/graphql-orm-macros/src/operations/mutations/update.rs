@@ -35,6 +35,7 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) update_policy_checks: &'a [TokenStream],
     pub(in crate::operations) update_assignments_graphql_call: &'a TokenStream,
     pub(in crate::operations) has_updated_at_column: bool,
+    pub(in crate::operations) updated_at_assignment: &'a str,
     pub(in crate::operations) table_name: &'a str,
     pub(in crate::operations) pk_id_for_id: &'a TokenStream,
     pub(in crate::operations) sql_table_name: &'a str,
@@ -89,6 +90,7 @@ pub(in crate::operations) fn update(
         update_policy_checks,
         update_assignments_graphql_call,
         has_updated_at_column,
+        updated_at_assignment,
         table_name,
         pk_id_for_id,
         sql_table_name,
@@ -253,7 +255,7 @@ pub(in crate::operations) fn update(
 
                 // Update timestamp column when this entity defines one
                 if #has_updated_at_column {
-                    set_clauses.push(::std::format!("updated_at = {}", #struct_name::__gom_current_updated_at_expr()));
+                    set_clauses.push(::std::format!(#updated_at_assignment, #struct_name::__gom_current_updated_at_expr()));
                 }
                 if let ::std::option::Option::Some(assignment) = #struct_name::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
