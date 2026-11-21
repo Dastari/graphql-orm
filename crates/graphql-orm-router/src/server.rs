@@ -381,6 +381,7 @@ impl PreparedRouter {
             internal_subscription: internal_subscription.clone(),
             request_limits: self.config.request_limits.clone(),
             introspection: self.config.introspection,
+            refusal_outcome: self.config.refusal_outcome,
             persisted_documents_enabled: self.config.persisted_documents.is_some(),
             persisted_documents: self.config.persisted_documents.clone(),
             verified_runtimes: Arc::new(hive_router::tokio::sync::Mutex::new(BTreeMap::new())),
@@ -465,6 +466,7 @@ impl PreparedRouter {
                 listener,
                 self.lifecycle.metrics(),
                 self.config.persisted_documents.clone(),
+                self.config.refusal_outcome,
             )
         });
         let public_graphql_path = self.config.graphql_path.clone();
@@ -620,9 +622,34 @@ fn selected_node_lookup(
 #[derive(Clone, Copy)]
 struct TrustedInternalSubscription;
 
+/// Set once an operation of this request reaches the execute stage or sends
+/// a subgraph request. Hive raises every error it hands the error hook after
+/// that point during or after execution, so none of them is a refusal. An
+/// HTTP request has its own plugin context; a WebSocket connection shares one,
+/// so WebSocket refusals are classified by the public gateway instead.
+#[derive(Clone, Copy)]
+struct ExecutionStarted;
+
 /// Bearer of a private subscription connection whose scopes expire with an
 /// external authority snapshot. Kept in memory only, never formatted.
 struct RetainedConnectionBearer(String);
+
+/// A refusal names its code and, for a refused selection, only its response
+/// path by response key. It never names the rule or the missing scope.
+fn authorization_denial_error(denial: crate::auth::AuthorizationDenial) -> GraphQLError {
+    let mut error = GraphQLError::from_message_and_code(denial.message, denial.code);
+    if let Some(path) = denial.path {
+        let mut segments =
+            hive_router::executor::response::graphql_error::GraphQLErrorPath::with_capacity(
+                path.len(),
+            );
+        for key in &path {
+            segments.push_field(key);
+        }
+        error.path = Some(segments);
+    }
+    error
+}
 
 /// Why an operation's principal could not be confirmed.
 fn authority_unavailable() -> GraphQLError {
@@ -647,6 +674,7 @@ struct PluginRuntime {
     internal_subscription: Option<InternalSubscriptionEndpoint>,
     request_limits: crate::RequestLimits,
     introspection: bool,
+    refusal_outcome: bool,
     strict_persisted_documents: bool,
     persisted_documents_enabled: bool,
     persisted_documents: Option<crate::persisted::PersistedDocuments>,
@@ -852,7 +880,7 @@ impl RouterPlugin for StaticGraphPlugin {
                     // Non-text credentials are refused by the authorization check.
                     .and_then(|value| value.to_str().ok());
                 if !internal.authorizes(payload.router_http_request.path(), supplied) {
-                    return invalid_bearer_response(payload);
+                    return invalid_bearer_response(payload, self.runtime.refusal_outcome);
                 }
                 if is_internal_subscription {
                     payload.context.insert(TrustedInternalSubscription);
@@ -873,10 +901,10 @@ impl RouterPlugin for StaticGraphPlugin {
                 };
                 if !verified {
                     return payload.end_with_graphql_error(
-                        GraphQLError::from_message_and_code(
+                        self.refusal(GraphQLError::from_message_and_code(
                             "Persisted document runtime is unavailable",
                             "SERVICE_UNAVAILABLE",
-                        ),
+                        )),
                         hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
                     );
                 }
@@ -895,10 +923,10 @@ impl RouterPlugin for StaticGraphPlugin {
                 return payload.proceed();
             };
             let Ok(authorization) = authorization.to_str() else {
-                return invalid_bearer_response(payload);
+                return invalid_bearer_response(payload, self.runtime.refusal_outcome);
             };
             let Some(token) = strict_bearer_token(authorization) else {
-                return invalid_bearer_response(payload);
+                return invalid_bearer_response(payload, self.runtime.refusal_outcome);
             };
             match provider.authenticate_bearer(token) {
                 Ok(principal) => {
@@ -922,14 +950,14 @@ impl RouterPlugin for StaticGraphPlugin {
                     let unavailable =
                         matches!(error.kind(), crate::AuthenticationErrorKind::Unavailable);
                     payload.end_with_graphql_error(
-                        GraphQLError::from_message_and_code(
+                        self.refusal(GraphQLError::from_message_and_code(
                             if unavailable {
                                 "authentication service unavailable"
                             } else {
                                 "invalid bearer credential"
                             },
                             "UNAUTHENTICATED",
-                        ),
+                        )),
                         if unavailable {
                             hive_router::http::StatusCode::SERVICE_UNAVAILABLE
                         } else {
@@ -955,10 +983,10 @@ impl RouterPlugin for StaticGraphPlugin {
             && payload.body.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'[')
         {
             return payload.end_with_graphql_error(
-                GraphQLError::from_message_and_code(
+                self.refusal(GraphQLError::from_message_and_code(
                     "Persisted document extraction failed",
                     "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
-                ),
+                )),
                 hive_router::http::StatusCode::BAD_REQUEST,
             );
         }
@@ -988,6 +1016,7 @@ impl RouterPlugin for StaticGraphPlugin {
         let operation_name = payload.graphql_params.operation_name.clone();
         let gateway_enabled = self.runtime.internal_subscription.is_some();
         let metrics = self.runtime.lifecycle.metrics();
+        let refusal_outcome = self.runtime.refusal_outcome;
         // Hive refuses introspection itself unless it is enabled. When it is
         // enabled on an authenticated router it still needs a validated
         // caller, as every described root field does.
@@ -1001,7 +1030,10 @@ impl RouterPlugin for StaticGraphPlugin {
             if may_select_subscription(&payload.document, operation_name.as_deref()) {
                 metrics.graphql_error();
                 return payload.end_with_graphql_error(
-                    http_subscription_refusal(gateway_enabled),
+                    crate::outcome::refusal(
+                        http_subscription_refusal(gateway_enabled),
+                        refusal_outcome,
+                    ),
                     hive_router::http::StatusCode::BAD_REQUEST,
                 );
             }
@@ -1010,9 +1042,12 @@ impl RouterPlugin for StaticGraphPlugin {
             {
                 metrics.graphql_error();
                 return payload.end_with_graphql_error(
-                    GraphQLError::from_message_and_code(
-                        "authentication is required",
-                        "UNAUTHENTICATED",
+                    crate::outcome::refusal(
+                        GraphQLError::from_message_and_code(
+                            "authentication is required",
+                            "UNAUTHENTICATED",
+                        ),
+                        refusal_outcome,
                     ),
                     hive_router::http::StatusCode::UNAUTHORIZED,
                 );
@@ -1036,9 +1071,9 @@ impl RouterPlugin for StaticGraphPlugin {
             self.runtime.lifecycle.metrics().graphql_error();
             return OnGraphqlAnalysisHookResult::EndWithResponse(
                 PlanExecutionOutput::from_graphql_errors_to_response(
-                    vec![http_subscription_refusal(
+                    vec![self.refusal(http_subscription_refusal(
                         self.runtime.internal_subscription.is_some(),
-                    )],
+                    ))],
                     hive_router::http::StatusCode::BAD_REQUEST,
                 ),
             );
@@ -1048,10 +1083,10 @@ impl RouterPlugin for StaticGraphPlugin {
         {
             return OnGraphqlAnalysisHookResult::EndWithResponse(
                 PlanExecutionOutput::from_graphql_errors_to_response(
-                    vec![GraphQLError::from_message_and_code(
+                    vec![self.refusal(GraphQLError::from_message_and_code(
                         "GraphQL operation exceeds the configured field limit",
                         "OPERATION_LIMIT_EXCEEDED",
-                    )],
+                    ))],
                     hive_router::http::StatusCode::BAD_REQUEST,
                 ),
             );
@@ -1061,10 +1096,10 @@ impl RouterPlugin for StaticGraphPlugin {
             if self.runtime.authentication.is_some() {
                 return OnGraphqlAnalysisHookResult::EndWithResponse(
                     PlanExecutionOutput::from_graphql_errors_to_response(
-                        vec![GraphQLError::from_message_and_code(
+                        vec![self.refusal(GraphQLError::from_message_and_code(
                             "authorization state is unavailable",
                             "UNAUTHENTICATED",
-                        )],
+                        ))],
                         hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
                     ),
                 );
@@ -1076,7 +1111,7 @@ impl RouterPlugin for StaticGraphPlugin {
             Err(_) => {
                 return OnGraphqlAnalysisHookResult::EndWithResponse(
                     PlanExecutionOutput::from_graphql_errors_to_response(
-                        vec![authority_unavailable()],
+                        vec![self.refusal(authority_unavailable())],
                         hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
                     ),
                 );
@@ -1131,7 +1166,7 @@ impl RouterPlugin for StaticGraphPlugin {
             .authorization_denied(denials.len());
         let errors = denials
             .into_iter()
-            .map(|denial| GraphQLError::from_message_and_code(denial.message, denial.code))
+            .map(|denial| self.refusal(authorization_denial_error(denial)))
             .collect::<Vec<_>>();
         OnGraphqlAnalysisHookResult::EndWithResponse(
             PlanExecutionOutput::from_graphql_errors_to_response(
@@ -1145,14 +1180,17 @@ impl RouterPlugin for StaticGraphPlugin {
         &'execution self,
         payload: OnExecuteStartHookPayload<'execution>,
     ) -> OnExecuteStartHookResult<'execution> {
+        // Every refusal below still precedes any subgraph request. Errors Hive
+        // reports to the error hook from here on come from execution.
+        payload.context.insert(ExecutionStarted);
         let selected = selected_policy(payload.context);
         let Some(catalog) = selected.as_ref().and_then(|selected| selected.0.as_ref()) else {
             if self.runtime.authentication.is_some() {
                 return payload.end_with_graphql_error(
-                    GraphQLError::from_message_and_code(
+                    self.refusal(GraphQLError::from_message_and_code(
                         "authorization state is unavailable",
                         "UNAUTHENTICATED",
-                    ),
+                    )),
                     hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
                 );
             }
@@ -1162,7 +1200,7 @@ impl RouterPlugin for StaticGraphPlugin {
             Ok(principal) => principal,
             Err(_) => {
                 return payload.end_with_graphql_error(
-                    authority_unavailable(),
+                    self.refusal(authority_unavailable()),
                     hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
                 );
             }
@@ -1190,7 +1228,7 @@ impl RouterPlugin for StaticGraphPlugin {
         payload.end_with_graphql_errors(
             denials
                 .into_iter()
-                .map(|denial| GraphQLError::from_message_and_code(denial.message, denial.code)),
+                .map(|denial| self.refusal(authorization_denial_error(denial))),
             hive_router::http::StatusCode::OK,
         )
     }
@@ -1199,6 +1237,7 @@ impl RouterPlugin for StaticGraphPlugin {
         &'execution self,
         payload: OnSubgraphHttpRequestHookPayload<'execution>,
     ) -> OnSubgraphHttpRequestHookResult<'execution> {
+        payload.context.insert(ExecutionStarted);
         if payload.subgraph_name == crate::node_lookup::NODE_SUBGRAPH_NAME {
             // The router-hosted Node subgraph is never contacted over the
             // network; answer from the graph this request is pinned to.
@@ -1264,7 +1303,41 @@ impl RouterPlugin for StaticGraphPlugin {
         {
             payload.error.message = "Persisted document request refused".to_owned();
         }
+        // The router's own refusals end their hooks with a response and never
+        // reach this hook. An HTTP error that arrives here before the execute
+        // stage is one of Hive's own pipeline errors (request, parse,
+        // validation, limits, persisted document, variable coercion,
+        // planning), raised before any subgraph request. This relies on Hive's
+        // inbound request deduplication staying disabled (see
+        // `build_hive_config`), so no request can receive another request's
+        // execution error.
+        //
+        // Hive's subscription branch runs neither the execute hook nor the
+        // subgraph request hook, so `ExecutionStarted` is never set for a
+        // subscription and its absence proves nothing there. The only
+        // subscriptions Hive serves arrive on the private gateway endpoint
+        // (`TrustedInternalSubscription`); they are never marked here. Their
+        // `error` frames are classified by code instead, in
+        // `outcome::mark_hive_websocket_refusal`, whose unit test pins that
+        // execution codes stay unmarked.
+        if self.runtime.refusal_outcome
+            && payload.context.get_ref::<ExecutionStarted>().is_none()
+            && payload
+                .context
+                .get_ref::<TrustedInternalSubscription>()
+                .is_none()
+            && payload.error.extensions.code.as_deref() != Some(crate::outcome::GATEWAY_TIMEOUT)
+        {
+            crate::outcome::mark_refused(&mut payload.error);
+        }
         payload.proceed()
+    }
+}
+
+impl StaticGraphPlugin {
+    /// Marks a router refusal raised before any subgraph request.
+    fn refusal(&self, error: GraphQLError) -> GraphQLError {
+        crate::outcome::refusal(error, self.runtime.refusal_outcome)
     }
 }
 
@@ -1432,9 +1505,15 @@ fn may_select_introspection(
     })
 }
 
-fn invalid_bearer_response(payload: OnHttpRequestHookPayload<'_>) -> OnHttpRequestHookResult<'_> {
+fn invalid_bearer_response(
+    payload: OnHttpRequestHookPayload<'_>,
+    refusal_outcome: bool,
+) -> OnHttpRequestHookResult<'_> {
     payload.end_with_graphql_error(
-        GraphQLError::from_message_and_code("invalid bearer credential", "UNAUTHENTICATED"),
+        crate::outcome::refusal(
+            GraphQLError::from_message_and_code("invalid bearer credential", "UNAUTHENTICATED"),
+            refusal_outcome,
+        ),
         hive_router::http::StatusCode::UNAUTHORIZED,
     )
 }
@@ -2043,5 +2122,31 @@ mod tests {
             serialized["traffic_shaping"]["router"]["dedupe"]["enabled"],
             false
         );
+    }
+
+    /// The refusal outcome (#764) marks an HTTP error `refused` when the
+    /// request never reached the execute stage. With Hive's inbound request
+    /// deduplication on, a request could receive another request's execution
+    /// error without having executed itself, and that error would be marked
+    /// `refused` after a write ran. Deduplication therefore stays disabled in
+    /// every configuration, with and without the refusal outcome.
+    #[test]
+    fn inbound_deduplication_stays_disabled_for_the_refusal_outcome() {
+        for refusal_outcome in [false, true] {
+            let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .allow_plaintext_http(true)
+                .with_subgraph(StaticSubgraph::new(
+                    "status",
+                    "http://status.test/graphql",
+                    "http://status.test/sdl",
+                ))
+                .with_refusal_outcome(refusal_outcome);
+            let hive = build_hive_config(&config, 7, None).unwrap();
+            let serialized = serde_json::to_value(hive).unwrap();
+            assert_eq!(
+                serialized["traffic_shaping"]["router"]["dedupe"]["enabled"], false,
+                "refusal outcome {refusal_outcome}: inbound deduplication must stay disabled (#764)"
+            );
+        }
     }
 }

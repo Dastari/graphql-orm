@@ -26,7 +26,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         .finish()
         .sdl();
 
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     {
         assert!(sdl.contains("aiSessions("));
         assert!(sdl.contains("activitySnapshot: AiSessionActivitySnapshot!"));
@@ -63,7 +63,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(!sdl.contains("AiSessions("));
     }
 
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     {
         assert!(sdl.contains("AiSessions("));
         assert!(sdl.contains("ActivitySnapshot: AiSessionActivitySnapshot!"));

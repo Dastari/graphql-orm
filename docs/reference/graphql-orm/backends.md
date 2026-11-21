@@ -214,28 +214,10 @@ graphql_orm::db::Database::<graphql_orm::SqliteBackend>
 graphql_orm::db::Database::<graphql_orm::PostgresBackend>
 ```
 
-## Naming Feature Groups
+## Naming configuration
 
-Naming features are independent from backend features. Enable at most one feature from each group:
-
-- `resolver-case-pascal`, `resolver-case-snake`, `resolver-case-screaming-snake`,
-  `resolver-case-lower`, `resolver-case-upper`
-- `argument-case-pascal`, `argument-case-snake`, `argument-case-screaming-snake`,
-  `argument-case-lower`, `argument-case-upper`
-- `field-case-pascal`, `field-case-snake`, `field-case-screaming-snake`, `field-case-lower`,
-  `field-case-upper`
-
-Example:
-
-```toml
-graphql-orm = {
-  version = "0.2.21",
-  default-features = false,
-  features = [
-    "mssql",
-    "resolver-case-pascal",
-    "argument-case-pascal",
-    "field-case-pascal",
-  ],
-}
-```
+GraphQL naming is independent from backend features. It is selected per build
+by the `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+`GRAPHQL_ORM_FIELD_CASE` environment variables, which replaced the
+`resolver-case-*`, `argument-case-*` and `field-case-*` features. See
+[naming configuration](macros-and-attributes.md#naming-configuration).

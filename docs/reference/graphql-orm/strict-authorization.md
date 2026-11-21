@@ -274,7 +274,7 @@ policy callback, on every generated path:
 
 | Where the error surfaces | Authored refusal | Propagated or declared failure |
 | --- | --- | --- |
-| Generated GraphQL field or root | rendered as written, with its code | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
+| Generated GraphQL field or root | rendered as written, with its code, when it carries a `code` extension; an uncoded refusal is `INTERNAL_ERROR` with the default message | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
 | Relation boundary | `FORBIDDEN`, or `UNAUTHENTICATED` / `AUTHORIZATION_MISCONFIGURED` when it carries that code; no text | the failure class; no text |
 | `Changed` subscription event | the event is dropped; a timer refusal ends the stream with `FORBIDDEN` | the stream ends with a continuity-loss error |
 | Repository field policy callbacks | its code and message when the code is an ORM public code; otherwise `INTERNAL_ERROR`, default message | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
@@ -351,11 +351,12 @@ cannot grant a write; a row it leaves out is treated as missing even where the
 callbacks would have allowed it, so it must not exclude rows the caller can
 write. The default returns `None`. Repository writes do not ask.
 
-**Narrowing bulk writes to read visibility (opt-in).** With
-`DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` (or
-`Database::with_narrow_bulk_writes_to_read_visibility(true)`), GraphQL
+**Narrowing bulk writes to read visibility (default).** GraphQL
 `updateMany` and `deleteMany` also narrow their locking read by read
-visibility when the policy declares no `write_target_prefilter`. If
+visibility when the policy declares no `write_target_prefilter`. This is the
+default since the breaking release;
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility(false)` (or
+`Database::with_narrow_bulk_writes_to_read_visibility(false)`) turns it off. If
 `RowPolicy::read_visibility` returns `Prefilter` or `Complete` for the
 `GraphqlMutation` surface, its predicate is added to the bulk write's locking
 read. A row outside the caller's read visibility is then never passed to a row
@@ -363,8 +364,8 @@ callback or counted. The predicate only narrows. Every selected row is still
 classified as in the table above, so the payload and the rows written for
 visible rows are unchanged.
 
-The setting is off by default, and bulk writes then select the same rows as
-before. With it on:
+With the setting off, bulk writes select every row their filter matches, as
+before the breaking release. With it on:
 
 - A row outside read visibility that `can_write_row` would allow is left out,
   as a missing row is. If callers may bulk-write rows they cannot read, return
@@ -390,8 +391,8 @@ rows that a scan reads.
 **Snapshot target selection on SQL Server (separate opt-in).**
 `DatabaseBuilder::mssql_snapshot_bulk_write_targets(true)` (or
 `Database::with_mssql_snapshot_bulk_write_targets(true)`) lets a narrowed
-bulk write avoid that read. It is off by default, and stays off when narrowing
-becomes the default. It needs `narrow_bulk_writes_to_read_visibility` too. It
+bulk write avoid that read. It is off by default, and the narrowing default
+does not turn it on. It needs `narrow_bulk_writes_to_read_visibility` too. It
 applies to a bulk write with a SQL predicate (read visibility or a
 `write_target_prefilter`) **when all of these hold**:
 
@@ -604,8 +605,18 @@ single-row read checks and default propagating `notify_with` errors use
 that same classifier. An error whose own `async_graphql::Error.source` field is
 `Some` without a string `code` is masked; the wrapped error need not have a nested
 `std::error::Error::source()`. The exception is a typed `OrmPublicError` returned
-with `?`, which keeps its code and message. Use `Error::new` or set a string `code`
-for an authored refusal. `INTERNAL_ERROR`, whether set as a string `code` or on a
+with `?`, which keeps its code and message. Set a string `code` for an authored
+refusal: an error with no `code` extension, such as a plain
+`async_graphql::Error::new(text)`, is not a public refusal and renders as
+`INTERNAL_ERROR` with the default message, its text logged only. A host whose
+uncoded callback text is safe for clients can restore the earlier rendering
+for one schema: `DatabaseBuilder::expose_uncoded_callback_messages(true)` or
+`Database::with_uncoded_callback_messages_exposed(true)` on the `Database` the
+schema serves. Generated `schema_builder`s then install the
+`graphql_orm::graphql::errors::UncodedCallbackMessages` extension, which
+applies to the queries, mutations and subscriptions of that schema only; a
+handwritten schema installs the extension itself. Work outside a schema, such
+as a task the host spawns, keeps the default. `INTERNAL_ERROR`, whether set as a string `code` or on a
 typed `OrmPublicError`, always renders the default message. Custom `From` conversions leaving that field empty preserve their text
 and extensions. Direct SQLx sources retain their safe bulk category; other
 sources become `INTERNAL_ERROR`. Internal details use the existing opt-in

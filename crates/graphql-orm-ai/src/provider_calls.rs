@@ -7139,14 +7139,30 @@ mod tests {
             .expect("AI schema should apply");
         crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
+        // The supervised fixture tool is HighImpact, so its approvals always
+        // need recent MFA. The fixture principal has just completed it.
+        let authenticated_at =
+            OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+                .expect("current second should be representable");
+        let assurance = agql_auth::SessionAssurance::new(
+            authenticated_at,
+            ["otp", "pwd"],
+            Some("urn:test:loa:2".to_owned()),
+            Some("test".to_owned()),
+            agql_auth::MfaAcceptance::Satisfied,
+        )
+        .expect("test assurance should validate");
         let principal = AuthPrincipal::User(AuthUser {
             user_id: "provider-user".to_owned(),
             session_id: Uuid::new_v4(),
             roles: vec![],
             scopes: vec![],
-            session: SessionContext::default(),
+            session: SessionContext::default().with_assurance(assurance),
             token_claims: AccessTokenMetadata {
                 tenant_id: Some("provider-tenant".to_owned()),
+                auth_time: Some(authenticated_at.unix_timestamp()),
+                amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
+                acr: Some("urn:test:loa:2".to_owned()),
                 ..AccessTokenMetadata::default()
             },
         });
@@ -13660,7 +13676,16 @@ mod tests {
             .persist_and_execute(&mut guard, &fixture.lease, &discover, &[&discover])
             .await;
         let candidate = &broker_output(&discover_call)["candidates"][0];
-        assert_eq!(candidate["capabilityId"], generated_id.as_str());
+        // Broker version 2 discovers the entity; its one operation is the
+        // registered generated root, which execute resolves without naming.
+        assert_eq!(candidate["kind"], "generated_entity");
+        assert_eq!(
+            capability_index
+                .entity_entry_of(generated_id)
+                .map(|entity| entity.id.as_str()),
+            candidate["capabilityId"].as_str()
+        );
+        assert_eq!(candidate["operations"].as_array().map(Vec::len), Some(1));
 
         let describe = commit_broker_provider_budget(
             &fixture,
@@ -13852,7 +13877,7 @@ mod tests {
             ..ProviderCapabilities::default()
         };
         // The static tool is not a bootstrap definition: the surface is the
-        // three broker definitions only, and the session binding is the one a
+        // four broker definitions only, and the session binding is the one a
         // run with no static tool at all would have.
         let select = |session: AiCapabilityBrokerSession| {
             AiCapabilityDeliveryTurn::select(
@@ -13886,7 +13911,7 @@ mod tests {
                 .expect("brokered static tools should validate"),
         );
         assert_eq!(delivery.current_tools(), unbrokered.current_tools());
-        assert_eq!(delivery.current_tools().len(), 3);
+        assert_eq!(delivery.current_tools().len(), 4);
         assert_eq!(
             delivery.session_binding().fingerprint(),
             unbrokered.session_binding().fingerprint()
@@ -14020,19 +14045,18 @@ mod tests {
             .persist_and_execute(&mut guard, &lease, &describe, &[&discover, &describe])
             .await;
         let description = broker_output(&describe_call);
-        // Describe carries the review metadata and the reviewed argument
-        // schema of the exact registered tool.
+        // Describe carries the review metadata and a signature of the
+        // reviewed argument schema of the exact registered tool, whose
+        // result is fixed.
         assert_eq!(description["kind"], "reviewed_static");
         assert_eq!(description["risk"], json!(descriptor.risk));
         assert_eq!(description["approval"], json!(descriptor.approval));
-        assert_eq!(
-            description["planSchema"]["properties"]["arguments"],
-            descriptor.argument_schema
-        );
-        assert_eq!(
-            description["planSchema"]["properties"]["selections"]["maxItems"],
-            0
-        );
+        assert_eq!(description["version"], 2);
+        let operations = description["operations"].as_array().expect("operations");
+        assert_eq!(operations.len(), 1);
+        let signature = operations[0]["signature"].as_str().expect("signature");
+        assert!(signature.ends_with("-> fixed"), "{signature}");
+        assert!(description.get("planSchema").is_none());
         let loaded_reference = description["loadedReference"]
             .as_str()
             .expect("description should carry an opaque loaded reference")

@@ -56,6 +56,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
+| `key_only_deletes` | flag | absent; a `Key`/`Keys` subscriber of the exact key gets a key-only `DELETED` event when a delete releases no row. Not allowed when a primary-key field declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is not GraphQL-readable. See [subscription release authorization](entities-and-relations.md#subscription-release-authorization) |
 | `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `mutation_error_codes` | flag | absent; generated single-row results gain a nullable `errorCode` and the bulk filter refusals a code; see [mutation result error codes](error-codes.md#mutation-result-error-codes) |
@@ -319,17 +320,9 @@ equivalent to `#[graphql(complex, rename_fields = "PascalCase")]`. A relation wi
 the primary-key field as its source. The one exception is an entity with `schema_only = true`,
 which has no generated object. A relation target needs no loader implementation: generated
 relations take their keys from the relation, and every generated entity is a `RelationTarget`.
-`BatchLoadEntity` is needed only to load an entity through `RelationLoader`'s single-column
-`Loader<String>` form from handwritten code:
-
-```rust,ignore
-impl BatchLoadEntity for Account {
-    fn batch_column() -> &'static str { "id" }
-    fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
-        row.try_get("id")
-    }
-}
-```
+`BatchLoadEntity` is no longer used: `RelationLoader`'s single-column `Loader<String>` form,
+which read rows without entity, row or field policy, was removed in the breaking release.
+Existing implementations still compile and can be deleted.
 
 `GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
 `RecordVersion` (for an exported managed version) to its complex object.
@@ -338,7 +331,7 @@ They use the same encoding and declared version-field policy as generated object
 This is the whole supported declaration for an entity with a generated `NodeId`, a managed
 `RecordVersion` and a generated collection relation, with generated queries and subscriptions and
 no generated mutations. Its parent is compiled under the default names and under all three
-Pascal-case features by `crates/graphql-orm/tests/node_id_version_relations.rs`:
+`PascalCase` naming variables by `crates/graphql-orm/tests/node_id_version_relations.rs`:
 
 ```rust,ignore
 use graphql_orm::async_graphql::SimpleObject;
@@ -483,7 +476,7 @@ resolves its own fields before complex ones. The published name follows
 async-graphql: an explicit `#[graphql(name = "…")]` is used as written and also
 names every `derived(...)` copy. Otherwise the identifier, or a derived copy's
 `derived(name = "…")`, is renamed by `rename_fields` (the impl's for methods, the
-struct's for struct fields, camelCase by default); the `field-case-*` features do
+struct's for struct fields, camelCase by default); `GRAPHQL_ORM_FIELD_CASE` does
 not apply. Derived copies of a skipped struct field are still published. Names
 must be string literals, also when passed through `macro_rules!`. Remove such
 fields. The declared managed column controls subscription preflight
@@ -711,7 +704,7 @@ remove the generated operation with the entity's `query_shapes`/`mutation_shapes
 `generated_mutations` in `schema_roots!`.
 ```
 
-The check compares the exposed names: generated names follow the `resolver-case-*` features and the
+The check compares the exposed names: generated names follow `GRAPHQL_ORM_RESOLVER_CASE` and the
 entity's selected shapes, and handwritten names follow `#[graphql(name = "...")]` and the root's
 `rename_fields`, derived with the same routines async-graphql uses (so `fn s3bucket` is checked as
 `s3Bucket`, the name it is served under). It covers the Query, Mutation and Subscription roots
@@ -761,11 +754,11 @@ missing. An empty or incomplete manual list therefore cannot hide a collision, a
 at start-up rather than at compile time. A schema assembled by hand with `Schema::build` gets neither
 check.
 
-`max_page_limit: N` declares the maximum page limit of the `Database` the schema serves. The module
-then exposes `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the semantic catalogue publishes `N` as the ceiling of
-pageable relationship lists, the relation complexity estimate caps pages at `N`, and the schema
-builders panic for a `Database` whose `PaginationConfig::max_limit` is not `Some(N)`. It is optional;
-without it the catalogue and the estimate use the compile-time default of 100. See
+`max_page_limit: N` declares the maximum page limit of the `Database` the schema serves; a schema
+that omits it has a maximum of 100. The module exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
+semantic catalogue publishes it as the ceiling of pageable relationship lists, the relation
+complexity estimate caps pages at it, and the schema builders panic for a `Database` whose
+`PaginationConfig::max_limit` is not that value. See
 [page size](pagination-migration.md#page-size-reduced-by-default-refused-on-request).
 
 `require_policies: true` is an opt-in review gate. Every entity in `entities` must then record a
@@ -1022,16 +1015,39 @@ an authoritative source that implements the declared opaque cursor, watermark,
 replay, and reset contract. Generated broadcast subscriptions are explicitly
 `BestEffort` and have no bounded-wait registration limits.
 
-## Naming features
+## Naming configuration
 
-Feature groups alter generated names independently of the selected database.
-Enable at most one in each group:
+Three build-time environment variables select generated GraphQL names,
+independently of the selected database. Each takes one async-graphql rename
+rule: `camelCase` (the default when unset or empty), `PascalCase`,
+`snake_case`, `SCREAMING_SNAKE_CASE`, `lowercase` or `UPPERCASE`.
 
-| Group | Features |
+| Variable | Names it selects |
 | --- | --- |
-| resolver names | `resolver-case-pascal`, `resolver-case-snake`, `resolver-case-screaming-snake`, `resolver-case-lower`, `resolver-case-upper` |
-| argument names | `argument-case-pascal`, `argument-case-snake`, `argument-case-screaming-snake`, `argument-case-lower`, `argument-case-upper` |
-| field names | `field-case-pascal`, `field-case-snake`, `field-case-screaming-snake`, `field-case-lower`, `field-case-upper` |
+| `GRAPHQL_ORM_RESOLVER_CASE` | generated root query, mutation and subscription fields |
+| `GRAPHQL_ORM_ARGUMENT_CASE` | generated field arguments |
+| `GRAPHQL_ORM_FIELD_CASE` | generated object and input object fields, including the shared `PageInfo`, filter and search types |
+
+The `graphql-orm` and `graphql-orm-macros` build scripts read the same
+variables, so a build has exactly one naming contract, and an unknown value
+fails the build. Because the shared runtime types are compiled once per build,
+the choice is per build, not per crate: set it where the build is configured,
+usually the host workspace's `.cargo/config.toml`:
+
+```toml
+[env]
+GRAPHQL_ORM_RESOLVER_CASE = "PascalCase"
+GRAPHQL_ORM_ARGUMENT_CASE = "PascalCase"
+GRAPHQL_ORM_FIELD_CASE = "PascalCase"
+```
+
+Changing a variable rebuilds the two crates. `graphql-orm-ai` reads
+`GRAPHQL_ORM_AI_CASE` for its own types; see its configuration reference.
+
+These variables replaced the mutually exclusive `resolver-case-*`,
+`argument-case-*` and `field-case-*` Cargo features (#508). Features must be
+additive, and two dependants enabling different case features failed to
+compile; see the [migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).
 
 ## Further reading
 
@@ -1318,7 +1334,7 @@ type Ticket {
 ```
 
 - The name is always `RecordVersion` (`graphql_orm::graphql::orm::RECORD_VERSION_FIELD`); it does
-  not follow the `field-case-*` features. The declared field keeps its own name.
+  not follow `GRAPHQL_ORM_FIELD_CASE`. The declared field keeps its own name.
 - It resolves the declared field's value and applies the same field read policy and subscription
   availability. Generated `Changed` payloads may select it.
 - It has no column and no input, filter, order or aggregate entry.
@@ -1447,25 +1463,29 @@ the outer commit.
 
 ## Stable entity identity
 
-`#[graphql_entity(stable_type_id = "old_crate::models::Record")]` replaces the
-default Rust module-path identity in generated operation fingerprints and sort
-keys. The shared entity parser also accepts it on `#[repository_entity(...)]`;
-repository-only entities emit no GraphQL operation descriptors.
+Generated operation fingerprints and the catalogue order do not depend on
+where an entity is declared (fingerprint algorithm `graphql-orm-sha256-len-v2`).
+Moving an entity to another module or crate keeps its fingerprints with no
+declaration.
 
-The value is an opaque token, normally the old Rust path. Use a string literal
-of 1–1024 printable ASCII bytes without whitespace or control characters. Repeated declarations fail compilation. Omitting the option preserves
-all existing fingerprints. Distinct entities must have distinct identities;
+`#[graphql_entity(stable_type_id = "old_crate::models::Record")]` replaces the
+default Rust module-path value returned by `entity_rust_type()`. It no longer
+affects any fingerprint and may be removed. The shared entity parser also
+accepts it on `#[repository_entity(...)]`; repository-only entities emit no
+GraphQL operation descriptors.
+
+The value is an opaque token. Use a string literal
+of 1–1024 printable ASCII bytes without whitespace or control characters. Repeated declarations fail compilation. Distinct entities must have distinct identities;
 catalogue composition panics on collisions and names both real Rust paths.
 `diagnostic_rust_type()` retains that path independently of the identity returned
-by `entity_rust_type()`, outside hashes and serialized exports.
+by `entity_rust_type()`. Neither value is hashed or exported.
 
-To preserve persisted bindings during a move, set the option to the exact old
-`entity_rust_type()` value and keep it after moving. This preserves only that
-identity input: field types, argument types and relation targets must also be
+To preserve persisted bindings during a move, field types, argument types and
+relation targets must be
 spelled identically before and after the move. The schema signature records
 Rust source spellings, so qualifying a previously bare type or changing its
 qualifier changes fingerprints even if it names the same type. Prefer imported
 bare names, retain their spelling across modules/crates, and compare
 `catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
 or your catalogue accessor). See the
-[migration recipe](../../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).
+[migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).

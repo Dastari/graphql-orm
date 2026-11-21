@@ -42,7 +42,7 @@ pub trait AiSkillAccessPolicy: Send + Sync {
 /// Server-recognized skill activation rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Enum)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiSkillActivationInput {
     /// A trusted planner must select the skill explicitly.
     Manual,
@@ -64,7 +64,7 @@ impl AiSkillActivationInput {
 /// Maximum data classification a skill may request from current policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Enum)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiSkillClassificationInput {
     /// Public data only.
     Public,
@@ -91,7 +91,7 @@ impl AiSkillClassificationInput {
 /// Maximum tool maturity a skill may request from current policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Enum)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiSkillMaturityInput {
     /// Read-only application operations.
     ReadOnly,
@@ -115,7 +115,7 @@ impl AiSkillMaturityInput {
 /// Provider capabilities a skill may require; all are requests that routing
 /// policy may further narrow or reject.
 #[derive(Clone, Debug, Default, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSkillProviderCapabilitiesInput {
     /// Requires model image input.
     pub image_input: bool,
@@ -133,7 +133,7 @@ pub struct AiSkillProviderCapabilitiesInput {
 
 /// Hard per-run ceilings embedded in one immutable skill version.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSkillBudgetInput {
     /// Maximum model/tool steps.
     pub maximum_steps: i64,
@@ -149,7 +149,7 @@ pub struct AiSkillBudgetInput {
 ///
 /// This binding grants no navigation or referenced-resource authority.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSkillUiIntentBindingInput {
     /// Stable logical intent type.
     pub intent_type: String,
@@ -160,7 +160,7 @@ pub struct AiSkillUiIntentBindingInput {
 /// Creates or CAS-updates safe logical skill metadata. New skills are always
 /// disabled until a version is published.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct UpsertAiSkillInput {
     /// Existing skill ID, or absent to create.
     pub id: Option<Uuid>,
@@ -176,7 +176,7 @@ pub struct UpsertAiSkillInput {
 
 /// Publishes one immutable protected skill version and makes it current.
 #[derive(InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct PublishAiSkillVersionInput {
     /// Logical skill receiving the version.
     pub skill_id: Uuid,
@@ -212,7 +212,7 @@ pub struct PublishAiSkillVersionInput {
 
 /// CAS input for enabling or disabling a skill's current version.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SetAiSkillEnabledInput {
     /// Logical skill ID.
     pub skill_id: Uuid,
@@ -224,7 +224,7 @@ pub struct SetAiSkillEnabledInput {
 
 /// Redacted immutable skill-version metadata.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSkillVersionView {
     /// Immutable version row ID.
     pub id: Uuid,
@@ -260,7 +260,7 @@ pub struct AiSkillVersionView {
 
 /// Redacted exact UI-intent binding on an immutable skill version.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSkillUiIntentBindingView {
     /// Stable logical intent type.
     pub intent_type: String,
@@ -270,7 +270,7 @@ pub struct AiSkillUiIntentBindingView {
 
 /// Redacted logical skill with its current published version metadata.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiSkillView {
     /// Skill ID.
     pub id: Uuid,
@@ -360,10 +360,10 @@ pub trait AiSkillCatalogService: Send + Sync {
 pub struct AiSkillQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiSkillQueryRoot {
     /// Lists bounded redacted skill metadata for one exact scope.
     async fn ai_skills(
@@ -391,10 +391,10 @@ impl AiSkillQueryRoot {
 pub struct AiSkillMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiSkillMutationRoot {
     /// Creates or CAS-updates safe logical skill metadata.
     async fn upsert_ai_skill(

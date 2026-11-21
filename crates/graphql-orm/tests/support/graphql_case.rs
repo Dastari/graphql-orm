@@ -39,11 +39,11 @@ fn spell(
 pub fn resolver_name(camel: &str) -> &'static str {
     spell(
         camel,
-        cfg!(feature = "resolver-case-pascal"),
-        cfg!(feature = "resolver-case-snake"),
-        cfg!(feature = "resolver-case-screaming-snake"),
-        cfg!(feature = "resolver-case-lower"),
-        cfg!(feature = "resolver-case-upper"),
+        cfg!(graphql_orm_resolver_case = "pascal"),
+        cfg!(graphql_orm_resolver_case = "snake"),
+        cfg!(graphql_orm_resolver_case = "screaming_snake"),
+        cfg!(graphql_orm_resolver_case = "lower"),
+        cfg!(graphql_orm_resolver_case = "upper"),
     )
 }
 
@@ -51,11 +51,11 @@ pub fn resolver_name(camel: &str) -> &'static str {
 pub fn argument_name(camel: &str) -> &'static str {
     spell(
         camel,
-        cfg!(feature = "argument-case-pascal"),
-        cfg!(feature = "argument-case-snake"),
-        cfg!(feature = "argument-case-screaming-snake"),
-        cfg!(feature = "argument-case-lower"),
-        cfg!(feature = "argument-case-upper"),
+        cfg!(graphql_orm_argument_case = "pascal"),
+        cfg!(graphql_orm_argument_case = "snake"),
+        cfg!(graphql_orm_argument_case = "screaming_snake"),
+        cfg!(graphql_orm_argument_case = "lower"),
+        cfg!(graphql_orm_argument_case = "upper"),
     )
 }
 
@@ -63,10 +63,10 @@ pub fn argument_name(camel: &str) -> &'static str {
 pub fn field_name(camel: &str) -> &'static str {
     spell(
         camel,
-        cfg!(feature = "field-case-pascal"),
-        cfg!(feature = "field-case-snake"),
-        cfg!(feature = "field-case-screaming-snake"),
-        cfg!(feature = "field-case-lower"),
-        cfg!(feature = "field-case-upper"),
+        cfg!(graphql_orm_field_case = "pascal"),
+        cfg!(graphql_orm_field_case = "snake"),
+        cfg!(graphql_orm_field_case = "screaming_snake"),
+        cfg!(graphql_orm_field_case = "lower"),
+        cfg!(graphql_orm_field_case = "upper"),
     )
 }

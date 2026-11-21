@@ -163,23 +163,19 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         })
         .collect::<Vec<_>>();
-    // A declared maximum page limit replaces the compile-time default in the
-    // catalogue's pageable relationship lists, is checked against the
-    // `Database` when the schema is built, and bounds the relation
-    // complexity estimate.
-    let declared_page_maximum = match args.max_page_limit {
-        Some(maximum) => quote! {
-            ::std::option::Option::<u32>::Some(#maximum)
-        },
-        None => quote! { ::std::option::Option::<u32>::None },
-    };
+    // The schema's maximum page limit is fixed at compile time: the declared
+    // `max_page_limit`, or the default of 100. The catalogue's pageable
+    // relationship lists publish it, the `Database` is checked against it
+    // when the schema is built, and it bounds the relation complexity
+    // estimate.
+    let declared_page_maximum = args.max_page_limit.unwrap_or(100);
     let page_maximum_const = quote! {
-        /// The maximum page limit this schema declares with
-        /// `schema_roots!(max_page_limit: ...)`, or `None` when it declares
-        /// none. A declared maximum is the one the semantic catalogue
-        /// publishes, and the schema refuses a `Database` configured with a
-        /// different one.
-        pub const GRAPHQL_ORM_MAX_PAGE_LIMIT: ::std::option::Option<u32> = #declared_page_maximum;
+        /// The maximum page limit of this schema: the one declared with
+        /// `schema_roots!(max_page_limit: ...)`, or 100. The semantic
+        /// catalogue publishes it, and the schema refuses a `Database`
+        /// configured with a different one.
+        pub const GRAPHQL_ORM_MAX_PAGE_LIMIT: ::std::option::Option<u32> =
+            ::std::option::Option::Some(#declared_page_maximum);
     };
     let page_maximum_check = quote! {
         ::graphql_orm::graphql::orm::admit_declared_page_maximum(
@@ -508,7 +504,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 quote! {
                     let builder = builder.data(
                         ::graphql_orm::async_graphql::dataloader::DataLoader::new(
-                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
+                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::__generated(database.clone()),
                             ::graphql_orm::tokio::spawn,
                         )
                     );
@@ -638,6 +634,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 .data(database.clone())
             .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
             .extension(::graphql_orm::graphql::orm::PageMaximumValidation)
+            .extension(::graphql_orm::graphql::errors::UncodedCallbackMessages(
+                database.exposes_uncoded_callback_messages(),
+            ))
             .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
@@ -738,7 +737,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! {
                 let builder = builder.data(
                     ::graphql_orm::async_graphql::dataloader::DataLoader::new(
-                    ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
+                    ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::__generated(database.clone()),
                         ::graphql_orm::tokio::spawn,
                     )
                 );
@@ -855,6 +854,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             .data(database.clone())
             .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
             .extension(::graphql_orm::graphql::orm::PageMaximumValidation)
+            .extension(::graphql_orm::graphql::errors::UncodedCallbackMessages(
+                database.exposes_uncoded_callback_messages(),
+            ))
             .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
                 vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]

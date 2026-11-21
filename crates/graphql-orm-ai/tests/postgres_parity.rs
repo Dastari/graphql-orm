@@ -29,6 +29,9 @@ use secrecy::SecretString;
 #[cfg(feature = "provider-openai-core")]
 use sha2::Sha256;
 
+#[path = "support/broker_entity_parity.rs"]
+mod broker_entity_parity;
+
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
 const POSTGRES_IMAGE: &str =
     "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065";
@@ -718,6 +721,13 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
         .schema()
         .apply_migration(&upgrade, ApplyOptions::default())
         .await
+        .expect_err("the default gate refuses the index drop");
+    let options = module.admit_index_replacements(&upgrade, ApplyOptions::default());
+    assert!(options.allow_destructive);
+    database
+        .schema()
+        .apply_migration(&upgrade, options)
+        .await
         .expect("upgrade should apply");
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
@@ -758,6 +768,143 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
 
 /// A strict owned plan of the composed AI module re-plans empty on PostgreSQL:
 /// no identifier is truncated, so certification sees no drift.
+/// A store at schema module 0.81.0 has no unique index on context-checkpoint
+/// positions. When a key already repeats, the 0.82.0 upgrade is refused with a
+/// typed error before any statement runs, and applies once the row is resolved.
+#[tokio::test]
+async fn owned_postgres_upgrade_refuses_repeated_unique_keys_before_any_ddl() {
+    use graphql_orm::graphql::orm::{MigrationStep, SchemaModuleCatalog, UniqueIndexDuplicates};
+    const TABLE: &str = "graphql_orm_ai_context_checkpoints";
+    const ADDED: [(&str, &[&str]); 3] = [
+        ("graphql_orm_ai_approvals", &["tool_call_id"]),
+        (
+            "graphql_orm_ai_run_attempts",
+            &["run_id", "lease_generation"],
+        ),
+        (TABLE, &["session_id", "through_sequence"]),
+    ];
+
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let catalog = SchemaModuleCatalog::compose(&[&module]).expect("AI module should compose");
+    let model = catalog.schema_model();
+    let names = ADDED
+        .iter()
+        .map(|(table, columns)| {
+            model
+                .tables
+                .iter()
+                .find(|candidate| candidate.table_name == *table)
+                .and_then(|table| {
+                    table
+                        .indexes
+                        .iter()
+                        .find(|index| index.is_unique && index.columns == *columns)
+                })
+                .map(|index| index.name.to_owned())
+                .expect("added unique index should be declared")
+        })
+        .collect::<Vec<_>>();
+    let initial = database
+        .schema()
+        .plan_migration_to_entities("ai-unique-v1", "AI module", module.entities())
+        .await
+        .expect("AI module should plan");
+    database
+        .schema()
+        .apply_migration(&initial, ApplyOptions::default())
+        .await
+        .expect("AI module should apply");
+    for name in &names {
+        graphql_orm::sqlx::query(&format!("DROP INDEX \"{name}\""))
+            .execute(database.pool())
+            .await
+            .expect("added unique index should drop");
+    }
+    let session_id = Uuid::new_v4();
+    let insert = |through_sequence: i64| {
+        let pool = database.pool().clone();
+        async move {
+            let id = Uuid::new_v4();
+            graphql_orm::sqlx::query(&format!(
+                "INSERT INTO {TABLE} (id, session_id, through_sequence, source_hash, \
+                 token_estimate, provider_kind, provider_model, protected_summary) \
+                 VALUES ($1, $2, $3, 'source', 1, 'mock', 'upgrade-test', '{{}}'::jsonb)"
+            ))
+            .bind(id)
+            .bind(session_id)
+            .bind(through_sequence)
+            .execute(&pool)
+            .await
+            .map(|_| id)
+        }
+    };
+    insert(7).await.expect("first checkpoint should insert");
+    let duplicate = insert(7)
+        .await
+        .expect("a 0.81.0 store accepts the repeated key");
+    let present = |pool: graphql_orm::sqlx::PgPool, names: Vec<String>| async move {
+        graphql_orm::sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM pg_indexes WHERE indexname = ANY($1)",
+        )
+        .bind(names)
+        .fetch_one(&pool)
+        .await
+        .expect("index catalogue should read")
+        .0
+    };
+
+    let upgrade = database
+        .schema()
+        .plan_migration_to_entities("ai-unique-v2", "unique indexes", module.entities())
+        .await
+        .expect("upgrade should plan");
+    assert_eq!(upgrade.steps.len(), 3, "{:?}", upgrade.statements);
+    assert!(upgrade.steps.iter().all(|step| matches!(
+        &step.step,
+        MigrationStep::CreateIndex { index, .. } if index.is_unique
+    )));
+    let refused = database
+        .schema()
+        .apply_migration(&upgrade, ApplyOptions::default())
+        .await
+        .expect_err("repeated keys must refuse the upgrade");
+    let duplicates = UniqueIndexDuplicates::from_error(&refused)
+        .unwrap_or_else(|| panic!("refusal should be typed: {refused:?}"));
+    assert_eq!(duplicates.table, TABLE);
+    assert_eq!(duplicates.columns, ["session_id", "through_sequence"]);
+    assert_eq!(present(database.pool().clone(), names.clone()).await, 0);
+    assert_eq!(
+        database
+            .schema()
+            .current_version()
+            .await
+            .expect("version should read"),
+        Some("ai-unique-v1".to_owned())
+    );
+
+    graphql_orm::sqlx::query(&format!("DELETE FROM {TABLE} WHERE id = $1"))
+        .bind(duplicate)
+        .execute(database.pool())
+        .await
+        .expect("duplicate checkpoint should delete");
+    database
+        .schema()
+        .apply_migration(&upgrade, ApplyOptions::default())
+        .await
+        .expect("a clean store should upgrade");
+    assert_eq!(present(database.pool().clone(), names).await, 3);
+    assert!(
+        insert(7).await.is_err(),
+        "the unique index should hold for new rows"
+    );
+}
+
 #[tokio::test]
 async fn owned_postgres_ai_schema_module_owned_replan_is_empty() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
@@ -2069,4 +2216,16 @@ async fn owned_postgres_rotation_held_after_commit_cannot_strand_a_later_rotatio
     );
     drop(database);
     drop(container);
+}
+
+#[tokio::test]
+async fn owned_postgres_broker_v2_entity_capability_executes_one_root_through_the_generated_schema()
+{
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    broker_entity_parity::entity_capability_round_trip(database).await;
 }

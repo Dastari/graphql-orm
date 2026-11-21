@@ -118,8 +118,10 @@
 //! }
 //! ```
 //!
-//! Naming feature groups (`resolver-case-*`, `argument-case-*`, and
-//! `field-case-*`) remain independent from backend selection.
+//! GraphQL naming is selected per build by the `GRAPHQL_ORM_RESOLVER_CASE`,
+//! `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` environment
+//! variables, independent from backend selection. See the `graphql-orm` crate
+//! documentation.
 //!
 //! # Search And Spatial Attributes
 //!
@@ -206,72 +208,6 @@ mod wrapper_object;
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
 compile_error!("Enable at least one database backend feature: sqlite, postgres, or mssql.");
-
-#[cfg(any(
-    all(feature = "resolver-case-pascal", feature = "resolver-case-snake"),
-    all(
-        feature = "resolver-case-pascal",
-        feature = "resolver-case-screaming-snake"
-    ),
-    all(feature = "resolver-case-pascal", feature = "resolver-case-lower"),
-    all(feature = "resolver-case-pascal", feature = "resolver-case-upper"),
-    all(
-        feature = "resolver-case-snake",
-        feature = "resolver-case-screaming-snake"
-    ),
-    all(feature = "resolver-case-snake", feature = "resolver-case-lower"),
-    all(feature = "resolver-case-snake", feature = "resolver-case-upper"),
-    all(
-        feature = "resolver-case-screaming-snake",
-        feature = "resolver-case-lower"
-    ),
-    all(
-        feature = "resolver-case-screaming-snake",
-        feature = "resolver-case-upper"
-    ),
-    all(feature = "resolver-case-lower", feature = "resolver-case-upper")
-))]
-compile_error!("Enable at most one resolver-case-* feature at a time.");
-
-#[cfg(any(
-    all(feature = "argument-case-pascal", feature = "argument-case-snake"),
-    all(
-        feature = "argument-case-pascal",
-        feature = "argument-case-screaming-snake"
-    ),
-    all(feature = "argument-case-pascal", feature = "argument-case-lower"),
-    all(feature = "argument-case-pascal", feature = "argument-case-upper"),
-    all(
-        feature = "argument-case-snake",
-        feature = "argument-case-screaming-snake"
-    ),
-    all(feature = "argument-case-snake", feature = "argument-case-lower"),
-    all(feature = "argument-case-snake", feature = "argument-case-upper"),
-    all(
-        feature = "argument-case-screaming-snake",
-        feature = "argument-case-lower"
-    ),
-    all(
-        feature = "argument-case-screaming-snake",
-        feature = "argument-case-upper"
-    ),
-    all(feature = "argument-case-lower", feature = "argument-case-upper")
-))]
-compile_error!("Enable at most one argument-case-* feature at a time.");
-
-#[cfg(any(
-    all(feature = "field-case-pascal", feature = "field-case-snake"),
-    all(feature = "field-case-pascal", feature = "field-case-screaming-snake"),
-    all(feature = "field-case-pascal", feature = "field-case-lower"),
-    all(feature = "field-case-pascal", feature = "field-case-upper"),
-    all(feature = "field-case-snake", feature = "field-case-screaming-snake"),
-    all(feature = "field-case-snake", feature = "field-case-lower"),
-    all(feature = "field-case-snake", feature = "field-case-upper"),
-    all(feature = "field-case-screaming-snake", feature = "field-case-lower"),
-    all(feature = "field-case-screaming-snake", feature = "field-case-upper"),
-    all(feature = "field-case-lower", feature = "field-case-upper")
-))]
-compile_error!("Enable at most one field-case-* feature at a time.");
 
 #[proc_macro]
 /// Generate GraphQL mutation result object types.

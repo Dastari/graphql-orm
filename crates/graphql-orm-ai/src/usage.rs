@@ -38,7 +38,7 @@ pub trait AiUsageAccessPolicy: Send + Sync {
 
 /// Optional bounded usage filters.
 #[derive(Clone, Debug, Default, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiUsageFilterInput {
     /// Exact provider family.
     pub provider_kind: Option<AiProviderKindInput>,
@@ -121,7 +121,7 @@ impl TryFrom<AiUsageFilterInput> for AiUsageFilter {
 
 /// One immutable, redacted provider-usage fact.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiUsageView {
     /// Usage fact ID.
     pub id: Uuid,
@@ -163,7 +163,7 @@ pub struct AiUsageView {
 
 /// One usage keyset edge.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiUsageEdge {
     /// Immutable usage fact.
     pub node: AiUsageView,
@@ -173,7 +173,7 @@ pub struct AiUsageEdge {
 
 /// Bounded usage connection.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiUsageConnection {
     /// Bounded result edges.
     pub edges: Vec<AiUsageEdge>,
@@ -204,10 +204,10 @@ pub trait AiUsageService: Send + Sync {
 pub struct AiUsageQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiUsageQueryRoot {
     /// Returns a bounded keyset window of immutable provider usage.
     async fn ai_usage(

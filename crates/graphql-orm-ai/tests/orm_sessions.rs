@@ -1301,9 +1301,9 @@ async fn generic_graphql_mutation_uses_the_same_selection_admission() {
     let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
         .data(sessions)
         .finish();
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let query = r#"mutation { createAiSession(input:{scope:{kind:"workspace",id:"54",tenantId:"tenant-1"},executionSelection:{provider:LOCAL_HARNESS,profileId:"grok_acp",model:"discovered-model",reasoningEffort:ULTRA}}){executionSelection{provider profileId model reasoningEffort}} }"#;
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let query = r#"mutation { CreateAiSession(Input:{Scope:{Kind:"workspace",Id:"54",TenantId:"tenant-1"},ExecutionSelection:{Provider:LocalHarness,ProfileId:"grok_acp",Model:"discovered-model",ReasoningEffort:Ultra}}){ExecutionSelection{Provider ProfileId Model ReasoningEffort}} }"#;
     let response = schema
         .execute(Request::new(query).data(principal("graphql-owner")))

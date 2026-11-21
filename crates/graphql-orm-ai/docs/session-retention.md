@@ -484,7 +484,8 @@ releases it at the purge cutoff.
   which only the Codex app-server and Grok ACP adapters implement, so an
   OpenAI response cannot reach them. A supervised adoption re-persists the
   response that was recorded when its provider turn was first checkpointed;
-- responses stored before AI schema module `0.82.0`, and xAI or
+- responses stored before the stored-response ledger (AI schema module
+  `0.82.0` on main, `0.83.0` in the breaking release), and xAI or
   OpenAI-compatible stored responses (see below).
 
 - **Release.** When a deleting session passes its `deleted_content_purge_seconds`
@@ -521,7 +522,8 @@ releases it at the purge cutoff.
   `AiStoredResponseCleanupReport::unconfirmed`. It is never reported as
   deleted.
 
-Responses stored before AI schema module `0.82.0` are not in the ledger; their
+Responses stored before the ledger (AI schema module `0.82.0` on main,
+`0.83.0` in the breaking release) are not in the ledger; their
 identifiers are still in `provider_response_id` on run attempts, checkpoints
 and tool calls, and `OpenAiStoredResponseDeletionService::delete_and_confirm_absent`
 deletes one by its exact identifier. The ledger covers OpenAI only: responses

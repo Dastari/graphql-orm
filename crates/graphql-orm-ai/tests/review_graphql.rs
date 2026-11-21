@@ -45,7 +45,7 @@ fn review_roots_follow_the_complete_configured_graphql_case() {
     .finish()
     .sdl();
 
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     {
         assert!(proposal_sdl.contains("aiProposals(sessionId:"));
         assert!(proposal_sdl.contains("reviewAiProposal(input:"));
@@ -55,7 +55,7 @@ fn review_roots_follow_the_complete_configured_graphql_case() {
         assert!(!approval_sdl.contains("AiApprovals("));
     }
 
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     {
         assert!(proposal_sdl.contains("AiProposals(SessionId:"));
         assert!(proposal_sdl.contains("ReviewAiProposal(Input:"));

@@ -1,7 +1,7 @@
 #![cfg(all(
     feature = "sqlite",
-    feature = "field-case-pascal",
-    feature = "argument-case-snake"
+    graphql_orm_field_case = "pascal",
+    graphql_orm_argument_case = "snake"
 ))]
 //! The `@key` string must follow field case, not argument case.
 //!

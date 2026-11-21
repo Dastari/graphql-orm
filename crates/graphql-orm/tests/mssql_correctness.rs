@@ -23,8 +23,8 @@ use graphql_orm::graphql::orm::{
     TransactionError, TransactionMode, contains_like_pattern, introspect_mssql_schema,
     render_migration_step, render_select_query, render_upsert_sql,
 };
-use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
+use graphql_orm::{chrono, prelude::*};
 use owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -471,20 +471,20 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
                sorts: Vec<SortExpression>,
                pagination: Option<PaginationRequest>| {
         let values = vec![SqlValue::Int(n), SqlValue::Int(n + 1), SqlValue::Int(n + 2)];
-        CompositeRelationQueryKey {
-            relation: "wide_children",
-            parent_key: RelationKey::from_sql_values(&values),
-            parent_values: values,
-            fk_columns: vec!["[PartA]", "[PartB]", "[PartC]"],
-            key_part_kinds: vec![RelationKeyPartKind::Int; 3],
-            where_signature: filter.as_ref().map(|_| "visible".into()),
-            order_signature: (!sorts.is_empty()).then(|| "ranked".into()),
-            page_signature: pagination.as_ref().map(|_| "first".into()),
+        CompositeRelationQueryKey::__generated(
+            "wide_children",
+            RelationKey::from_sql_values(&values),
+            values,
+            vec!["[PartA]", "[PartB]", "[PartC]"],
+            vec![RelationKeyPartKind::Int; 3],
+            filter.as_ref().map(|_| "visible".into()),
+            (!sorts.is_empty()).then(|| "ranked".into()),
+            pagination.as_ref().map(|_| "first".into()),
             filter,
             sorts,
             pagination,
-            auth_context: None,
-        }
+            None,
+        )
     };
     let ids = |page: &graphql_orm::graphql::loaders::RelationLoadResult<GomBatchChild>| {
         page.entities
@@ -492,7 +492,7 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
             .map(|child| child.id)
             .collect::<Vec<_>>()
     };
-    let loader = RelationLoader::<GomBatchChild, MssqlBackend>::new(database.clone());
+    let loader = RelationLoader::<GomBatchChild, MssqlBackend>::__generated(database.clone());
 
     // Every child of every parent, unpaged and as a first page.
     for paged in [false, true] {
@@ -572,7 +572,7 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
             .await
             .map_err(|error| format!("duplicates, paged {paged}: {error}"))?;
         for key in &keys {
-            let n = match &key.parent_values[0] {
+            let n = match &key.parent_values()[0] {
                 SqlValue::Int(n) => *n,
                 other => panic!("{other:?}"),
             };
@@ -670,17 +670,6 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
     }
     assert!(resolved[&representations[800]].is_none());
 
-    // The single-column loader: 2,500 keys in one `IN` list.
-    let singles = (1..=2_500).map(|id| id.to_string()).collect::<Vec<_>>();
-    let loaded = Loader::<String>::load(&loader, &singles)
-        .await
-        .map_err(|error| format!("load 5: {error}"))?;
-    assert_eq!(loaded.len(), 2_500);
-    let found = loaded.values().filter(|rows| !rows.is_empty()).count();
-    // Children 11, 12, 13, 21, ... up to 2493.
-    assert_eq!(found, 249 * 3);
-    assert_eq!(loaded["2493"][0].id, 2493);
-    assert!(loaded["2500"].is_empty());
     Ok(())
 }
 
@@ -730,26 +719,26 @@ async fn long_string_keys_stay_distinct(connection: &str) -> TestResult {
     .await?;
     let database =
         graphql_orm::db::Database::<MssqlBackend>::new(MssqlPool::connect_ado(connection).await?);
-    let loader = RelationLoader::<GomLongKeyChild, MssqlBackend>::new(database);
+    let loader = RelationLoader::<GomLongKeyChild, MssqlBackend>::__generated(database);
     let key = |suffix: &str, paged: bool| {
         let values = vec![SqlValue::String(format!("{}{suffix}", "k".repeat(4000)))];
-        CompositeRelationQueryKey {
-            relation: "long_children",
-            parent_key: RelationKey::from_sql_values(&values),
-            parent_values: values,
-            fk_columns: vec!["[ParentKey]"],
-            key_part_kinds: vec![RelationKeyPartKind::String],
-            where_signature: None,
-            order_signature: None,
-            page_signature: paged.then(|| "first".into()),
-            filter: None,
-            sorts: vec![],
-            pagination: paged.then_some(PaginationRequest {
+        CompositeRelationQueryKey::__generated(
+            "long_children",
+            RelationKey::from_sql_values(&values),
+            values,
+            vec!["[ParentKey]"],
+            vec![RelationKeyPartKind::String],
+            None,
+            None,
+            paged.then(|| "first".into()),
+            None,
+            vec![],
+            paged.then_some(PaginationRequest {
                 limit: Some(5),
                 offset: 0,
             }),
-            auth_context: None,
-        }
+            None,
+        )
     };
     for paged in [false, true] {
         let keys = [
@@ -1761,6 +1750,172 @@ async fn altered_columns_keep_their_collation() -> TestResult {
         Some(default)
     );
     assert_eq!(column("Label").try_get::<String, _>("type_name")?, "int");
+    server.cleanup()?;
+    Ok(())
+}
+
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.TemporalRecords",
+    schema_policy = "external_writable"
+)]
+struct TemporalRecord {
+    #[primary_key]
+    id: String,
+    #[filterable(type = "date")]
+    legacy_stamp: String,
+    #[filterable(type = "date")]
+    precise_stamp: chrono::NaiveDateTime,
+    utc_stamp: chrono::DateTime<chrono::Utc>,
+    #[filterable(type = "date")]
+    calendar_date: chrono::NaiveDate,
+    #[filterable(type = "date")]
+    offset_stamp: Option<chrono::DateTime<chrono::FixedOffset>>,
+}
+
+#[tokio::test]
+#[ignore = "starts disposable SQL Server"]
+async fn temporal_parameters_are_independent_of_session_dateformat()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::db::mssql::MssqlPoolOptions;
+    use graphql_orm::graphql::filters::DateFilter;
+    use graphql_orm::graphql::orm::{DatabaseFilter, OrmBackend};
+
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "ALTER LOGIN [sa] WITH DEFAULT_LANGUAGE = British;
+         CREATE TABLE dbo.TemporalRecords (
+             id nvarchar(64) NOT NULL PRIMARY KEY,
+             legacy_stamp datetime NOT NULL,
+             precise_stamp datetime2(7) NOT NULL,
+             utc_stamp datetime2(7) NOT NULL,
+             calendar_date date NOT NULL,
+             offset_stamp datetimeoffset(7) NULL
+         );",
+    )
+    .await?;
+    let compatibility = MssqlPool::connect_ado(&server.connection_string).await?;
+    let typed = MssqlPool::connect_ado_external_writable_with(
+        &server.connection_string,
+        MssqlPoolOptions::new().typed_temporal_parameters(true),
+    )
+    .await?;
+    let date = "2026-04-09".parse::<chrono::NaiveDate>()?;
+    let sql = "SET LANGUAGE British; SET DATEFORMAT dmy;
+        SELECT CONVERT(char(10), CONVERT(datetime, @P1), 23) AS value";
+    let text_date = SqlValue::temporal_text("2026-04-09".into());
+    for (pool, expected) in [(&compatibility, "2026-09-04"), (&typed, "2026-04-09")] {
+        let rows = pool
+            .fetch_rows(sql, std::slice::from_ref(&text_date))
+            .await?;
+        assert_eq!(rows[0].try_get::<String, _>("value")?, expected);
+    }
+    let rows = compatibility
+        .fetch_rows(sql, &[SqlValue::from(date)])
+        .await?;
+    assert_eq!(rows[0].try_get::<String, _>("value")?, "2026-04-09");
+    let rows = typed
+        .fetch_rows(sql, &[SqlValue::String("2026-04-09".into())])
+        .await?;
+    assert_eq!(rows[0].try_get::<String, _>("value")?, "2026-09-04");
+
+    typed.install_restore_marker().await?;
+    let database = Database::<MssqlBackend>::builder(typed.clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    let stamp = "2026-04-09T12:34:56.1234567".parse::<chrono::NaiveDateTime>()?;
+    let offset = chrono::DateTime::parse_from_rfc3339("2026-04-09T12:34:56.1234567+05:30")?;
+    let row = TemporalRecord::insert(
+        &database,
+        CreateTemporalRecordInput {
+            legacy_stamp: "2026-04-09".into(),
+            precise_stamp: stamp,
+            utc_stamp: stamp.and_utc(),
+            calendar_date: date,
+            offset_stamp: Some(offset),
+        },
+    )
+    .await?;
+    assert_eq!(row.legacy_stamp, "2026-04-09T00:00:00Z");
+    assert_eq!(row.precise_stamp, stamp);
+    assert_eq!(row.calendar_date, date);
+    let read_offset = row.offset_stamp.expect("offset round-trips");
+    assert_eq!(read_offset, offset);
+    assert_eq!(read_offset.offset(), offset.offset());
+
+    let eq = |value: &str| {
+        Some(DateFilter {
+            eq: Some(value.into()),
+            ..Default::default()
+        })
+    };
+    for filter in [
+        TemporalRecordWhereInput {
+            legacy_stamp: eq("2026-04-09"),
+            ..Default::default()
+        },
+        TemporalRecordWhereInput {
+            precise_stamp: eq("2026-04-09 12:34:56.1234567"),
+            ..Default::default()
+        },
+        TemporalRecordWhereInput {
+            calendar_date: eq("2026-04-09"),
+            ..Default::default()
+        },
+        TemporalRecordWhereInput {
+            offset_stamp: eq("2026-04-09T07:04:56.1234567Z"),
+            ..Default::default()
+        },
+    ] {
+        let (predicates, values) = filter.to_sql_conditions();
+        let query = format!(
+            "SELECT id FROM dbo.TemporalRecords WHERE {}",
+            predicates.join(" AND ")
+        );
+        let matched = MssqlBackend::fetch_rows(&typed, &query, &values).await?;
+        assert_eq!(matched.len(), 1, "{query}");
+        assert_eq!(matched[0].try_get::<String, _>("id")?, row.id);
+    }
+
+    let row = TemporalRecord::update_by_id(
+        &database,
+        &row.id,
+        UpdateTemporalRecordInput {
+            legacy_stamp: Some("2026-05-10".into()),
+            offset_stamp: Some(None),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("the row exists");
+    assert_eq!(row.legacy_stamp, "2026-05-10T00:00:00Z");
+    assert!(row.offset_stamp.is_none());
+
+    let compatibility = MssqlPool::connect_ado_external_writable(&server.connection_string).await?;
+    let database = Database::<MssqlBackend>::builder(compatibility)
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    let nanos = "2026-04-09T12:34:56.123456789".parse::<chrono::NaiveDateTime>()?;
+    let nanos_offset = chrono::DateTime::parse_from_rfc3339("2026-04-09T12:34:56.123456789+05:30")?;
+    let row = TemporalRecord::insert(
+        &database,
+        CreateTemporalRecordInput {
+            legacy_stamp: "2026-04-09T00:00:00".into(),
+            precise_stamp: nanos,
+            utc_stamp: nanos.and_utc(),
+            calendar_date: date,
+            offset_stamp: Some(nanos_offset),
+        },
+    )
+    .await?;
+    assert_eq!(row.precise_stamp, stamp);
+    assert_eq!(row.utc_stamp, stamp.and_utc());
+    assert_eq!(row.calendar_date, date);
+    assert_eq!(row.offset_stamp, Some(offset));
+    assert_eq!(row.offset_stamp.unwrap().offset(), offset.offset());
+
     server.cleanup()?;
     Ok(())
 }

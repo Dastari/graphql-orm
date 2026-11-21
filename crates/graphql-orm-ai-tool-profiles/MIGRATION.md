@@ -10,6 +10,46 @@ supersedes: []
 
 # Migration Guide
 
+## 0.26.1 to 0.27.0: breaking release
+
+AI tool profiles 0.26.1 to 0.27.0. **Action needed.** Part of the single
+breaking release; upgrade together with operation catalogue 0.10.0,
+ORM/macros 0.187.0 and AI 0.151.0. Host steps for the whole workspace are in
+the root [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release). No
+SDL or data migration.
+
+- **Operation fingerprint algorithm v2. Action needed.** Generated-operation
+  fingerprints no longer include the Rust module path, so every operation and
+  catalogue fingerprint changes once. Regenerate tool manifests and operation
+  contracts from the upgraded catalogue; ones bound under
+  `graphql-orm-sha256-len-v1` are refused as stale. No Rust API change.
+- **Index fingerprints change once.** `AI_CAPABILITY_INDEX_VERSION` is 3 and
+  the generated query roots of each entity become one `GeneratedEntity`
+  entry, so every index and index-set fingerprint that holds generated
+  queries changes. Recompile indexes; do not compare them with stored
+  version 2 fingerprints. The index version does not change generated
+  query capability fingerprints again; they change once with the operation
+  fingerprint algorithm above.
+- **Code.** Handle `AiCapabilityKind::GeneratedEntity` and
+  `AiCapabilityOperationShape::Entity` in exhaustive matches. Struct literals
+  of `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` need
+  `operations` (empty for every kind but an entity).
+- **Lookups.** `entries()` no longer lists the roots an entity groups. Look a
+  root up with `entry(root_id)`, which still resolves it, or with
+  `operation_entry(entity_id, operation_name)`. Code that searched with
+  `kind: Some(GeneratedQuery)` to find entity roots should search for
+  `GeneratedEntity`, or use `ranked_operation_matches` for one match per root.
+- **Search.** Ranking order for standalone entries is unchanged. Entity
+  entries score as one entry, including their roots' operation names and
+  descriptions. **No action.**
+- **Signatures.** `AiCapabilitySignature` and
+  `AiSharedTypePlanSchema::compile_named` are additions. **No action.**
+- **Runtime live keys. No action.** Runtime collections with live
+  subscriptions and a node identity compile under both ORM identity modes:
+  the default `RuntimeInt64` strings and the opt-in
+  `with_legacy_int_identities()`. Capability sets and fingerprints are
+  unchanged for schemas that already compiled.
+
 ## 0.26.0 to 0.26.1: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

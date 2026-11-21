@@ -1,6 +1,6 @@
 //! Provider-neutral capability delivery, loading, and run fencing.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
@@ -26,9 +26,19 @@ pub const AI_CAPABILITY_DISCOVER_TOOL_ID: &str = "graphql.capabilities.discover"
 pub const AI_CAPABILITY_DESCRIBE_TOOL_ID: &str = "graphql.capabilities.describe";
 /// Frozen broker tool identifier for executing one loaded exact capability.
 pub const AI_CAPABILITY_EXECUTE_TOOL_ID: &str = "graphql.capabilities.execute";
+/// Frozen broker tool identifier for expanding one named type of a loaded
+/// capability's signature (broker version 2).
+pub const AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID: &str = "graphql.capabilities.describe_type";
 
-/// Current broker request/response envelope version.
-pub const AI_CAPABILITY_BROKER_VERSION: u16 = 1;
+/// Current broker protocol version.
+///
+/// Version 2 adds the `describe_type` operation, returns compact typed
+/// signatures from `describe` instead of the plan schema, discovers one
+/// entity capability per entity, and takes the entity's `operation` at
+/// `describe_type` and `execute`. The version is hashed into the fixed broker
+/// definitions and every fixed-broker session binding, so a session bound
+/// under version 1 rebinds once.
+pub const AI_CAPABILITY_BROKER_VERSION: u16 = 2;
 
 /// Maximum reviewed static tools one run may reach through the fixed broker.
 ///
@@ -55,8 +65,14 @@ pub enum AiCapabilityDeliveryMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiCapabilityDeliveryLimits {
-    /// Prefer a fixed broker for large surfaces. Opt-in to preserve retained bindings.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Prefer the fixed broker over provider-native deferred loading when the
+    /// exact definitions exceed the eager limits. On by default; set `false`
+    /// (or call [`Self::with_provider_deferred_for_large_surfaces`]) to keep
+    /// `ProviderDeferred` for large surfaces.
+    #[serde(
+        default = "default_prefer_fixed_broker_for_large_surfaces",
+        skip_serializing_if = "is_true"
+    )]
     pub prefer_fixed_broker_for_large_surfaces: bool,
     /// Maximum definitions admitted into eager mode.
     pub maximum_eager_definitions: u16,
@@ -75,8 +91,14 @@ pub struct AiCapabilityDeliveryLimits {
     pub maximum_describe_bytes: u32,
 }
 
-fn is_false(value: &bool) -> bool {
-    !value
+// Serde's `skip_serializing_if` passes the field by reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
+const fn default_prefer_fixed_broker_for_large_surfaces() -> bool {
+    true
 }
 
 const fn default_maximum_retained_searches() -> u16 {
@@ -94,7 +116,8 @@ const fn default_maximum_describe_bytes() -> u32 {
 impl Default for AiCapabilityDeliveryLimits {
     fn default() -> Self {
         Self {
-            prefer_fixed_broker_for_large_surfaces: false,
+            prefer_fixed_broker_for_large_surfaces: default_prefer_fixed_broker_for_large_surfaces(
+            ),
             maximum_eager_definitions: 16,
             maximum_eager_definition_bytes: 256 * 1024,
             maximum_deferred_definitions: 8,
@@ -106,8 +129,20 @@ impl Default for AiCapabilityDeliveryLimits {
 }
 
 impl AiCapabilityDeliveryLimits {
+    /// Opts out of the fixed-broker preference: a provider that supports
+    /// `ProviderDeferred` keeps native deferred loading above the eager
+    /// limits, as before broker version 2.
+    ///
+    /// The selected mode is part of the retained session binding, so
+    /// changing this setting rebinds retained sessions.
+    #[must_use]
+    pub const fn with_provider_deferred_for_large_surfaces(mut self) -> Self {
+        self.prefer_fixed_broker_for_large_surfaces = false;
+        self
+    }
+
     /// Rejects a limit set that cannot represent a complete
-    /// discover/describe/execute broker interaction.
+    /// discover/describe/describe-type/execute broker interaction.
     ///
     /// # Errors
     ///
@@ -270,6 +305,7 @@ pub fn prepare_capability_delivery_surface(
             definition.tool_id.as_str(),
             AI_CAPABILITY_DISCOVER_TOOL_ID
                 | AI_CAPABILITY_DESCRIBE_TOOL_ID
+                | AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID
                 | AI_CAPABILITY_EXECUTE_TOOL_ID
         ) {
             return Err(AiError::InvalidConfiguration(
@@ -299,9 +335,9 @@ pub fn prepare_capability_delivery_surface(
             })
             .collect(),
         AiCapabilityDeliveryMode::ClientDeferred => {
-            vec![discovery_definition(index_fingerprint)]
+            vec![discovery_definition(Some(index_fingerprint))]
         }
-        AiCapabilityDeliveryMode::FixedBroker => fixed_broker_definitions(index_fingerprint),
+        AiCapabilityDeliveryMode::FixedBroker => fixed_broker_definitions(),
     };
     Ok(AiCapabilityDeliverySurface {
         mode: decision.mode,
@@ -355,7 +391,11 @@ pub fn prepare_client_deferred_continuation(
     Ok(exact_definitions)
 }
 
-fn discovery_definition(index_fingerprint: &str) -> ModelToolDefinition {
+/// `index_fingerprint` is `Some` only for client-deferred delivery, whose
+/// installed definitions are catalogue-derived. The fixed broker passes `None`:
+/// its three definitions depend on the broker protocol version alone, so a
+/// catalogue change never alters the retained provider surface.
+fn discovery_definition(index_fingerprint: Option<&str>) -> ModelToolDefinition {
     broker_definition(
         AI_CAPABILITY_DISCOVER_TOOL_ID,
         "graphql_capabilities_discover",
@@ -376,12 +416,38 @@ fn discovery_definition(index_fingerprint: &str) -> ModelToolDefinition {
     )
 }
 
-fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition> {
-    let discover = discovery_definition(index_fingerprint);
+fn fixed_discovery_definition() -> ModelToolDefinition {
+    broker_definition(
+        AI_CAPABILITY_DISCOVER_TOOL_ID,
+        "graphql_capabilities_discover",
+        "Search the current reviewed read capabilities. A generated_entity candidate covers every read operation of one entity; its operations list names them.",
+        None,
+        json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "maxLength": 1024},
+                "namespace": {"type": ["string", "null"], "maxLength": 256},
+                "kind": {
+                    "type": ["string", "null"],
+                    "enum": ["generated_query", "generated_entity", "reviewed_static", null],
+                    "description": "generated_query: every generated read; generated_entity: entity capabilities only; reviewed_static: reviewed tools only."
+                },
+                "entityOrClass": {"type": ["string", "null"], "maxLength": 256},
+                "maximumResults": {"type": "integer", "minimum": 1, "maximum": 32}
+            },
+            "required": ["text", "maximumResults"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
+    let index_fingerprint = None;
+    let discover = fixed_discovery_definition();
     let describe = broker_definition(
         AI_CAPABILITY_DESCRIBE_TOOL_ID,
         "graphql_capabilities_describe",
-        "Load one exact current capability and return its bounded public planning contract.",
+        "Load one exact current capability. Returns a loadedReference and one compact typed signature per operation; expand any named type with graphql_capabilities_describe_type.",
         index_fingerprint,
         json!({
             "type": "object",
@@ -393,10 +459,10 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
             "additionalProperties": false
         }),
     );
-    let execute = broker_definition(
-        AI_CAPABILITY_EXECUTE_TOOL_ID,
-        "graphql_capabilities_execute",
-        "Execute one previously loaded exact capability. Copy only fields admitted by the returned planSchema: flatten argument leaves into name/value entries, and omit optional wrapper fields that the planSchema does not expose.",
+    let describe_type = broker_definition(
+        AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID,
+        "graphql_capabilities_describe_type",
+        "Expand one named type of a loaded capability's signature: an input type from inputTypes, select, or select.<relationship path>. Long types are paged with offset.",
         index_fingerprint,
         json!({
             "type": "object",
@@ -405,15 +471,43 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
                     "type": "string", "minLength": 64, "maxLength": 64,
                     "description": "Exact loadedReference returned by the matching describe call."
                 },
+                "operation": {
+                    "type": ["string", "null"], "minLength": 1, "maxLength": 256,
+                    "description": "Operation of an entity capability, from its describe result. Omit for a capability with one operation."
+                },
+                "type": {"type": "string", "minLength": 1, "maxLength": 512},
+                "offset": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000},
+                "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 128}
+            },
+            "required": ["loadedReference", "type"],
+            "additionalProperties": false
+        }),
+    );
+    let execute = broker_definition(
+        AI_CAPABILITY_EXECUTE_TOOL_ID,
+        "graphql_capabilities_execute",
+        "Execute one operation of a previously loaded exact capability. Use only argument and selection paths its signature and expanded types admit: flatten argument leaves into name/value entries with dotted paths, and omit optional fields you do not need.",
+        index_fingerprint,
+        json!({
+            "type": "object",
+            "properties": {
+                "loadedReference": {
+                    "type": "string", "minLength": 64, "maxLength": 64,
+                    "description": "Exact loadedReference returned by the matching describe call."
+                },
+                "operation": {
+                    "type": ["string", "null"], "minLength": 1, "maxLength": 256,
+                    "description": "Operation of an entity capability, from its describe result. Omit for a capability with one operation."
+                },
                 "arguments": {
                     "type": "array", "maxItems": 64,
-                    "description": "Optional root arguments admitted by planSchema.arguments. Flatten each supplied scalar leaf into one name/value entry using its dotted public path; omit this array when no root argument is needed.",
+                    "description": "Optional root arguments of the signature. Flatten each supplied scalar leaf into one name/value entry using its dotted public path, for example where.status.eq; omit this array when no root argument is needed.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "name": {
                                 "type": "string", "minLength": 1, "maxLength": 256,
-                                "description": "Exact dotted public argument path admitted by planSchema.arguments."
+                                "description": "Exact dotted public argument path admitted by the signature."
                             },
                             "value": {
                                 "type": ["string", "integer", "number", "boolean", "null"],
@@ -426,12 +520,12 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
                 },
                 "selections": {
                     "type": "array", "maxItems": 256, "uniqueItems": true,
-                    "description": "One or more exact scalar paths copied from planSchema.selections.items.enum.",
+                    "description": "One or more exact dotted scalar paths from the select type and its select.<path> expansions.",
                     "items": {"type": "string", "maxLength": 512}
                 },
                 "relationshipArguments": {
                     "type": "array", "maxItems": 64,
-                    "description": "Optional relationship arguments admitted by planSchema.relationshipArguments. Omit when that schema has no applicable relationship argument.",
+                    "description": "Optional arguments of a selected relationship path, as listed by its select type. Omit when none applies.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -455,7 +549,7 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
                 },
                 "relationshipMaximumItems": {
                     "type": "array", "maxItems": 64,
-                    "description": "Optional relationship bounds admitted by planSchema.relationshipMaximumItems. Omit when the exact relationship path is not present there.",
+                    "description": "Optional bounds of selected relationship paths whose select type lists maximumItems. Omit otherwise.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -468,32 +562,41 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
                 },
                 "maximumItems": {
                     "type": ["integer", "null"], "minimum": 1, "maximum": 10000,
-                    "description": "Optional root result bound. Supply a positive value only when planSchema exposes maximumItems; otherwise omit it."
+                    "description": "Root result bound. Supply a positive value when the operation lists maximumItems; otherwise omit it."
                 }
             },
             "required": ["loadedReference", "selections"],
             "additionalProperties": false
         }),
     );
-    vec![discover, describe, execute]
+    vec![discover, describe, describe_type, execute]
 }
 
 fn broker_definition(
     tool_id: &str,
     provider_name: &str,
     description: &str,
-    index_fingerprint: &str,
+    index_fingerprint: Option<&str>,
     parameters: serde_json::Value,
 ) -> ModelToolDefinition {
-    ModelToolDefinition {
-        tool_id: tool_id.to_owned(),
-        provider_name: provider_name.to_owned(),
-        fingerprint: hash_json(&json!({
+    let fingerprint = match index_fingerprint {
+        Some(index_fingerprint) => hash_json(&json!({
             "version": 1,
             "tool_id": tool_id,
             "index_fingerprint": index_fingerprint,
             "parameters": parameters.clone(),
         })),
+        None => hash_json(&json!({
+            "version": 2,
+            "tool_id": tool_id,
+            "broker_version": AI_CAPABILITY_BROKER_VERSION,
+            "parameters": parameters.clone(),
+        })),
+    };
+    ModelToolDefinition {
+        tool_id: tool_id.to_owned(),
+        provider_name: provider_name.to_owned(),
+        fingerprint,
         description: description.to_owned(),
         parameters,
         strict: true,
@@ -504,10 +607,12 @@ fn broker_definition(
 /// Selects the safest admissible delivery mode from provider declarations and
 /// exact definition size. Prompt text cannot influence this decision.
 ///
-/// Native deferred loading remains the default for unchanged hosts. Set
+/// Above the eager limits a provider that supports both `ProviderDeferred`
+/// and `FixedBroker` gets the constant-size fixed broker by default, so no
+/// selected mode's request size grows with the catalogue. Clear
 /// [`AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces`] to
-/// prefer a constant-size broker above the eager limits. This changes the
-/// selected mode and requires rebinding retained sessions.
+/// keep native deferred loading. The selected mode is part of the retained
+/// session binding, so changing it rebinds retained sessions.
 ///
 /// # Errors
 ///
@@ -564,8 +669,9 @@ pub fn select_capability_delivery_mode(
 pub struct AiProviderCapabilitySessionBinding {
     /// Selected delivery mode.
     delivery_mode: AiCapabilityDeliveryMode,
-    /// Canonical capability-index-set fingerprint.
-    capability_index_fingerprint: String,
+    /// Canonical capability-index-set fingerprint for catalogue-derived
+    /// modes; `None` for the fixed broker.
+    capability_index_fingerprint: Option<String>,
     /// Stable fingerprints of frozen static bootstrap tools.
     static_bootstrap_tool_fingerprints: BTreeSet<String>,
     /// Reviewed provider projection algorithm version.
@@ -582,6 +688,19 @@ pub struct AiProviderCapabilitySessionBinding {
 
 impl AiProviderCapabilitySessionBinding {
     /// Creates one immutable provider-session binding.
+    ///
+    /// `EagerExact`, `ProviderDeferred` and `ClientDeferred` definitions are
+    /// derived from the catalogue, so their binding includes
+    /// `capability_index_fingerprint` and rotates when the catalogue changes.
+    ///
+    /// A `FixedBroker` binding covers the broker protocol version
+    /// ([`AI_CAPABILITY_BROKER_VERSION`]), the static bootstrap surface, the
+    /// delivery mode and the provider identity only. The supplied index
+    /// fingerprint is validated and then dropped: it is neither stored nor
+    /// hashed, so a schema or catalogue change keeps the retained session.
+    /// Describe and execute remain authoritative: each revalidates the current
+    /// index, schema, entry and policy fingerprints and refuses a drifted
+    /// selection with the recoverable [`AI_CAPABILITY_STALE`] outcome.
     ///
     /// # Errors
     ///
@@ -620,16 +739,32 @@ impl AiProviderCapabilitySessionBinding {
                 "provider bootstrap tool binding is invalid".to_owned(),
             ));
         }
-        let fingerprint = hash_json(&json!({
-            "version": 1,
-            "delivery_mode": delivery_mode,
-            "capability_index_fingerprint": capability_index_fingerprint,
-            "static_bootstrap_tool_fingerprints": static_bootstrap_tool_fingerprints,
-            "provider_projection_version": provider_projection_version,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "registration_identity": registration_identity,
-        }));
+        let (capability_index_fingerprint, fingerprint) =
+            if delivery_mode == AiCapabilityDeliveryMode::FixedBroker {
+                let fingerprint = hash_json(&json!({
+                    "version": 2,
+                    "delivery_mode": delivery_mode,
+                    "broker_version": AI_CAPABILITY_BROKER_VERSION,
+                    "static_bootstrap_tool_fingerprints": static_bootstrap_tool_fingerprints,
+                    "provider_projection_version": provider_projection_version,
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "registration_identity": registration_identity,
+                }));
+                (None, fingerprint)
+            } else {
+                let fingerprint = hash_json(&json!({
+                    "version": 1,
+                    "delivery_mode": delivery_mode,
+                    "capability_index_fingerprint": capability_index_fingerprint,
+                    "static_bootstrap_tool_fingerprints": static_bootstrap_tool_fingerprints,
+                    "provider_projection_version": provider_projection_version,
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "registration_identity": registration_identity,
+                }));
+                (Some(capability_index_fingerprint), fingerprint)
+            };
         Ok(Self {
             delivery_mode,
             capability_index_fingerprint,
@@ -647,17 +782,21 @@ impl AiProviderCapabilitySessionBinding {
         self.delivery_mode
     }
 
-    /// Exact canonical capability-index-set fingerprint.
-    pub fn capability_index_fingerprint(&self) -> &str {
-        &self.capability_index_fingerprint
+    /// Exact canonical capability-index-set fingerprint bound into a
+    /// catalogue-derived delivery mode.
+    ///
+    /// Returns `None` for [`AiCapabilityDeliveryMode::FixedBroker`], whose
+    /// binding does not depend on the catalogue.
+    pub fn capability_index_fingerprint(&self) -> Option<&str> {
+        self.capability_index_fingerprint.as_deref()
     }
 
     /// Exact canonical capability-index-set fingerprint.
     ///
     /// This is the explicit multi-target name for
     /// [`Self::capability_index_fingerprint`].
-    pub fn capability_index_set_fingerprint(&self) -> &str {
-        &self.capability_index_fingerprint
+    pub fn capability_index_set_fingerprint(&self) -> Option<&str> {
+        self.capability_index_fingerprint.as_deref()
     }
 
     /// Exact frozen static bootstrap tool fingerprints.
@@ -776,13 +915,20 @@ pub trait AiCapabilityAuthorityPolicy: Send + Sync {
     ///
     /// The broker passes every entry that matches the query, in rank order and
     /// before the query's result ceiling, and truncates only after this
-    /// returns. A restricted principal therefore receives its permitted
+    /// returns. Each [`AiCapabilityKind::GeneratedEntity`] match is followed
+    /// by the [`AiCapabilityKind::GeneratedQuery`] entries of the roots it
+    /// groups; the broker returns the entity only with the roots this batch
+    /// admits, lists only those roots, and ranks it on its own metadata and
+    /// those roots alone. In per-root (client-deferred) discovery, the entity
+    /// entry of a grouped root precedes that root's first match, and the root
+    /// is returned only when both are admitted. A restricted principal therefore receives its permitted
     /// candidates even when unpermitted entries rank above them. When every
     /// policy call succeeds, the amount of policy work depends on the query
     /// and catalogue, never on which candidates the principal may use.
     ///
     /// One search can therefore evaluate up to the index set's
-    /// `maximum_entries` matches (16,384 by default). Bound it with
+    /// `maximum_entries` matches (16,384 by default), plus the grouped roots
+    /// of each matching entity. Bound it with
     /// [`AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations`].
     ///
     /// The result must hold exactly one decision per match, in the same order,
@@ -899,9 +1045,41 @@ pub struct AiLoadedCapabilityBinding {
     provider_kind: ProviderKind,
     provider_session_fingerprint: String,
     expires_at: OffsetDateTime,
+    /// Operations of an entity capability current host policy admitted at
+    /// load, in operation-name order. Empty for every other kind.
+    operations: Vec<AiLoadedCapabilityOperation>,
+    /// For a root an entity capability groups, the host-policy fingerprint
+    /// of the entity entry, which is decided at load and again at execute.
+    entity_policy_fingerprint: Option<String>,
+}
+
+/// One operation of a loaded entity capability, as admitted at load.
+#[derive(Clone, Debug)]
+struct AiLoadedCapabilityOperation {
+    operation_name: String,
+    capability_id: AiToolId,
+    capability_fingerprint: String,
+    entry_fingerprint: String,
+    policy_fingerprint: String,
+}
+
+/// The exact executable root a broker call resolved from a loaded binding.
+struct LoadedTarget {
+    capability_id: AiToolId,
+    capability_kind: AiCapabilityKind,
+    capability_fingerprint: String,
+    operation_name: String,
 }
 
 impl AiLoadedCapabilityBinding {
+    /// Operations of a loaded entity capability that current host policy
+    /// admitted at load, in operation-name order. Empty for every other kind.
+    pub fn operation_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.operations
+            .iter()
+            .map(|operation| operation.operation_name.as_str())
+    }
+
     /// Stable capability ID carried to the ordinary durable tool broker.
     pub fn capability_id(&self) -> &AiToolId {
         &self.capability_id
@@ -1019,8 +1197,10 @@ impl AiCapabilityDiscoveryBroker {
         Ok(self)
     }
 
-    /// Caps how many ranked matches one discovery query may send to host
-    /// policy. Unset by default, so every match is evaluated.
+    /// Caps how many entries one discovery query may send to host policy:
+    /// the ranked matches plus each matching entity's grouped roots (or each
+    /// matching root's entity, in per-root discovery). Unset by default, so
+    /// every match is evaluated.
     ///
     /// A query that matches more entries than `maximum` is refused before any
     /// policy call with [`AiError::InvalidInput`] carrying
@@ -1116,27 +1296,64 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
-        self.search_admitted(principal_reference, run, query, |_| true)
+        self.search_admitted(principal_reference, run, query, false, |_| true)
             .await
     }
 
     /// [`Self::search`] over the entries `admit` accepts. An entry `admit`
     /// refuses is removed before the authorization bound and before host
-    /// policy, exactly as if the index did not hold it.
+    /// policy, exactly as if the index did not hold it. With `per_root`, an
+    /// entity entry is replaced by the root entries it groups
+    /// ([`AiCapabilityIndexSet::ranked_operation_matches`]).
     async fn search_admitted(
         &self,
         principal_reference: &PrincipalReference,
         run: &AiCapabilityRunBinding,
         query: &AiCapabilitySearchQuery,
+        per_root: bool,
         admit: impl Fn(&AiCapabilityIndexEntry) -> bool,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        let mut ranked = indexes.ranked_matches(query)?;
+        let mut ranked = if per_root {
+            indexes.ranked_operation_matches(query)?
+        } else {
+            indexes.ranked_matches(query)?
+        };
         ranked.retain(|candidate| admit(candidate.entry()));
+        // One policy batch decides every match together with the entries it
+        // depends on: an entity entry's grouped roots follow it, and in
+        // per-root ranking a root's entity entry precedes its first root.
+        let mut batch = Vec::new();
+        let mut slots = Vec::with_capacity(ranked.len());
+        let mut entity_slots = BTreeMap::<AiToolId, usize>::new();
+        for candidate in &ranked {
+            let entity_at = if per_root {
+                candidate.entity().map(|entity| {
+                    *entity_slots
+                        .entry(entity.entry().id.clone())
+                        .or_insert_with(|| {
+                            batch.push(entity);
+                            batch.len() - 1
+                        })
+                })
+            } else {
+                None
+            };
+            batch.push(*candidate);
+            let at = batch.len() - 1;
+            let mut roots = Vec::new();
+            if !per_root {
+                for root in candidate.operations() {
+                    batch.push(root);
+                    roots.push(batch.len() - 1);
+                }
+            }
+            slots.push((at, roots, entity_at));
+        }
         if self
             .maximum_discovery_authorizations
-            .is_some_and(|maximum| ranked.len() > maximum)
+            .is_some_and(|maximum| batch.len() > maximum)
         {
             return Err(AiError::InvalidInput(
                 AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
@@ -1144,22 +1361,49 @@ impl AiCapabilityDiscoveryBroker {
         }
         let decisions = self
             .authority
-            .authorize_discovery(&principal, &ranked, run)
+            .authorize_discovery(&principal, &batch, run)
             .await?;
-        if decisions.len() != ranked.len()
-            || ranked
+        if decisions.len() != batch.len()
+            || batch
                 .iter()
                 .zip(&decisions)
                 .any(|(candidate, decision)| decision.capability_id != candidate.entry().id)
         {
             return Err(AiError::Forbidden);
         }
-        let candidates = ranked
-            .iter()
-            .zip(decisions)
-            .filter(|(_, decision)| decision.allowed)
+        // An entity is kept only with its admitted roots, and a root only
+        // with its admitted entity. Nothing of a denied root is returned.
+        let mut kept = Vec::with_capacity(slots.len());
+        for (at, roots, entity_at) in slots {
+            if !decisions[at].allowed || entity_at.is_some_and(|entity| !decisions[entity].allowed)
+            {
+                continue;
+            }
+            let admitted = roots
+                .iter()
+                .filter(|root| decisions[**root].allowed)
+                .map(|root| batch[*root].entry().id.clone())
+                .collect::<BTreeSet<_>>();
+            if batch[at].entry().kind == AiCapabilityKind::GeneratedEntity && admitted.is_empty() {
+                continue;
+            }
+            kept.push((batch[at], admitted));
+        }
+        // Rank again on each entity's own metadata and its admitted roots,
+        // so a denied root's text decides neither whether nor where its
+        // entity appears. Per-root ranks depend on the root alone already.
+        let order = if per_root {
+            (0..kept.len()).collect::<Vec<_>>()
+        } else {
+            indexes.rank_admitted(query, &kept)?
+        };
+        let candidates = order
+            .into_iter()
             .take(usize::from(query.maximum_results))
-            .map(|(candidate, _)| candidate.candidate())
+            .map(|position| {
+                let (candidate, admitted) = &kept[position];
+                candidate.admitted_candidate(admitted)
+            })
             .collect();
         Ok(AiCapabilityIndexSetSearchResult {
             index_set_fingerprint: indexes.fingerprint().to_owned(),
@@ -1203,7 +1447,54 @@ impl AiCapabilityDiscoveryBroker {
         if !decision.allowed || !valid_binding_value(&decision.policy_fingerprint) {
             return Err(AiError::Forbidden);
         }
+        // A root an entity groups is loadable only while host policy also
+        // admits its entity, as at discovery.
+        let entity_policy_fingerprint = match index.entity_entry_of(&entry.id) {
+            Some(entity) => {
+                let entity_decision = self
+                    .authority
+                    .authorize(&principal, index, entity, run)
+                    .await?;
+                if !entity_decision.allowed
+                    || !valid_binding_value(&entity_decision.policy_fingerprint)
+                {
+                    return Err(AiError::Forbidden);
+                }
+                Some(entity_decision.policy_fingerprint)
+            }
+            None => None,
+        };
+        // Each operation of an entity capability is its own root entry, and
+        // host policy decides each one. Only admitted operations are loaded.
+        let mut operations = Vec::new();
+        if entry.kind == AiCapabilityKind::GeneratedEntity {
+            for member in &entry.operations {
+                let root = index
+                    .entry(&member.capability_id)
+                    .ok_or(AiError::Forbidden)?;
+                let member_decision = self
+                    .authority
+                    .authorize(&principal, index, root, run)
+                    .await?;
+                if member_decision.allowed
+                    && valid_binding_value(&member_decision.policy_fingerprint)
+                {
+                    operations.push(AiLoadedCapabilityOperation {
+                        operation_name: member.operation_name.clone(),
+                        capability_id: root.id.clone(),
+                        capability_fingerprint: root.capability_fingerprint.clone(),
+                        entry_fingerprint: root.fingerprint.clone(),
+                        policy_fingerprint: member_decision.policy_fingerprint,
+                    });
+                }
+            }
+            if operations.is_empty() {
+                return Err(AiError::Forbidden);
+            }
+        }
         Ok(AiLoadedCapabilityBinding {
+            operations,
+            entity_policy_fingerprint,
             nonce: Uuid::new_v4(),
             principal_reference_fingerprint: principal_reference_fingerprint(principal.reference()),
             capability_id: entry.id.clone(),
@@ -1231,14 +1522,32 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// # Errors
     ///
-    /// Fails closed on expiry, revocation, drift, or any cross-run/provider/
-    /// target/kind substitution.
+    /// Fails closed with [`AiError::Forbidden`] on expiry, revocation, or any
+    /// cross-run/provider/principal substitution. Drift of the capability,
+    /// entry, index, schema, catalogue, target-policy or host-policy
+    /// fingerprint since the handle was loaded also fails closed, with
+    /// [`AiError::InvalidInput`] carrying [`AI_CAPABILITY_STALE`]: nothing
+    /// executes and the caller must describe the capability again. Drift is
+    /// checked only after the handle is proven to belong to this principal
+    /// and run, and a current denial is never reported as drift when the
+    /// fingerprints are unchanged.
     pub async fn authorize_execution(
         &self,
         principal_reference: &PrincipalReference,
         run: &AiCapabilityRunBinding,
         loaded: &AiLoadedCapabilityBinding,
     ) -> Result<(), AiError> {
+        self.authorize_loaded(principal_reference, run, loaded)
+            .await
+            .map(|_| ())
+    }
+
+    async fn authorize_loaded(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        loaded: &AiLoadedCapabilityBinding,
+    ) -> Result<(ResolvedPrincipal, Arc<AiCapabilityIndexSet>), AiError> {
         if principal_reference_fingerprint(principal_reference)
             != loaded.principal_reference_fingerprint
             || self.clock.now() > loaded.expires_at
@@ -1253,28 +1562,129 @@ impl AiCapabilityDiscoveryBroker {
         }
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
+        {
+            let (index, entry) = indexes
+                .entry(&loaded.capability_id)
+                .ok_or_else(stale_capability)?;
+            if loaded.capability_kind != entry.kind {
+                return Err(AiError::Forbidden);
+            }
+            if loaded.capability_fingerprint != entry.capability_fingerprint
+                || loaded.entry_fingerprint != entry.fingerprint
+                || loaded.index_set_fingerprint != indexes.fingerprint()
+                || loaded.index_fingerprint != index.fingerprint()
+                || loaded.schema_fingerprint != index.schema_fingerprint()
+                || loaded.semantic_catalogue_fingerprint != index.semantic_catalogue_fingerprint()
+                || loaded.target_policy_fingerprint != index.target_policy_fingerprint()
+            {
+                return Err(stale_capability());
+            }
+            let decision = self
+                .authority
+                .authorize(&principal, index, entry, run)
+                .await?;
+            if !decision.allowed {
+                return Err(AiError::Forbidden);
+            }
+            if decision.policy_fingerprint != loaded.policy_fingerprint {
+                return Err(stale_capability());
+            }
+            // A grouped root also needs its entity admitted, with the policy
+            // fingerprint recorded at load.
+            match (
+                index.entity_entry_of(&entry.id),
+                &loaded.entity_policy_fingerprint,
+            ) {
+                (None, None) => {}
+                (Some(entity), Some(recorded)) => {
+                    let entity_decision = self
+                        .authority
+                        .authorize(&principal, index, entity, run)
+                        .await?;
+                    if !entity_decision.allowed {
+                        return Err(AiError::Forbidden);
+                    }
+                    if &entity_decision.policy_fingerprint != recorded {
+                        return Err(stale_capability());
+                    }
+                }
+                _ => return Err(stale_capability()),
+            }
+        }
+        Ok((principal, indexes))
+    }
+
+    /// Resolves and authorizes the root one broker call addresses.
+    ///
+    /// An entity capability needs `operation` unless exactly one of its
+    /// operations was loaded; any other capability has one operation, its
+    /// own, and `operation` may only name it. The entity is authorized as a
+    /// whole and then the chosen root entry again, with its own fingerprints
+    /// and host policy, so the root is never reached on the entity's
+    /// decision alone.
+    async fn authorize_loaded_operation(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        loaded: &AiLoadedCapabilityBinding,
+        operation: Option<&str>,
+    ) -> Result<LoadedTarget, AiError> {
+        let selected = if loaded.capability_kind == AiCapabilityKind::GeneratedEntity {
+            let selected = match operation {
+                Some(name) => loaded
+                    .operations
+                    .iter()
+                    .find(|candidate| candidate.operation_name == name),
+                None if loaded.operations.len() == 1 => loaded.operations.first(),
+                None => None,
+            };
+            Some(selected.ok_or_else(invalid_operation)?)
+        } else {
+            None
+        };
+        let (principal, indexes) = self
+            .authorize_loaded(principal_reference, run, loaded)
+            .await?;
         let (index, entry) = indexes
             .entry(&loaded.capability_id)
-            .ok_or(AiError::Forbidden)?;
-        if loaded.capability_kind != entry.kind
-            || loaded.capability_fingerprint != entry.capability_fingerprint
-            || loaded.entry_fingerprint != entry.fingerprint
-            || loaded.index_set_fingerprint != indexes.fingerprint()
-            || loaded.index_fingerprint != index.fingerprint()
-            || loaded.schema_fingerprint != index.schema_fingerprint()
-            || loaded.semantic_catalogue_fingerprint != index.semantic_catalogue_fingerprint()
-            || loaded.target_policy_fingerprint != index.target_policy_fingerprint()
+            .ok_or_else(stale_capability)?;
+        let Some(selected) = selected else {
+            if operation.is_some_and(|name| name != entry.operation_name) {
+                return Err(invalid_operation());
+            }
+            return Ok(LoadedTarget {
+                capability_id: loaded.capability_id.clone(),
+                capability_kind: loaded.capability_kind,
+                capability_fingerprint: loaded.capability_fingerprint.clone(),
+                operation_name: entry.operation_name.clone(),
+            });
+        };
+        let root = index
+            .operation_entry(&loaded.capability_id, &selected.operation_name)
+            .ok_or_else(stale_capability)?;
+        if root.id != selected.capability_id
+            || root.kind != AiCapabilityKind::GeneratedQuery
+            || root.capability_fingerprint != selected.capability_fingerprint
+            || root.fingerprint != selected.entry_fingerprint
         {
-            return Err(AiError::Forbidden);
+            return Err(stale_capability());
         }
         let decision = self
             .authority
-            .authorize(&principal, index, entry, run)
+            .authorize(&principal, index, root, run)
             .await?;
-        if !decision.allowed || decision.policy_fingerprint != loaded.policy_fingerprint {
+        if !decision.allowed {
             return Err(AiError::Forbidden);
         }
-        Ok(())
+        if decision.policy_fingerprint != selected.policy_fingerprint {
+            return Err(stale_capability());
+        }
+        Ok(LoadedTarget {
+            capability_id: root.id.clone(),
+            capability_kind: root.kind,
+            capability_fingerprint: root.capability_fingerprint.clone(),
+            operation_name: root.operation_name.clone(),
+        })
     }
 
     async fn rehydrate(
@@ -1326,7 +1736,7 @@ fn hash_json(value: &serde_json::Value) -> String {
 
 /// One frozen capability-broker meta-operation.
 ///
-/// The three operations are the complete crate-owned broker surface. Resolving
+/// The four operations are the complete crate-owned broker surface. Resolving
 /// an operation from a tool identifier is discovery, not authorization: every
 /// dispatch still rehydrates the principal, reapplies current host policy and,
 /// for [`Self::Execute`] only, passes through ordinary resolver authorization.
@@ -1337,6 +1747,8 @@ pub enum AiCapabilityBrokerOperation {
     Discover,
     /// Load one exact current capability and return its planning contract.
     Describe,
+    /// Expand one named type of a loaded capability's signature.
+    DescribeType,
     /// Execute one previously loaded exact capability through a closed plan.
     Execute,
 }
@@ -1349,6 +1761,7 @@ impl AiCapabilityBrokerOperation {
         match tool_id.as_str() {
             AI_CAPABILITY_DISCOVER_TOOL_ID => Some(Self::Discover),
             AI_CAPABILITY_DESCRIBE_TOOL_ID => Some(Self::Describe),
+            AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID => Some(Self::DescribeType),
             AI_CAPABILITY_EXECUTE_TOOL_ID => Some(Self::Execute),
             _ => None,
         }
@@ -1359,37 +1772,31 @@ impl AiCapabilityBrokerOperation {
         match self {
             Self::Discover => AI_CAPABILITY_DISCOVER_TOOL_ID,
             Self::Describe => AI_CAPABILITY_DESCRIBE_TOOL_ID,
+            Self::DescribeType => AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID,
             Self::Execute => AI_CAPABILITY_EXECUTE_TOOL_ID,
         }
     }
 
     /// Whether this operation can reach an application resolver.
     ///
-    /// Only [`Self::Execute`] can. Discovery and describe return bounded
-    /// authority-neutral metadata and grant no execution authority.
+    /// Only [`Self::Execute`] can. Discovery, describe and describe-type
+    /// return bounded authority-neutral metadata and grant no execution
+    /// authority.
     pub const fn reaches_resolver(self) -> bool {
         matches!(self, Self::Execute)
     }
 }
 
-/// Returns the three frozen broker definitions for one exact compact index.
+/// Returns the four frozen fixed-broker definitions: discover, describe,
+/// describe-type and execute.
 ///
 /// The definitions are crate-authored and deterministic: a host installs them
 /// verbatim and cannot widen, rename, or re-fingerprint the broker surface.
-///
-/// # Errors
-///
-/// Returns [`AiError::InvalidConfiguration`] for a malformed index
-/// fingerprint.
-pub fn capability_broker_definitions(
-    index_fingerprint: &str,
-) -> Result<Vec<ModelToolDefinition>, AiError> {
-    if !crate::valid_sha256(index_fingerprint) {
-        return Err(AiError::InvalidConfiguration(
-            "capability delivery index fingerprint is invalid".to_owned(),
-        ));
-    }
-    Ok(fixed_broker_definitions(index_fingerprint))
+/// They depend only on [`AI_CAPABILITY_BROKER_VERSION`] and never on a
+/// catalogue or schema fingerprint, so they are identical before and after any
+/// catalogue change.
+pub fn capability_broker_definitions() -> Vec<ModelToolDefinition> {
+    fixed_broker_definitions()
 }
 
 /// Canonical serialized byte cost of one exact definition set.
@@ -1483,6 +1890,9 @@ pub struct AiCapabilityBrokerAmplification {
     pub discover_calls: u32,
     /// Accepted describe calls.
     pub describe_calls: u32,
+    /// Accepted describe-type calls.
+    #[serde(default)]
+    pub describe_type_calls: u32,
     /// Accepted execute calls.
     pub execute_calls: u32,
 }
@@ -1492,6 +1902,7 @@ impl AiCapabilityBrokerAmplification {
     pub const fn total_calls(self) -> u32 {
         self.discover_calls
             .saturating_add(self.describe_calls)
+            .saturating_add(self.describe_type_calls)
             .saturating_add(self.execute_calls)
     }
 }
@@ -1593,20 +2004,21 @@ impl AiCapabilityBrokerSession {
         &self.brokered_static_tools
     }
 
-    /// Makes describe return the complete inline compact plan schema instead
-    /// of the default shared-type rendering.
+    /// Makes describe also return each operation's complete inline compact
+    /// plan schema as `planSchema`, beside its signature.
     ///
-    /// By default describe defines each repeated input type once under
-    /// `planSchema.types` and references it by name, which is the same
-    /// contract in far fewer bytes. Use the inline form only for a model that
-    /// cannot follow a schema reference.
+    /// By default describe returns only compact typed signatures and the
+    /// model expands named types with `describe_type`. Use the inline form
+    /// only for a model that cannot follow a type name. The schema is dropped
+    /// again when the description would exceed
+    /// [`AiCapabilityDeliveryLimits::maximum_describe_bytes`].
     #[must_use]
     pub const fn with_inline_describe_schema(mut self) -> Self {
         self.inline_describe_schema = true;
         self
     }
 
-    /// Whether describe returns the inline compact plan schema.
+    /// Whether describe also returns the inline compact plan schema.
     pub const fn uses_inline_describe_schema(&self) -> bool {
         self.inline_describe_schema
     }
@@ -1727,6 +2139,12 @@ impl AiCapabilityBrokerSession {
         let mut state = self.state();
         state.amplification.execute_calls = state.amplification.execute_calls.saturating_add(1);
     }
+
+    fn record_describe_type(&self) {
+        let mut state = self.state();
+        state.amplification.describe_type_calls =
+            state.amplification.describe_type_calls.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1747,6 +2165,20 @@ struct BrokerDiscoverArguments {
 struct BrokerDescribeArguments {
     capability_id: String,
     candidate_fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrokerDescribeTypeArguments {
+    loaded_reference: String,
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(rename = "type")]
+    type_name: String,
+    #[serde(default)]
+    offset: Option<u32>,
+    #[serde(default)]
+    limit: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1777,6 +2209,8 @@ struct BrokerRelationshipMaximumItems {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrokerExecuteArguments {
     loaded_reference: String,
+    #[serde(default)]
+    operation: Option<String>,
     #[serde(default)]
     arguments: Vec<BrokerExecuteArgument>,
     selections: Vec<String>,
@@ -1896,6 +2330,45 @@ fn insert_broker_argument_segments(
     }
 }
 
+/// Safe [`AiError::InvalidInput`] message for a broker selection this run does
+/// not hold: an identifier discovery never returned to it, an unknown or
+/// expired `loadedReference`, or lost process-local broker state.
+///
+/// The model-facing code is `selection_stale`
+/// ([`crate::AiApplicationToolFailureCode::SelectionStale`]). It says nothing
+/// about whether the named capability exists, so it cannot be used to probe
+/// for capabilities the current principal cannot see.
+pub const AI_CAPABILITY_SELECTION_STALE: &str = "broker capability selection is stale";
+
+/// Safe [`AiError::InvalidInput`] message for a selection the run does hold
+/// whose index, schema, catalogue, entry, capability or policy fingerprint no
+/// longer matches the current published state.
+///
+/// The model-facing code is `capability_stale`
+/// ([`crate::AiApplicationToolFailureCode::CapabilityStale`]): the earlier
+/// candidate, planning contract and `loadedReference` are void, and the model
+/// must discover and describe again. It is reported only for a candidate the
+/// current principal was already shown or a capability it already loaded, so
+/// it reveals no capability the principal could not see.
+pub const AI_CAPABILITY_STALE: &str = "broker capability is stale";
+
+/// Safe [`AiError::InvalidInput`] message for a `describe_type` or `execute`
+/// call whose `operation` is not one the loaded capability's description
+/// returned, or that omits it where the capability has several.
+///
+/// The model-facing code is `invalid_arguments` with a fixed correction. It
+/// is reported only for a capability the run holds, after its loaded
+/// reference was matched, and names no operation.
+pub const AI_CAPABILITY_OPERATION_INVALID: &str =
+    "broker capability operation is not one the description returned";
+
+/// Safe [`AiError::InvalidInput`] message for a `describe_type` call naming a
+/// type the loaded operation's signature does not define.
+///
+/// The model-facing code is `invalid_arguments` with a fixed correction.
+pub const AI_CAPABILITY_TYPE_UNKNOWN: &str =
+    "broker capability type is not defined by the signature";
+
 /// Whether index metadata admits a reviewed static tool to the fixed broker.
 /// The registered descriptor is checked again before describe and execute.
 fn brokerable_static_entry(entry: &AiCapabilityIndexEntry) -> bool {
@@ -1906,7 +2379,15 @@ fn brokerable_static_entry(entry: &AiCapabilityIndexEntry) -> bool {
 }
 
 fn stale_selection() -> AiError {
-    AiError::InvalidInput("broker capability selection is stale".to_owned())
+    AiError::InvalidInput(AI_CAPABILITY_SELECTION_STALE.to_owned())
+}
+
+fn stale_capability() -> AiError {
+    AiError::InvalidInput(AI_CAPABILITY_STALE.to_owned())
+}
+
+fn invalid_operation() -> AiError {
+    AiError::InvalidInput(AI_CAPABILITY_OPERATION_INVALID.to_owned())
 }
 
 fn malformed_broker_arguments() -> AiError {
@@ -1925,6 +2406,7 @@ pub struct AiCapabilityDescription {
     capability_id: AiToolId,
     capability_kind: AiCapabilityKind,
     capability_fingerprint: String,
+    operations: Vec<AiCapabilityDescribedOperation>,
     contract: serde_json::Value,
 }
 
@@ -1952,6 +2434,88 @@ impl AiCapabilityDescription {
     /// Bounded model-visible planning contract.
     pub const fn contract(&self) -> &serde_json::Value {
         &self.contract
+    }
+
+    /// Operations of the description, in the order of the contract's
+    /// `operations` list: every admitted operation of an entity capability,
+    /// or the capability's own single operation.
+    pub fn operations(&self) -> &[AiCapabilityDescribedOperation] {
+        &self.operations
+    }
+
+    /// Attaches one signature summary to each operation, in
+    /// [`Self::operations`] order, typically
+    /// [`crate::AiCapabilitySignature::summary`].
+    ///
+    /// The members of each summary are merged into that operation of the
+    /// contract. When the contract would exceed `maximum_bytes`, any
+    /// `planSchema` member is dropped first; if it still does not fit, every
+    /// signature is dropped and `signaturesAvailable` is `false`. Nothing is
+    /// truncated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] when the number of summaries
+    /// differs from the number of operations, a summary is not an object, or
+    /// even the contract without signatures exceeds `maximum_bytes`.
+    pub fn with_operation_signatures(
+        mut self,
+        summaries: Vec<serde_json::Value>,
+        maximum_bytes: u32,
+    ) -> Result<Self, AiError> {
+        let invalid =
+            || AiError::InvalidConfiguration("capability planning contract is invalid".to_owned());
+        if summaries.len() != self.operations.len() {
+            return Err(invalid());
+        }
+        let base = self.contract.clone();
+        let fits = |contract: &serde_json::Value| {
+            serde_json::to_vec(contract)
+                .is_ok_and(|encoded| encoded.len() <= maximum_bytes as usize)
+        };
+        let merge = |contract: &mut serde_json::Value, keep_plan_schema: bool| {
+            let operations = contract
+                .get_mut("operations")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(invalid)?;
+            if operations.len() != summaries.len() {
+                return Err(invalid());
+            }
+            for (operation, summary) in operations.iter_mut().zip(&summaries) {
+                let (Some(target), Some(source)) = (operation.as_object_mut(), summary.as_object())
+                else {
+                    return Err(invalid());
+                };
+                for (key, value) in source {
+                    if key == "planSchema" && !keep_plan_schema {
+                        continue;
+                    }
+                    if key != "operation" {
+                        target.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Ok(())
+        };
+        for keep_plan_schema in [true, false] {
+            let mut contract = base.clone();
+            merge(&mut contract, keep_plan_schema)?;
+            if fits(&contract) {
+                self.contract = contract;
+                return Ok(self);
+            }
+        }
+        let mut contract = base;
+        if let Some(object) = contract.as_object_mut() {
+            object.insert("signaturesAvailable".to_owned(), json!(false));
+        }
+        if !fits(&contract) {
+            return Err(AiError::InvalidConfiguration(
+                "capability planning contract exceeds its deployment bound".to_owned(),
+            ));
+        }
+        self.contract = contract;
+        Ok(self)
     }
 
     /// Attaches the exact compact plan schema of the loaded capability.
@@ -2090,7 +2654,7 @@ impl AiCapabilityExecution {
 }
 
 fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json::Value {
-    json!({
+    let mut value = json!({
         "capabilityId": candidate.id.as_str(),
         "kind": candidate.kind,
         "name": candidate.name,
@@ -2100,14 +2664,66 @@ fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json
         "operation": candidate.operation_name,
         "shape": candidate.operation_shape,
         "candidateFingerprint": candidate.entry_fingerprint,
-    })
+    });
+    if !candidate.operations.is_empty()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("operation");
+        object.insert(
+            "operations".to_owned(),
+            candidate
+                .operations
+                .iter()
+                .map(|operation| {
+                    json!({"operation": operation.operation_name, "shape": operation.operation_shape})
+                })
+                .collect(),
+        );
+    }
+    value
 }
+
+/// Model-facing usage note of every broker version 2 description.
+const DESCRIBE_USAGE: &str = "Each operation has a typed signature. Expand a named type from inputTypes, select or select.<path> with graphql_capabilities_describe_type (loadedReference, operation, type). Execute with loadedReference, operation, arguments as dotted leaf paths (for example where.status.eq) and selections as dotted scalar paths.";
 
 fn planning_contract(
     entry: &AiCapabilityIndexEntry,
+    loaded: &AiLoadedCapabilityBinding,
     loaded_reference: &str,
     expires_in_seconds: i64,
 ) -> serde_json::Value {
+    // Entity-level shapes and bounds count only the roots this principal
+    // may use, never a denied one.
+    let admitted = loaded
+        .operations
+        .iter()
+        .map(|operation| operation.capability_id.clone())
+        .collect::<BTreeSet<_>>();
+    let operations = if entry.kind == AiCapabilityKind::GeneratedEntity {
+        loaded
+            .operations
+            .iter()
+            .filter_map(|operation| {
+                let member = entry
+                    .operations
+                    .iter()
+                    .find(|member| member.capability_id == operation.capability_id)?;
+                Some(json!({
+                    "operation": member.operation_name,
+                    "shape": member.operation_shape,
+                    "description": member.description,
+                    "resultRecordCost": member.result_record_cost,
+                }))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![json!({
+            "operation": entry.operation_name,
+            "shape": entry.operation_shape,
+            "description": entry.description,
+            "resultRecordCost": entry.result_record_cost,
+        })]
+    };
     json!({
         "version": AI_CAPABILITY_BROKER_VERSION,
         "loadedReference": loaded_reference,
@@ -2118,18 +2734,127 @@ fn planning_contract(
         "description": entry.description,
         "namespace": entry.namespace,
         "entity": entry.entity_name,
-        "operation": entry.operation_name,
-        "shape": entry.operation_shape,
         "resultClassification": entry.result_classification,
-        "resultDescription": entry.result_description,
-        "resultRecordCost": entry.result_record_cost,
+        "resultDescription": entry.admitted_result_description(&admitted),
+        "resultRecordCost": entry.admitted_result_record_cost(&admitted),
         "risk": entry.risk,
         "approval": entry.approval,
-        "scalarFields": entry.scalar_fields,
-        "relationships": entry.relationships,
         "aggregates": entry.aggregate_features,
         "candidateFingerprint": entry.fingerprint,
+        "usage": DESCRIBE_USAGE,
+        "operations": operations,
     })
+}
+
+/// One operation of a described capability: the exact root whose signature
+/// the host attaches to the description.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiCapabilityDescribedOperation {
+    operation_name: String,
+    capability_id: AiToolId,
+    capability_kind: AiCapabilityKind,
+    capability_fingerprint: String,
+}
+
+impl AiCapabilityDescribedOperation {
+    /// Public operation name the model passes as `operation`.
+    pub fn operation_name(&self) -> &str {
+        &self.operation_name
+    }
+
+    /// Exact root capability of this operation.
+    pub const fn capability_id(&self) -> &AiToolId {
+        &self.capability_id
+    }
+
+    /// Family of the root: a generated query, or a brokered static tool.
+    pub const fn capability_kind(&self) -> AiCapabilityKind {
+        self.capability_kind
+    }
+
+    /// Exact root capability fingerprint.
+    pub fn capability_fingerprint(&self) -> &str {
+        &self.capability_fingerprint
+    }
+}
+
+/// Authorized `describe_type` request: one named type of one loaded
+/// operation's signature.
+///
+/// Construction proves the loaded reference belongs to this run and the
+/// capability and operation still pass current fingerprint and host-policy
+/// checks. The host renders the page from the registered capability with
+/// [`crate::AiCapabilitySignature::describe_type`].
+#[derive(Clone, Debug)]
+pub struct AiCapabilityTypeRequest {
+    operation: AiCapabilityDescribedOperation,
+    type_name: String,
+    offset: u32,
+    limit: u16,
+    /// Index descriptions of the capability's top-level scalar fields and
+    /// relationships, added to the root selection page.
+    field_descriptions: BTreeMap<String, String>,
+}
+
+impl AiCapabilityTypeRequest {
+    /// Exact root operation the type belongs to.
+    pub const fn operation(&self) -> &AiCapabilityDescribedOperation {
+        &self.operation
+    }
+
+    /// Requested type name.
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// First field or value of the requested page.
+    pub const fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    /// Maximum fields or values in the requested page.
+    pub const fn limit(&self) -> u16 {
+        self.limit
+    }
+
+    /// Renders the page from the operation's signature.
+    ///
+    /// The root selection page also carries each top-level field's
+    /// model-safe index description.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] carrying
+    /// [`AI_CAPABILITY_TYPE_UNKNOWN`] when the signature defines no such type.
+    pub fn render(
+        &self,
+        signature: &crate::AiCapabilitySignature,
+    ) -> Result<serde_json::Value, AiError> {
+        let mut page = signature
+            .describe_type(&self.type_name, self.offset, self.limit)
+            .ok_or_else(|| AiError::InvalidInput(AI_CAPABILITY_TYPE_UNKNOWN.to_owned()))?;
+        if self.type_name == crate::AI_CAPABILITY_SELECTION_TYPE
+            && let Some(fields) = page
+                .get_mut("fields")
+                .and_then(serde_json::Value::as_array_mut)
+        {
+            for field in fields {
+                let description = field
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|name| self.field_descriptions.get(name))
+                    .filter(|description| !description.is_empty())
+                    .cloned();
+                if let (Some(object), Some(description)) = (field.as_object_mut(), description) {
+                    object.insert("description".to_owned(), json!(description));
+                }
+            }
+        }
+        if let Some(object) = page.as_object_mut() {
+            object.insert("operation".to_owned(), json!(self.operation.operation_name));
+        }
+        Ok(page)
+    }
 }
 
 impl AiCapabilityDiscoveryBroker {
@@ -2157,29 +2882,43 @@ impl AiCapabilityDiscoveryBroker {
         let parsed: BrokerDiscoverArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
         let brokers_static = !session.brokered_static_tools.is_empty();
-        // Without brokered static tools the search stays generated-only. With
-        // them, an unfiltered search covers both families.
-        let kind = match parsed.kind {
-            Some(AiCapabilityKind::GeneratedQuery) => Some(AiCapabilityKind::GeneratedQuery),
+        // Generated reads are entity capabilities plus any root without an
+        // entity. Without brokered static tools the search covers only
+        // those; with them, an unfiltered search covers both families.
+        let generated = |entry: &AiCapabilityIndexEntry| {
+            matches!(
+                entry.kind,
+                AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
+            )
+        };
+        let admit: Box<dyn Fn(&AiCapabilityIndexEntry) -> bool + Send + Sync> = match parsed.kind {
+            Some(AiCapabilityKind::GeneratedQuery) => Box::new(generated),
+            Some(AiCapabilityKind::GeneratedEntity) => {
+                Box::new(|entry: &AiCapabilityIndexEntry| {
+                    entry.kind == AiCapabilityKind::GeneratedEntity
+                })
+            }
             Some(AiCapabilityKind::ReviewedStatic) if brokers_static => {
-                Some(AiCapabilityKind::ReviewedStatic)
+                let session = session.clone();
+                Box::new(move |entry: &AiCapabilityIndexEntry| session.brokers_static_entry(entry))
             }
             Some(_) => return Err(malformed_broker_arguments()),
-            None if brokers_static => None,
-            None => Some(AiCapabilityKind::GeneratedQuery),
+            None => {
+                let session = session.clone();
+                Box::new(move |entry: &AiCapabilityIndexEntry| {
+                    generated(entry) || session.brokers_static_entry(entry)
+                })
+            }
         };
         let query = AiCapabilitySearchQuery {
             text: parsed.text,
             namespace: parsed.namespace,
-            kind,
+            kind: None,
             entity_or_operation: parsed.entity_or_class,
             maximum_results: parsed.maximum_results,
         };
         let result = self
-            .search_admitted(principal_reference, run, &query, |entry| {
-                entry.kind == AiCapabilityKind::GeneratedQuery
-                    || session.brokers_static_entry(entry)
-            })
+            .search_admitted(principal_reference, run, &query, false, admit)
             .await?;
         let value = json!({
             "version": AI_CAPABILITY_BROKER_VERSION,
@@ -2227,7 +2966,11 @@ impl AiCapabilityDiscoveryBroker {
             entity_or_operation: parsed.entity_or_class,
             maximum_results: parsed.maximum_results,
         };
-        let result = self.search(principal_reference, run, &query).await?;
+        // Client-deferred delivery installs one exact definition per root,
+        // so it ranks roots: an entity's roots stand in for the entity.
+        let result = self
+            .search_admitted(principal_reference, run, &query, true, |_| true)
+            .await?;
         if result.candidates.len() > usize::from(session.limits().maximum_deferred_definitions) {
             return Err(AiError::InvalidConfiguration(
                 "deferred discovery exceeded its exact definition bound".to_owned(),
@@ -2257,16 +3000,20 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// The candidate must come from discovery retained for this run or, when
     /// enabled, the unexpired cache for this principal and AI session. Its
-    /// fingerprint must still match. A drifted index, an unknown
-    /// identifier, and an identifier never returned by discovery are all
-    /// reported as one bounded retryable stale selection, so describe cannot be
-    /// used to probe for capabilities the current principal cannot see.
+    /// fingerprint must still match. An unknown identifier and an identifier
+    /// never returned to this run by discovery are both reported as one
+    /// bounded retryable [`AI_CAPABILITY_SELECTION_STALE`], so describe cannot
+    /// be used to probe for capabilities the current principal cannot see.
+    /// A candidate this run does hold whose index set has since changed is
+    /// reported as the distinct retryable [`AI_CAPABILITY_STALE`], telling the
+    /// model to discover and describe again.
     ///
     /// # Errors
     ///
-    /// Returns [`AiError::InvalidInput`] for malformed arguments or a stale
-    /// selection, and [`AiError::Forbidden`] when current host policy no
-    /// longer permits the exact candidate.
+    /// Returns [`AiError::InvalidInput`] for malformed arguments, an unheld
+    /// selection ([`AI_CAPABILITY_SELECTION_STALE`]) or a drifted one
+    /// ([`AI_CAPABILITY_STALE`]), and [`AiError::Forbidden`] when current host
+    /// policy no longer permits the exact candidate.
     pub async fn dispatch_describe(
         &self,
         principal_reference: &PrincipalReference,
@@ -2292,12 +3039,18 @@ impl AiCapabilityDiscoveryBroker {
             })
             .ok_or_else(stale_selection)?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        verify_search_binding(&indexes, &search).map_err(|_| stale_selection())?;
-        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_selection)?;
+        // The run holds this exact candidate, so reporting catalogue drift
+        // discloses nothing the principal was not already shown.
+        verify_search_binding(&indexes, &search).map_err(|_| stale_capability())?;
+        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_capability)?;
         // A static tool is loadable only while this run brokers its exact
         // fingerprint. A cached discovery from a run that did, or any other
         // capability family, is the same stale selection as an unknown ID.
-        if entry.kind != AiCapabilityKind::GeneratedQuery && !session.brokers_static_entry(entry) {
+        if !matches!(
+            entry.kind,
+            AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
+        ) && !session.brokers_static_entry(entry)
+        {
             return Err(stale_selection());
         }
         let loaded = self
@@ -2307,16 +3060,128 @@ impl AiCapabilityDiscoveryBroker {
         let expires_in_seconds = (loaded.expires_at - self.clock.now())
             .whole_seconds()
             .max(0);
-        let contract = planning_contract(entry, &loaded_reference, expires_in_seconds);
+        let contract = planning_contract(entry, &loaded, &loaded_reference, expires_in_seconds);
+        let operations = if loaded.capability_kind == AiCapabilityKind::GeneratedEntity {
+            loaded
+                .operations
+                .iter()
+                .map(|operation| AiCapabilityDescribedOperation {
+                    operation_name: operation.operation_name.clone(),
+                    capability_id: operation.capability_id.clone(),
+                    capability_kind: AiCapabilityKind::GeneratedQuery,
+                    capability_fingerprint: operation.capability_fingerprint.clone(),
+                })
+                .collect()
+        } else {
+            vec![AiCapabilityDescribedOperation {
+                operation_name: entry.operation_name.clone(),
+                capability_id: loaded.capability_id.clone(),
+                capability_kind: loaded.capability_kind,
+                capability_fingerprint: loaded.capability_fingerprint.clone(),
+            }]
+        };
         let description = AiCapabilityDescription {
             loaded_reference: loaded_reference.clone(),
             capability_id: loaded.capability_id.clone(),
             capability_kind: loaded.capability_kind,
             capability_fingerprint: loaded.capability_fingerprint.clone(),
+            operations,
             contract,
         };
         session.record_loaded(loaded_reference, loaded);
         Ok(description)
+    }
+
+    /// Dispatches one frozen `graphql.capabilities.describe_type` call up to
+    /// the rendering of the page.
+    ///
+    /// The loaded reference must be one this run holds and has not expired;
+    /// the capability and the chosen operation are then checked against the
+    /// current index and host policy exactly as at execute. The returned
+    /// request names the exact root whose signature the host renders.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for malformed arguments, an unheld
+    /// or expired reference ([`AI_CAPABILITY_SELECTION_STALE`]), drift
+    /// ([`AI_CAPABILITY_STALE`]) or an operation the description did not
+    /// return ([`AI_CAPABILITY_OPERATION_INVALID`]), and
+    /// [`AiError::Forbidden`] for revocation or substitution.
+    pub async fn dispatch_describe_type(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        arguments: &serde_json::Value,
+    ) -> Result<AiCapabilityTypeRequest, AiError> {
+        let parsed: BrokerDescribeTypeArguments =
+            serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
+        if !crate::valid_sha256(&parsed.loaded_reference)
+            || parsed.type_name.is_empty()
+            || parsed.type_name.len() > 512
+            || parsed.type_name.chars().any(char::is_control)
+            || parsed
+                .operation
+                .as_ref()
+                .is_some_and(|operation| !valid_graphql_name(operation))
+            || parsed.offset.is_some_and(|offset| offset > 1_000_000)
+            || parsed
+                .limit
+                .is_some_and(|limit| !(1..=crate::AI_CAPABILITY_TYPE_PAGE_MAXIMUM).contains(&limit))
+        {
+            return Err(malformed_broker_arguments());
+        }
+        let loaded = session
+            .loaded(&parsed.loaded_reference)
+            .ok_or_else(stale_selection)?;
+        if self.clock.now() > loaded.expires_at {
+            return Err(stale_selection());
+        }
+        if loaded.capability_kind == AiCapabilityKind::ReviewedStatic
+            && !session
+                .brokered_static_tools
+                .contains(&loaded.capability_fingerprint)
+        {
+            return Err(AiError::Forbidden);
+        }
+        let target = self
+            .authorize_loaded_operation(
+                principal_reference,
+                run,
+                &loaded,
+                parsed.operation.as_deref(),
+            )
+            .await?;
+        let field_descriptions = self
+            .current_indexes
+            .current_index_set(run)?
+            .entry(&loaded.capability_id)
+            .map(|(_, entry)| {
+                entry
+                    .scalar_fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.description.clone()))
+                    .chain(entry.relationships.iter().map(|relationship| {
+                        (relationship.name.clone(), relationship.description.clone())
+                    }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        session.record_describe_type();
+        Ok(AiCapabilityTypeRequest {
+            field_descriptions,
+            operation: AiCapabilityDescribedOperation {
+                operation_name: target.operation_name,
+                capability_id: target.capability_id,
+                capability_kind: target.capability_kind,
+                capability_fingerprint: target.capability_fingerprint,
+            },
+            type_name: parsed.type_name,
+            offset: parsed.offset.unwrap_or(0),
+            limit: parsed
+                .limit
+                .unwrap_or(crate::AI_CAPABILITY_TYPE_PAGE_DEFAULT),
+        })
     }
 
     /// Dispatches one frozen `graphql.capabilities.execute` call up to, but
@@ -2330,9 +3195,12 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// # Errors
     ///
-    /// Returns [`AiError::InvalidInput`] for malformed arguments, an unknown
-    /// loaded reference, or an expired binding, and [`AiError::Forbidden`] for
-    /// a non-read capability or any revocation, drift, or substitution.
+    /// Returns [`AiError::InvalidInput`] for malformed arguments, for an
+    /// unknown loaded reference or an expired binding
+    /// ([`AI_CAPABILITY_SELECTION_STALE`]), and for a loaded capability whose
+    /// index, schema, catalogue, entry or policy fingerprint has drifted
+    /// ([`AI_CAPABILITY_STALE`]). Returns [`AiError::Forbidden`] for a non-read
+    /// capability or any revocation or substitution.
     pub async fn authorize_broker_execution(
         &self,
         principal_reference: &PrincipalReference,
@@ -2352,7 +3220,7 @@ impl AiCapabilityDiscoveryBroker {
             return Err(stale_selection());
         }
         let static_tool = match loaded.capability_kind {
-            AiCapabilityKind::GeneratedQuery => false,
+            AiCapabilityKind::GeneratedQuery | AiCapabilityKind::GeneratedEntity => false,
             AiCapabilityKind::ReviewedStatic
                 if session
                     .brokered_static_tools
@@ -2362,7 +3230,20 @@ impl AiCapabilityDiscoveryBroker {
             }
             _ => return Err(AiError::Forbidden),
         };
-        self.authorize_execution(principal_reference, run, &loaded)
+        if parsed
+            .operation
+            .as_ref()
+            .is_some_and(|operation| !valid_graphql_name(operation))
+        {
+            return Err(malformed_broker_arguments());
+        }
+        let target = self
+            .authorize_loaded_operation(
+                principal_reference,
+                run,
+                &loaded,
+                parsed.operation.as_deref(),
+            )
             .await?;
         if static_tool {
             let indexes = self.current_indexes.current_index_set(run)?;
@@ -2440,9 +3321,9 @@ impl AiCapabilityDiscoveryBroker {
             }
             session.record_execute();
             return Ok(AiCapabilityExecution {
-                capability_id: loaded.capability_id.clone(),
-                capability_kind: loaded.capability_kind,
-                capability_fingerprint: loaded.capability_fingerprint.clone(),
+                capability_id: target.capability_id,
+                capability_kind: target.capability_kind,
+                capability_fingerprint: target.capability_fingerprint,
                 audit_reference: loaded.audit_reference(),
                 plan: plan_arguments,
             });
@@ -2464,9 +3345,9 @@ impl AiCapabilityDiscoveryBroker {
         }
         session.record_execute();
         Ok(AiCapabilityExecution {
-            capability_id: loaded.capability_id.clone(),
-            capability_kind: loaded.capability_kind,
-            capability_fingerprint: loaded.capability_fingerprint.clone(),
+            capability_id: target.capability_id,
+            capability_kind: target.capability_kind,
+            capability_fingerprint: target.capability_fingerprint,
             audit_reference: loaded.audit_reference(),
             plan: serde_json::Value::Object(plan),
         })
@@ -2547,8 +3428,12 @@ impl AiCapabilityDeliveryTurn {
             retained_definitions_frozen,
             session.limits(),
         )?;
+        // A fixed-broker binding carries no index fingerprint: its surface is
+        // catalogue-independent and describe/execute revalidate the index.
         if session_binding.delivery_mode() != surface.mode()
-            || session_binding.capability_index_fingerprint() != index_fingerprint
+            || session_binding
+                .capability_index_fingerprint()
+                .is_some_and(|bound| bound != index_fingerprint)
         {
             return Err(AiError::InvalidConfiguration(
                 "capability session binding does not match the selected surface".to_owned(),
@@ -2723,6 +3608,29 @@ impl AiCapabilityDeliveryTurn {
         Ok(())
     }
 
+    /// Exact crate-authored definition of one broker operation in this
+    /// turn's delivery mode, or `None` when the mode does not offer it.
+    ///
+    /// The fixed broker's definitions are catalogue-independent; the
+    /// client-deferred discovery definition stays bound to the index.
+    #[cfg_attr(feature = "mssql", allow(dead_code))]
+    pub(crate) fn broker_definition(
+        &self,
+        operation: AiCapabilityBrokerOperation,
+    ) -> Option<ModelToolDefinition> {
+        match self.mode {
+            AiCapabilityDeliveryMode::FixedBroker => fixed_broker_definitions()
+                .into_iter()
+                .find(|definition| definition.tool_id == operation.tool_id()),
+            AiCapabilityDeliveryMode::ClientDeferred => (operation
+                == AiCapabilityBrokerOperation::Discover)
+                .then(|| discovery_definition(Some(&self.index_fingerprint))),
+            AiCapabilityDeliveryMode::EagerExact | AiCapabilityDeliveryMode::ProviderDeferred => {
+                None
+            }
+        }
+    }
+
     /// Whether an offered definition set is exactly the crate-owned surface.
     pub fn matches_offered_tools(&self, offered: &[ModelToolDefinition]) -> bool {
         let current = self.current_tools();
@@ -2787,7 +3695,7 @@ impl AiCapabilityDeliveryTurn {
             return Err(AiError::Conflict);
         }
         let generation = current.generation.checked_add(1).ok_or(AiError::Conflict)?;
-        let mut tools = vec![discovery_definition(&self.index_fingerprint)];
+        let mut tools = vec![discovery_definition(Some(&self.index_fingerprint))];
         tools.extend(
             self.static_bootstrap_tools
                 .iter()
@@ -2856,7 +3764,7 @@ mod tests {
 
     #[test]
     fn discovery_optional_filters_match_the_broker_contract() {
-        let definition = discovery_definition("index");
+        let definition = discovery_definition(Some("index"));
         let validator = jsonschema::validator_for(&definition.parameters).unwrap();
         for arguments in [
             json!({"text":"reviewed record", "maximumResults":8}),
@@ -2964,11 +3872,44 @@ mod tests {
         profile_id: &str,
         target_policy: &str,
     ) -> Arc<AiCapabilityIndex> {
-        const SDL: &str = r#"
-            schema { query: Query }
-            type Query { GeneratedRecord(recordId: ID!): Record! }
-            type Record { recordId: ID!, subject: String! }
-        "#;
+        generated_index_with_schema(target_id, profile_id, target_policy, None, false)
+    }
+
+    /// The `Record` entity with two query roots, `GeneratedRecord` and
+    /// `RecordBySubject`, grouped into one entity capability.
+    fn two_root_entity_index(target_policy: &str) -> Arc<AiCapabilityIndex> {
+        generated_index_with_schema(
+            "generated-read-application",
+            "generated-read",
+            target_policy,
+            None,
+            true,
+        )
+    }
+
+    /// `added_field` publishes one more `Record` scalar: a real schema change
+    /// with a different schema, catalogue, entry and index fingerprint.
+    /// `second_root` adds the `RecordBySubject` root of the same entity.
+    fn generated_index_with_schema(
+        target_id: &str,
+        profile_id: &str,
+        target_policy: &str,
+        added_field: Option<&str>,
+        second_root: bool,
+    ) -> Arc<AiCapabilityIndex> {
+        let added_sdl = added_field
+            .map(|field| format!(", {field}: String!"))
+            .unwrap_or_default();
+        let second_root_sdl = if second_root {
+            ", RecordBySubject(subject: String!): Record!"
+        } else {
+            ""
+        };
+        let sdl = format!(
+            "schema {{ query: Query }}
+            type Query {{ GeneratedRecord(recordId: ID!): Record!{second_root_sdl} }}
+            type Record {{ recordId: ID!, subject: String!{added_sdl} }}"
+        );
         let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
             field_name: field_name.to_owned(),
             description: format!("Reviewed public {field_name}."),
@@ -2994,7 +3935,11 @@ mod tests {
             entity_name: "Record".to_owned(),
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
-            fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
+            fields: [scalar("recordId", "ID"), scalar("subject", "String")]
+                .into_iter()
+                .chain(added_field.map(|field| scalar(field, "String")))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             label_fields: Vec::new(),
             record_version: None,
         };
@@ -3015,10 +3960,29 @@ mod tests {
             true,
         )
         .expect("test query semantics should validate");
+        let second_operation = second_root.then(|| {
+            GraphqlSemanticOperationDescriptor::custom(
+                GraphqlOperationKind::Query,
+                "RecordBySubject",
+                "Read one reviewed application record by its subject heading.",
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: "subject".to_owned(),
+                    description: "Reviewed record subject.".to_owned(),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        "String",
+                        GraphqlSemanticTypeKind::Scalar,
+                        false,
+                    ),
+                }],
+                GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, false),
+                true,
+            )
+            .expect("second query semantics should validate")
+        });
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [entity],
             &GraphqlOperationCatalog::compose(std::iter::empty()),
-            [operation],
+            std::iter::once(operation).chain(second_operation),
         )
         .expect("test query catalogue should validate");
         let target = crate::GraphqlExecutionTargetId::parse(target_id)
@@ -3026,7 +3990,7 @@ mod tests {
         let catalogue = crate::AiGraphqlQueryCapabilityCatalog::compile(
             profile_id,
             target.clone(),
-            SDL,
+            &sdl,
             &semantics,
             crate::AiGraphqlQueryCapabilityLimits::default(),
         )
@@ -3128,7 +4092,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_host_keeps_native_delivery_and_binding() {
+    fn large_surfaces_default_to_the_fixed_broker_and_hosts_can_opt_out() {
         let provider = ProviderCapabilities {
             capability_delivery_modes: BTreeSet::from([
                 AiCapabilityDeliveryMode::ProviderDeferred,
@@ -3136,16 +4100,25 @@ mod tests {
             ]),
             ..ProviderCapabilities::default()
         };
-        let selected = select_capability_delivery_mode(
-            &provider,
-            55,
-            4_917_706,
-            false,
-            AiCapabilityDeliveryLimits::default(),
-        )
-        .unwrap()
-        .mode();
-        assert_eq!(selected, AiCapabilityDeliveryMode::ProviderDeferred);
+        let select = |limits| {
+            select_capability_delivery_mode(&provider, 55, 4_917_706, false, limits)
+                .unwrap()
+                .mode()
+        };
+        // Default: no mode whose request size grows with the catalogue.
+        assert!(AiCapabilityDeliveryLimits::default().prefer_fixed_broker_for_large_surfaces);
+        assert_eq!(
+            select(AiCapabilityDeliveryLimits::default()),
+            AiCapabilityDeliveryMode::FixedBroker
+        );
+        // Opt-out: native deferred loading as before, with the same binding
+        // fingerprint a host that never opted in had.
+        let opted_out =
+            AiCapabilityDeliveryLimits::default().with_provider_deferred_for_large_surfaces();
+        assert_eq!(
+            select(opted_out),
+            AiCapabilityDeliveryMode::ProviderDeferred
+        );
         let binding = |mode| {
             AiProviderCapabilitySessionBinding::new(
                 mode,
@@ -3159,18 +4132,71 @@ mod tests {
             .unwrap()
         };
         assert_eq!(
-            binding(selected).fingerprint(),
-            binding(AiCapabilityDeliveryMode::ProviderDeferred).fingerprint()
-        );
-        assert_eq!(
-            binding(selected).fingerprint(),
+            binding(select(opted_out)).fingerprint(),
             "525f9e792f18b8e566073f853724cd03161da7535a59dd5d9d9c1420e501f9dc"
         );
+        // A small surface stays eager, and a provider without the fixed
+        // broker keeps native deferred loading.
+        let eager = ProviderCapabilities {
+            capability_delivery_modes: BTreeSet::from([
+                AiCapabilityDeliveryMode::EagerExact,
+                AiCapabilityDeliveryMode::ProviderDeferred,
+                AiCapabilityDeliveryMode::FixedBroker,
+            ]),
+            ..ProviderCapabilities::default()
+        };
+        assert_eq!(
+            select_capability_delivery_mode(
+                &eager,
+                2,
+                1_024,
+                false,
+                AiCapabilityDeliveryLimits::default()
+            )
+            .unwrap()
+            .mode(),
+            AiCapabilityDeliveryMode::EagerExact
+        );
+        let native_only = ProviderCapabilities {
+            capability_delivery_modes: BTreeSet::from([AiCapabilityDeliveryMode::ProviderDeferred]),
+            ..ProviderCapabilities::default()
+        };
+        assert_eq!(
+            select_capability_delivery_mode(
+                &native_only,
+                55,
+                4_917_706,
+                false,
+                AiCapabilityDeliveryLimits::default()
+            )
+            .unwrap()
+            .mode(),
+            AiCapabilityDeliveryMode::ProviderDeferred
+        );
+        // The default serializes without the field and a configuration
+        // stored without it reads as the new default; an explicit opt-out
+        // round-trips.
+        let default_value = serde_json::to_value(AiCapabilityDeliveryLimits::default()).unwrap();
         assert!(
-            serde_json::to_value(AiCapabilityDeliveryLimits::default())
-                .unwrap()
+            default_value
                 .get("prefer_fixed_broker_for_large_surfaces")
                 .is_none()
+        );
+        let stored: AiCapabilityDeliveryLimits = serde_json::from_value(json!({
+            "maximum_eager_definitions": 16,
+            "maximum_eager_definition_bytes": 262_144,
+            "maximum_deferred_definitions": 8
+        }))
+        .unwrap();
+        assert!(stored.prefer_fixed_broker_for_large_surfaces);
+        let opted_out_value = serde_json::to_value(opted_out).unwrap();
+        assert_eq!(
+            opted_out_value["prefer_fixed_broker_for_large_surfaces"],
+            false
+        );
+        assert_eq!(
+            serde_json::from_value::<AiCapabilityDeliveryLimits>(opted_out_value).unwrap(),
+            opted_out
         );
     }
 
@@ -3313,7 +4339,7 @@ mod tests {
             definitions,
         )
         .expect("fixed broker should project");
-        assert_eq!(fixed.tools().len(), 3);
+        assert_eq!(fixed.tools().len(), 4);
         assert!(
             serde_json::to_vec(fixed.tools())
                 .expect("fixed surface")
@@ -3376,7 +4402,7 @@ mod tests {
         .expect("fixed delivery");
         let surface = delivery.current_surface();
         assert_eq!(surface.mode(), AiCapabilityDeliveryMode::FixedBroker);
-        assert_eq!(surface.tools().len(), 4);
+        assert_eq!(surface.tools().len(), 5);
         assert!(surface.tools().contains(&static_tool));
         #[cfg(feature = "provider-grok-acp")]
         {
@@ -3442,7 +4468,12 @@ mod tests {
                 registration.identity(),
             )
             .unwrap();
-            assert!(registration.with_capability_binding(wrong_index).is_err());
+            // 6A: a FixedBroker binding is catalogue-independent. A different
+            // index fingerprint is validated and dropped, so the binding is
+            // identical and still admitted; describe/execute revalidate drift.
+            assert_eq!(wrong_index.fingerprint(), binding.fingerprint());
+            assert_eq!(wrong_index.capability_index_fingerprint(), None);
+            assert!(registration.with_capability_binding(wrong_index).is_ok());
         }
         assert!(
             surface
@@ -3473,7 +4504,7 @@ mod tests {
         clone
             .set_static_bootstrap_offering(&BTreeSet::new())
             .unwrap();
-        assert_eq!(delivery.current_tools().len(), 3);
+        assert_eq!(delivery.current_tools().len(), 4);
         assert!(delivery.shares_run_state(&clone));
         assert!(matches!(surface.freeze_offering(), Err(AiError::Conflict)));
         delivery
@@ -4058,7 +5089,7 @@ mod tests {
             broker
                 .authorize_execution(&principal_reference, &run, &loaded)
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
 
         *current_index.0.write().expect("index write") = index("target-policy-v1");
@@ -4068,7 +5099,7 @@ mod tests {
             broker
                 .authorize_execution(&principal_reference, &run, &loaded)
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
 
         *authority.policy_fingerprint.write().expect("policy write") =
@@ -4124,7 +5155,7 @@ mod tests {
                 &AiCapabilitySearchQuery {
                     text: "reviewed record".to_owned(),
                     namespace: None,
-                    kind: Some(AiCapabilityKind::GeneratedQuery),
+                    kind: Some(AiCapabilityKind::GeneratedEntity),
                     entity_or_operation: None,
                     maximum_results: 2,
                 },
@@ -4170,7 +5201,7 @@ mod tests {
             broker
                 .authorize_execution(&principal_reference, &run, &loaded)
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
     }
 
@@ -4222,7 +5253,7 @@ mod tests {
                 &AiCapabilitySearchQuery {
                     text: "reviewed record".to_owned(),
                     namespace: None,
-                    kind: Some(AiCapabilityKind::GeneratedQuery),
+                    kind: Some(AiCapabilityKind::GeneratedEntity),
                     entity_or_operation: None,
                     maximum_results: 2,
                 },
@@ -4461,7 +5492,7 @@ mod tests {
 
     #[test]
     fn fixed_broker_execute_admits_the_minimal_schema_aligned_wrapper() {
-        let definitions = fixed_broker_definitions(&"a".repeat(64));
+        let definitions = fixed_broker_definitions();
         let execute = definitions
             .iter()
             .find(|definition| definition.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
@@ -4484,11 +5515,15 @@ mod tests {
             execute.parameters["required"],
             json!(["loadedReference", "selections"])
         );
-        assert!(execute.description.contains("returned planSchema"));
+        assert!(
+            execute
+                .description
+                .contains("signature and expanded types admit")
+        );
         assert!(
             execute.parameters["properties"]["maximumItems"]["description"]
                 .as_str()
-                .is_some_and(|description| description.contains("only when planSchema exposes"))
+                .is_some_and(|description| description.contains("lists maximumItems"))
         );
     }
 
@@ -4632,6 +5667,241 @@ mod tests {
                     &DiscoveryCacheFixture::session(),
                     &candidate,
                 )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    fn schema_changed_index() -> Arc<AiCapabilityIndex> {
+        generated_index_with_schema(
+            "generated-read-application",
+            "generated-read",
+            "target-policy-v1",
+            Some("note"),
+            false,
+        )
+    }
+
+    #[test]
+    fn fixed_broker_binding_and_definitions_survive_a_schema_change() {
+        let before = generated_index("target-policy-v1");
+        let after = schema_changed_index();
+        assert_ne!(before.schema_fingerprint(), after.schema_fingerprint());
+        let before_set = AiCapabilityIndexSet::compile([before]).expect("index set before");
+        let after_set = AiCapabilityIndexSet::compile([after]).expect("index set after");
+        assert_ne!(before_set.fingerprint(), after_set.fingerprint());
+
+        let static_tool = definition("reviewed.records_list");
+        let binding = |mode, indexes: &AiCapabilityIndexSet| {
+            AiProviderCapabilitySessionBinding::new(
+                mode,
+                indexes.fingerprint(),
+                BTreeSet::from([static_tool.fingerprint.clone()]),
+                "provider-projection-v1",
+                "model-test",
+                ModelReasoningEffort::Unspecified,
+                "f".repeat(64),
+            )
+            .expect("session binding")
+        };
+        let retained = binding(AiCapabilityDeliveryMode::FixedBroker, &before_set);
+        let current = binding(AiCapabilityDeliveryMode::FixedBroker, &after_set);
+        assert_eq!(retained, current);
+        assert_eq!(retained.fingerprint(), current.fingerprint());
+        assert_eq!(retained.capability_index_fingerprint(), None);
+        assert_eq!(retained.capability_index_set_fingerprint(), None);
+
+        // Catalogue-derived modes still rotate with the catalogue.
+        for mode in [
+            AiCapabilityDeliveryMode::EagerExact,
+            AiCapabilityDeliveryMode::ProviderDeferred,
+            AiCapabilityDeliveryMode::ClientDeferred,
+        ] {
+            let before = binding(mode, &before_set);
+            assert_eq!(
+                before.capability_index_fingerprint(),
+                Some(before_set.fingerprint())
+            );
+            assert_ne!(
+                before.fingerprint(),
+                binding(mode, &after_set).fingerprint()
+            );
+        }
+        assert_ne!(
+            discovery_definition(Some(before_set.fingerprint())),
+            discovery_definition(Some(after_set.fingerprint()))
+        );
+
+        // The binding retained from before the change selects the surface for
+        // the changed catalogue, and that surface is byte-identical.
+        let capabilities = ProviderCapabilities {
+            custom_tools: true,
+            capability_delivery_modes: BTreeSet::from([AiCapabilityDeliveryMode::FixedBroker]),
+            ..ProviderCapabilities::default()
+        };
+        let select = |indexes: &AiCapabilityIndexSet| {
+            let fixture = DiscoveryCacheFixture::new(1);
+            AiCapabilityDeliveryTurn::select(
+                &capabilities,
+                indexes.fingerprint(),
+                vec![static_tool.clone()],
+                true,
+                retained.clone(),
+                Arc::new(fixture.broker),
+                DiscoveryCacheFixture::session(),
+            )
+            .expect("retained fixed-broker binding should select")
+        };
+        let before_turn = select(&before_set);
+        let after_turn = select(&after_set);
+        assert_eq!(before_turn.current_tools(), after_turn.current_tools());
+        assert!(after_turn.matches_offered_tools(&before_turn.current_tools()));
+        let mut broker_tools = capability_broker_definitions();
+        broker_tools.push(static_tool.clone());
+        broker_tools.sort_by(|left, right| left.tool_id.cmp(&right.tool_id));
+        assert_eq!(after_turn.current_tools(), broker_tools);
+        for operation in [
+            AiCapabilityBrokerOperation::Discover,
+            AiCapabilityBrokerOperation::Describe,
+            AiCapabilityBrokerOperation::Execute,
+        ] {
+            assert_eq!(
+                before_turn.broker_definition(operation),
+                after_turn.broker_definition(operation)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_change_is_a_recoverable_capability_stale_distinct_from_an_unheld_selection() {
+        use crate::AiApplicationToolFailureCode as Code;
+        let code = |error: &AiError| crate::classify_safe_application_tool_error(error);
+        let fixture = DiscoveryCacheFixture::new(4);
+        let candidate = fixture.discover(&fixture.run).await;
+        let session = DiscoveryCacheFixture::session();
+        let described = fixture
+            .broker
+            .dispatch_describe(&fixture.principal, &fixture.run, &session, &candidate)
+            .await
+            .expect("candidate describes before the schema change");
+        let execute =
+            json!({"loadedReference": described.loaded_reference(), "selections": ["recordId"]});
+        fixture
+            .broker
+            .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+            .await
+            .expect("loaded capability executes before the schema change");
+
+        // A selection the run never held is the generic outcome, before and
+        // after the change, whether or not the identifier exists.
+        let unknown = json!({"loadedReference": "e".repeat(64), "selections": ["recordId"]});
+        let mut forged = candidate.clone();
+        forged["candidateFingerprint"] = json!("f".repeat(64));
+        let mut absent = candidate.clone();
+        absent["capabilityId"] = json!("generated.never_published");
+        let assert_unheld = |error: AiError| {
+            assert!(
+                matches!(&error, AiError::InvalidInput(message)
+                    if message == AI_CAPABILITY_SELECTION_STALE),
+                "{error:?}"
+            );
+            assert_eq!(code(&error), Some(Code::SelectionStale));
+        };
+        let unheld = || async {
+            assert_unheld(
+                fixture
+                    .broker
+                    .authorize_broker_execution(
+                        &fixture.principal,
+                        &fixture.run,
+                        &session,
+                        &unknown,
+                    )
+                    .await
+                    .expect_err("an unknown loaded reference is refused"),
+            );
+            for selection in [&forged, &absent] {
+                assert_unheld(
+                    fixture
+                        .broker
+                        .dispatch_describe(&fixture.principal, &fixture.run, &session, selection)
+                        .await
+                        .expect_err("an unheld candidate is refused"),
+                );
+            }
+        };
+        unheld().await;
+
+        *fixture.index.0.write().expect("index") = schema_changed_index();
+
+        let assert_stale = |error: AiError| {
+            assert!(
+                matches!(&error, AiError::InvalidInput(message) if message == AI_CAPABILITY_STALE),
+                "{error:?}"
+            );
+            assert_eq!(code(&error), Some(Code::CapabilityStale));
+        };
+        assert_stale(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+                .await
+                .expect_err("a loaded capability is stale after the schema change"),
+        );
+        assert_stale(
+            fixture
+                .broker
+                .dispatch_describe(&fixture.principal, &fixture.run, &session, &candidate)
+                .await
+                .expect_err("a held candidate is stale after the schema change"),
+        );
+        unheld().await;
+        assert!(Code::CapabilityStale.retryable() && Code::SelectionStale.retryable());
+        assert_ne!(
+            Code::CapabilityStale.as_str(),
+            Code::SelectionStale.as_str()
+        );
+
+        // The same run and provider-session binding recover by discovering
+        // and describing again; nothing is rebound.
+        let candidate = fixture.discover(&fixture.run).await;
+        let described = fixture
+            .broker
+            .dispatch_describe(&fixture.principal, &fixture.run, &session, &candidate)
+            .await
+            .expect("the changed capability describes again");
+        let execute =
+            json!({"loadedReference": described.loaded_reference(), "selections": ["note"]});
+        fixture
+            .broker
+            .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+            .await
+            .expect("the re-described capability executes under the same binding");
+
+        // A changed host-policy fingerprint that still allows the capability
+        // is drift; a denial is never reported as drift.
+        *fixture
+            .authority
+            .policy_fingerprint
+            .write()
+            .expect("policy") = "current-policy-v2".to_owned();
+        assert_stale(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+                .await
+                .expect_err("a changed policy fingerprint voids the loaded contract"),
+        );
+        *fixture
+            .authority
+            .policy_fingerprint
+            .write()
+            .expect("policy") = "current-policy-v1".to_owned();
+        fixture.authority.allowed.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
                 .await,
             Err(AiError::Forbidden)
         ));
@@ -4835,6 +6105,7 @@ mod tests {
             capability_id: AiToolId::parse("jim.query.records.auto").expect("capability ID"),
             capability_kind: AiCapabilityKind::GeneratedQuery,
             capability_fingerprint: "b".repeat(64),
+            operations: Vec::new(),
             contract: json!({"loadedReference": "a".repeat(64)}),
         };
         let bounded = description
@@ -4864,6 +6135,7 @@ mod tests {
             capability_id: AiToolId::parse("jim.query.records.auto").expect("capability ID"),
             capability_kind: AiCapabilityKind::GeneratedQuery,
             capability_fingerprint: "b".repeat(64),
+            operations: Vec::new(),
             contract: json!({"description": "x".repeat(2_048)}),
         };
         assert!(matches!(
@@ -4983,7 +6255,7 @@ mod tests {
             .expect("mixed discovery");
         assert_eq!(
             candidate_kinds(&mixed),
-            BTreeSet::from(["generated_query".to_owned(), "reviewed_static".to_owned()])
+            BTreeSet::from(["generated_entity".to_owned(), "reviewed_static".to_owned()])
         );
         // Mutations and subscriptions stay outside the broker.
         for kind in ["generated_mutation", "generated_subscription"] {
@@ -5229,7 +6501,7 @@ mod tests {
         )
         .expect("fixed broker with a brokered static tool");
         // The brokered tool adds no provider definition.
-        assert_eq!(delivery.current_tools().len(), 4);
+        assert_eq!(delivery.current_tools().len(), 5);
         assert_eq!(
             delivery.session().brokered_static_tool_fingerprints(),
             &BTreeSet::from([static_entry.capability_fingerprint.clone()])
@@ -5296,6 +6568,7 @@ mod tests {
             capability_id: AiToolId::parse("records.lookup").expect("id"),
             capability_kind: AiCapabilityKind::GeneratedQuery,
             capability_fingerprint: "b".repeat(64),
+            operations: Vec::new(),
             contract: json!({"version": AI_CAPABILITY_BROKER_VERSION}),
         };
 
@@ -5349,5 +6622,751 @@ mod tests {
             .into_model_result();
         assert_eq!(attached["planSchema"], plain);
         assert!(attached.get("planSchemaTypeReferences").is_none());
+    }
+
+    /// Denies the listed root capability IDs and allows everything else.
+    struct RootAuthority {
+        denied: RwLock<BTreeSet<String>>,
+        policy_fingerprint: RwLock<String>,
+    }
+
+    #[async_trait]
+    impl AiCapabilityAuthorityPolicy for RootAuthority {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _owning_index: &AiCapabilityIndex,
+            entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            Ok(AiCapabilityAuthorityDecision {
+                allowed: !self
+                    .denied
+                    .read()
+                    .map_err(|_| AiError::PersistenceFailed)?
+                    .contains(entry.id.as_str()),
+                policy_fingerprint: self
+                    .policy_fingerprint
+                    .read()
+                    .map_err(|_| AiError::PersistenceFailed)?
+                    .clone(),
+            })
+        }
+    }
+
+    struct EntityBrokerFixture {
+        broker: AiCapabilityDiscoveryBroker,
+        principal: PrincipalReference,
+        run: AiCapabilityRunBinding,
+        authority: Arc<RootAuthority>,
+        index: Arc<CurrentIndex>,
+        session: AiCapabilityBrokerSession,
+    }
+
+    impl EntityBrokerFixture {
+        fn new() -> Self {
+            let principal = principal();
+            let reference = principal.reference();
+            let authority = Arc::new(RootAuthority {
+                denied: RwLock::new(BTreeSet::new()),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            });
+            let index = Arc::new(CurrentIndex(RwLock::new(two_root_entity_index(
+                "target-policy-v1",
+            ))));
+            let broker = AiCapabilityDiscoveryBroker::new(
+                Arc::new(Resolver(principal)),
+                index.clone(),
+                authority.clone(),
+                Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+                Duration::seconds(30),
+            )
+            .expect("broker");
+            Self {
+                broker,
+                principal: reference,
+                run: run_binding(),
+                authority,
+                index,
+                session: DiscoveryCacheFixture::session(),
+            }
+        }
+
+        fn root_id(&self, operation: &str) -> AiToolId {
+            let index = self.index.0.read().expect("index").clone();
+            let entity = index
+                .entries()
+                .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+                .expect("entity entry")
+                .clone();
+            index
+                .operation_entry(&entity.id, operation)
+                .expect("root entry")
+                .id
+                .clone()
+        }
+
+        async fn discover(&self) -> serde_json::Value {
+            self.broker
+                .dispatch_discover(
+                    &self.principal,
+                    &self.run,
+                    &self.session,
+                    &json!({"text": "reviewed application record", "maximumResults": 4}),
+                )
+                .await
+                .expect("discovery")
+        }
+
+        async fn describe(&self) -> Result<AiCapabilityDescription, AiError> {
+            let discovered = self.discover().await;
+            let candidate = &discovered["candidates"][0];
+            self.broker
+                .dispatch_describe(
+                    &self.principal,
+                    &self.run,
+                    &self.session,
+                    &json!({
+                        "capabilityId": candidate["capabilityId"],
+                        "candidateFingerprint": candidate["candidateFingerprint"],
+                    }),
+                )
+                .await
+        }
+
+        async fn execute(
+            &self,
+            arguments: serde_json::Value,
+        ) -> Result<AiCapabilityExecution, AiError> {
+            self.broker
+                .authorize_broker_execution(&self.principal, &self.run, &self.session, &arguments)
+                .await
+        }
+    }
+
+    fn assert_input_error(error: &AiError, expected: &str) {
+        assert!(
+            matches!(error, AiError::InvalidInput(message) if message == expected),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_entity_capability_covers_its_roots_with_per_root_authority() {
+        let fixture = EntityBrokerFixture::new();
+        let discovered = fixture.discover().await;
+        assert_eq!(discovered["version"], 2);
+        let candidates = discovered["candidates"].as_array().expect("candidates");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "one candidate per entity: {discovered}"
+        );
+        let candidate = &candidates[0];
+        assert_eq!(candidate["kind"], "generated_entity");
+        assert_eq!(candidate["entity"], "Record");
+        assert_eq!(
+            candidate["operations"],
+            json!([
+                {"operation": "GeneratedRecord", "shape": "custom"},
+                {"operation": "RecordBySubject", "shape": "custom"}
+            ])
+        );
+
+        let described = fixture.describe().await.expect("describe");
+        assert_eq!(
+            described.capability_kind(),
+            AiCapabilityKind::GeneratedEntity
+        );
+        let operations = described
+            .operations()
+            .iter()
+            .map(|operation| {
+                (
+                    operation.operation_name().to_owned(),
+                    operation.capability_id().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            [
+                (
+                    "GeneratedRecord".to_owned(),
+                    fixture.root_id("GeneratedRecord")
+                ),
+                (
+                    "RecordBySubject".to_owned(),
+                    fixture.root_id("RecordBySubject")
+                ),
+            ]
+        );
+        let contract = described.contract();
+        assert_eq!(contract["version"], 2);
+        assert!(contract.get("planSchema").is_none());
+        assert_eq!(contract["operations"][1]["operation"], "RecordBySubject");
+        let loaded_reference = described.loaded_reference().to_owned();
+
+        // Execute resolves the exact root; the plan compiles against it.
+        let execution = fixture
+            .execute(json!({
+                "loadedReference": loaded_reference,
+                "operation": "RecordBySubject",
+                "arguments": [{"name": "subject", "value": "quarterly"}],
+                "selections": ["recordId"]
+            }))
+            .await
+            .expect("execute one operation");
+        assert_eq!(
+            execution.capability_id(),
+            &fixture.root_id("RecordBySubject")
+        );
+        assert_eq!(
+            execution.capability_kind(),
+            AiCapabilityKind::GeneratedQuery
+        );
+        assert_eq!(execution.plan()["arguments"]["subject"], "quarterly");
+
+        // Several operations: the call must name one the description returned.
+        for operation in [None, Some("SomethingElse")] {
+            let mut arguments =
+                json!({"loadedReference": loaded_reference, "selections": ["recordId"]});
+            if let Some(operation) = operation {
+                arguments["operation"] = json!(operation);
+            }
+            let error = fixture
+                .execute(arguments)
+                .await
+                .expect_err("operation is required");
+            assert_input_error(&error, AI_CAPABILITY_OPERATION_INVALID);
+            assert_eq!(
+                crate::classify_safe_application_tool_error(&error),
+                Some(crate::AiApplicationToolFailureCode::InvalidArguments)
+            );
+        }
+
+        // describe_type is fenced by the same loaded reference and operation.
+        let request = fixture
+            .broker
+            .dispatch_describe_type(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({"loadedReference": loaded_reference, "operation": "GeneratedRecord", "type": "select"}),
+            )
+            .await
+            .expect("describe type");
+        assert_eq!(
+            request.operation().capability_id(),
+            &fixture.root_id("GeneratedRecord")
+        );
+        assert_eq!(request.type_name(), "select");
+        assert_eq!(
+            (request.offset(), request.limit()),
+            (0, crate::AI_CAPABILITY_TYPE_PAGE_DEFAULT)
+        );
+        assert_eq!(fixture.session.amplification().describe_type_calls, 1);
+
+        // Host policy decides each root. A root denied at describe is absent
+        // from the description and unreachable; one revoked afterwards is
+        // refused at execute.
+        fixture
+            .authority
+            .denied
+            .write()
+            .expect("policy")
+            .insert(fixture.root_id("GeneratedRecord").as_str().to_owned());
+        let narrowed = fixture.describe().await.expect("narrowed describe");
+        assert_eq!(
+            narrowed
+                .operations()
+                .iter()
+                .map(AiCapabilityDescribedOperation::operation_name)
+                .collect::<Vec<_>>(),
+            ["RecordBySubject"]
+        );
+        assert_eq!(
+            narrowed.contract()["operations"].as_array().map(Vec::len),
+            Some(1)
+        );
+        let only = fixture
+            .execute(
+                json!({"loadedReference": narrowed.loaded_reference(), "selections": ["recordId"]}),
+            )
+            .await
+            .expect("the single admitted operation needs no name");
+        assert_eq!(only.capability_id(), &fixture.root_id("RecordBySubject"));
+        let denied = fixture
+            .execute(json!({
+                "loadedReference": narrowed.loaded_reference(),
+                "operation": "GeneratedRecord",
+                "selections": ["recordId"]
+            }))
+            .await
+            .expect_err("a root denied at describe is not loaded");
+        assert_input_error(&denied, AI_CAPABILITY_OPERATION_INVALID);
+        assert!(matches!(
+            fixture
+                .execute(json!({
+                    "loadedReference": loaded_reference,
+                    "operation": "GeneratedRecord",
+                    "selections": ["recordId"]
+                }))
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        // With every root denied the entity is neither discovered nor, from a
+        // candidate the run already holds, loadable.
+        let held = fixture.discover().await["candidates"][0].clone();
+        fixture
+            .authority
+            .denied
+            .write()
+            .expect("policy")
+            .insert(fixture.root_id("RecordBySubject").as_str().to_owned());
+        assert_eq!(fixture.discover().await["candidates"], json!([]));
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &fixture.session,
+                    &json!({
+                        "capabilityId": held["capabilityId"],
+                        "candidateFingerprint": held["candidateFingerprint"],
+                    }),
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_v1_selections_and_bindings_are_refused_and_v2_works() {
+        let fixture = EntityBrokerFixture::new();
+        let index = fixture.index.0.read().expect("index").clone();
+        // A version 1 discovery returned the root itself, with the root
+        // entry's fingerprint. Version 2 never returns it, so a retained
+        // transcript that replays it holds no selection.
+        let root = index
+            .entry(&fixture.root_id("GeneratedRecord"))
+            .expect("root entry")
+            .clone();
+        let v1_candidate = json!({
+            "capabilityId": root.id.as_str(),
+            "candidateFingerprint": root.fingerprint,
+        });
+        fixture.discover().await;
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &v1_candidate,
+            )
+            .await
+            .expect_err("a version 1 candidate is not held");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        assert_eq!(
+            crate::classify_safe_application_tool_error(&error),
+            Some(crate::AiApplicationToolFailureCode::SelectionStale)
+        );
+        for call in [
+            json!({"loadedReference": "e".repeat(64), "selections": ["recordId"]}),
+            json!({"loadedReference": "e".repeat(64), "type": "select"}),
+        ] {
+            let error = if call.get("type").is_some() {
+                fixture
+                    .broker
+                    .dispatch_describe_type(
+                        &fixture.principal,
+                        &fixture.run,
+                        &fixture.session,
+                        &call,
+                    )
+                    .await
+                    .expect_err("an unheld reference is refused")
+            } else {
+                fixture
+                    .execute(call)
+                    .await
+                    .expect_err("an unheld reference is refused")
+            };
+            assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        }
+
+        // A retained fixed-broker binding minted under version 1 differs from
+        // every version 2 binding, so the provider session rebinds once.
+        let fields = (
+            BTreeSet::<String>::new(),
+            "provider-projection-v1",
+            "model-test",
+            ModelReasoningEffort::Unspecified,
+            "f".repeat(64),
+        );
+        let v1_binding = hash_json(&json!({
+            "version": 2,
+            "delivery_mode": AiCapabilityDeliveryMode::FixedBroker,
+            "broker_version": 1,
+            "static_bootstrap_tool_fingerprints": fields.0,
+            "provider_projection_version": fields.1,
+            "model": fields.2,
+            "reasoning_effort": fields.3,
+            "registration_identity": fields.4,
+        }));
+        let v2_binding = AiProviderCapabilitySessionBinding::new(
+            AiCapabilityDeliveryMode::FixedBroker,
+            "a".repeat(64),
+            fields.0.clone(),
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4.clone(),
+        )
+        .expect("binding");
+        assert_ne!(v2_binding.fingerprint(), v1_binding);
+
+        // The version 1 surface was three definitions; a turn offering it is
+        // not the crate-owned version 2 surface and is refused.
+        let definitions = capability_broker_definitions();
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.tool_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                AI_CAPABILITY_DISCOVER_TOOL_ID,
+                AI_CAPABILITY_DESCRIBE_TOOL_ID,
+                AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID,
+                AI_CAPABILITY_EXECUTE_TOOL_ID,
+            ]
+        );
+        for definition in &definitions {
+            let v1_fingerprint = hash_json(&json!({
+                "version": 2,
+                "tool_id": definition.tool_id,
+                "broker_version": 1,
+                "parameters": definition.parameters,
+            }));
+            assert_ne!(definition.fingerprint, v1_fingerprint);
+        }
+        let capabilities = ProviderCapabilities {
+            custom_tools: true,
+            capability_delivery_modes: BTreeSet::from([AiCapabilityDeliveryMode::FixedBroker]),
+            ..ProviderCapabilities::default()
+        };
+        let turn = AiCapabilityDeliveryTurn::select(
+            &capabilities,
+            &"a".repeat(64),
+            Vec::new(),
+            true,
+            v2_binding,
+            Arc::new(fixture.broker.clone()),
+            DiscoveryCacheFixture::session(),
+        )
+        .expect("version 2 turn");
+        let v1_surface = definitions
+            .iter()
+            .filter(|definition| definition.tool_id != AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!turn.matches_offered_tools(&v1_surface));
+        let mut sorted = definitions.clone();
+        sorted.sort_by(|left, right| left.tool_id.cmp(&right.tool_id));
+        assert!(turn.matches_offered_tools(&sorted));
+
+        // Version 2 discover, describe, describe_type and execute work.
+        let described = fixture.describe().await.expect("describe");
+        let page = fixture
+            .broker
+            .dispatch_describe_type(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({"loadedReference": described.loaded_reference(), "operation": "GeneratedRecord", "type": "select", "offset": 0, "limit": 8}),
+            )
+            .await
+            .expect("describe type");
+        assert_eq!(page.limit(), 8);
+        fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "operation": "GeneratedRecord",
+                "arguments": [{"name": "recordId", "value": "record-1"}],
+                "selections": ["recordId"]
+            }))
+            .await
+            .expect("execute");
+        // After a schema change, the held selection is capability_stale.
+        *fixture.index.0.write().expect("index") = generated_index_with_schema(
+            "generated-read-application",
+            "generated-read",
+            "target-policy-v1",
+            Some("note"),
+            true,
+        );
+        for error in [
+            fixture
+                .broker
+                .dispatch_describe_type(
+                    &fixture.principal,
+                    &fixture.run,
+                    &fixture.session,
+                    &json!({"loadedReference": described.loaded_reference(), "operation": "GeneratedRecord", "type": "select"}),
+                )
+                .await
+                .expect_err("stale"),
+            fixture
+                .execute(json!({
+                    "loadedReference": described.loaded_reference(),
+                    "operation": "GeneratedRecord",
+                    "selections": ["recordId"]
+                }))
+                .await
+                .expect_err("stale"),
+        ] {
+            assert_input_error(&error, AI_CAPABILITY_STALE);
+            assert_eq!(
+                crate::classify_safe_application_tool_error(&error),
+                Some(crate::AiApplicationToolFailureCode::CapabilityStale)
+            );
+        }
+    }
+
+    #[test]
+    fn operation_signatures_fit_the_bound_or_are_withheld_without_truncation() {
+        let description = || AiCapabilityDescription {
+            loaded_reference: "a".repeat(64),
+            capability_id: AiToolId::parse("records.entity.record").expect("id"),
+            capability_kind: AiCapabilityKind::GeneratedEntity,
+            capability_fingerprint: "b".repeat(64),
+            operations: vec![AiCapabilityDescribedOperation {
+                operation_name: "Records".to_owned(),
+                capability_id: AiToolId::parse("records.query.records").expect("id"),
+                capability_kind: AiCapabilityKind::GeneratedQuery,
+                capability_fingerprint: "c".repeat(64),
+            }],
+            contract: json!({"version": 2, "operations": [{"operation": "Records"}]}),
+        };
+        let summary = json!({
+            "operation": "Records",
+            "signature": "Records(where?: RecordWhereInput) -> select",
+            "planSchema": {"padding": "x".repeat(4_096)},
+        });
+        let with_schema = description()
+            .with_operation_signatures(vec![summary.clone()], 64 * 1_024)
+            .expect("fits");
+        assert!(
+            with_schema.contract()["operations"][0]
+                .get("planSchema")
+                .is_some()
+        );
+        let without_schema = description()
+            .with_operation_signatures(vec![summary.clone()], 1_024)
+            .expect("signature fits without the inline schema");
+        assert_eq!(
+            without_schema.contract()["operations"][0]["signature"],
+            "Records(where?: RecordWhereInput) -> select"
+        );
+        assert!(
+            without_schema.contract()["operations"][0]
+                .get("planSchema")
+                .is_none()
+        );
+        let mut long = summary;
+        long["signature"] = json!("y".repeat(4_096));
+        let withheld = description()
+            .with_operation_signatures(vec![long], 1_024)
+            .expect("contract fits without signatures");
+        assert_eq!(withheld.contract()["signaturesAvailable"], false);
+        assert!(
+            withheld.contract()["operations"][0]
+                .get("signature")
+                .is_none()
+        );
+        assert!(
+            description()
+                .with_operation_signatures(Vec::new(), 1_024)
+                .is_err(),
+            "one summary per operation"
+        );
+    }
+
+    impl EntityBrokerFixture {
+        fn deny(&self, operation: &str) {
+            let id = self.root_id(operation);
+            self.authority
+                .denied
+                .write()
+                .expect("policy")
+                .insert(id.as_str().to_owned());
+        }
+
+        fn entity_id(&self) -> AiToolId {
+            self.index
+                .0
+                .read()
+                .expect("index")
+                .entries()
+                .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+                .expect("entity entry")
+                .id
+                .clone()
+        }
+
+        async fn discover_text(&self, text: &str) -> serde_json::Value {
+            self.broker
+                .dispatch_discover(
+                    &self.principal,
+                    &self.run,
+                    &self.session,
+                    &json!({"text": text, "maximumResults": 4}),
+                )
+                .await
+                .expect("discovery")
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_lists_and_ranks_only_admitted_roots() {
+        let fixture = EntityBrokerFixture::new();
+        // `heading` appears only in RecordBySubject's description.
+        let found = fixture.discover_text("subject heading").await;
+        assert_eq!(found["candidates"].as_array().map(Vec::len), Some(1));
+        let only_heading = fixture.discover_text("heading").await;
+        assert_eq!(only_heading["candidates"].as_array().map(Vec::len), Some(1));
+
+        fixture.deny("RecordBySubject");
+        // The denied root is not listed.
+        let discovered = fixture.discover_text("reviewed application record").await;
+        assert_eq!(
+            discovered["candidates"][0]["operations"],
+            json!([{"operation": "GeneratedRecord", "shape": "custom"}]),
+            "{discovered}"
+        );
+        // A term only the denied root's description holds no longer surfaces
+        // the entity.
+        let hidden = fixture.discover_text("heading").await;
+        assert_eq!(hidden["candidates"], json!([]), "{hidden}");
+        // Nor does the denied root's operation name.
+        let by_name = fixture
+            .broker
+            .dispatch_discover(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({"text": "record", "entityOrClass": "RecordBySubject", "maximumResults": 4}),
+            )
+            .await
+            .expect("discovery");
+        assert_eq!(by_name["candidates"], json!([]), "{by_name}");
+
+        // An entity whose roots are all denied is not listed at all.
+        fixture.deny("GeneratedRecord");
+        let none = fixture.discover_text("reviewed application record").await;
+        assert_eq!(none["candidates"], json!([]), "{none}");
+
+        // An entity the policy denies hides its admitted roots too.
+        fixture.authority.denied.write().expect("policy").clear();
+        let entity = fixture.entity_id();
+        fixture
+            .authority
+            .denied
+            .write()
+            .expect("policy")
+            .insert(entity.as_str().to_owned());
+        let denied_entity = fixture.discover_text("reviewed application record").await;
+        assert_eq!(denied_entity["candidates"], json!([]), "{denied_entity}");
+    }
+
+    #[tokio::test]
+    async fn describe_shapes_and_cost_count_only_admitted_roots() {
+        let fixture = EntityBrokerFixture::new();
+        fixture.deny("RecordBySubject");
+        let described = fixture.describe().await.expect("describe");
+        let index = fixture.index.0.read().expect("index").clone();
+        let entity = index
+            .entries()
+            .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+            .expect("entity")
+            .clone();
+        let admitted = BTreeSet::from([fixture.root_id("GeneratedRecord")]);
+        let contract = described.contract();
+        assert_eq!(
+            contract["resultDescription"],
+            entity.admitted_result_description(&admitted)
+        );
+        assert_eq!(
+            contract["resultRecordCost"],
+            json!(entity.admitted_result_record_cost(&admitted))
+        );
+        assert_eq!(contract["operations"].as_array().map(Vec::len), Some(1));
+        assert!(!contract.to_string().contains("RecordBySubject"));
+        assert!(!contract.to_string().contains("heading"));
+    }
+
+    #[tokio::test]
+    async fn client_deferred_roots_need_their_entity_admitted() {
+        let fixture = EntityBrokerFixture::new();
+        let session =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let discover = |session: AiCapabilityBrokerSession| {
+            let fixture = &fixture;
+            async move {
+                fixture
+                    .broker
+                    .dispatch_client_deferred_discover(
+                        &fixture.principal,
+                        &fixture.run,
+                        &session,
+                        &json!({"text": "reviewed application record", "maximumResults": 4}),
+                    )
+                    .await
+                    .map(|value| (value, session))
+            }
+        };
+        let (allowed, session) = discover(session).await.expect("discover");
+        let roots = allowed["candidates"].as_array().expect("roots");
+        assert_eq!(roots.len(), 2, "{allowed}");
+        assert!(roots.iter().all(|root| root["kind"] == "generated_query"));
+        let loaded = session.loaded_bindings();
+        assert_eq!(loaded.len(), 2);
+
+        // Denying the entity hides its roots from per-root discovery and
+        // refuses execution of a root already loaded.
+        let entity = fixture.entity_id();
+        fixture
+            .authority
+            .denied
+            .write()
+            .expect("policy")
+            .insert(entity.as_str().to_owned());
+        for binding in &loaded {
+            assert!(matches!(
+                fixture
+                    .broker
+                    .authorize_execution(&fixture.principal, &fixture.run, binding)
+                    .await,
+                Err(AiError::Forbidden)
+            ));
+        }
+        let fresh =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let (hidden, _) = discover(fresh).await.expect("discover");
+        assert_eq!(hidden["candidates"], json!([]), "{hidden}");
+
+        // A denied root is not discovered; its sibling still is.
+        fixture.authority.denied.write().expect("policy").clear();
+        fixture.deny("RecordBySubject");
+        let fresh =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let (narrowed, _) = discover(fresh).await.expect("discover");
+        assert_eq!(narrowed["candidates"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            narrowed["candidates"][0]["capabilityId"],
+            fixture.root_id("GeneratedRecord").as_str()
+        );
     }
 }

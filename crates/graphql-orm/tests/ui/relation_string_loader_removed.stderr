@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `RelationLoader<Board>: Loader<std::string::String>` is not satisfied
+  --> tests/ui/relation_string_loader_removed.rs:26:25
+   |
+26 |     let _ = loader.load(&["board-1".to_string()]).await;
+   |                    ---- ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Loader<std::string::String>` is not implemented for `RelationLoader<Board>`
+   |                    |
+   |                    required by a bound introduced by this call
+   |
+   = help: `RelationLoader<T, B>` implements trait `Loader<K>`:
+             Loader<CompositeRelationQueryKey>
+             Loader<IsolatedLoad<CompositeRelationQueryKey>>
+             Loader<IsolatedLoad<SelectedRelationQueryKey>>
+             Loader<RelationQueryKey>
+             Loader<SelectedRelationQueryKey>

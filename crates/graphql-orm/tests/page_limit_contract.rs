@@ -11,8 +11,10 @@
 //! By default a client page limit above the database's maximum is reduced to
 //! it. With `DatabaseBuilder::refuse_oversized_page_limit` the request fails with
 //! `PAGE_LIMIT_EXCEEDED` instead, on list roots, to-many relations and keyset
-//! connections. Trusted Rust code gives one keyset read its own maximum with
-//! `EntityQuery::with_max_limit`.
+//! connections. A schema's maximum is fixed at compile time and a `Database`
+//! that applies another is refused. Trusted Rust code gives one keyset read
+//! its own maximum with `EntityQuery::with_max_limit`; an over-limit host
+//! request is an error, never a shorter page.
 //!
 //! SQLite runs directly. PostgreSQL and SQL Server use a test-owned container:
 //!
@@ -147,6 +149,22 @@ schema_roots! {
     max_page_limit: 2,
     query_custom_ops: [],
     entities: [LimitBoard, LimitCard],
+}
+
+/// The same entities in a schema that declares no maximum page limit.
+mod undeclared {
+    use super::*;
+    #[cfg(feature = "sqlite")]
+    schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "postgres")]
+    schema_roots! { backend: "postgres", query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "mssql")]
+    schema_roots! {
+        backend: "mssql",
+        schema_policy: "external_writable",
+        query_custom_ops: [],
+        entities: [LimitBoard, LimitCard],
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -347,45 +365,74 @@ const OFFSET_PAGES: [(&str, &str, &[&str]); 3] = [
     ),
 ];
 
-/// #456: a client page offset above a configured maximum is refused with
+/// Assert that `response` is one `PAGE_LIMIT_EXCEEDED` offset refusal that
+/// names `maximum`.
+fn assert_offset_refused(name: &str, response: &async_graphql::Response, maximum: i64) {
+    assert_eq!(response.errors.len(), 1, "{name}: {:?}", response.errors);
+    let error = &response.errors[0];
+    assert_eq!(
+        error.extensions.as_ref().and_then(|ext| ext.get("code")),
+        Some(&async_graphql::Value::from("PAGE_LIMIT_EXCEEDED")),
+        "{name}: {error:?}"
+    );
+    assert!(
+        error.message.starts_with("requested offset ")
+            && error
+                .message
+                .ends_with(&format!(" exceeds the maximum page offset {maximum}")),
+        "{name}: {}",
+        error.message
+    );
+}
+
+/// #456: a client page offset above the maximum is refused with
 /// `PAGE_LIMIT_EXCEEDED`, the code an oversized limit is refused with, and
-/// never reaches the database. An offset at the maximum is served. Without a
-/// maximum, which is the default, offsets stay unbounded.
+/// never reaches the database. An offset at the maximum is served. The
+/// breaking release bounds a `Database`'s client offsets at
+/// `PaginationConfig::DEFAULT_MAX_OFFSET` (10,000) by default;
+/// `with_max_page_offset(None)` is the explicit opt-out that leaves them
+/// unbounded.
 async fn client_offsets_above_a_configured_maximum_are_refused(db: &Database) -> TestResult {
+    let default_maximum = graphql_orm::graphql::orm::PaginationConfig::RECOMMENDED_MAX_OFFSET;
+    assert_eq!(
+        graphql_orm::graphql::orm::PaginationConfig::DEFAULT_MAX_OFFSET,
+        Some(default_maximum)
+    );
     let capped = db.clone().with_max_page_offset(Some(3));
-    assert_eq!(db.client_pagination_config().max_offset(), None);
+    let unbounded = db.clone().with_max_page_offset(None);
+    assert_eq!(
+        db.client_pagination_config().max_offset(),
+        Some(default_maximum)
+    );
     assert_eq!(capped.client_pagination_config().max_offset(), Some(3));
+    assert_eq!(unbounded.client_pagination_config().max_offset(), None);
     for (name, query, path) in OFFSET_PAGES {
         let over = query.replace("OFFSET", "4");
         let at_maximum = query.replace("OFFSET", "3");
+        let at_default_maximum = query.replace("OFFSET", &default_maximum.to_string());
+        let over_default_maximum = query.replace("OFFSET", &(default_maximum + 1).to_string());
         let deep = query.replace("OFFSET", "1000000000");
 
-        // Default: any offset is served; past the last row the page is empty.
+        // Default: offsets up to the default maximum are served; past the
+        // last row the page is empty. A deeper offset is refused.
         let served = execute(db, &over).await;
         assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
         assert_eq!(edges(served.data.into_json()?, path), 1, "{name}");
-        let served = execute(db, &deep).await;
+        let served = execute(db, &at_default_maximum).await;
+        assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
+        assert_eq!(edges(served.data.into_json()?, path), 0, "{name}");
+        for query in [&over_default_maximum, &deep] {
+            assert_offset_refused(name, &execute(db, query).await, default_maximum);
+        }
+
+        // Opted out: any offset is served.
+        let served = execute(&unbounded, &deep).await;
         assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
         assert_eq!(edges(served.data.into_json()?, path), 0, "{name}");
 
         // With a maximum: refused with the stable code, naming both numbers.
         for query in [&over, &deep] {
-            let refused = execute(&capped, query).await;
-            assert_eq!(refused.errors.len(), 1, "{name}: {:?}", refused.errors);
-            let error = &refused.errors[0];
-            assert_eq!(
-                error.extensions.as_ref().and_then(|ext| ext.get("code")),
-                Some(&async_graphql::Value::from("PAGE_LIMIT_EXCEEDED")),
-                "{name}: {error:?}"
-            );
-            assert!(
-                error.message.starts_with("requested offset ")
-                    && error
-                        .message
-                        .ends_with(" exceeds the maximum page offset 3"),
-                "{name}: {}",
-                error.message
-            );
+            assert_offset_refused(name, &execute(&capped, query).await, 3);
         }
         let served = execute(&capped, &at_maximum).await;
         assert!(served.errors.is_empty(), "{name}: {:?}", served.errors);
@@ -454,18 +501,120 @@ async fn host_keyset_reads_take_a_per_read_maximum(db: &Database) -> TestResult 
     }
     assert_eq!(seen.len(), CARDS);
 
-    // The per-read maximum still bounds the page: with the refusal enabled a
-    // limit above it fails rather than being reduced.
-    let refusing = db.clone().with_oversized_page_limit_refusal(true);
+    // An over-limit request from trusted Rust code is an error, never a
+    // shorter page: above the per-read maximum, above the database maximum on
+    // the generated repository helper, and inside a transaction.
+    let code = |error: &async_graphql::Error| {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code"))
+            .cloned()
+    };
+    let exceeded = Some(async_graphql::Value::from("PAGE_LIMIT_EXCEEDED"));
     let refused = EntityQuery::<LimitCard, Backend>::new()
         .with_max_limit(bound)
-        .fetch_authorized_keyset(&refusing, None, None, page(bound + 1))
+        .fetch_authorized_keyset(db, None, None, page(bound + 1))
         .await
         .expect_err("a limit above the per-read maximum is refused");
+    assert_eq!(code(&refused), exceeded);
+    let refused = LimitCard::keyset_page(db, LimitCardWhereInput::default(), page(MAXIMUM + 1))
+        .await
+        .expect_err("a limit above the database maximum is refused");
     assert_eq!(
-        refused.extensions.as_ref().and_then(|ext| ext.get("code")),
-        Some(&async_graphql::Value::from("PAGE_LIMIT_EXCEEDED"))
+        refused.code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
     );
+    let refused = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                tx.keyset_page::<LimitCard>(
+                    LimitCardWhereInput::default(),
+                    KeysetPageInput {
+                        limit: Some(MAXIMUM + 1),
+                        ..Default::default()
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .expect_err("a transaction keyset limit above the maximum is refused");
+    let TransactionError::Rejected(error) = refused else {
+        panic!("expected a rejected transaction, got {refused:?}");
+    };
+    assert_eq!(
+        error.code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
+    );
+    let refused = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                tx.keyset_connection_page::<LimitCard>(
+                    LimitCardWhereInput::default(),
+                    graphql_orm::graphql::pagination::KeysetConnectionInput {
+                        last: Some(MAXIMUM + 1),
+                        ..Default::default()
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .expect_err("a backward transaction keyset limit above the maximum is refused");
+    let TransactionError::Rejected(error) = refused else {
+        panic!("expected a rejected transaction, got {refused:?}");
+    };
+    assert_eq!(
+        error.code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
+    );
+    let at_maximum = LimitCard::keyset_page(db, LimitCardWhereInput::default(), page(MAXIMUM))
+        .await
+        .map_err(|error| error.message)?;
+    assert_eq!(at_maximum.edges.len() as i64, MAXIMUM);
+    // Authorized scans have the same exact-or-refused host contract, including
+    // the per-read override. They do not silently truncate overflow checks.
+    let scanning = db
+        .clone()
+        .with_authorized_scan_config(AuthorizedScanConfig::new([71; 32], 8, 64));
+    let refused = EntityQuery::<LimitCard, Backend>::new()
+        .fetch_authorized_scan(
+            &scanning,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(MAXIMUM + 1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("an authorized scan above the maximum is refused");
+    assert_eq!(code(&refused), exceeded);
+    let scan = EntityQuery::<LimitCard, Backend>::new()
+        .with_max_limit(bound + 1)
+        .fetch_authorized_scan(
+            &scanning,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(bound + 1),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| error.message)?;
+    assert_eq!(scan.nodes.len() as i64, bound + 1);
+
+    // An omitted limit is not a request for more than the maximum.
+    let omitted = LimitCard::keyset_page(
+        db,
+        LimitCardWhereInput::default(),
+        KeysetPageInput::default(),
+    )
+    .await
+    .map_err(|error| error.message)?;
+    assert_eq!(omitted.edges.len() as i64, MAXIMUM);
     Ok(())
 }
 
@@ -501,6 +650,27 @@ fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Datab
     // relation complexity estimate caps a requested page at.
     let _ = schema_builder(db.clone()).finish();
 
+    // A schema that declares no maximum has the default of 100 and refuses
+    // this fixture's database, whose maximum is 2.
+    assert_eq!(undeclared::GRAPHQL_ORM_MAX_PAGE_LIMIT, Some(100));
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = undeclared::schema_builder(db.clone());
+    }))
+    .expect_err("an undeclared schema refuses a database with another maximum");
+    let message = refused
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("this schema's maximum page limit is 100"),
+        "{message}"
+    );
+    let _ = undeclared::schema_builder(
+        db.clone()
+            .with_pagination_config(PaginationConfig::secure()),
+    )
+    .finish();
+
     // A database with the default maximum (100), or none, is refused.
     for mismatched in [
         db.clone()
@@ -517,25 +687,22 @@ fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Datab
             .cloned()
             .unwrap_or_default();
         assert!(
-            message.contains("schema_roots! declares `max_page_limit: 2`"),
+            message.contains("this schema's maximum page limit is 2"),
             "{message}"
         );
     }
 }
 
-#[cfg(feature = "sqlite")]
-mod undeclared {
-    use super::*;
-    schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [LimitBoard, LimitCard], }
-}
-
-#[cfg(feature = "sqlite")]
 mod large_declared {
     use super::*;
+    #[cfg(feature = "sqlite")]
     schema_roots! { backend: "sqlite", max_page_limit: 200, query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "postgres")]
+    schema_roots! { backend: "postgres", max_page_limit: 200, query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "mssql")]
+    schema_roots! { backend: "mssql", schema_policy: "external_writable", max_page_limit: 200, query_custom_ops: [], entities: [LimitBoard, LimitCard], }
 }
 
-#[cfg(feature = "sqlite")]
 async fn schema_complexity_bounds_are_isolated(db: &Database) -> TestResult {
     let query =
         "{ limitBoard(id: \"board\") { cards(page: { limit: 100 }) { edges { node { id } } } } }";
@@ -585,14 +752,133 @@ async fn schema_complexity_bounds_are_isolated(db: &Database) -> TestResult {
     Ok(())
 }
 
+/// #667: a trusted `EntityQuery::paginate` read (connection or `fetch_all*`)
+/// is exact or refused, never reduced, with or without the client refusal
+/// opt-in. A per-read `with_max_limit` admits a larger exact page.
+async fn host_connection_reads_are_exact_or_refused(db: &Database) -> TestResult {
+    use graphql_orm::graphql::pagination::ConnectionSelection;
+    let oversized = PageInput {
+        limit: Some(MAXIMUM + 1),
+        offset: Some(0),
+    };
+    let query = || EntityQuery::<LimitCard, Backend>::new().paginate(&oversized);
+    let selection = ConnectionSelection {
+        rows: true,
+        count: false,
+        has_next_page: true,
+    };
+    let refused = |result: graphql_orm::Result<Connection<LimitCard>>, name: &str| {
+        let error = OrmPublicError::from(result.expect_err(name));
+        assert_eq!(
+            error.code,
+            OrmErrorCode::PageLimitExceeded,
+            "{name}: {error:?}"
+        );
+    };
+    for handle in [
+        db.clone(),
+        db.clone().with_oversized_page_limit_refusal(true),
+    ] {
+        refused(query().fetch_connection(&handle).await, "fetch_connection");
+        refused(
+            query().fetch_connection_with_auth(&handle, None).await,
+            "fetch_connection_with_auth",
+        );
+        refused(
+            query()
+                .fetch_connection_selected_with_auth(&handle, None, selection)
+                .await,
+            "fetch_connection_selected_with_auth",
+        );
+        let exact = || query().with_max_limit(MAXIMUM + 1);
+        for (name, connection) in [
+            ("fetch_connection", exact().fetch_connection(&handle).await?),
+            (
+                "fetch_connection_with_auth",
+                exact().fetch_connection_with_auth(&handle, None).await?,
+            ),
+            (
+                "fetch_connection_selected_with_auth",
+                exact()
+                    .fetch_connection_selected_with_auth(&handle, None, selection)
+                    .await?,
+            ),
+        ] {
+            assert_eq!(connection.edges.len() as i64, MAXIMUM + 1, "{name}");
+            assert!(connection.page_info.has_next_page, "{name}");
+        }
+        // A limit above the per-read maximum is still refused.
+        refused(
+            query()
+                .with_max_limit(MAXIMUM)
+                .fetch_connection(&handle)
+                .await,
+            "per-read maximum",
+        );
+
+        // `fetch_all*` reads of the page follow the same rule.
+        let refused_rows = |result: graphql_orm::Result<Vec<LimitCard>>, name: &str| {
+            let error = OrmPublicError::from(result.expect_err(name));
+            assert_eq!(
+                error.code,
+                OrmErrorCode::PageLimitExceeded,
+                "{name}: {error:?}"
+            );
+        };
+        refused_rows(query().fetch_all(&handle).await, "fetch_all");
+        refused_rows(
+            query().fetch_all_with_auth(&handle, None).await,
+            "fetch_all_with_auth",
+        );
+        assert!(
+            query().fetch_one(&handle).await.is_err(),
+            "fetch_one reads the same page"
+        );
+        for (name, rows) in [
+            ("fetch_all", exact().fetch_all(&handle).await?),
+            (
+                "fetch_all_with_auth",
+                exact().fetch_all_with_auth(&handle, None).await?,
+            ),
+        ] {
+            assert_eq!(rows.len() as i64, MAXIMUM + 1, "{name}");
+        }
+    }
+
+    // `fetch_all_on` cannot see the database's maximum, so it checks the
+    // default maximum: exact up to it, refused above it, never reduced.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    {
+        let page = |limit: i64| PageInput {
+            limit: Some(limit),
+            offset: Some(0),
+        };
+        let rows = EntityQuery::<LimitCard, Backend>::new()
+            .paginate(&page(3))
+            .fetch_all_on(db.pool())
+            .await?;
+        assert_eq!(rows.len(), 3, "fetch_all_on within the default maximum");
+        let over = EntityQuery::<LimitCard, Backend>::new()
+            .paginate(&page(PaginationConfig::DEFAULT_MAX_LIMIT + 1))
+            .fetch_all_on(db.pool())
+            .await
+            .expect_err("fetch_all_on above the default maximum");
+        assert_eq!(
+            OrmPublicError::from(over).code,
+            OrmErrorCode::PageLimitExceeded
+        );
+    }
+    Ok(())
+}
+
 async fn run() -> TestResult {
     let fixture = fixture().await?;
-    #[cfg(feature = "sqlite")]
     schema_complexity_bounds_are_isolated(&fixture.db).await?;
     declared_maximum_is_published_and_a_mismatched_database_is_refused(&fixture.db);
     oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(&fixture.db).await?;
     client_offsets_above_a_configured_maximum_are_refused(&fixture.db).await?;
     host_keyset_reads_take_a_per_read_maximum(&fixture.db).await?;
+    host_connection_reads_are_exact_or_refused(&fixture.db).await?;
     fixture.finish()
 }
 

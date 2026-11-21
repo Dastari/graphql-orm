@@ -42,6 +42,22 @@ use crate::{
     RevokeAiApprovalInput, ToolMaturity,
 };
 
+/// Default cap on the lifetime of one approval: 24 hours from its creation.
+///
+/// A host changes it with [`AiApprovalServiceLimits::new`], up to
+/// [`AI_APPROVAL_LIFETIME_CEILING`].
+pub const AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME: Duration = Duration::hours(24);
+
+/// Largest approval-lifetime cap a host may configure: seven days.
+///
+/// An approval is a one-shot authorization of one previewed action. The
+/// preview and its resource versions go stale, so no configuration may keep
+/// an approval decidable for longer than this.
+pub const AI_APPROVAL_LIFETIME_CEILING: Duration = Duration::days(7);
+
+/// Stored tool-call risk that forces step-up authentication on its approval.
+const HIGH_IMPACT_RISK: &str = "high_impact";
+
 /// Deployment-owned approval freshness, lifetime, and preview bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AiApprovalServiceLimits {
@@ -52,15 +68,28 @@ pub struct AiApprovalServiceLimits {
 impl AiApprovalServiceLimits {
     /// Creates validated approval-service limits.
     ///
+    /// `maximum_approval_lifetime` caps the expiry a new approval may be
+    /// given, measured from the moment it is requested. A request for a later
+    /// expiry is refused. The default is
+    /// [`AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME`]. The cap is applied when an
+    /// approval is requested: an approval that is already pending keeps its
+    /// recorded expiry, and
+    /// [`AiApprovalWaitReconciliationLimits::maximum_pending_duration`]
+    /// separately closes waits by age.
+    ///
     /// # Errors
     ///
     /// Returns [`AiError::InvalidConfiguration`] unless both durations are
-    /// positive.
+    /// positive and the approval lifetime is at most
+    /// [`AI_APPROVAL_LIFETIME_CEILING`].
     pub fn new(
         maximum_principal_age: Duration,
         maximum_approval_lifetime: Duration,
     ) -> Result<Self, AiError> {
-        if !maximum_principal_age.is_positive() || !maximum_approval_lifetime.is_positive() {
+        if !maximum_principal_age.is_positive()
+            || !maximum_approval_lifetime.is_positive()
+            || maximum_approval_lifetime > AI_APPROVAL_LIFETIME_CEILING
+        {
             return Err(AiError::InvalidConfiguration(
                 "invalid approval-service limits".to_owned(),
             ));
@@ -70,13 +99,18 @@ impl AiApprovalServiceLimits {
             maximum_approval_lifetime,
         })
     }
+
+    /// Configured cap on the lifetime of one approval.
+    pub const fn maximum_approval_lifetime(&self) -> Duration {
+        self.maximum_approval_lifetime
+    }
 }
 
 impl Default for AiApprovalServiceLimits {
     fn default() -> Self {
         Self {
             maximum_principal_age: Duration::seconds(60),
-            maximum_approval_lifetime: Duration::hours(24),
+            maximum_approval_lifetime: AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME,
         }
     }
 }
@@ -557,16 +591,20 @@ impl OrmAiApprovalService {
         {
             return Err(AiError::Conflict);
         }
-        self.require_registered_binding(
-            lease,
-            &binding,
-            if native_candidate.is_some() {
-                "approval_prepared"
-            } else {
-                "executing"
-            },
-        )
-        .await?;
+        let high_impact = self
+            .require_registered_binding(
+                lease,
+                &binding,
+                if native_candidate.is_some() {
+                    "approval_prepared"
+                } else {
+                    "executing"
+                },
+            )
+            .await?;
+        // A caller may add step-up to any approval but can never waive it for
+        // a HighImpact tool call.
+        let recent_mfa_required = recent_mfa_required || high_impact;
         if !self
             .access_policy
             .can_access_approval(
@@ -1024,12 +1062,13 @@ impl OrmAiApprovalService {
         lease: &AiRunLease,
         binding: &AiApprovalBinding,
         expected_state: &str,
-    ) -> Result<(), AiError> {
+    ) -> Result<bool, AiError> {
         let call = AiToolCallRecord::find_by_id(&self.database, &binding.tool_call_id.0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
         let tool_id = AiToolId::parse(call.tool_id.clone())?;
+        let mut high_impact = call.risk == HIGH_IMPACT_RISK;
         if call.run_id != lease.run_id().0
             || call.lease_generation != lease.lease_generation()
             || call.state != expected_state
@@ -1053,7 +1092,10 @@ impl OrmAiApprovalService {
             {
                 return Err(AiError::Forbidden);
             }
-            return Ok(());
+            // The registered descriptor is authoritative even if the stored
+            // call row recorded a lower risk.
+            high_impact |= descriptor.risk == AiToolRisk::HighImpact;
+            return Ok(high_impact);
         }
         let capability = self
             .tool_catalog
@@ -1075,7 +1117,7 @@ impl OrmAiApprovalService {
         {
             return Err(AiError::Forbidden);
         }
-        Ok(())
+        Ok(high_impact)
     }
 
     async fn current_request_principal(
@@ -1300,13 +1342,20 @@ impl OrmAiApprovalService {
         } else {
             record.state.clone()
         };
+        // Report the requirement a decision will actually enforce, including
+        // for a HighImpact approval staged before step-up was forced.
+        let recent_mfa_required = record.recent_mfa_required
+            || AiToolCallRecord::find_by_id(&self.database, &record.tool_call_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .is_some_and(|call| call.risk == HIGH_IMPACT_RISK);
         Ok(AiApprovalView {
             id: record.id,
             tool_call_id: record.tool_call_id,
             session_id: record.session_id,
             canonical_preview: async_graphql::Json(preview),
             state,
-            recent_mfa_required: record.recent_mfa_required,
+            recent_mfa_required,
             approver_subject: record.approver_subject.clone(),
             created_at: record.created_at,
             expires_at: record.expires_at,
@@ -1336,9 +1385,6 @@ impl OrmAiApprovalService {
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
         let (scope, policy, _) = self.visible_context(&principal, &current, action).await?;
-        if current.recent_mfa_required {
-            self.require_recent_mfa(&principal)?;
-        }
         let now = canonical_second(self.clock.now());
         // Visibility (including the tenant predicate) is settled above. A
         // decision that lost to the run's closure (cancellation, completion,
@@ -1348,6 +1394,11 @@ impl OrmAiApprovalService {
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::Conflict)?;
+        // HighImpact risk forces step-up whatever the approval row recorded,
+        // so an approval staged without the flag cannot be decided without it.
+        if current.recent_mfa_required || call.risk == HIGH_IMPACT_RISK {
+            self.require_recent_mfa(&principal)?;
+        }
         if call.approval_id == Some(current.id) {
             let run = AiRunRecord::find_by_id(&self.database, &call.run_id)
                 .await
@@ -1535,17 +1586,22 @@ impl AiApprovalService for OrmAiApprovalService {
         {
             return Err(AiError::NotFound);
         }
-        let connection = AiApprovalRecord::keyset_connection_page(
-            &self.database,
-            AiApprovalRecordWhereInput {
+        let connection = {
+            let filter = AiApprovalRecordWhereInput {
                 session_id: Some(UuidFilter {
                     eq: Some(session_id.0),
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-            page_input(&page, false),
-        )
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                page_input(&page, false),
+                move |chunk| {
+                    AiApprovalRecord::keyset_connection_page(&self.database, filter.clone(), chunk)
+                },
+            )
+        }
         .await
         .map_err(map_orm)?;
         let mut edges = Vec::with_capacity(connection.edges.len());
@@ -3139,8 +3195,10 @@ mod tests {
             }),
             Arc::new(AllowApprovals),
             Arc::new(tool_catalog),
+            // Every fixture approval is HighImpact, so every decision needs
+            // step-up; two hours covers the waits these tests simulate.
             RecentMfaPolicy {
-                maximum_age: Duration::minutes(5),
+                maximum_age: Duration::hours(2),
                 clock_skew: Duration::seconds(30),
                 allowed_amr: vec!["otp".to_owned()],
                 allowed_acr: vec!["urn:test:loa:2".to_owned()],
@@ -4489,6 +4547,148 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(approval.state, "expired");
+    }
+
+    async fn set_recent_mfa_required(fixture: &Fixture, id: Uuid, required: bool) {
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiApprovalRecord>(
+                        &id,
+                        UpdateAiApprovalRecordInput {
+                            recent_mfa_required: Some(required),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("approval row should update");
+    }
+
+    #[tokio::test]
+    async fn high_impact_approval_forces_step_up_even_when_the_caller_waives_it() {
+        let fixture = fixture().await;
+        let (running, tool_call_id) = seed_running_tool(&fixture).await;
+        let (binding, preview) = approval_binding(&fixture, &running, tool_call_id);
+        // The fixture tool is HighImpact; the caller asks for no step-up.
+        let requested = fixture
+            .approval_service
+            .request_approval(
+                &running,
+                binding,
+                preview,
+                fixture.now + Duration::hours(4),
+                false,
+            )
+            .await
+            .expect("approval request should park the run");
+        let id = requested.approval_id().0;
+        let stored = AiApprovalRecord::find_by_id(&fixture.database, &id)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should be durable");
+        assert!(stored.recent_mfa_required);
+
+        // An approval staged before step-up was forced has the flag clear.
+        // HighImpact risk still gates its decision and its view.
+        set_recent_mfa_required(&fixture, id, false).await;
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .expect("approval read should succeed")
+            .expect("approval should remain visible");
+        assert!(view.recent_mfa_required);
+        // The principal's MFA is now older than the two-hour policy.
+        fixture.clock.advance_seconds(3 * 3_600);
+        for decision in [AiApprovalDecision::Approve, AiApprovalDecision::Deny] {
+            assert!(matches!(
+                fixture
+                    .approval_service
+                    .decide_approval(
+                        &fixture.principal,
+                        DecideAiApprovalInput {
+                            id,
+                            decision,
+                            expected_version: view.row_version,
+                        },
+                    )
+                    .await,
+                Err(AiError::RecentMfaRequired)
+            ));
+        }
+        let unchanged = AiApprovalRecord::find_by_id(&fixture.database, &id)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should be durable");
+        assert_eq!(unchanged.state, "pending");
+    }
+
+    #[tokio::test]
+    async fn approval_lifetime_cap_has_a_ceiling_and_a_host_configurable_default() {
+        assert_eq!(
+            AiApprovalServiceLimits::default().maximum_approval_lifetime(),
+            AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME
+        );
+        assert!(AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME <= AI_APPROVAL_LIFETIME_CEILING);
+        assert!(
+            AiApprovalServiceLimits::new(Duration::seconds(60), AI_APPROVAL_LIFETIME_CEILING)
+                .is_ok()
+        );
+        // Before the ceiling any positive lifetime was accepted.
+        for lifetime in [
+            AI_APPROVAL_LIFETIME_CEILING + Duration::seconds(1),
+            Duration::days(3_650),
+        ] {
+            assert!(matches!(
+                AiApprovalServiceLimits::new(Duration::seconds(60), lifetime),
+                Err(AiError::InvalidConfiguration(_))
+            ));
+        }
+
+        // The configured cap bounds every requested expiry.
+        let fixture = fixture().await;
+        let capped = fixture.approval_service.clone().with_limits(
+            AiApprovalServiceLimits::new(Duration::seconds(60), Duration::minutes(2))
+                .expect("lower cap should validate"),
+        );
+        let (running, tool_call_id) = seed_running_tool(&fixture).await;
+        let (binding, preview) = approval_binding(&fixture, &running, tool_call_id);
+        assert!(matches!(
+            capped
+                .request_approval(
+                    &running,
+                    binding.clone(),
+                    preview.clone(),
+                    fixture.now + Duration::minutes(2) + Duration::seconds(1),
+                    true,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        let requested = capped
+            .request_approval(
+                &running,
+                binding,
+                preview,
+                fixture.now + Duration::minutes(2),
+                true,
+            )
+            .await
+            .expect("an expiry at the cap should be accepted");
+        let stored = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should be durable");
+        assert_eq!(
+            stored.expires_at,
+            (fixture.now + Duration::minutes(2)).unix_timestamp()
+        );
     }
 
     #[tokio::test]

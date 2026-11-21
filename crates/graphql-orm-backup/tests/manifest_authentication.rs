@@ -1595,6 +1595,7 @@ async fn prune_then_replay(temp: &TempDir) -> (Uuid, Uuid) {
         .await
         .expect("prune");
     assert_eq!(deleted.snapshot_ids(), vec![old.snapshot_id]);
+    assert_eq!(pruned.deleted_snapshot_ids, vec![old.snapshot_id]);
     assert_eq!(pruned.deleted_snapshots, 1);
     assert!(load_manifest(&repository, old.snapshot_id).await.is_err());
 
@@ -1612,7 +1613,7 @@ async fn prune_then_replay(temp: &TempDir) -> (Uuid, Uuid) {
 
 fn not_admitted(error: &BackupError, snapshot_id: Uuid) -> bool {
     error.is_snapshot_not_admitted()
-        && matches!(error, BackupError::ManifestAuthenticationFailed { key, .. } if *key == snapshot_manifest_key(snapshot_id))
+        && matches!(error, BackupError::SnapshotNotAdmitted { snapshot_id: refused, .. } if *refused == snapshot_id)
 }
 
 #[tokio::test]
@@ -1662,6 +1663,7 @@ async fn a_pruned_snapshot_put_back_is_refused_by_the_revocation_record() {
     .await
     .expect("delete the replayed snapshot");
     assert_eq!(log.snapshot_ids(), vec![replayed]);
+    assert_eq!(deleted.deleted_snapshot_ids, vec![replayed]);
     assert_eq!(deleted.retained_snapshots, 1);
     assert!(
         repository

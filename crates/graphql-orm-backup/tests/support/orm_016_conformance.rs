@@ -590,3 +590,24 @@ fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     ).with_repository_identity(uuid::Uuid::from_u128(1))
 }
+
+#[cfg(feature = "orm-postgres")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL and graphql-orm/change-journal; run the backup-postgres owned lane"]
+async fn journaled_target_clear_uses_the_restore_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let database = Arc::new(graphql_orm::db::Database::new(pool.clone()));
+    let catalog = catalog()?;
+    apply_schema(database.as_ref(), &catalog).await?;
+    insert_fixture(&pool).await?;
+    database.ensure_change_journal_recorder(catalog.entities()).await?;
+    graphql_orm::sqlx::query("TRUNCATE conformance_activity_events")
+        .execute(&pool)
+        .await
+        .expect_err("ordinary truncation must be refused by the installed recorder");
+    let adapter = OrmBackupAdapter::new(database, catalog.entities().to_vec());
+    adapter.clear_restore_target().await?;
+    assert!(adapter.restore_target_is_empty().await?);
+    Ok(())
+}

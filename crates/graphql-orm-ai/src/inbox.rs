@@ -26,7 +26,7 @@ pub struct AiInboxWakeup {
 
 /// One authorized durable cross-session notification.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiInboxEventView {
     /// Event identifier.
     pub id: Uuid,
@@ -44,7 +44,7 @@ pub struct AiInboxEventView {
 
 /// Bounded inbox catch-up page.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiInboxEventPage {
     /// Events after the requested exclusive sequence.
     pub events: Vec<AiInboxEventView>,
@@ -58,7 +58,7 @@ pub struct AiInboxEventPage {
 
 /// Inbox subscription item with explicit retention-gap signaling.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiInboxEventEnvelope {
     /// Durable event, absent only for a reset signal.
     pub event: Option<AiInboxEventView>,

@@ -32,5 +32,7 @@ unchanged and discoverable.
 
 - [ADR-0014: Workspace minimum supported Rust version](ADR-0014-workspace-msrv.md)
 
+- [ADR-0015: Router enforces composed authorization directives](ADR-0015-router-enforces-composed-authorization-directives.md)
+
 Use the [ADR template](../templates/adr.md) for a genuinely durable decision,
 not for feature chronology or implementation status.

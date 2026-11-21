@@ -10,13 +10,55 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.187.0 binds every column a read predicate renders to its own row: through the entity's
+Version 0.188.0 binds every column a read predicate renders to its own row: through the entity's
 table path at the root of a statement, and through an alias no other scope uses inside a relation,
 `not_related`, closure or count subquery. A column missing from a target table then fails the read
 instead of resolving against an outer row (#796). The generated alias names are
 reserved as table names, and a hand-written `ReadVisibilityFilter` may only hold single-row
 expressions, with every column written through `__gom_self` where it is evaluated in a subquery.
-See the [migration guide](../../MIGRATION.md#01860-to-01870-read-predicate-columns-bound-to-their-row).
+See the [migration guide](../../MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row).
+
+Version 0.187.0 is the **breaking release**: every change that breaks hosts or
+invalidates stored fingerprints ships in it, and the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) lists the
+steps in upgrade order. In short:
+
+- **Schema and storage.** Migration plans no longer drop tables the target
+  does not declare; lossy column type changes and integrity-removing steps
+  need `allow_destructive`; applying a plan refuses, before any statement
+  runs, a new unique index whose key existing rows repeat
+  (`UniqueIndexDuplicates`); the PostgreSQL change journal refuses `TRUNCATE`
+  and unjournaled cascades.
+- **Build and API.** GraphQL naming is selected by the
+  `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+  `GRAPHQL_ORM_FIELD_CASE` build variables instead of Cargo features; a schema
+  built by hand from generated roots installs `GeneratedInputValidation`;
+  each schema's maximum page limit is fixed at compile time
+  (`schema_roots!(max_page_limit: N)`, 100 when omitted); host-side keyset
+  pages and `paginate(PageInput)` reads refuse a limit above the maximum
+  instead of returning fewer rows; `SqlValue` is non-exhaustive and gains
+  `Temporal`; the policy-free relation preload API and direct relation
+  data-loader use are removed.
+- **Defaults.** Generated GraphQL bulk writes are narrowed to the caller's
+  read visibility (`narrow_bulk_writes_to_read_visibility(false)` opts out;
+  `mssql_snapshot_bulk_write_targets` stays a separate opt-in); a `Database`
+  refuses a client page offset above 10,000 (`max_page_offset(None)` opts
+  out); an uncoded host callback error reads as `INTERNAL_ERROR` unless the
+  schema's `Database` opts in; `ReadPredicate::related` is three-valued, so
+  its negation never admits a NULL key or an UNKNOWN-only relation, and
+  `not_related` is `related(..).not()`; runtime GraphQL serves `RecordVersion`
+  and integer live keys as `RuntimeInt64` strings.
+- **Fingerprints.** With operation catalogue 0.10.0, generated-operation
+  fingerprints no longer include the Rust module path: moving an entity keeps
+  them, and every fingerprint changes once at this upgrade. `stable_type_id`
+  is still accepted and no longer affects fingerprints.
+- **Opt-in additions.** SQL Server binds chrono values natively, and pools can
+  opt in to native binds for annotated temporal text and date filters with
+  `MssqlPoolOptions::typed_temporal_parameters(true)`;
+  `#[graphql_entity(key_only_deletes)]` adds a key-only delete signal for
+  `Key`/`Keys` subscribers.
+
+Upgrade ORM and macros together.
 
 Version 0.186.0 fixes startup races in the owned PostgreSQL test harness.
 See the [migration guide](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
@@ -839,9 +881,11 @@ repository reference, or build matching local rustdoc with
 | `receiver-admission` | exact delegated HTTP query admission; enables `auth-agql` | requires registered contracts and authoritative host adapters; [reference](../../docs/reference/receiver-admission.md) |
 | `router-protocol` | project-neutral generated operation export | does not run a router |
 
-The naming features `resolver-case-*`, `argument-case-*`, and `field-case-*`
-are independent groups; enable at most one feature in each group. In a
-multi-backend dependency graph, select `backend = "sqlite" | "postgres" |
+GraphQL naming is not a feature: the `GRAPHQL_ORM_RESOLVER_CASE`,
+`GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` environment variables
+select it per build; see
+[naming configuration](../../docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
+In a multi-backend dependency graph, select `backend = "sqlite" | "postgres" |
 "mssql"` on each entity and in `schema_roots!`.
 
 Companion capabilities remain separate packages rather than core features.
@@ -934,8 +978,10 @@ README remains project-neutral.
 - **Federation entities:** `federation_key` opts an entity into a resolvable
   Apollo Federation v2 `@key`, generating a batched entity resolver that runs
   the same authorization chain as the single-row read. A joined field is
-  authorized only by the subgraph that owns the entity; the router's contract
-  covers root fields.
+  authorized by the subgraph that owns the entity. The router's descriptor
+  contract covers root fields; since router 0.16.0 it also refuses fields whose
+  composed `@authenticated` or `@requiresScopes` the caller does not meet, but
+  it grants nothing.
 - **Checked calendar filters:** generated date predicates use half-open
   calendar ranges and recursively reject invalid spans, offsets, and ranges
   before database work. PostgreSQL uses session `CURRENT_DATE`, SQL Server uses

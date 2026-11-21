@@ -1273,6 +1273,104 @@ async fn a_stored_sort_key_too_long_for_a_cursor_refuses_the_page_with_a_stable_
             field: fid("child.label"),
             direction: RuntimeOrderDirection::Asc,
         }]);
+        // The breaking Rust API reports a typed cursor failure, on direct
+        // reads, relation batches and query-to-relation error conversion.
+        let parent = runtime.resolve_collection(&cid("parent")).unwrap();
+        let child = runtime.resolve_collection(&cid("child")).unwrap();
+        let relation = runtime
+            .resolve_relation(&parent, &RelationId::new("children").unwrap())
+            .unwrap();
+        let parent_id = runtime.resolve_field(&parent, &fid("parent.id")).unwrap();
+        let parent_label = runtime
+            .resolve_field(&parent, &fid("parent.label"))
+            .unwrap();
+        let child_id = runtime.resolve_field(&child, &fid("child.id")).unwrap();
+        let parent_projection = runtime.resolve_projection(&parent, &[parent_id]).unwrap();
+        let child_projection = runtime.resolve_projection(&child, &[child_id]).unwrap();
+        let limits = RuntimeQueryLimits {
+            max_cursor_bytes: 2048,
+            ..Default::default()
+        };
+        let long_order = runtime
+            .runtime_order(
+                &parent,
+                Some(vec![RuntimeOrderInput {
+                    field: parent_label,
+                    direction: RuntimeOrderDirection::Asc,
+                    nulls: RuntimeNullPlacement::Last,
+                }]),
+                limits,
+            )
+            .unwrap();
+        let direct = runtime
+            .runtime_read_request(
+                &parent,
+                &parent_projection,
+                None,
+                long_order,
+                RuntimePageRequest::first(1, None),
+                false,
+                limits,
+            )
+            .unwrap();
+        let query_error = database
+            .execute_runtime_read(&direct, None)
+            .await
+            .unwrap_err();
+        let query_code = query_error.code();
+        assert_eq!(query_error.detail(), Some("cursor_key_too_large"));
+        let converted_code = RuntimeRelationError::from(query_error).code();
+        let ordinary_limits = RuntimeQueryLimits::default();
+        let anchored = runtime
+            .runtime_read_request_with_relation_keys(
+                &parent,
+                &parent_projection,
+                None,
+                runtime
+                    .runtime_order(&parent, None, ordinary_limits)
+                    .unwrap(),
+                RuntimePageRequest::first(1, None),
+                false,
+                std::slice::from_ref(&relation),
+                ordinary_limits,
+            )
+            .unwrap();
+        let parents = database
+            .execute_runtime_anchored_read(&anchored, None)
+            .await
+            .unwrap();
+        let batch = runtime
+            .runtime_relation_batch_request(
+                &relation,
+                parents.relation_parents(&relation).unwrap(),
+                &child_projection,
+                None,
+                runtime
+                    .runtime_order(&child, None, ordinary_limits)
+                    .unwrap(),
+                RuntimeRelationSelection::ToMany {
+                    pages: vec![RuntimePageRequest::first(2, None)],
+                    include_count: false,
+                },
+                RuntimeRelationLimits {
+                    max_cursor_bytes: 2048,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let relation_error = database
+            .execute_runtime_relation_batch(&batch, None)
+            .await
+            .unwrap_err();
+        assert_eq!(relation_error.detail(), Some("cursor_key_too_large"));
+        assert_eq!(
+            (query_code, relation_error.code(), converted_code),
+            (
+                RuntimeQueryErrorCode::CursorKeyTooLarge,
+                RuntimeRelationErrorCode::CursorKeyTooLarge,
+                RuntimeRelationErrorCode::CursorKeyTooLarge,
+            )
+        );
         let module = RuntimeGraphqlModule::compile(runtime.clone(), Default::default()).unwrap();
         let api = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
             .unwrap()

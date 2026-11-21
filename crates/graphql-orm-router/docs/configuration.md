@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-17
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -70,6 +70,7 @@ an unbounded value.
 | `graphqlPath` | `/graphql`; absolute, non-root, without query or fragment. |
 | `anonymousDevelopment` | `false`; mutually exclusive with authentication and unsuitable for production. |
 | `introspection` | `false`. `true` enables `__schema` and `__type`; with authentication configured they also need a valid bearer. The depth limit applies either way. |
+| `refusalOutcome` | `false`. `true` adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request. See [Refusal outcome](#refusal-outcome). |
 | `authentication` | Required unless anonymous development is explicitly enabled. |
 | `scopeMatcher` | Omitted means exact-string matching. `kind: "hierarchical"` requires the `auth-agql` feature. |
 | `subgraphs` | At least one static source is required. |
@@ -94,6 +95,55 @@ an unbounded value.
 
 Durations must be nonzero. Values over their hard safety ceilings fail before
 binding.
+
+## Refusal outcome
+
+`refusalOutcome: true` (programmatically `RouterConfig::with_refusal_outcome(true)`)
+lets a client tell that an operation never ran. Each error of an operation the
+router refused before it sent any subgraph request carries
+`extensions.outcome: "refused"` beside its `code`. The value is the one
+generated ORM services put on their mutation errors (`refused`, `failed`,
+`committed`, `unknown`; see the
+[shared vocabulary](../../../docs/reference/graphql-orm/error-codes.md#router-refusal-outcome)),
+so one client rule covers a refusal by the router and by a service.
+
+It is off by default because it adds an extension field to existing
+responses. It changes no code, message, path or HTTP status.
+
+Marked, over HTTP and the WebSocket gateway alike:
+
+- the router's own refusals: an invalid or unverifiable bearer, a root or
+  nested `@authenticated`/`@requiresScopes` refusal and an unavailable
+  authorization state (`UNAUTHENTICATED`, `FORBIDDEN`), the field limit
+  (`OPERATION_LIMIT_EXCEEDED`), a subscription over HTTP
+  (`SUBSCRIPTIONS_NOT_SUPPORTED`), anonymous introspection, persisted-document
+  refusals (`PERSISTED_DOCUMENT_*`, and `SERVICE_UNAVAILABLE` when the
+  persisted-document runtime cannot be verified), and the WebSocket gateway's
+  admission refusals (`SUBSCRIPTION_LIMIT_EXCEEDED`, `REQUEST_TOO_LARGE`, an
+  ambiguous operation, an unavailable authority, and a subscription refused
+  while continuity is lost);
+- the engine's refusals before execution: request and body errors, parse
+  failures and the token limit, validation failures and the depth, alias and
+  directive limits, `BAD_USER_INPUT` variable coercion,
+  `INTROSPECTION_DISABLED` and `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`. Over the
+  WebSocket gateway the engine reports these with one pipeline code, such as
+  `GRAPHQL_VALIDATION_FAILED`, and only the codes it raises before execution
+  are marked.
+
+Never marked:
+
+- any error of an operation for which a subgraph request started, including a
+  partly executed operation, a subgraph's own errors and the router-hosted
+  Node lookup;
+- an execution failure, the request timeout (`GATEWAY_TIMEOUT`), and
+  terminal subscription errors such as `SUBSCRIPTION_SCHEMA_RELOAD`,
+  `SUBSCRIPTION_AUTHORIZATION_CHANGED` and `SUBSCRIPTION_CONTINUITY_LOST`
+  after a subscription started;
+- byte-route responses, which are not GraphQL operations.
+
+The router never replaces an `outcome` that a subgraph sent, so a service's
+`failed`, `committed` or `unknown` reaches the client unchanged. Read an
+absent `outcome` as unknown.
 
 ## Outbound transport
 
@@ -270,6 +320,66 @@ environment proxy, and a 30-second unknown-key refresh cooldown.
 Leeway may not exceed five minutes; insecure HTTP is an explicit loopback-only
 development setting. These fields are configured by the `with_*` methods in
 the [source type](../src/jwt.rs).
+
+### Nested directive authorization
+
+An authenticated router also evaluates the Federation `@authenticated` and
+`@requiresScopes` directives that composition kept in the supergraph, on every
+selected field of the normalized operation, at the root and below it. It runs
+in the same two places as the descriptor check: when the request is analysed,
+and again with complete variables before execution, so no subgraph request
+opens for a refused operation. Subscriptions are checked at admission; a
+connection whose scopes change ends its subscriptions, and a resubscription is
+checked against the new scopes.
+
+- A field `P.f` returning named type `R` requires the rules on `P`, on `P.f`,
+  and on `R`, all of them.
+- A field selected on an interface also requires, for every object type that
+  implements it, the rules on that type, on its field, and on that field's
+  return type, because the field may resolve on any of them.
+- A field of a type that implements an interface also requires the rules
+  declared on the same field of that interface and on the interface itself,
+  including rules a subgraph declares on an `@interfaceObject` type.
+- An inline fragment, or a fragment spread (normalized into one), requires
+  the rule on its type condition. Aliases change only the reported path.
+- `@requiresScopes(scopes: [["a", "b"], ["c"]])` holds when every scope of at
+  least one inner list is granted, matched with the configured scope matcher.
+  It implies authentication.
+- When several subgraphs declare `@requiresScopes` on the same type or field,
+  every subgraph's declaration must hold. Composition merges them into one
+  list of alternatives, so the router reads each subgraph's own declaration.
+  Directive names are resolved as composition resolves them: `@link`
+  imports and `as:` renames, the link's namespace prefix, an unknown prefix
+  stripped, and the unprefixed names when Federation v2 is not linked or the
+  composite-schemas specification is.
+- A graph is refused when it is built if a declaration is malformed (an
+  empty list or set, or a scope that is not a non-empty string); if a
+  directive application whose name, with or without a `<prefix>__`, is
+  `requiresScopes`, `authenticated` or an import alias of either does not
+  resolve to Federation's directive; if either directive is placed on an
+  argument, input field, enum value, union, input object, directive argument
+  or the schema; or if the composed directives cannot be matched to the
+  declarations they came from. Every declaration is recorded on its own, so
+  one whose scope sets also appear in another declaration still applies.
+- Fragments marked `@defer` and fields marked `@stream` are checked like any
+  other selection.
+- `@skip` and `@include` are applied as for root fields: a selection left out
+  by its condition is not checked.
+- `__typename` is never refused. `__schema` and `__type` follow the
+  introspection setting.
+
+A refused selection refuses the whole operation, as a refused root field does:
+the response has no `data`, and each error carries `UNAUTHENTICATED` (no
+caller) or `FORBIDDEN` (a scope is missing) and the selection's `path` by
+response key, without naming the rule. At most 32 errors are reported. This is
+the Federation "reject" mode for unauthorized fields; the router does not
+offer the mode that removes the field and returns partial data. Each distinct
+rule is evaluated once per operation, and selection sets that cannot reach a
+rule are not walked.
+
+The router never grants: a selection the directives allow is still authorized
+by its subgraph's resolver guards and policies. Anonymous development mode has
+no authorization catalogue and evaluates no directives.
 
 ## Static subgraphs and secrets
 

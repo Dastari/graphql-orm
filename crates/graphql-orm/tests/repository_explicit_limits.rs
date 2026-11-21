@@ -727,4 +727,51 @@ async fn search_builder_offsets_are_trusted_and_client_page_offsets_are_bounded(
         .await
         .unwrap();
     assert_eq!(hits.len(), 5);
+
+    // The breaking release bounds a `Database`'s client offsets by default;
+    // a trusted builder offset stays unbounded.
+    let default_maximum = graphql_orm::graphql::orm::PaginationConfig::RECOMMENDED_MAX_OFFSET;
+    assert_eq!(
+        database.client_pagination_config().max_offset(),
+        Some(default_maximum)
+    );
+    let default_search = || {
+        graphql_orm::graphql::orm::EntitySearchQuery::<LimitRow, LimitRowWhereInput, SqliteBackend>::new(
+            database.pool(),
+            search(),
+        )
+        .client_pagination_config(database.client_pagination_config())
+    };
+    let hits = default_search()
+        .offset(default_maximum + 1)
+        .limit(5)
+        .fetch_all()
+        .await
+        .expect("a builder offset is not a client offset");
+    assert!(hits.is_empty());
+    assert_code(
+        default_search()
+            .paginate(PageInput {
+                limit: Some(5),
+                offset: Some(default_maximum + 1),
+            })
+            .fetch_all()
+            .await,
+        OrmErrorCode::PageLimitExceeded,
+    );
+    let unbounded = database.clone().with_max_page_offset(None);
+    let hits = graphql_orm::graphql::orm::EntitySearchQuery::<
+        LimitRow,
+        LimitRowWhereInput,
+        SqliteBackend,
+    >::new(unbounded.pool(), search())
+    .client_pagination_config(unbounded.client_pagination_config())
+    .paginate(PageInput {
+        limit: Some(5),
+        offset: Some(default_maximum + 1),
+    })
+    .fetch_all()
+    .await
+    .expect("max_page_offset(None) leaves client offsets unbounded");
+    assert!(hits.is_empty());
 }

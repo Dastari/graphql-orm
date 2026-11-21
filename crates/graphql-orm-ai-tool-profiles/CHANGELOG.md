@@ -10,6 +10,23 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.27.0 (breaking release)
+
+The tool-profiles part of the single breaking release, with operation catalogue
+0.10.0 and AI 0.151.0: operation fingerprint algorithm v2, capability index
+version 3 and compact signatures for broker version 2 (#683, #551). Host steps
+are in the root [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release)
+and the [migration guide](MIGRATION.md#0261-to-0270-breaking-release).
+
+- **Breaking (fingerprints, #683):** requires operation catalogue 0.10.0, whose generated-operation fingerprint algorithm is `graphql-orm-sha256-len-v2`. Operation contracts and tool manifests record that name. A manifest or contract bound under `graphql-orm-sha256-len-v1` is refused as stale; regenerate it. No Rust API change.
+- **Breaking (index, 5B):** `AI_CAPABILITY_INDEX_VERSION` is `3`. `AiCapabilityIndex::compile` groups every generated query root of one entity into one `AiCapabilityKind::GeneratedEntity` entry (shape `AiCapabilityOperationShape::Entity`) whose `operations` list each root (`AiCapabilityOperationMember`). The index and its limits count one entry per entity. Each root keeps its own `GeneratedQuery` entry, identity, capability fingerprint and entry fingerprint: `entry(root_id)` still resolves it, and `operation_entry` and `entity_entry_of` navigate between them. Roots without an entity stay standalone entries. Index and index-set fingerprints change once; the entity capability fingerprint (`AI_CAPABILITY_ENTITY_VERSION`) covers every root's ID and fingerprint.
+- **Breaking (API):** new `AiCapabilityKind` and `AiCapabilityOperationShape` variants; new `operations` fields on `AiCapabilityIndexEntry` and `AiCapabilitySearchCandidate` (`AiCapabilityCandidateOperation`). `entries()` lists discoverable entries only, so grouped roots are not listed there.
+- **Added:** `AiCapabilityIndexSet::ranked_operation_matches` ranks every executable root on its own metadata, exactly as a standalone entry, for delivery that installs one definition per root.
+- **Added:** `AiCapabilityIndexSet::rank_admitted` ranks matches again after host policy, scoring each entity entry on its own metadata and its admitted roots only. `AiCapabilityRankedMatch::operations`, `entity` and `admitted_candidate`, and `AiCapabilityIndexEntry::admitted_result_description` and `admitted_result_record_cost`, expose the same admitted-only view.
+- **Performance (3B):** search uses an inverted index built when the index is compiled: a query scores only the posting lists of its terms. Scores are the same fixed per-field weights as before; an entity entry is also found by its roots' operation names and descriptions. No IDF, BM25 or other catalogue-wide statistic contributes, so an entry's score never depends on other entries.
+- **Added (2B):** `AiCapabilitySignature` renders a plan schema as a compact typed signature and expands one named input type, `select` or `select.<path>` at a time, in pages (`AI_CAPABILITY_TYPE_PAGE_MAXIMUM`). `AiGraphqlQueryCapability::capability_signature` builds it; `AiSharedTypePlanSchema::compile_named` defines every named GraphQL input type once. Both are model-facing renderings: plans are still validated against the unchanged closed schema and no capability fingerprint changes.
+- **Fixed:** runtime live key inputs compile under the ORM's default string identities. With live subscriptions and a node identity, a UUID key member is `UUID!` in both identity modes, and an integer key member is `RuntimeInt64!` by default and `Int!` only under `with_legacy_int_identities()`. The matcher previously recognised live key inputs only when `RecordVersion` was `Int!`, so a UUID-keyed collection under default options failed every query, mutation and subscription catalogue with `InvalidConfiguration("generated input <Object>KeyInput.<field> differs from its canonical contract")`. The identity mode is now read from the `RecordVersion` scalar. No data migration is needed.
+
 ## Unreleased - 0.26.1
 
 - Install from a reviewed Git revision using the package inventory and release manifest.

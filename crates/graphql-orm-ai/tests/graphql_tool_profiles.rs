@@ -186,9 +186,9 @@ fn semantic_entity_metadata_is_public_only_and_descriptive() {
         metadata.description,
         "A visible record available for reviewed application workflows"
     );
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     assert_eq!(metadata.fields[0].field_name, "id");
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     assert_eq!(metadata.fields[0].field_name, "Id");
     assert_eq!(
         metadata.fields[0].description,

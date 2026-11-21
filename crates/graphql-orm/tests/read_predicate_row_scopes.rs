@@ -579,7 +579,10 @@ fn link_shapes() -> Vec<(&'static str, ReadPredicate, &'static [&'static str])> 
                 ReadPredicate::not_related::<B, ShadowTarget, ShadowTarget>(LINK, linked(any()))
                     .unwrap(),
             ),
-            &["a2"],
+            // Relations are three-valued: b2's only linked row, b1, has no
+            // link of its own, so whether b1 is linked on is UNKNOWN and b2
+            // is not admitted; b3's linked row is.
+            &[],
         ),
     ]
 }

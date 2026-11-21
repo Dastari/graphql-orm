@@ -31,8 +31,14 @@ fn duration_order_parameters(
     serde::Deserialize,
 )]
 #[graphql(complex)]
-#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
-#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    graphql_orm_field_case = "pascal",
+    graphql(rename_fields = "PascalCase")
+)]
+#[cfg_attr(
+    graphql_orm_field_case = "snake",
+    graphql(rename_fields = "snake_case")
+)]
 #[graphql_entity(
     backend = "sqlite",
     table = "composed_parents",

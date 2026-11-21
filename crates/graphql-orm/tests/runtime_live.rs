@@ -333,6 +333,7 @@ impl Fixture {
         let module = RuntimeGraphqlModule::compile(
             schema.clone(),
             RuntimeGraphqlOptions::default()
+                .with_legacy_int_identities()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
                 .with_live_source(
                     source.clone(),
@@ -648,6 +649,7 @@ async fn deleted_images_require_complete_evidence_current_policy_and_application
     let module = RuntimeGraphqlModule::compile(
         f.schema.clone(),
         RuntimeGraphqlOptions::default()
+            .with_legacy_int_identities()
             .with_cursor_profile(RuntimeCursorProfile::Unprotected)
             .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls),
     )
@@ -1194,12 +1196,12 @@ impl ParityQuery {
 }
 #[tokio::test]
 #[cfg(not(any(
-    feature = "field-case-pascal",
-    feature = "field-case-snake",
-    feature = "resolver-case-pascal",
-    feature = "resolver-case-snake",
-    feature = "argument-case-pascal",
-    feature = "argument-case-snake"
+    graphql_orm_field_case = "pascal",
+    graphql_orm_field_case = "snake",
+    graphql_orm_resolver_case = "pascal",
+    graphql_orm_resolver_case = "snake",
+    graphql_orm_argument_case = "pascal",
+    graphql_orm_argument_case = "snake"
 )))]
 async fn derived_and_runtime_share_identity_version_and_changed_client_shapes() {
     let f = Fixture::new().await;
@@ -1367,6 +1369,7 @@ async fn native_profile_keeps_current_reads_but_never_releases_deleted_images() 
     let module = RuntimeGraphqlModule::compile(
         f.schema.clone(),
         RuntimeGraphqlOptions::default()
+            .with_legacy_int_identities()
             .with_cursor_profile(RuntimeCursorProfile::Unprotected)
             .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls),
     )
@@ -1499,6 +1502,7 @@ async fn graphql_mutations_serve_identity_and_managed_versions_and_publish_after
     let module = RuntimeGraphqlModule::compile(
         f.schema.clone(),
         RuntimeGraphqlOptions::default()
+            .with_legacy_int_identities()
             .with_cursor_profile(RuntimeCursorProfile::Unprotected)
             .with_mutations(Default::default())
             .with_live_source(
@@ -1688,6 +1692,7 @@ async fn nested_point_and_live_cursors_use_final_composer_protection() {
     let module = RuntimeGraphqlModule::compile(
         f.schema.clone(),
         RuntimeGraphqlOptions::default()
+            .with_legacy_int_identities()
             .with_relation_filters()
             .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls),
     )
@@ -1851,6 +1856,7 @@ async fn opting_into_existing_version_storage_is_an_owned_migration_noop() {
     let (after, after_catalog) = compose(
         from_legacy_json,
         RuntimeGraphqlOptions::default()
+            .with_legacy_int_identities()
             .with_cursor_profile(RuntimeCursorProfile::Unprotected)
             .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls),
     );
@@ -1881,6 +1887,7 @@ async fn composite_numeric_live_keys_share_mutation_inputs_including_create_only
         let module = RuntimeGraphqlModule::compile(
             f.schema.clone(),
             RuntimeGraphqlOptions::default()
+                .with_legacy_int_identities()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
                 .with_mutations(mutations)
                 .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls),
@@ -1934,9 +1941,9 @@ async fn composite_numeric_live_keys_share_mutation_inputs_including_create_only
 }
 
 // #528 (4): a browser reads a JSON number as a double, so a 64-bit key or
-// version above 2^53 arrives changed. The opt-in serves them as strings.
+// version above 2^53 arrives changed. They are served as strings by default.
 #[tokio::test]
-async fn int64_identity_strings_are_opt_in_for_versions_and_integer_live_keys() {
+async fn int64_identities_are_strings_by_default_and_int_only_on_legacy_opt_out() {
     const BIG: i64 = 9_007_199_254_740_993; // 2^53 + 1
     for composite in [false, true] {
         let mut definition = definition();
@@ -1975,12 +1982,13 @@ async fn int64_identity_strings_are_opt_in_for_versions_and_integer_live_keys() 
                 .unwrap()
         };
         for strings in [false, true] {
+            // Strings are the default; the legacy `Int` form is an opt-out.
             let mut options = RuntimeGraphqlOptions::default()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
                 .with_mutations(RuntimeGraphqlMutationOptions::default())
                 .with_live_source(f.source.clone(), RuntimeLiveProfile::NativeRls);
-            if strings {
-                options = options.with_int64_identity_strings();
+            if !strings {
+                options = options.with_legacy_int_identities();
             }
             let module = RuntimeGraphqlModule::compile(f.schema.clone(), options).unwrap();
             let (api, catalog) =
@@ -2822,6 +2830,7 @@ async fn enabling_rls_after_registration_ends_live_subscriptions_without_deliver
         RuntimeGraphqlModule::compile(
             f.schema.clone(),
             RuntimeGraphqlOptions::default()
+                .with_legacy_int_identities()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
                 .with_live_source(
                     f.source.clone(),
@@ -2908,6 +2917,7 @@ async fn rls_enabled_during_delivery_authorization_ends_without_delivery() {
         RuntimeGraphqlModule::compile(
             f.schema.clone(),
             RuntimeGraphqlOptions::default()
+                .with_legacy_int_identities()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
                 .with_live_source(
                     f.source.clone(),
@@ -3031,6 +3041,7 @@ async fn live_composite_key_inputs_compile_public_query_capabilities() {
             let module = RuntimeGraphqlModule::compile(
                 fixture.schema.clone(),
                 RuntimeGraphqlOptions::default()
+                    .with_legacy_int_identities()
                     .with_mutations(RuntimeGraphqlMutationOptions::default())
                     .with_cursor_profile(RuntimeCursorProfile::Unprotected)
                     .with_live_source(

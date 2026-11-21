@@ -252,12 +252,14 @@ async fn projections_are_typed_bounded_transaction_visible_and_authorized()
     database.set_entity_policy(AllowEntityReads);
     database.set_row_policy(AllowRows);
     database.set_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
+    // The schema is built for the default maximum; the repository reads
+    // below use a handle with a smaller one.
+    let sdl = schema_builder(database.clone()).finish().sdl();
     database.set_pagination_config(
         PaginationConfig::secure()
             .with_default_limit(Some(2))
             .with_max_limit(Some(2)),
     );
-    let sdl = schema_builder(database.clone()).finish().sdl();
     assert!(!sdl.contains("PublicCertificateProjection"));
     assert!(!sdl.contains("SensitiveCertificateProjection"));
     assert!(!sdl.contains("privateKeyEnc"));

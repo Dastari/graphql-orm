@@ -71,9 +71,8 @@ impl AiUsageService for OrmAiUsageService {
                 ..Default::default()
             }),
         };
-        let connection = AiUsageEntryRecord::keyset_connection_page(
-            &self.database,
-            AiUsageEntryRecordWhereInput {
+        let connection = {
+            let filter = AiUsageEntryRecordWhereInput {
                 scope_kind: Some(StringFilter {
                     eq: Some(scope.kind),
                     ..Default::default()
@@ -112,9 +111,19 @@ impl AiUsageService for OrmAiUsageService {
                 }),
                 created_at,
                 ..Default::default()
-            },
-            page_input(&page, false),
-        )
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                page_input(&page, false),
+                move |chunk| {
+                    AiUsageEntryRecord::keyset_connection_page(
+                        &self.database,
+                        filter.clone(),
+                        chunk,
+                    )
+                },
+            )
+        }
         .await
         .map_err(map_usage)?;
         Ok(AiUsageConnection {

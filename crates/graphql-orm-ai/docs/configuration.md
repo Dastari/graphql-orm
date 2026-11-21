@@ -28,10 +28,17 @@ authority.
 | `provider-tls-aws-lc`, `provider-tls-ring`, `provider-tls-native` | No | Provider HTTP TLS stack: rustls with aws-lc-rs, rustls with an explicit `ring` provider and the platform verifier, or the platform's native TLS. Exactly one is required by any adapter. |
 | `local-harness` | No | Installed, deployment-sandboxed JSON-lines driver; never a generic subprocess launcher. |
 | `provider-codex-app-server` | No | Experimental local Codex/app-server boundary; deployment owns installation, sandboxing, and credentials. |
-| `graphql-case-pascal` | No | Changes the complete public GraphQL naming contract. |
 
 Exactly one persistence backend is required. Provider features do not enable a
 provider or authorize egress.
+
+GraphQL naming is not a feature. The AI types use camelCase unless the build
+sets `GRAPHQL_ORM_AI_CASE=PascalCase`, which gives them the coherent
+PascalCase contract and requires `GRAPHQL_ORM_RESOLVER_CASE`,
+`GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` to be `PascalCase`
+too; any other value fails the build. These variables replaced the
+`graphql-case-pascal` feature (#508). See the ORM
+[naming configuration](../../../docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
 
 ### Provider TLS stack
 

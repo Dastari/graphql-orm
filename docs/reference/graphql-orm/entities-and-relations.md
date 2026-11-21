@@ -418,7 +418,11 @@ default behind it (its own or the position's), and list wrapping must match,
 except that a variable that is not a list may stand where the list's item type
 admits it, since execution coerces it to a one-element list. In a oneof input
 object a variable standing for the member must be declared non-null and
-resolve to a value. A
+resolve to a value. Under async-graphql's default `ValidationMode::Strict`,
+async-graphql's own argument validation refuses a member variable whose
+supplied value is `null` first, with its own `Invalid value for argument`
+message and no `invalid_graphql_input` code; under `ValidationMode::Fast` this
+check refuses it. A
 scalar, list or enum sent for an input object at any depth, or a variable whose
 type does not fit its position, refuses the whole request before any resolver,
 policy callback or SQL runs. The error is the one runtime GraphQL schemas
@@ -431,10 +435,16 @@ check covers field arguments; directive arguments (`@include`, `@skip` and
 custom directives) are left to async-graphql. Runtime GraphQL schemas use the
 same checker.
 
-A schema built by hand from generated roots does not get this check unless it
-installs the extension:
+A schema built by hand from generated roots must install the extension:
 `Schema::build(..).extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`.
-Without it such a schema keeps async-graphql's behaviour described above.
+The extension sets a private request mark, and every generated resolver that
+takes an input object (lists, keyset and scan pages, search, aggregates,
+`Changed` subscriptions, create, upsert, update, bulk update and delete, and
+to-many relation fields) refuses with `INPUT_VALIDATION_REQUIRED` before
+authorization or any database work when the mark is missing, the way
+[`GeneratedSubscriptionAdmission`](#subscription-release-authorization) fails closed.
+Resolvers with only scalar arguments, such as single reads and delete by id,
+do not need it (#753).
 
 ## Relation target auth mode and operation scopes
 
@@ -580,6 +590,24 @@ late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
 
 Repository-only entities cannot authorize GraphQL subscription provenance for creates or updates, so such a source suppresses those events even for a public target. Delete invalidations instead start authority at the current parent. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
+
+`#[graphql_entity(key_only_deletes)]` adds a key-only delete signal. When a
+generated delete releases no row to a subscriber (the row policy grants no
+deleted preimage, or SQL visibility cannot authorize a missing row), a
+subscriber whose `Key` or `Keys` argument names the deleted row's complete key
+receives `DELETED` with `id` (and `key` for a composite key) and a null entity.
+Unkeyed subscribers, and subscribers of other keys, receive nothing, as
+without the attribute. The subscriber's resolver authentication, scopes,
+assurance and entity access, and its read access to every key field, are
+checked before and after the payload is prepared. A key field must be
+exposed on change events and pass the host field policy, which is asked with
+no record. Row policy is not checked, because there is no row: a subscriber
+with entity and key-field access who names a key learns that a row with that
+key was deleted, whether or not it could read that row. Use the attribute
+only where that is acceptable. It is a compile error when a primary-key field
+declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is
+not GraphQL-readable, and it applies to direct deletes only, not to
+propagated events.
 
 Direct generated deleted preimages default to suppression. They require an
 explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or
@@ -948,7 +976,10 @@ alias/path; providers may be evaluated again during ordinary field resolution. A
 and execution-pruned skip/include selections retain their field identities.
 
 The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its default
-`NoCache` storage. It batches concurrent loads without reusing results across
+`NoCache` storage. The loader and its keys are generated-resolver plumbing:
+its key constructors are generated-only, hidden and outside semver, and apply
+no policy if called by hand. A handwritten schema registers the loader
+with `graphql::loaders::relation_data_loader::<T, B>(db)`. It batches concurrent loads without reusing results across
 requests; other cache types are not accepted as authoritative targets and the
 resolver falls back to a fresh typed query. Current visibility predicates and
 structural `DbAuthContext::partition_key()` values participate in SQL batch grouping. A cursor, snapshot,
@@ -986,7 +1017,7 @@ Use `#[relation(target = "Link", from = "id", to = "parent_id", multiple, filter
 to expose the relation name in the source's generated `WhereInput`. For example,
 `where: {links: [{targetId: {inList: ["x", "y"]}}]}` matches parents with any authorized
 matching link. The member is the relation field's GraphQL name, so a relation called `linked_to`
-is `LinkedTo` under `field-case-pascal` or `rename_fields = "PascalCase"`. The filter members of
+is `LinkedTo` under `GRAPHQL_ORM_FIELD_CASE=PascalCase` or `rename_fields = "PascalCase"`. The filter members of
 one alternative apply to one link row: `{TargetKind: {eq: "person"}, TargetId: {inList: ["a"]}}`
 matches a parent with a person link `a`, not a parent with a person link and a device `a`.
 Omitting the member applies no filter. An empty list matches no parents. Each alternative is a typed target

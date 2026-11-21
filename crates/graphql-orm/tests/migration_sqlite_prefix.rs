@@ -95,7 +95,12 @@ async fn unmanaged_lookalikes_refuse_strict_apply_and_survive_managed_only_repla
     }
     let manager = db.schema();
     let strict = manager
-        .plan_migration_to_entities("strict", "unmanaged lookalikes", &[Widget::metadata()])
+        .plan_migration_to_entities_with_options(
+            "strict",
+            "unmanaged lookalikes",
+            &[Widget::metadata()],
+            PlanOptions::strict(),
+        )
         .await?;
     assert_eq!(strict.steps.len(), names.len(), "{strict:?}");
     for name in names {

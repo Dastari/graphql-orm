@@ -97,8 +97,11 @@ provides generated resolver selection requirements.
 
 When rows and count are both required, the existing paired fetch retains its
 pinned database auth transaction. Keyset connections and authorized scans keep
-their explicit count opt-in. Repository `fetch_all` remains intentionally
-unbounded for trusted internal use.
+their explicit count opt-in. `EntityQuery::fetch_all` without a page reads
+every row, for trusted internal use. With a `paginate(page)` page, `fetch_all`,
+`fetch_all_with_auth`, `fetch_all_on` and `fetch_one*` honour `page.limit`
+exactly or fail with `PAGE_LIMIT_EXCEEDED`, like the connection reads (see
+[page size](#page-size-reduced-by-default-refused-on-request)).
 
 ## Authorization-aware pagination (0.33.0)
 
@@ -192,6 +195,19 @@ target, and as the policy of an entity that a generated related-row filter
 or relation-count ordering targets.
 
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
+`predicate.not()?` uses SQL `NOT`: TRUE becomes FALSE, FALSE becomes TRUE,
+and NULL/UNKNOWN remains UNKNOWN (denied in WHERE). It never treats UNKNOWN as
+FALSE before negating. Empty SQL fragments and empty conjunctions fail closed; an empty disjunction
+is the supported constant FALSE. A relation is three-valued (#770): UNKNOWN
+when a source key column is NULL, or when no related row matches but one has
+the target UNKNOWN. Its positive form renders as one correlated `EXISTS`; a
+negation, also one reaching it through `and`/`or`, renders
+`<keys IS NOT NULL> AND NOT EXISTS (<related rows where the target is not
+FALSE>)` (an anti-join on PostgreSQL). So `related(..).not()` never admits a
+NULL key or an UNKNOWN-only relation, and double negation is the identity.
+`exists_any.not()?.or(exists_matching)?` means "the key is set and no related
+row exists, or a related row matches"; to also admit rows without a key, add
+an explicit NULL test of the key with `or`.
 
 `ReadPredicate::related::<Backend, Source, Target>(&[("source_column",
 "target_column")], target_predicate)` provides a validated, parameterized
@@ -211,8 +227,11 @@ counts, aggregates, keyset and connection pages, authorized scans, search and
 subscription delivery. Each renders the same SQL clause; no path evaluates a
 policy in Rust.
 
-- `predicate.not()?` renders `NOT (...)` with the inner bind values in their
-  original order. It is TRUE exactly when the inner predicate is FALSE. A
+- `predicate.not()?` is TRUE exactly when the inner predicate is FALSE. For a
+  column comparison, NULL test, generated filter or closure it renders
+  `NOT (...)` with the inner bind values in their original order; a relation
+  renders its own FALSE rows (below), and `and`/`or` trees that contain one
+  are negated by De Morgan. A
   comparison with a NULL column is UNKNOWN, and `NOT` keeps it UNKNOWN, so
   negation does not admit a row because a compared column is NULL:
   `column("secret", Eq, 1).not()?` admits rows whose `secret` holds another
@@ -240,19 +259,31 @@ policy in Rust.
   refused as before.
 - **Absence of a related row.** `ReadPredicate::not_related::<Backend, Source,
   Target>(&[("source_column", "target_column")], target_predicate)` is the
-  fail-closed "no related row matching P". For each source row it is UNKNOWN
-  when a source key column is NULL, FALSE when a related row has `P` TRUE,
-  UNKNOWN when no related row has `P` TRUE but one has it UNKNOWN (it might
-  match), and TRUE otherwise, including when there is no related row. It
-  renders a `CASE` over two correlated `EXISTS` subqueries (related rows where
-  `P`, and related rows where `P` is not FALSE), so the target's bind values
-  appear twice. `not_related(k, p).not()?` admits the same rows as
-  `related(k, p)`. Add `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?`
+  fail-closed "no related row matching P", and is exactly
+  `related(k, p)?.not()`. For each source row it is UNKNOWN when a source key
+  column is NULL, FALSE when a related row has `P` TRUE, UNKNOWN when no
+  related row has `P` TRUE but one has it UNKNOWN (it might match), and TRUE
+  otherwise, including when there is no related row. It renders
+  `<every key IS NOT NULL> AND NOT EXISTS (<related rows where P is TRUE or
+  UNKNOWN>)`, one correlated subquery that binds the target's values once.
+  `not_related(k, p).not()?` admits the same rows as `related(k, p)`. Add `.or(ReadPredicate::is_null::<Backend, Source>("key")?)?`
   to admit rows with a NULL key. A target predicate rendering the deny
   fallback is refused, as for `not()`.
-- `related(k, p).not()?` is plain `NOT EXISTS`, which is two-valued: it admits
-  a row with a NULL key, or whose related rows all have `P` UNKNOWN. This form
-  is unchanged since 0.92; prefer `not_related` for absence policies.
+- `related(k, p).not()?` is that same three-valued negation since the
+  breaking release (#770). Before it, the form rendered plain `NOT EXISTS`,
+  which admitted a row with a NULL key, or whose related rows all had `P`
+  UNKNOWN.
+- Because a relation with a NULL key, or with only UNKNOWN matches, is
+  UNKNOWN and not FALSE, the UNKNOWN propagates through compositions:
+  `not_related(k, related(k2, q))` denies a source row whose related row has
+  a NULL `k2` key, and a negated closure over a relation target denies a row
+  whose closure holds an UNKNOWN and no TRUE. To count a related row with a
+  NULL key as "does not match", write the target as
+  `is_not_null(k2).and(related(k2, q))`.
+- A negated relation nests one `CASE` for each relation level it negates, so
+  the `CASE` limit below also bounds negation: a relation chain more than ten
+  levels deep builds but cannot be negated, and `not()` refuses it with
+  `AUTHORIZATION_MISCONFIGURED`.
 - **Visibility of related rows.** As with `related`, the policy owns the join:
   the target's row policy is not applied inside `related` or `not_related`, so
   a target row the caller cannot read counts like any other. `not_related(P)`
@@ -385,7 +416,7 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     shape.
 
 - **Composition limits.** Relations, negations and closures inline their
-  target: a closure four times, `not_related` twice. A closure inside a
+  target: a closure four times. A closure inside a
   closure also evaluates the inner walk for every row the outer walk
   reaches. Unbounded composition could therefore render a statement of many
   megabytes, nest past what the server parses, or recurse deeply enough to
@@ -487,9 +518,11 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
     1.1 s for two and 8 s for three, while four levels exhausted server
     memory. PostgreSQL followed the same curve: 3.7 s at two levels, 21 s at
-    three and 172 s at four. A `not_related` chain inlines its target twice
-    per level: on PostgreSQL eight levels took 150 s and nine 542 s, while
-    five, the most the `CASE` limit allows, take about 30 ms.
+    three and 172 s at four. Until the breaking release a `not_related`
+    chain inlined its target twice per level: on PostgreSQL eight levels took
+    150 s and nine 542 s. It now inlines its target once and nests one `CASE`
+    for every two levels, so the `CASE` limit stops it at twenty levels (nine
+    on SQL Server, at the relation total).
   - **What fits on SQL Server.** A closure at the default 64 hops uses 67
     subquery levels and counts as one relation; each `related` or
     `not_related` around it adds two subquery levels and one relation. That
@@ -570,47 +603,66 @@ above the maximum then fails with `PAGE_LIMIT_EXCEEDED` before any row is
 read. The message names the limit asked for and the maximum. A limit at the
 maximum and an omitted limit are served as before. The setting is off by
 default, so existing responses do not change. A custom resolver that takes a
-client `PageInput` should resolve it with
-`Database::client_pagination_config().resolve_client_page` so the setting covers it too.
-The setting also covers Rust reads that take a `PageInput`: with refusal on,
-an `EntityQuery::paginate(page)` read through `fetch_connection`,
-`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and an
-`EntitySearchQuery::paginate(page)` read, fail with `PAGE_LIMIT_EXCEEDED` when
-`page.limit` is above the maximum instead of being reduced.
+client `PageInput` must resolve it with
+`Database::client_pagination_config().resolve_client_page` before passing it
+to `paginate`, as generated resolvers do, so the client's limit is reduced, or
+refused when the setting is on. The setting does not apply to host reads: a
+`PageInput` that reaches `paginate` directly is a trusted request and is
+exact or refused, as below.
 
-`schema_roots!(max_page_limit: N, ...)` declares the maximum at compile time.
-The generated module then exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
-semantic catalogue publishes `N` as the ceiling of every pageable
-relationship list (in place of the compile-time default of 100), the relation
-complexity estimate caps a requested page at `N`, and building the schema
-panics when the `Database` applies a different maximum or none. Without the
-declaration nothing changes: the catalogue and the complexity estimate use
-100 whatever the database is configured with. With several declaring schemas
-in one process each complexity estimate uses its own schema data; undeclared schemas retain the default estimate of 100.
+A schema's maximum page limit is fixed at compile time:
+`schema_roots!(max_page_limit: N, ...)`, or 100 when the declaration is
+omitted. The generated module exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
+semantic catalogue publishes it as the ceiling of every pageable relationship
+list, the relation complexity estimate caps a requested page at it, and
+building the schema panics when the `Database` applies a different maximum or
+none. The published bound and the estimate therefore always agree with what
+the database applies. With several schemas in one process each complexity
+estimate uses its own schema data; bounds are never shared between schemas.
 
-Rust repository reads are separate. `limit(n)` on a repository or transaction
-builder is exact or refused, and `with_max_limit(n)` gives one trusted read
-its own maximum (see the 0.128.0 migration note). The keyset helpers
-(`Record::keyset_page`, `keyset_connection_page`, `tx.keyset_page`) keep GraphQL
-page semantics and reduce an oversized limit. To read more rows a page from
-trusted code, page with
-`EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(&db, None, None, page)`,
-or call the helper on a handle with a raised maximum:
+Rust repository reads are separate: trusted code gets the rows it asked for
+or an error. `limit(n)` on a repository or transaction builder is exact or
+refused, and `with_max_limit(n)` gives one trusted read its own maximum (see
+the 0.128.0 migration note). The keyset helpers (`Record::keyset_page`,
+`keyset_connection_page`, `tx.keyset_page`, and `fetch_authorized_keyset*` or
+`fetch_authorized_scan` called without a GraphQL context) follow the same
+rule: an explicit limit above the maximum fails with `PAGE_LIMIT_EXCEEDED`,
+and an omitted limit uses the default limit, reduced to the maximum. Called
+with a GraphQL context, `fetch_authorized_keyset*` and `fetch_authorized_scan`
+treat the limit as a client's: it is reduced, or refused when
+`refuse_oversized_page_limit` is set. `paginate(PageInput)` follows the same
+host rule: `EntityQuery::paginate(page)` read through `fetch_all`,
+`fetch_all_with_auth`, `fetch_all_on`, `fetch_one*`, `fetch_connection`,
+`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and
+`EntitySearchQuery::paginate(page)` read through any fetch, honour
+`page.limit` exactly or fail with `PAGE_LIMIT_EXCEEDED` (a negative limit with
+`INVALID_INPUT`), whatever `refuse_oversized_page_limit` says. Before the
+breaking release these two reduced the limit to the maximum without saying
+so. To read more rows a page from trusted code, give the read its own
+maximum: `EntityQuery::<Record>::new().with_max_limit(n)` before
+`fetch_authorized_keyset(&db, None, None, page)` or `paginate(page)` and a
+`fetch_connection*` call, or `.pagination_config(config.with_max_limit(Some(n)))`
+on a search. A handle with a raised maximum works too:
 `db.clone().with_pagination_config(db.pagination_config().with_max_limit(Some(n)))`.
 Either way the page is bounded by `n`, and `pageInfo.hasNextPage` and the end
 cursor page through a larger set.
 
-### Page offset: unbounded by default, bounded on request
+### Page offset: bounded at 10,000 by default
 
 Every backend reads and discards the rows an offset skips, so a client that
-sends `page: { offset: 1000000000 }` costs a scan of that many rows. Offsets
-are unbounded by default, so existing responses do not change. Set
-`DatabaseBuilder::max_page_offset(Some(n))` (or
-`Database::with_max_page_offset(Some(n))`) to refuse an offset above `n`
-with `PAGE_LIMIT_EXCEEDED`, the code of a refused page limit, before any row
-is read. The message is `requested offset N exceeds the maximum page offset M`.
-`PaginationConfig::RECOMMENDED_MAX_OFFSET` is 10,000; page deeper with keyset
-cursors. The bound applies on SQLite, PostgreSQL and SQL Server to the same
+sends `page: { offset: 1000000000 }` costs a scan of that many rows. Since the
+breaking release a `Database` refuses a client offset above
+`PaginationConfig::DEFAULT_MAX_OFFSET` (`Some(10_000)`, the value of
+`PaginationConfig::RECOMMENDED_MAX_OFFSET`) with `PAGE_LIMIT_EXCEEDED`, the
+code of a refused page limit, before any row is read. Release 0.169.0 added
+the bound as an opt-in; it was unbounded by default until the breaking
+release. The message is `requested offset N exceeds the maximum page offset
+M`. Set another maximum with `DatabaseBuilder::max_page_offset(Some(n))` (or
+`Database::with_max_page_offset(Some(n))`), or opt out with
+`max_page_offset(None)` to leave client offsets unbounded; page deeper with
+keyset cursors. A `ClientPaginationConfig` built directly from a
+`PaginationConfig`, as a pool or transaction without a `Database` uses, has no
+offset maximum unless `with_max_offset` sets one. The bound applies on SQLite, PostgreSQL and SQL Server to the same
 pages as the limit refusal: list roots, to-many relations and search
 connections, custom resolvers that use
 `ClientPaginationConfig::resolve_client_page` (or `admit_client_offset`), and

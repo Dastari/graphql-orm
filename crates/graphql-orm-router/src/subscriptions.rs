@@ -84,6 +84,8 @@ impl std::fmt::Debug for InternalSubscriptionEndpoint {
 
 pub(crate) struct SubscriptionGateway {
     persisted_documents: Option<crate::persisted::PersistedDocuments>,
+    /// Whether refusals before any subgraph request carry `outcome: refused`.
+    refusal_outcome: bool,
     config: SubscriptionConfig,
     authentication: Arc<dyn AuthenticationProvider>,
     internal: InternalSubscriptionEndpoint,
@@ -108,6 +110,7 @@ impl SubscriptionGateway {
         bound_address: SocketAddr,
         metrics: Arc<RouterMetrics>,
         persisted_documents: Option<crate::persisted::PersistedDocuments>,
+        refusal_outcome: bool,
     ) -> Arc<Self> {
         let connect_address = loopback_connect_address(bound_address);
         let internal_url = format!("ws://localhost:{}{}", connect_address.port(), internal.path);
@@ -116,6 +119,7 @@ impl SubscriptionGateway {
         let max_pending_connections = config.pending_connection_limit();
         Arc::new(Self {
             persisted_documents,
+            refusal_outcome,
             config,
             authentication,
             internal,
@@ -709,7 +713,12 @@ async fn handle_text(
             json!({"type": "pong"}).to_string().into(),
         )),
         "pong" => None,
-        "subscribe" => forward_subscribe(message, state).await,
+        "subscribe" => {
+            let refusal_outcome = state.borrow().gateway.refusal_outcome;
+            forward_subscribe(message, state)
+                .await
+                .map(|reply| mark_subscribe_refusal(reply, refusal_outcome))
+        }
         "complete" => forward_complete(message, state).await,
         _ => state
             .borrow_mut()
@@ -1104,6 +1113,9 @@ fn public_server_message(mut message: Value, state: &SharedConnectionState) -> O
             if kind != "next" {
                 state.remove_operation(&id);
             }
+            if kind == "error" && state.gateway.refusal_outcome {
+                crate::outcome::mark_hive_websocket_refusal(&mut message);
+            }
             message["id"] = Value::String(id);
         }
         _ => {}
@@ -1230,6 +1242,26 @@ async fn forward_subscribe(
     state
         .borrow_mut()
         .terminate_with_public_close(1011, "Subscription transport unavailable")
+}
+
+/// Every operation-scoped `error` frame that `forward_subscribe` answers
+/// itself is sent before the operation reaches Hive, so nothing ran. Close
+/// frames and forwarded operations are unchanged.
+fn mark_subscribe_refusal(reply: ws::Message, refusal_outcome: bool) -> ws::Message {
+    let ws::Message::Text(text) = &reply else {
+        return reply;
+    };
+    if !refusal_outcome {
+        return reply;
+    }
+    let Ok(mut message) = serde_json::from_str::<Value>(text) else {
+        return reply;
+    };
+    if message.get("type").and_then(Value::as_str) != Some("error") {
+        return reply;
+    }
+    crate::outcome::mark_refused_frame(&mut message);
+    ws::Message::Text(message.to_string().into())
 }
 
 fn encode_operation_variables(
@@ -1650,6 +1682,7 @@ mod tests {
             "127.0.0.1:12345".parse().unwrap(),
             Arc::new(RouterMetrics::default()),
             None,
+            false,
         )
     }
 
@@ -1838,6 +1871,7 @@ mod tests {
             "127.0.0.1:12345".parse().unwrap(),
             Arc::new(RouterMetrics::default()),
             None,
+            false,
         );
         let state = Rc::new(RefCell::new(ConnectionState {
             gateway: gateway.clone(),

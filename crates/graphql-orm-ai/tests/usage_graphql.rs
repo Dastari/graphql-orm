@@ -55,14 +55,14 @@ fn schema(
 async fn usage_query_is_authenticated_bounded_and_passes_exact_scope_and_filters() {
     let service = Arc::new(RecordingUsageService::default());
     let schema = schema(service.clone());
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let query = r#"{
         aiUsage(
             scope: { kind: "project", id: "project-7", tenantId: "tenant-3" }
             filter: { providerModel: "gpt-test" }
         ) { edges { cursor } pageInfo { hasNextPage } }
     }"#;
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let query = r#"{
         AiUsage(
             Scope: { Kind: "project", Id: "project-7", TenantId: "tenant-3" }
@@ -92,13 +92,13 @@ async fn usage_query_is_authenticated_bounded_and_passes_exact_scope_and_filters
 async fn usage_query_fails_closed_without_auth_service_or_valid_filter() {
     let service = Arc::new(RecordingUsageService::default());
     let schema = schema(service.clone());
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let basic_query = "{ aiUsage(scope: { kind: \"project\", id: \"one\" }) { edges { cursor } } }";
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let basic_query = "{ AiUsage(Scope: { Kind: \"project\", Id: \"one\" }) { Edges { Cursor } } }";
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     let invalid_query = "{ aiUsage(scope: { kind: \"project\", id: \"one\" }, filter: { providerModel: \" \" }) { edges { cursor } } }";
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     let invalid_query = "{ AiUsage(Scope: { Kind: \"project\", Id: \"one\" }, Filter: { ProviderModel: \" \" }) { Edges { Cursor } } }";
     let unauthenticated = schema.execute(basic_query).await;
     assert_eq!(unauthenticated.errors.len(), 1);

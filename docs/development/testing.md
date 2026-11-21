@@ -23,6 +23,15 @@ The UI snapshot lane requires `rust-src` so standard-library panic excerpts
 match across local and CI runs. The repository toolchain and ORM CI jobs install
 that component explicitly.
 
+The `runtime-live` owned lane includes the runtime GraphQL CI test sets for
+SQLite and PostgreSQL, including assurance, format, many-to-many and long-table
+search regressions.
+
+The `callback-errors` owned lane runs callback refusal and keyset compatibility
+regressions on SQLite and a test-owned PostgreSQL container:
+`bash scripts/run-owned-database-lanes.sh callback-errors`. SQL Server callback
+refusals remain covered by the `bulk-refusals` lane.
+
 ## Workflow dependencies and permissions
 
 Pin external GitHub Actions to full commit SHAs and retain the upstream version
@@ -61,21 +70,43 @@ cargo tree -p graphql-orm --locked --no-default-features --features mssql
 cargo tree --duplicates --workspace --locked
 ```
 
-## GraphQL case features
+## GraphQL naming lanes
+
+Generated names follow the `GRAPHQL_ORM_RESOLVER_CASE`,
+`GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` build variables
+([naming configuration](../reference/graphql-orm/macros-and-attributes.md#naming-configuration)).
+The build scripts turn them into `cfg(graphql_orm_resolver_case = "...")`,
+`cfg(graphql_orm_argument_case = "...")` and `cfg(graphql_orm_field_case =
+"...")`, with the values `camel`, `pascal`, `snake`, `screaming_snake`,
+`lower` and `upper`, which tests can use too.
 
 Tests that build GraphQL documents spell names through
 `crates/graphql-orm/tests/support/graphql_case.rs`. Its `resolver_name`,
 `argument_name` and `field_name` take the default camelCase spelling, and apply
-the same `convert_case` conversion the derive macros use for the enabled
-`resolver-case-*`, `argument-case-*` or `field-case-*` feature. Fixed wire names
-such as `NodeId` and `RecordVersion` are written literally. The CI
-`orm-case-features` job runs `managed_version`, `keyed_changed_subscriptions`,
-`node_ids`, `grouped_aggregates` and `record_version_ui` with all three
-snake-case features:
+the same `convert_case` conversion the derive macros use for the selected
+case. Fixed wire names such as `NodeId` and `RecordVersion` are written
+literally. The CI `orm-case-features` job runs `managed_version`,
+`keyed_changed_subscriptions`, `node_ids`, `grouped_aggregates` and the
+`record_version_ui` compile contract with all three variables set to
+`snake_case`:
 
 ```sh
-cargo test -p graphql-orm --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui
+export GRAPHQL_ORM_RESOLVER_CASE=snake_case GRAPHQL_ORM_ARGUMENT_CASE=snake_case GRAPHQL_ORM_FIELD_CASE=snake_case
+cargo test -p graphql-orm --no-default-features --features sqlite --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates
+cargo test -p graphql-orm --no-default-features --features sqlite --test compile_ui record_version_ui
 ```
+
+A different value rebuilds graphql-orm and everything above it in the same
+target directory. Use a separate `CARGO_TARGET_DIR` per naming lane when you
+switch often.
+
+## Compile contracts
+
+The trybuild compile-fail and compile-pass contracts run in one test binary,
+`crates/graphql-orm/tests/compile_ui/`, with one module per area (they share
+the `support/ui.rs` lock and ran one at a time before). Select a module with a
+filter, for example
+`cargo test -p graphql-orm --test compile_ui dependent_delete_ui::`.
 
 ## Required authorization and privacy regressions
 
@@ -298,12 +329,15 @@ scripts/run-owned-database-lanes.sh ai-postgres
 
 `scripts/run-owned-database-lanes.sh page-limit-contract` runs
 `page_limit_contract` (the opt-in oversized page refusal, the declared
-`schema_roots!` maximum and host keyset maxima) on SQLite, an owned PostgreSQL
+`schema_roots!` maximum, host keyset maxima and exact host `paginate` reads) on SQLite, an owned PostgreSQL
 container and an owned SQL Server container.
-
 `scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
 authorized page regressions (`authorized_page_context_binding`) on SQLite,
 PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
+
+`scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
+unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
+predicate column, duplicate keys inside the filter, and duplicates outside it.
 
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order
@@ -383,3 +417,9 @@ CI and full release validation. Run it on a selected branch with
 It does not create skipped check runs for CI's other jobs or share CI's main
 concurrency group. The runner has a 120-minute timeout and reclaims disk before
 executing the two owned PostgreSQL test families. No release is triggered.
+
+The focused `bash scripts/run-owned-database-lanes.sh migration-journal` lane
+executes the PostgreSQL journal and TRUNCATE regressions, journaled dependent
+deletes, catalog-read cancellation, and the PostgreSQL router fixture using
+test-owned disposable databases. Use it to repeat the journal portion of
+`postgres-legacy` after a recorder change.

@@ -3,7 +3,7 @@ title: graphql-orm-router threat model
 kind: architecture
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-16
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -32,6 +32,10 @@ and RLS remain authoritative after router preflight.
   may deny before downstream work. It cannot grant around a subgraph guard.
   An undescribed root field is refused, and scope-template values are limited
   to one plain segment so client arguments cannot add separators or wildcards.
+  Composed `@authenticated` and `@requiresScopes` directives are evaluated on
+  every selected field at any depth, through aliases, fragments, interfaces,
+  and unions; a refused selection refuses the whole operation before any
+  downstream request.
 - Introspection is off unless configured; when enabled on an authenticated
   router it requires a validated bearer and stays depth-bounded.
 - Bearers propagate only after validation and only to configured GraphQL

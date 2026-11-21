@@ -67,7 +67,7 @@ pub trait AiRuleHierarchyResolver: Send + Sync {
 
 /// GraphQL classification ceiling. Secret material is deliberately absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiRuleClassificationInput {
     /// Public data only.
     Public,
@@ -92,7 +92,7 @@ impl From<AiRuleClassificationInput> for DataClassification {
 
 /// GraphQL tool-maturity ceiling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiRuleToolMaturityInput {
     /// Read-only application tools.
     ReadOnly,
@@ -121,7 +121,7 @@ impl From<AiRuleToolMaturityInput> for ToolMaturity {
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Enum,
 )]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiRuleApprovalRequirement {
     /// Preserve the registered descriptor and current host approval policy.
     DescriptorPolicy,
@@ -162,7 +162,7 @@ impl AiRuleApprovalRequirement {
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Enum,
 )]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiRuleProviderCapability {
     /// Streaming model output.
     Streaming,
@@ -966,7 +966,7 @@ fn resolved_rule_fingerprint(
 /// Absence inherits the effective broader ceiling. Zero explicitly permits no
 /// capacity in that dimension.
 #[derive(Clone, Debug, Default, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiRuleBudgetInput {
     /// Optional maximum steps; absence inherits broader limits.
     pub maximum_steps: Option<i64>,
@@ -988,7 +988,7 @@ pub struct AiRuleBudgetInput {
 
 /// GraphQL compare-and-swap input for one exact rule layer.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct SetAiRulePolicyInput {
     /// Exact application-defined scope.
     pub scope: AiScopeInput,
@@ -1064,7 +1064,7 @@ impl SetAiRulePolicyInput {
 
 /// Redacted GraphQL view of one exact stored rule layer.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiRulePolicyView {
     /// Scope kind.
     pub scope_kind: String,
@@ -1142,10 +1142,10 @@ pub trait AiRulePolicyService: Send + Sync {
 pub struct AiRuleQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiRuleQueryRoot {
     /// Loads one redacted exact-scope rule layer.
     async fn ai_rule_policy(
@@ -1166,10 +1166,10 @@ impl AiRuleQueryRoot {
 pub struct AiRuleMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiRuleMutationRoot {
     /// Creates or compare-and-swap updates one exact rule layer.
     async fn set_ai_rule_policy(

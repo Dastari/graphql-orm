@@ -302,3 +302,102 @@ async fn conditional_unique_index_is_idempotent_and_detects_predicate_tampering(
         .await?;
     Ok(())
 }
+
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    table = "conditional_index_records",
+    plural = "ConditionalPreflightRecords"
+)]
+#[graphql_orm(conditional_index(
+    name = "uidx_preflight_digest",
+    columns = ["digest"],
+    unique = true,
+    predicate_field = "status",
+    predicate_values = ["status"]
+))]
+#[allow(dead_code)]
+struct ConditionalPreflightRecord {
+    #[primary_key]
+    id: String,
+    digest: String,
+    status: Option<String>,
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn conditional_unique_preflight_respects_new_and_existing_predicate_columns()
+-> graphql_orm::Result<()> {
+    for (add_status, included, refused) in [
+        (true, false, false),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        let database = database().await?;
+        let mut before = ConditionalPreflightRecord::metadata().clone();
+        before.indexes = Box::new([]);
+        if add_status {
+            before.fields = before
+                .fields
+                .iter()
+                .filter(|c| c.name != "status")
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+        }
+        let plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "preflight-v1",
+                "before conditional index",
+                &[Box::leak(Box::new(before))],
+            )
+            .await?;
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await?;
+        let sql = if add_status {
+            "INSERT INTO conditional_index_records (id, digest) VALUES ('1', 'same'), ('2', 'same')"
+        } else if included {
+            "INSERT INTO conditional_index_records (id, digest, status) VALUES ('1', 'same', 'status'), ('2', 'same', 'status')"
+        } else {
+            "INSERT INTO conditional_index_records (id, digest, status) VALUES ('1', 'same', 'outside'), ('2', 'same', 'outside'), ('3', 'same', 'status')"
+        };
+        graphql_orm::sqlx::query(sql)
+            .execute(database.pool())
+            .await?;
+        let plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "preflight-v2",
+                "conditional index",
+                &[ConditionalPreflightRecord::metadata()],
+            )
+            .await?;
+        let result = database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await;
+        if refused {
+            let error = result.expect_err("duplicates inside the predicate must be refused");
+            assert!(
+                graphql_orm::graphql::orm::UniqueIndexDuplicates::from_error(&error).is_some(),
+                "{error:?}"
+            );
+            assert_eq!(
+                database.schema().current_version().await?,
+                Some("preflight-v1".into())
+            );
+        } else {
+            result?;
+            assert_eq!(
+                database.schema().current_version().await?,
+                Some("preflight-v2".into())
+            );
+        }
+    }
+    Ok(())
+}

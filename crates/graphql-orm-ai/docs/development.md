@@ -23,9 +23,10 @@ RUSTDOCFLAGS="-D warnings -D missing_docs" \
 Check the optional naming contract independently:
 
 ```bash
-cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
-RUSTDOCFLAGS="-D warnings -D missing_docs" \
-  cargo doc -p graphql-orm-ai --features graphql-case-pascal --no-deps
+export GRAPHQL_ORM_AI_CASE=PascalCase GRAPHQL_ORM_RESOLVER_CASE=PascalCase \
+  GRAPHQL_ORM_ARGUMENT_CASE=PascalCase GRAPHQL_ORM_FIELD_CASE=PascalCase
+cargo test -p graphql-orm-ai --test graphql_naming
+RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai --no-deps
 ```
 
 Compile other backends without connecting to them:

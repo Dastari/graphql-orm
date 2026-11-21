@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.186.0 to 0.187.0: read-predicate columns bound to their row
+## 0.187.0 to 0.188.0: read-predicate columns bound to their row
 
 Upgrade ORM and macros together. Read predicates now bind every column to
 the row it describes (#796):
@@ -259,6 +259,1012 @@ same rows. Hand-written filters are restricted, as described below.
   Placeholder counting now closes a SQLite `[...]` name at its first `]`,
   as SQLite does; it used to read `]]` as an escaped bracket, which only
   SQL Server has. Fragments without `]]` count the same.
+
+## 0.186.0 to 0.187.0: breaking release
+
+This release collects every change that breaks hosts or invalidates stored
+fingerprints, bindings, approvals or sessions. It is the only breaking release
+of this batch: the releases before it were additive, and their entries follow
+this section, newest first.
+
+**Who needs this section.** Every host. A host that upgrades from an older
+release applies the entries below this section for the releases it skipped as
+well; they are cumulative, and each is marked **Action needed** or **No
+action**.
+
+**Versions.** Upgrade all the packages you use in one deployment. A producer
+and a consumer on different sides of this release do not agree on any
+fingerprint.
+
+| Package | Version in this release |
+| --- | --- |
+| `graphql-orm`, `graphql-orm-macros` | 0.187.0 |
+| `graphql-orm-operation-catalog` | 0.10.0 |
+| `graphql-orm-ai-tool-profiles` | 0.27.0 |
+| `graphql-orm-ai` (AI schema module `0.83.0`) | 0.151.0 |
+| `graphql-orm-backup` | 0.28.0 |
+| `graphql-orm-router` | 0.17.0 |
+| `graphql-orm-storage`, `graphql-orm-router-protocol` | unchanged |
+
+**How to upgrade in one pass.** Every entry in parts 1 to 4 is marked
+**Action needed** and says who it applies to; skip an entry whose condition
+you do not meet. The parts are ordered by what they change. Work in two
+stages: first make the Part 2 code changes, because replanning a migration
+needs a build that compiles against the new release; then, at deployment, run
+Part 1, Part 3 and Part 4 in that order.
+
+1. [Part 1: schema and storage](#part-1-schema-and-storage). Replan pending
+   migrations, re-apply the PostgreSQL change-journal recorder, and apply AI
+   schema module `0.83.0`, with the new build and before any new worker
+   starts.
+2. [Part 2: build configuration and Rust API](#part-2-build-configuration-and-rust-api).
+   Make the workspace compile again: naming variables, removed features and
+   APIs, new enum variants and the compile-time page maximum. Do this first.
+3. [Part 3: defaults and behaviour](#part-3-defaults-and-behaviour). Review
+   each default that changed and either accept it or set the documented
+   opt-out, before the first request is served.
+4. [Part 4: fingerprints, bindings, approvals and sessions](#part-4-fingerprints-bindings-approvals-and-sessions).
+   Regenerate exports and manifests, and let stored state that holds an old
+   fingerprint rebind or be requested again.
+
+Changes in this release that need no action are listed
+[at the end](#also-in-this-release-no-action).
+
+### Part 1: schema and storage
+
+Do these as the first step of the deployment, with a build that already has
+the Part 2 code changes: planning and applying need the new release. None of
+them changes generated SDL.
+
+#### 1.1 Migration plans: undeclared tables, lossy type changes and integrity removal (#441, #568, #569)
+
+**Action needed** for every host that plans or applies migrations: replan
+pending migrations with the new release before applying them. ORM and macros.
+Generated SDL, operation catalogues and fingerprints are unchanged by this
+entry. Stored plan hashes change for plans that contain a
+reclassified step, because the hash covers each step's risk.
+
+- **Plans no longer drop undeclared tables by default. Action needed** for
+  hosts that rely on a default plan to remove a table whose entity was
+  deleted. `PlanOptions::default()` is now `managed_tables_only()`, so
+  `plan_migration`, `plan_migration_to_entities` and `plan_schema_target`
+  ignore every live table the target does not declare. The ORM keeps no
+  record of which tables it created, and the old default planned a
+  `DROP TABLE` for a host's own tables too. To drop tables:
+  - pass `PlanOptions::strict()` to the `_with_options` planner when every
+    table the database (or PostgreSQL schema) holds is the ORM's; or
+  - in a shared database, plan from a current model that names only the
+    tables to remove:
+    `plan_migration_with_options(version, description, &current, &target, PlanOptions::strict())`.
+  Either way the drops are `Destructive` and need
+  `ApplyOptions::allow_destructive`. Hosts that already pass
+  `managed_tables_only()` or `strict()` explicitly see no change.
+- **Schema stages and ABI upgrades drop only tables a stage declared. Action
+  needed** only for hosts that used a stage to drop a table no stage ever
+  declared. `plan_schema_stages`, `apply_schema_stages` and
+  `plan_upgrade`/`apply_upgrade` now leave such tables out of the plan. A
+  table that an earlier stage declared and a later stage omits is still
+  dropped, as a destructive step.
+- **Lossy column type changes are `Destructive`. Action needed** for hosts
+  that apply type changes under `ApplyOptions::default()`. A type change is
+  `Risky`, as before, only when it is a known lossless widening: a larger
+  integer, an integer into a wide enough exact numeric or a float that holds
+  it exactly, `REAL` into `DOUBLE PRECISION`, a numeric with at least the
+  same integer digits and scale, and a longer or unlimited
+  `VARCHAR`/`NVARCHAR`/`TEXT`. Every other type change, including one between
+  types the classifier does not know, is now `Destructive`: PostgreSQL
+  applies it with `ALTER COLUMN ... TYPE` and no `USING` clause, which rounds
+  or truncates stored values (`DOUBLE PRECISION` to `INTEGER`, a smaller
+  `NUMERIC` scale, `TIMESTAMPTZ` to `DATE`). Review the plan, then apply it
+  with `allow_destructive: true`.
+- **Integrity-removing steps are `Destructive`. Action needed** for hosts
+  whose plans or stages contain them and apply under
+  `ApplyOptions::default()`: `SetAppendOnly { enabled: false }`, `DropIndex`
+  (the step does not say whether the index is unique), `DropForeignKey`, and
+  a `SetCompositeUniques` or `SetCheckConstraints` step that removes or
+  changes an existing constraint. Steps that only add a constraint stay
+  `Risky`. This also covers changes the planner renders as a drop followed by
+  a create, such as a changed index definition or a foreign key whose delete
+  action changes. Review the plan, then apply it with
+  `allow_destructive: true`.
+- No new option was added: the existing `allow_destructive` gate covers all
+  of the above, for planned migrations, schema targets, schema stages, ABI
+  upgrades and owned (runtime) migrations.
+
+Classification details that can change a plan you already reviewed:
+
+- Removing column-level UNIQUE or
+  primary-key enforcement is `Destructive` and requires `allow_destructive`.
+  Of the append-only steps, only enabling retention purge can need it:
+  `SetAppendOnly { enabled: true, retention_purge: true }` is `Destructive` on
+  a table that is already append-only without purge, and when the prior state
+  is unknown (the public `classify_migration_step`). It is `Additive` on a
+  table without append-only enforcement. Enabling enforcement without purge,
+  or turning purge off, stays `Additive`, and disabling append-only
+  enforcement stays `Destructive`. `additive_only` refuses every
+  `Destructive` step.
+
+- Hosts that apply schema stages with `additive_only`
+  or inspect `PlannedSchemaStage::steps()`: stages now classify against the
+  schema they are planned from, exposed as the new public field
+  `PlannedSchemaStage::source_schema`, instead of an empty schema. Enabling
+  append-only enforcement in a stage is `Additive` again, and enabling purge
+  on an append-only table needs `allow_destructive`. Code that builds a
+  `PlannedSchemaStage` with a struct literal must set `source_schema`.
+
+- Review type conversions using the actual backend. The
+  classifier treats these as lossy, so they are `Destructive`: on SQL Server,
+  `NVARCHAR` into `VARCHAR`, `CHARACTER VARYING` or `TEXT` (code-page types
+  that may replace Unicode characters), any change into a length-less
+  `VARCHAR`, `NVARCHAR`, `CHAR` or `NCHAR` (one character wide), and a
+  numeric or integer into bare `DECIMAL`/`NUMERIC` that `(18,0)` cannot hold;
+  on SQLite, bare `NUMERIC` is also read as `(18,0)`, and `INTEGER` is 64-bit,
+  so `INTEGER` into `DOUBLE PRECISION` is lossy. PostgreSQL reads bare
+  `NUMERIC` as unconstrained and a length-less `VARCHAR` as unlimited, as
+  before. Without a backend, `classify_migration_step` admits a widening only
+  when it is lossless on every backend.
+
+#### 1.2 PostgreSQL change journal: TRUNCATE and unjournaled cascades are refused (#592)
+
+**Action needed** only for hosts that build with the `change-journal` feature
+on PostgreSQL. ORM and macros, and the backup ORM adapter.
+
+- **Re-apply the schema target. Action needed.** The recorder now installs a
+  `BEFORE TRUNCATE` statement trigger, `graphql_orm_change_journal_truncate`,
+  on every journaled table. Until the schema target is applied again (or
+  `Database::ensure_change_journal_recorder` is run) as the owner of the
+  tables, `validate_target` reports
+  `Missing change journal TRUNCATE guard` for each journaled table.
+- **`TRUNCATE` on a journaled table is refused. Action needed** for hosts or
+  operators that truncate entity tables. The statement fails with SQLSTATE
+  `0A000` and a message that starts
+  `graphql-orm change journal refuses TRUNCATE`, also when it reaches the
+  table through `TRUNCATE ... CASCADE`. The journal cannot record a truncate,
+  and an incremental restore would bring the rows back. Delete the rows
+  instead. A transaction that runs
+  `SET LOCAL graphql_orm.change_journal = 'off'` (the public constant
+  `CHANGE_JOURNAL_SETTING`) declares that it writes without journaling and may
+  truncate; take a full backup afterwards.
+- **A cascade into a table without a recorder is refused. Action needed** for
+  schemas where a table with a composite primary key (which the journal
+  cannot record) has a foreign key to a journaled table with
+  `ON DELETE CASCADE` or `SET NULL`. `plan_schema_target` and
+  `ensure_change_journal_recorder` fail with `ChangeJournalCascadeGap`
+  (`ChangeJournalCascadeGap::from_error`), `validate_target` reports
+  `Unjournaled cascade`, and the recorder install also refuses, from the
+  catalog, any such foreign key on a table no schema target declares
+  (including `ON UPDATE` actions). `validate_target` reports the same for
+  live tables, including constraints added outside the ORM after the recorder
+  was installed. Give the table a single-column primary key, journal it, or
+  make the foreign key restrict the delete and delete the rows through the
+  ORM.
+- **Backup adapter.** `OrmBackupAdapter::clear_restore_target` clears a
+  PostgreSQL target inside a transaction that turns the journal setting off,
+  so it keeps working on journaled databases. No action.
+- SQLite records journal entries from the ORM's own writes and has no
+  `TRUNCATE` statement; SQL Server has no change journal. Neither changes.
+- **Action needed.** Never set `graphql_orm.change_journal = off` as a role-level
+  or database-level default. The TRUNCATE guard reads the effective
+  `current_setting`, so those defaults also disable the guard. Limit the opt-out
+  to a trusted restore transaction using `SET LOCAL`, then take a full backup.
+
+#### 1.3 AI schema module `0.83.0`, and migrations refuse repeated unique keys before DDL (#532)
+
+**Action needed** for every host that composes `AiSchemaModule`: apply AI
+schema module `0.83.0` before starting workers. The unique-key check below
+also applies to every host migration that adds a unique index, with or without
+AI.
+
+Module `0.83.0` adds three unique indexes to module `0.82.0` (AI 0.147.0,
+which added the stored-response ledger table), and no table or column:
+
+| Table | Unique key |
+| --- | --- |
+| `graphql_orm_ai_approvals` | `tool_call_id` |
+| `graphql_orm_ai_run_attempts` | `run_id, lease_generation` |
+| `graphql_orm_ai_context_checkpoints` | `session_id, through_sequence` |
+
+The runtime already wrote at most one row per key, so a healthy store has no
+repeated key. Duplicates are not merged or deleted for you.
+
+`SchemaManager::apply_migration` and `apply_schema_target` now look for rows
+that repeat the key of a unique index the plan creates, before they run any
+statement. If they find one they return an error that
+`UniqueIndexDuplicates::from_error` reads; it names the table, the index and
+the key columns and carries no row data. Nothing has changed at that point:
+no DDL has run and the migration version is not recorded. This check applies
+to every host migration that adds a unique index to an existing table, not
+only to the AI module.
+
+Host steps:
+
+1. Plan and apply the AI module as usual
+   (`plan_migration_to_entities(..., AiSchemaModule.entities())`, then
+   `apply_migration`). The three steps are additive.
+2. If the apply returns `UniqueIndexDuplicates`, find the repeated rows, for
+   example
+   `SELECT session_id, through_sequence, COUNT(*) FROM graphql_orm_ai_context_checkpoints GROUP BY session_id, through_sequence HAVING COUNT(*) > 1`,
+   decide which row is authoritative, remove the others, and apply the same
+   plan again. Repeated rows in these tables mean the store was written
+   outside the runtime or restored inconsistently; investigate before
+   deleting.
+3. Expect the check to add one grouped read per new unique index to the
+   apply. On a very large table, run it in a maintenance window.
+
+Limits of the check: it covers `CREATE UNIQUE INDEX` on a table and columns
+that exist before the plan. PostgreSQL and SQLite ignore rows with a `NULL`
+key column, as their unique indexes do; SQL Server compares them. A unique
+index over a column the same plan adds, a column-level `UNIQUE` and a
+composite unique constraint are not checked; if rows violate one, the
+database rejects the statement and the transactional apply rolls back.
+
+Tool-call `idempotency_key` gets no index of its own. Every non-null value is
+`ai-tool:` followed by the row's `provider_call_key`, which is already
+unique, and mutation rows leave it `NULL`; SQL Server would admit only one
+`NULL` under a second unique index.
+
+The AI tables are a trusted store. Their integrity hashes are unkeyed and
+detect accidental divergence only; see
+[the AI security guide](crates/graphql-orm-ai/docs/security.md#database-trust-boundary).
+
+**Webhook-receipt index replacement. Action needed** for hosts that compose
+`AiSchemaModule` and upgrade a store whose webhook-receipt table still has a
+legacy AI index. The upgrade
+drops that index and creates the current composite one, and the drop is now
+`Destructive` (entry 1.1). Pass the plan's options through
+`AiSchemaModule::admit_index_replacements(&plan, options)`, which admits
+destructive steps only when every one is that known index replacement. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release).
+
+### Part 2: build configuration and Rust API
+
+These make the workspace compile again. None changes stored data.
+
+#### 2.1 GraphQL naming is selected by environment variables, not features (#508)
+
+**Action needed** only for builds that enable a `resolver-case-*`,
+`argument-case-*` or `field-case-*` feature of `graphql-orm` or
+`graphql-orm-macros`, or the `graphql-case-pascal` feature of
+`graphql-orm-ai`. ORM, macros and AI. No SDL, persistent schema or data
+migration: the same settings produce the same names.
+
+The 15 mutually exclusive naming features are removed, because Cargo features
+must be additive: two dependants that enabled different case features failed
+to compile. The build scripts of `graphql-orm` and `graphql-orm-macros` read
+one value per group instead:
+
+| Removed feature | Set instead |
+| --- | --- |
+| `resolver-case-pascal`, `-snake`, `-screaming-snake`, `-lower`, `-upper` | `GRAPHQL_ORM_RESOLVER_CASE` = `PascalCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `lowercase`, `UPPERCASE` |
+| `argument-case-*` (same five) | `GRAPHQL_ORM_ARGUMENT_CASE` (same values) |
+| `field-case-*` (same five) | `GRAPHQL_ORM_FIELD_CASE` (same values) |
+| `graphql-orm-ai/graphql-case-pascal` | `GRAPHQL_ORM_AI_CASE=PascalCase` plus all three ORM variables `PascalCase` |
+
+1. Remove the case features from every `Cargo.toml` that enables them. Cargo
+   refuses an unknown feature, so a missed one fails the build loudly.
+2. Set the variables once for the whole build, usually in the host
+   workspace's `.cargo/config.toml`:
+
+   ```toml
+   [env]
+   GRAPHQL_ORM_RESOLVER_CASE = "PascalCase"
+   GRAPHQL_ORM_ARGUMENT_CASE = "PascalCase"
+   GRAPHQL_ORM_FIELD_CASE = "PascalCase"
+   # Only if graphql-orm-ai enabled graphql-case-pascal:
+   GRAPHQL_ORM_AI_CASE = "PascalCase"
+   ```
+
+   Unset or empty means `camelCase`, the old default. An unknown value fails
+   the build. Set them in CI and in any tool that builds the crate outside
+   the workspace (an IDE, a container build) too, or those builds use
+   camelCase.
+3. If your crate forwarded the case features through its own features (for
+   example `pascal = ["graphql-orm/field-case-pascal"]`), remove those
+   features: Cargo cannot set an environment variable for the build.
+4. If your own code was gated on such a feature (`#[cfg(feature =
+   "pascal")]`), read the variable instead. A build script gives you a
+   `cfg` and reruns when the value changes:
+
+   ```rust
+   // build.rs
+   fn main() {
+       println!("cargo::rerun-if-env-changed=GRAPHQL_ORM_FIELD_CASE");
+       println!("cargo::rustc-check-cfg=cfg(app_pascal_fields)");
+       if std::env::var("GRAPHQL_ORM_FIELD_CASE").as_deref() == Ok("PascalCase") {
+           println!("cargo::rustc-cfg=app_pascal_fields");
+       }
+   }
+   ```
+
+   Then write `#[cfg(app_pascal_fields)]`. For a value only,
+   `option_env!("GRAPHQL_ORM_FIELD_CASE")` works without a build script, but
+   Cargo does not rebuild your crate when the variable changes, so prefer
+   the build script. Code that only needs the served names can read the
+   generated SDL instead. Inside graphql-orm's own tests the build script
+   sets `cfg(graphql_orm_field_case = "pascal")` (and `resolver`/`argument`),
+   with values `camel`, `pascal`, `snake`, `screaming_snake`, `lower` and
+   `upper`; these cfgs are not visible to other crates.
+
+`graphql-orm-ai` keeps its camelCase types unless `GRAPHQL_ORM_AI_CASE` is
+`PascalCase`, exactly as before when its feature was off, so an ORM-only
+PascalCase build keeps camelCase AI names.
+
+The trybuild compile contracts of `graphql-orm` now run in one test binary,
+`compile_ui`; run one with `cargo test -p graphql-orm --test compile_ui
+<module>::` (the module is the old binary's name, for example
+`dependent_delete_ui`). See
+[naming configuration](docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
+
+#### 2.2 The `graphql-orm-macros` `mysql` feature is removed
+
+**Action needed** only for a build that names the `mysql` feature of
+`graphql-orm-macros` in a `Cargo.toml` or on the command line. Macros only.
+
+The feature selected nothing: no generated code depended on it, and the ORM
+has no MySQL backend. Remove it from the feature list; Cargo refuses an
+unknown feature, so a missed one fails the build loudly. Keep exactly one of
+`sqlite`, `postgres` or `mssql`, matching the `graphql-orm` backend feature.
+
+#### 2.3 Hand-built schemas must install `GeneratedInputValidation` (#753)
+
+**Action needed** only for hosts that build an `async_graphql::Schema` by hand
+from generated roots (`QueryRoot`, `MutationRoot`, `SubscriptionRoot` or an
+entity's generated query, mutation or subscription objects) instead of a
+generated `schema_builder`. ORM and macros. No SDL, persistent schema or data
+migration.
+
+Generated resolvers that take an input object (lists, keyset and scan pages,
+search, aggregates, `Changed` subscriptions, create, upsert, update, bulk
+update and delete, and to-many relation fields) now refuse with
+`INPUT_VALIDATION_REQUIRED` before authorization or any database work when the
+schema does not install `GeneratedInputValidation`, the same way
+`GeneratedSubscriptionAdmission` fails closed. Without the extension, a scalar,
+list or enum sent for an input object passed async-graphql's validation and
+failed at the field, uncoded, after earlier root fields of the operation may
+already have written. Resolvers with only scalar arguments (single reads,
+delete by id) are unchanged.
+
+Add one line to each hand-built schema:
+
+```rust
+Schema::build(QueryRoot::default(), MutationRoot::default(), SubscriptionRoot::default())
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+    // ... the rest of your builder
+```
+
+Generated `schema_builder`, `schema_builder_with_limits` and
+`try_schema_builder_with_limits` already install it. See
+[input object values](docs/reference/graphql-orm/entities-and-relations.md#input-object-values).
+
+#### 2.4 A schema's maximum page limit is fixed at compile time (#674, #667)
+
+**Action needed** if the `Database` a generated schema serves sets a maximum page limit other
+than 100 (`DatabaseBuilder::max_page_limit`, `PaginationConfig::max_limit`,
+`PaginationConfig::unbounded()` or `legacy()`). Every `schema_roots!` schema
+now has a maximum: the one declared with `max_page_limit: N`, or 100. The
+schema builders panic at start-up for a `Database` that applies another
+maximum or none. Declare the maximum the database uses:
+`schema_roots!(max_page_limit: 250, ...)`. The semantic catalogue then
+publishes it for pageable relationship lists and the complexity estimate
+uses it, so a schema that declares a maximum other than 100 gets a new
+semantic fingerprint. `GRAPHQL_ORM_MAX_PAGE_LIMIT` is always `Some`.
+A database without a page maximum can no longer back a generated schema;
+give trusted reads their own maximum with `with_max_limit` instead
+([#674](https://github.com/Dastari/graphql-orm/issues/674),
+[#667](https://github.com/Dastari/graphql-orm/issues/667)).
+
+#### 2.5 Host-side page reads refuse a limit above the maximum (#667)
+
+ORM and macros. Rust code only; GraphQL clients are unaffected.
+
+- **Keyset and scan pages. Action needed** if Rust code calls `Record::keyset_page`, `keyset_connection_page`,
+  `keyset_page_ordered`, `tx.keyset_page`, `tx.keyset_connection_page`,
+  `fetch_authorized_keyset*` or `fetch_authorized_scan` without a GraphQL
+  context and with a limit above the maximum page limit. These calls used to
+  return the maximum number of rows without saying so; they now fail with
+  `PAGE_LIMIT_EXCEEDED`, like repository `limit(n)` since 0.128.0. Page with
+  the cursor at or below the maximum, give the read its own maximum with
+  `EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(...)`,
+  or call the helper on a handle with a raised maximum. An omitted limit still
+  uses the default limit, reduced to the maximum. GraphQL clients are
+  unaffected: their oversized limits are reduced, or refused when
+  `refuse_oversized_page_limit` is set (#667).
+- **`paginate(PageInput)` reads. Action needed** if Rust code calls `EntityQuery::paginate(page)` followed by
+  `fetch_all`, `fetch_all_with_auth`, `fetch_one`, `fetch_one_with_auth`,
+  `fetch_connection`, `fetch_connection_with_auth` or
+  `fetch_connection_selected_with_auth`, or `EntitySearchQuery::paginate(page)`
+  followed by any fetch, with `page.limit` above the maximum page limit, or
+  `EntityQuery::paginate(page)` followed by `fetch_all_on`/`fetch_one_on` with
+  `page.limit` above `PaginationConfig::DEFAULT_MAX_LIMIT` (100; those executor
+  reads cannot see the database's maximum). These reads used to return the
+  maximum number of rows without saying so, whether or not
+  `refuse_oversized_page_limit` was set; they now fail with
+  `PAGE_LIMIT_EXCEEDED`, and a negative limit with `INVALID_INPUT`. A limit at
+  or below the maximum is honoured exactly. Give one read a larger maximum
+  with `EntityQuery::with_max_limit(n)`, and one search with
+  `.pagination_config(config.with_max_limit(Some(n)))`. A custom resolver that
+  passes a client-supplied `PageInput` to `paginate` must resolve it first,
+  as generated resolvers now do:
+  `db.client_pagination_config().resolve_client_page(page.as_ref(), true)?`,
+  then paginate with the resolved `limit` and `offset`; the client's oversized
+  limit is then reduced, or refused when the opt-in is set, as before.
+  Generated GraphQL list roots, relations and search connections are
+  unchanged (#667).
+
+#### 2.6 `SqlValue` is non-exhaustive and gains `Temporal` (#521)
+
+**Action needed** for downstream Rust code that inspects SQL values. Add a
+wildcard arm to exhaustive matches on `graphql_orm::graphql::orm::SqlValue`
+and handle unsupported values explicitly. The enum is now `#[non_exhaustive]`
+and gains `Temporal` for dates and timestamps.
+
+Generated writes include `SqlValue::Temporal` for chrono fields and annotated
+temporal text fields in `MutationEvent.changes`. Host hooks that extract dates
+with `if let SqlValue::String(_)` must handle `SqlValue::Temporal` too, even with
+native SQL Server temporal text parameters disabled. Use
+`TemporalValue::kind()` to inspect the parsed value or
+`TemporalValue::as_text()` to recover its previous text spelling.
+
+#### 2.7 Runtime cursor errors have their own code (#580)
+
+**Action needed** for exhaustive
+matches on `RuntimeQueryErrorCode` or `RuntimeRelationErrorCode`, and for
+code that matches the 0.164.0 pair. Both enums gain `CursorKeyTooLarge`, so
+an exhaustive match needs an arm. `RuntimeQueryError::code()` and
+`RuntimeRelationError::code()` now return `CursorKeyTooLarge` for a stored
+order value that cannot fit a cursor, not `ResourceLimit` with
+`detail() == Some("cursor_key_too_large")` as in 0.164.0. A host that
+matches `ResourceLimit` and then checks `detail()` must match
+`CursorKeyTooLarge` instead; `detail()` still returns
+`Some("cursor_key_too_large")`, and `as_str()` is `cursor_key_too_large`,
+the code runtime GraphQL already returns.
+Release 0.164.0 kept its Rust API compatible; the dedicated variant ships
+only in this release
+([#580](https://github.com/Dastari/graphql-orm/issues/580)).
+
+#### 2.8 The policy-free relation preload API and direct relation data-loader use are removed (#445)
+
+ORM and macros.
+
+- **Relation preloads. Action needed** if code
+  calls `load_relations`, `bulk_load_relations`, `load_relations_with_auth` or
+  `bulk_load_relations_with_auth`, or implements
+  `graphql_orm::graphql::orm::RelationLoader`. The trait and its generated
+  implementations are gone: they filled relation fields without entity, row
+  or field policy. Read related rows through the generated relation resolvers,
+  the repository builders, or `tx.query::<T>()`, which apply policy. Delete
+  any handwritten implementation; nothing calls it.
+  ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
+- **Relation data loader. Action needed** if code uses `graphql::loaders::RelationLoader` directly. It loaded
+  whatever key it was given with no entity, row or field policy; generated
+  relation resolvers attach the authorized read to each key before loading.
+  It is now generated-resolver plumbing:
+  - `RelationLoader` is no longer in the prelude, and `RelationLoader::new`
+    is gone.
+  - `RelationQueryKey`, `CompositeRelationQueryKey` and
+    `SelectedRelationQueryKey` have private fields, so a struct literal no
+    longer compiles. Their `#[doc(hidden)]` constructors are generated-only
+    and outside semver; a key built with one by hand applies no entity, row
+    or field policy, so do not call them.
+  - The `Loader<String>` impl (a bare batch-column `SELECT … WHERE column IN
+    (…)`) is removed, so `load_one`/`load_many` with string keys no longer
+    compiles.
+  
+  A handwritten schema whose objects use generated relation resolvers
+  registers the loader with
+  `.data(graphql_orm::graphql::loaders::relation_data_loader::<Target, Backend>(db))`
+  in place of `DataLoader::new(RelationLoader::new(db), tokio::spawn)`;
+  generated `schema_builder`s register it themselves. Read related rows
+  through the generated relation resolvers, the repository builders or
+  `tx.query::<T>()`, which apply policy. `BatchLoadEntity` is no longer used by
+  the ORM; existing implementations still compile and can be deleted
+  ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
+
+#### 2.9 Backup: result and error types (#610)
+
+**Action needed** for struct literals, exhaustive destructuring and
+wildcard-free matches on `PruneResult`, `DeleteSnapshotResult` and
+`BackupError` of `graphql-orm-backup`. All three are now `#[non_exhaustive]`,
+the results gain `deleted_snapshot_ids`, and an unadmitted snapshot is refused
+with `BackupError::SnapshotNotAdmitted`. See the
+[backup migration guide](crates/graphql-orm-backup/MIGRATION.md#0272-to-0280-breaking-release).
+
+### Part 3: defaults and behaviour
+
+The code compiles without these, but results or refusals change. Review each
+one before the first request is served.
+
+#### 3.1 Bulk writes are narrowed to read visibility by default (#752)
+
+**Action needed** for hosts whose row policy lets a caller write rows it
+cannot read, or whose `read_visibility` returns `Err` on the
+`GraphqlMutation` surface. ORM and macros. No SDL, persistent schema or data
+migration.
+
+`DatabaseBuilder::narrow_bulk_writes_to_read_visibility` now defaults to
+`true`. Release 0.177.0 added it as an opt-in. Generated GraphQL `updateMany`
+and `deleteMany` add the SQL predicate of `RowPolicy::read_visibility`
+(`Prefilter` or `Complete`, on the `GraphqlMutation` surface) to their locking
+read when the row policy declares no `write_target_prefilter`. Rows outside
+the caller's read visibility are then not passed to row callbacks or counted
+against the bulk bound or scan budget, and on PostgreSQL they are not locked.
+Every selected row is still classified by the row callbacks, so rows the
+caller can read give the same payload and writes as before. Single-row and
+repository writes are unchanged.
+
+- Rows the caller may write but not read are now left out of a bulk write, as
+  a missing row is. To keep them, declare a `write_target_prefilter` that
+  selects every row the caller can read or write; it takes precedence in both
+  modes.
+- An error from `read_visibility` on the `GraphqlMutation` surface now refuses
+  the bulk write. A policy that returns `Err` for some callers, such as
+  write-only ones, must return `CallbackOnly` for them to keep their bulk
+  writes working.
+- To keep the previous target selection for one database, opt out with
+  `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(false)` (or
+  `Database::with_narrow_bulk_writes_to_read_visibility(false)`).
+- SQL Server: this default does **not** turn on
+  `DatabaseBuilder::mssql_snapshot_bulk_write_targets`. That setting stays a
+  separate opt-in, off by default, because it weakens the bulk write's
+  transaction from serializable. A narrowed SQL Server bulk write keeps the
+  single serializable `UPDLOCK, HOLDLOCK` read, which may lock rows a scan
+  reads outside the predicate.
+
+See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+
+#### 3.2 Client page offsets are bounded at 10,000 by default (#456)
+
+**Action needed** only for clients or Rust reads that send a page offset above
+10,000. ORM and macros. No SDL, persistent schema or data migration.
+
+- `DatabaseBuilder::max_page_offset` (and `Database::with_max_page_offset`)
+  now defaults to `PaginationConfig::DEFAULT_MAX_OFFSET`, `Some(10_000)`
+  (`PaginationConfig::RECOMMENDED_MAX_OFFSET`). Release 0.169.0 added the
+  bound as an opt-in with an unbounded default. A client page offset above
+  the maximum is refused with `PAGE_LIMIT_EXCEEDED` and the message
+  `requested offset N exceeds the maximum page offset 10000`, before any row
+  is read. It covers the pages 0.169.0 listed: generated list roots, to-many
+  relation pages and search pages (the native index included), custom
+  resolvers that use `ClientPaginationConfig::resolve_client_page` or
+  `admit_client_offset`, `EntityQuery::paginate(page)` through
+  `fetch_connection*`, and `EntitySearchQuery::paginate(page)`.
+- To keep the old behaviour, opt out explicitly with
+  `DatabaseBuilder::max_page_offset(None)` (or
+  `Database::with_max_page_offset(None)`); set another maximum with
+  `max_page_offset(Some(n))`. Prefer keyset cursors for deep paging: every
+  backend reads and discards the rows an offset skips.
+- Unchanged: an offset that trusted code sets with a builder's own
+  `offset(n)` (`search_db(...).offset(n)`, `EntitySearchQuery::offset`,
+  repository `offset(n)`) is not bounded. A `ClientPaginationConfig` built
+  directly from a `PaginationConfig`, as a pool or transaction without a
+  `Database` uses, still has no offset maximum unless `with_max_offset` sets
+  one. Keyset connections take no offset.
+
+#### 3.3 Uncoded callback errors are internal errors (#682)
+
+**Action needed** if an entity
+policy, row policy, write-input transform or mutation hook returns a refusal
+as plain text with no `code` extension, such as
+`async_graphql::Error::new("seat taken")`, and clients are meant to read
+that text. Generated GraphQL operations and `graphql_error_from_sqlx` used
+to return the text as written; they now return `INTERNAL_ERROR` with the
+default message and retain server-side diagnostics. The existing
+`GRAPHQL_ORM_LOG_INTERNAL_ERRORS` setting controls logging of diagnostic
+text. Give each deliberate refusal a public
+code, for example
+`OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken").into_graphql_error()`
+(or return the `OrmPublicError` with `?`); it then keeps its code and
+message on every surface. An error with an application-defined `code`
+extension is still rendered as written by GraphQL. At relation boundaries
+(relation authorization, including a relation field's read policy) an
+authored error without a public code stays `FORBIDDEN` with no message, as
+before. To restore the old rendering for one schema, opt in on the
+`Database` it serves: `DatabaseBuilder::expose_uncoded_callback_messages(true)`
+or `Database::with_uncoded_callback_messages_exposed(true)`. Generated
+`schema_builder`s install the `graphql::errors::UncodedCallbackMessages`
+extension from that setting, so another schema in the process keeps the
+default; a handwritten schema installs the extension itself. Repository
+callers see the default message either way
+([#682](https://github.com/Dastari/graphql-orm/issues/682)).
+
+#### 3.4 `ReadPredicate::related` is three-valued; its negation fails closed (#770)
+
+**Action needed** only for row policies that negate
+`ReadPredicate::related(..)`, directly or inside an `and`/`or` tree, for
+example `related(keys, p).not()?`, or that put a relation inside the target of
+a `not_related` or of a negated closure. ORM and macros. No SDL, persistent schema
+or data migration.
+
+`related(keys, target)` is now three-valued. For each source row it is
+UNKNOWN when a key column is NULL, TRUE when a related row has `target` TRUE,
+UNKNOWN when none does but one has `target` UNKNOWN, and FALSE otherwise.
+
+- Positive uses admit exactly the same rows as before, and render the same
+  single correlated `EXISTS (<related rows where target>)`, because only TRUE
+  admits a row. This holds for a positive relation or closure over any
+  target that contains no negation.
+- A negation, including one that reaches the relation through `and` or `or`
+  under `not()`, renders the rows where the relation is FALSE:
+  `<every source key IS NOT NULL> AND NOT EXISTS (<related rows where target
+  is TRUE or UNKNOWN>)`. It used to render as `NOT EXISTS (<related rows
+  where target>)` and admitted rows whose relation key is NULL, or whose
+  related rows only leave `target` UNKNOWN (for example `secret = 1` on a
+  NULL `secret`). Such a policy can now return fewer rows. PostgreSQL plans
+  the new negation as an anti-join, like the old one.
+- A policy that means to admit NULL keys must say so with an explicit `or`
+  over a NULL test of the key:
+  `related(keys, p).not()?.or(ReadPredicate::is_null::<B, S>("key")?)?`.
+  `ReadPredicate::is_null` (release 0.174.0) also works for keys that are
+  private or not filterable.
+- `ReadPredicate::not_related(keys, p)` (release 0.174.0) is now exactly
+  `related(keys, p)?.not()`. It renders the form above instead of a `CASE`
+  over two `EXISTS` probes, binding the target's values once instead of
+  twice. Code that compares its rendered SQL or counts its bind values must
+  be updated. It admits the same rows as before when `p` contains no
+  relation. When `p` itself contains a `related` (or the positive side of a
+  `not_related`), it can admit fewer; see the next item.
+- **Compositions that return fewer rows.** A relation that used to be FALSE
+  for a row with a NULL key, or for a row whose related rows only leave the
+  target UNKNOWN, is now UNKNOWN for that row, and the UNKNOWN propagates
+  outwards. Two compositions that were not negations of a bare `related`
+  therefore change:
+  - nested `not_related`:
+    `not_related(outer_keys, related(inner_keys, q))`. A source row whose
+    related row has a NULL inner key (or only UNKNOWN inner matches) used to
+    be admitted, because that related row counted as "does not match". The
+    related row is now "might match", so the source row is denied. The same
+    holds for `related(outer_keys, related(inner_keys, q)).not()`;
+  - a negated closure over a relation target:
+    `related_closure(keys, related(inner_keys, q)).not()` (and the `All`
+    forms). A closure whose reached rows are FALSE or UNKNOWN, with at least
+    one UNKNOWN, used to be FALSE and was admitted by the negation; it is now
+    UNKNOWN and denied.
+
+  Both fail closed: they can deny a row, never admit one that was denied. To
+  treat a related row with a NULL inner key as "does not match" again, say so
+  on the inner target, where FALSE wins over UNKNOWN:
+  `ReadPredicate::is_not_null::<B, T>("inner_key")?.and(related(inner_keys, q))?`.
+  A related row whose inner matches are only UNKNOWN stays UNKNOWN; decide
+  that case in `q` (for example with `is_null` on the compared column).
+- Double negation is the identity: `p.not()?.not()?` renders `p`, not
+  `NOT (NOT (p))`. A policy that cannot be negated is still refused with
+  `AUTHORIZATION_MISCONFIGURED`: a predicate that renders the deny fallback
+  `1 = 0` anywhere (an empty `in_list`), also inside a relation target, and a
+  negation over the composition budget.
+- A negated relation nests one `CASE` for each relation level it negates,
+  and `READ_PREDICATE_MAX_CASE_NESTING` is 10 on every backend (SQL Server's
+  own limit). A chain of more than ten nested `related` calls still builds
+  and admits the same rows, but `not()` over it is now refused with
+  `AUTHORIZATION_MISCONFIGURED`. Before, a chain up to the relation limit (32
+  nested, 9 on SQL Server) could be negated. A `not_related` chain now stops
+  at twenty levels instead of five (nine instead of two on SQL Server).
+
+Review each negated relation policy, each `not_related` whose target contains
+a relation and each negated closure over a relation target, and add the
+explicit NULL alternative where rows without a relation key should stay
+visible.
+
+#### 3.5 Runtime `RecordVersion` and integer live keys are strings (#528)
+
+**Action needed** for runtime GraphQL modules with a node identity or live subscriptions on an
+integer key. `RecordVersion`, the `…Changed` `keys` argument, the members of
+`…KeyInput` and the event `id` and `key` members are now typed
+`RuntimeInt64`: sent as decimal strings and accepted only as strings. The
+SDL, the semantic catalogue and their fingerprints change, so router
+descriptors must be regenerated and stored approvals bound to the old
+fingerprint re-approved. Clients must send and compare these values as
+strings. To keep the old SDL while clients move, compile the module with
+`RuntimeGraphqlOptions::with_legacy_int_identities()`. Static (derived)
+entities are unchanged
+([#528](https://github.com/Dastari/graphql-orm/issues/528), item 4).
+
+AI tool profiles and AI compile runtime live key inputs under both forms, so a
+UUID- or integer-keyed runtime collection with live subscriptions keeps its
+capability catalogue under the new default.
+
+#### 3.6 Router: nested `@authenticated` and `@requiresScopes` are enforced (#729, #485)
+
+**Action needed** for authenticated `graphql-orm-router` hosts whose
+subgraph SDL carries `@authenticated` or `@requiresScopes` below the root,
+on a field or a type, and whose clients select those fields without the
+authority they name. The router now evaluates the composed directives on
+every selected field (nested object fields, joined entity fields, interface
+and union members, fragments and aliases) and refuses the whole operation
+before any subgraph request, with `UNAUTHENTICATED` or `FORBIDDEN` and the
+refused selection's response path. It used to evaluate only root fields'
+descriptors and leave nested fields to the subgraph. Root fields are now
+also checked against their SDL directives. When several subgraphs declare
+`@requiresScopes` on one type or field, every declaration must hold, and a
+field of an implementation inherits the rules declared on its interface or
+on an `@interfaceObject` type.
+- A graph is refused when it is built if a `@requiresScopes` argument is an
+  empty list, contains an empty set, or contains a scope that is not a
+  non-empty string; if a directive named `requiresScopes` or
+  `authenticated` (or an import alias of either), with or without a
+  `<prefix>__`, does not resolve to Federation's directive; or if either
+  directive is placed on an argument, input field, enum value, union, input
+  object or the schema. Fix such declarations before upgrading.
+- Find the directives in each subgraph's SDL and confirm every client that
+  selects such a field presents a bearer and, for `@requiresScopes`, one
+  complete scope set. A field selected through an interface needs the rules
+  of every implementation of it.
+- A client that should still receive the rest of an operation must move the
+  protected selection into its own operation; the router does not null a
+  refused field.
+- Keep subgraph guards and policies: the router check grants nothing.
+See the [router migration guide](crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release).
+Anonymous development mode is unchanged.
+
+Releases before this one never enforced SDL `@authenticated` or
+`@requiresScopes` on nested fields, whatever an older changelog said (#485),
+so a deployment that relied on that claim was protected only by its subgraph
+guards. Keep those guards and policies after the upgrade too.
+
+#### 3.7 HighImpact approvals always require step-up; approval lifetime has a ceiling (#465)
+
+**Action needed** for every host that uses AI approvals. AI.
+
+- An approval of a `HighImpact` tool call always requires recent MFA. The
+  `recent_mfa_required` argument can add step-up to any approval and can no
+  longer waive it for a `HighImpact` call. This holds on every request path:
+  `OrmAiApprovalService::request_approval`, the supervised coordinator
+  (`AiSupervisedAgentCoordinatorLimits`), parked retained-provider waits and
+  prepared native approvals.
+- Pending `HighImpact` approvals staged before the upgrade without the flag
+  are also gated: every decision on them (approve, deny, revoke) requires
+  recent MFA, and `AiApprovalView.recent_mfa_required` reports `true`.
+- `AiApprovalServiceLimits::new` refuses a `maximum_approval_lifetime` above
+  `AI_APPROVAL_LIFETIME_CEILING` (7 days). The default stays 24 hours
+  (`AI_DEFAULT_MAXIMUM_APPROVAL_LIFETIME`) and is host-configurable up to the
+  ceiling. The cap applies when an approval is requested; an approval that is
+  already pending keeps its recorded expiry.
+
+Host steps:
+
+1. Make sure every principal who decides `HighImpact` approvals can satisfy
+   your `RecentMfaPolicy`, and that your approval UI starts step-up when
+   `recentMfaRequired` is `true` or a decision returns the recent-MFA error.
+2. If you construct `AiApprovalServiceLimits` with a lifetime above 7 days,
+   lower it. Construction now fails with `AiError::InvalidConfiguration`.
+3. Pending `HighImpact` approvals of host-defined tools stay valid but need
+   step-up to decide. Tell approvers, or let those approvals expire and
+   request them again. Pending approvals of generated-operation tools are
+   stale after this release whatever their impact, because the tool
+   fingerprint they are bound to changes (4.1); they cannot be consumed and
+   must be requested again.
+
+### Part 4: fingerprints, bindings, approvals and sessions
+
+Everything that must be regenerated or re-established is in this part, and it
+all happens once, in this release. In short:
+
+| Stored state | What happens at the upgrade |
+| --- | --- |
+| Operation, catalogue and router-export fingerprints | Change once for every entity (4.1). Regenerate exports and replace recorded literals |
+| AI tool manifests | Regenerate; a manifest that names `graphql-orm-sha256-len-v1` is refused as stale (4.1) |
+| Tool bindings, pending approvals of generated-operation tools, durable subscription waits | Stale; let them finish or expire before the upgrade, or request them again afterwards (4.1) |
+| Pending `HighImpact` approvals | Of host-defined tools: stay valid, but every decision needs recent MFA (3.7). Of generated-operation tools: stale, like every approval bound to an old fingerprint (4.1) |
+| Retained provider sessions, every delivery mode | Rebind once through cleanup-and-rebind (4.1 to 4.3) |
+| Retained fixed-broker sessions | Rebind once, then no longer rebind on catalogue or schema changes (4.2) |
+| Broker definition fingerprints listed by value | Admit the four new ones (4.3) |
+| Capability selections and loaded references | `selection_stale`; the model discovers and describes again (4.2, 4.3) |
+| Runtime GraphQL SDL, catalogue and descriptors of modules with integer identities | Change with `RuntimeInt64`; regenerate and re-approve (3.5) |
+| Semantic fingerprint of a schema that declares `max_page_limit` other than 100 | Changes (2.4) |
+
+#### 4.1 Generated-operation fingerprints no longer include the Rust module path (#683)
+
+**Action needed** for every host. ORM, macros, operation catalogue, AI tool
+profiles and AI. Every generated-operation fingerprint, catalogue fingerprint
+and router-export fingerprint changes once, for every entity.
+
+`GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` is now `graphql-orm-sha256-len-v2`.
+Version 1 hashed `module_path!()` plus the struct name (or a declared
+`stable_type_id`) and sorted the catalogue by it, so moving an entity to
+another module or crate changed its identity. Version 2 identifies an
+operation by its entity name, table, backend, root coordinate, arguments,
+result type and schema signature, and sorts the catalogue by those values.
+Authorization fingerprints keep their values and algorithm name.
+
+Host steps:
+
+1. Upgrade ORM, macros, the operation catalogue, AI tool profiles and AI in
+   one deployment. A producer and a consumer on different algorithm versions
+   do not agree on any fingerprint.
+2. Regenerate everything you export or store from the catalogue: router
+   descriptors and schema exports, and AI tool manifests. A manifest that
+   names `graphql-orm-sha256-len-v1` is refused as stale.
+3. Treat stored state that holds an old fingerprint as stale: tool bindings,
+   pending approvals of generated-operation tools, durable subscription waits
+   and retained provider sessions. Let pending approvals and waits finish or
+   expire before the upgrade where you can; afterwards request them again.
+   Retained provider sessions rebind once through the existing
+   cleanup-and-rebind lifecycle.
+4. Replace any fingerprint you compare against a recorded literal. To detect
+   which algorithm produced a fingerprint, read the operation algorithm name
+   (`GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM`, exported as
+   `operation_fingerprint_algorithm`), not the router-export label: that
+   label (`GRAPHQL_ROUTER_EXPORT_FINGERPRINT_ALGORITHM`) keeps its `v1` name
+   although every router-export fingerprint changes.
+5. `stable_type_id` is still accepted on `#[graphql_entity(...)]` and
+   `#[repository_entity(...)]`, and still detects two entity groups that
+   claim one identity, but it no longer changes any fingerprint. You may
+   remove it. `entity_rust_type()` and `diagnostic_rust_type()` are diagnostic
+   values only.
+
+Still true after the upgrade: the schema signature records field types,
+argument types and relation targets as spelled in source. Changing
+`crate::types::Status` to `other_crate::types::Status` changes fingerprints
+even when both name the same type. Keep those spellings identical across a
+move (imported bare names are safest) and compare `catalog().fingerprint()`
+before and after.
+
+#### 4.2 Fixed-broker sessions survive catalogue changes; stale selections have two codes (#551)
+
+**Action needed** for hosts that use the AI capability broker. AI and AI tool
+profiles. Retained fixed-broker provider sessions rebind once at the
+upgrade and then stop rebinding when the catalogue or a schema changes.
+
+- A `FixedBroker` `AiProviderCapabilitySessionBinding` now covers the broker
+  protocol version, the static bootstrap tools, the delivery mode and the
+  provider identity. It no longer covers the capability index, and the fixed
+  broker definitions (four, see 4.3) no longer hash it. `EagerExact`,
+  `ProviderDeferred` and `ClientDeferred` are unchanged: their definitions are
+  derived from the catalogue, so their bindings still rotate with it.
+- `AiProviderCapabilitySessionBinding::capability_index_fingerprint` and
+  `capability_index_set_fingerprint` return `Option<&str>`, `None` for a
+  fixed broker. `capability_broker_definitions()` takes no argument and
+  returns the definitions directly.
+- Describe and execute still check the current index, schema, catalogue,
+  entry, target-policy and host-policy fingerprints on every call. A drifted
+  selection now fails with the model-facing code `capability_stale`, including
+  at execute, which used to report `authorization_denied`. The error is
+  `AiError::InvalidInput` carrying `AI_CAPABILITY_STALE`.
+- A selection the run does not hold (a candidate discovery never returned to
+  it, or an unknown or expired `loadedReference`) now has its own code,
+  `selection_stale`
+  (`AiApplicationToolFailureCode::SelectionStale`, `AI_CAPABILITY_SELECTION_STALE`).
+  It used to share `capability_stale`. Both are retryable and both results
+  carry a fixed `correction` telling the model to discover and describe again.
+
+Host steps:
+
+1. Update calls to the two accessors and to `capability_broker_definitions`.
+   `AiProviderCapabilitySessionBinding::new` keeps its signature; for a fixed
+   broker the index fingerprint you pass is validated and then ignored.
+2. Deploy. Each retained fixed-broker session rebinds once, because its
+   binding fingerprint and broker definition fingerprints changed. Plan for
+   one cleanup-and-rebind per retained session.
+3. Admit the new fixed broker definition fingerprints wherever you list them
+   by value, for example in hierarchical rule policy.
+4. If you read tool failure codes (logs, dashboards, UI, tests), handle
+   `selection_stale` next to `capability_stale`, and expect `capability_stale`
+   where a drifted execute used to report `authorization_denied`.
+5. Remove any step that resets retained chats after a schema change. It is no
+   longer needed for fixed-broker sessions.
+
+#### 4.3 Capability broker version 2: compact signatures, entity capabilities and the fixed-broker default (#551)
+
+**Action needed** for hosts that use the AI capability broker. AI and AI tool
+profiles. No SDL, persistent schema or data migration.
+
+What changes for the model: discover returns one `generated_entity`
+candidate per entity, listing its operations; describe returns one compact
+typed signature per operation instead of the plan schema; the new
+`graphql.capabilities.describe_type` operation expands one named input type,
+`select` or `select.<path>` at a time, in pages; and `describe_type` and
+execute take the entity's `operation`. Plans are still validated against the
+unchanged closed schema. Discovery scores only the posting lists of the
+query's terms, with the same fixed per-entry weights and no catalogue-wide
+statistic.
+
+Fingerprints, bindings and sessions:
+
+- `AI_CAPABILITY_BROKER_VERSION` is `2`. The fixed broker definitions (now
+  four) and every `FixedBroker` session binding change once, so each retained
+  fixed-broker session rebinds once through cleanup-and-rebind. It is the
+  same single rebind as in 4.2; nothing else was added to the binding, and
+  catalogue or schema changes keep fixed-broker sessions afterwards.
+- The capability index is version 3 and groups each entity's query roots, so
+  index and index-set fingerprints change once. Bindings of `EagerExact`,
+  `ProviderDeferred` and `ClientDeferred` sessions hash the index set; they
+  already rebind once in this release for the fingerprint change (4.1).
+- Generated query capability fingerprints, tool manifests and approvals are
+  not changed by this entry. Mutations do not join the broker.
+- A selection or loaded reference from before the upgrade is
+  `selection_stale`; after a catalogue change a held one is
+  `capability_stale`, at describe, `describe_type` and execute alike.
+
+Host steps:
+
+1. Deploy AI and tool profiles together, and admit the four new broker
+   definition fingerprints wherever you list them by value.
+2. Make host capability policy decide `GeneratedEntity` entries as well as
+   root entries, in every delivery mode. Discover asks about each matching
+   entity and its grouped roots in one batch and lists, and ranks on, only
+   the roots you admit; describe, `describe_type` and execute ask about the
+   entity and each root again; client-deferred discovery, load and execute
+   need a root's entity admitted too. A policy that admits only root IDs
+   discovers nothing until it decides entity entries.
+3. Large surfaces now default to the fixed broker when the provider supports
+   both it and `ProviderDeferred`. To keep native deferred loading, set
+   `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+   `false` (or call `with_provider_deferred_for_large_surfaces()`); a stored
+   configuration without the field now reads as `true`. Changing the mode
+   rebinds retained sessions, so decide before the upgrade's single rebind.
+4. Update exhaustive matches and struct literals, and any model guidance that
+   names `planSchema`. Details: the
+   [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
+   and the
+   [tool profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0261-to-0270-breaking-release).
+
+### Also in this release: no action
+
+These ship with the release and change nothing until a host opts in.
+
+#### SQL Server native temporal parameters (#521)
+
+**No action** to retain the previous behavior for existing temporal text
+writes and date filters. SQL Server binds chrono values natively. To enable
+native binding for temporal text as well, pass
+`MssqlPoolOptions::new().typed_temporal_parameters(true)` when connecting
+your SQL Server pool and use that pool to build the `Database`.
+
+- On an `NVARCHAR(MAX)` field declared with `#[filterable(type = "date")]`,
+  writes may store SQL Server's text spelling. Filter comparisons convert
+  stored text to temporal values, changing lexical comparisons to temporal
+  comparisons. One row with non-ISO text that SQL Server cannot convert can
+  fail the whole query.
+- An offset-bearing filter compared with `datetime2` or `datetime` compares
+  instants with the stored column treated as UTC. Previously SQL Server
+  dropped the filter offset and compared wall-clock times. This can change
+  which rows filters and read policies admit.
+- At database compatibility level 130 or later, conversion of a legacy
+  `datetime` column to a higher-precision type can expose its 1/300-second
+  ticks. An `eq` or `BETWEEN` operand at the displayed millisecond can stop
+  matching. Native parameters can also change rounding on writes.
+
+The [SQL Server reference](docs/reference/graphql-orm/mssql.md#native-temporal-parameters)
+lists supported formats. A future breaking release can enable native
+temporal text parameters by default.
+
+#### Router: opt-in refusal outcome (#764)
+
+**No action.** `graphql-orm-router` only. The new `refusalOutcome` setting
+(`RouterConfig::with_refusal_outcome(true)`) is off by default and changes no
+response until a host enables it. With it, each error of an operation the
+router refused before sending any subgraph request carries
+`extensions.outcome: "refused"`, the value generated services send with
+`DatabaseBuilder::mutation_error_outcome(true)`, so a client handles both the
+same way. An absent `outcome` still means unknown. See the
+[router migration guide](crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release)
+and the [shared vocabulary](docs/reference/graphql-orm/error-codes.md#router-refusal-outcome).
+
+#### Key-only delete signals per entity (#666)
+
+**No action**; this is an opt-in. ORM and macros. `#[graphql_entity(key_only_deletes)]` sends a `DELETED` event
+with the key and a null entity to a `Changed` subscriber whose `Key` or
+`Keys` argument names the deleted row's complete key, when the delete
+releases no row because the row policy grants no deleted preimage. Unkeyed
+subscribers get nothing, as before. Before each key-only event, the
+subscriber's resolver authentication, scopes, assurance and entity access
+are checked, and so is read access to every key field through the host
+field policy (with no record). Row policy cannot be, because the row is
+gone. A subscriber with entity and key-field access who names a key
+therefore learns that a row with that key was deleted, whether or not it
+could read the row. Opt in only where that is acceptable. The attribute is
+a compile error when a primary-key field declares a `read_policy`, sets
+`subscribe = false`, is `graphql(skip)`, or is not GraphQL-readable
+([#666](https://github.com/Dastari/graphql-orm/issues/666)).
+
+#### AI: runtime live keys compile under default identities
+
+**No action.**
+With live subscriptions and a node identity, a runtime collection with a
+UUID key failed every query, mutation and subscription capability catalogue
+under the new default identities (`InvalidConfiguration("generated input
+<Object>KeyInput.<field> differs from its canonical contract")`). Tool
+profiles accept the default `RuntimeInt64` and the legacy `Int`
+identity alike, and AI adopts them.
 
 ## 0.185.0 to 0.186.0: Owned PostgreSQL test readiness
 

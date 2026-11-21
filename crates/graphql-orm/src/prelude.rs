@@ -20,7 +20,7 @@ pub use crate::graphql::auth_agql::{
 };
 pub use crate::graphql::errors::{OrmErrorCode, OrmPublicError, graphql_error_from_sqlx};
 pub use crate::graphql::filters::*;
-pub use crate::graphql::loaders::{BatchLoadEntity, RelationLoader};
+pub use crate::graphql::loaders::BatchLoadEntity;
 pub use crate::graphql::orm::*;
 pub use crate::graphql::pagination::*;
 pub use crate::graphql::structural_auth::{

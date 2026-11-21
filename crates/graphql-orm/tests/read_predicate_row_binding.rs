@@ -223,9 +223,12 @@ fn shapes() -> Vec<(&'static str, ReadPredicate, &'static [&'static str])> {
             &["s1", "s2"],
         ),
         (
+            // A relation is three-valued: `s3`'s only target has a NULL
+            // flag, so whether it matches is UNKNOWN and the negation does
+            // not admit it. The same rows as `not_related`.
             "not exists",
             related(eq()).not().unwrap(),
-            &["s1", "s3", "s4"],
+            &["s1", "s4"],
         ),
         (
             "not_related",
@@ -423,6 +426,7 @@ fn schema(db: &Database<B>) -> async_graphql::Schema<QueryRoot, MutationRoot, Su
     )
     .data(db)
     .data(AuthSubject::builder("reader").build())
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .finish()
 }
 

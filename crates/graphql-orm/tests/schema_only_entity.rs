@@ -238,7 +238,23 @@ async fn schema_only_entities_drive_staged_relation_delete_policy_migrations()
         .ok_or("missing schema-only fk before upgrade")?;
     assert_eq!(before_fk.on_delete, DeletePolicy::Restrict);
 
-    database.apply_schema_stages(&stages).await?;
+    assert!(
+        database
+            .apply_schema_stages(&stages)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("destructive")
+    );
+    database
+        .apply_schema_stages_with_options(
+            &stages,
+            graphql_orm::graphql::orm::ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await?;
     let after = introspect_schema(&pool).await?;
     let after_fk = after
         .tables
