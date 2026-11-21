@@ -45,6 +45,8 @@ run_identifier_quoting() {
 }
 
 run_sqlite() {
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+    --test read_snapshot_transaction -- --include-ignored --test-threads=1
   run_identifier_quoting sqlite
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test compile_ui dependent_delete_ui::
@@ -74,6 +76,8 @@ run_sqlite() {
 run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test search_filter_binding -- --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test read_snapshot_transaction -- --include-ignored --test-threads=1
   run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test authorized_pagination_postgres --test bounded_mutation_sentinels \
@@ -158,7 +162,7 @@ run_postgres_legacy() {
     --test uuid_contract \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
-    --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate \
+    --test read_snapshot_transaction --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate \
     --test dependent_delete_repro --test backup_roundtrip \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
@@ -183,6 +187,10 @@ run_migration_journal() {
 run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test search_filter_binding -- --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --test read_snapshot_transaction -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --lib snapshot_start_preserves_3952_from_restore_gate -- --ignored --test-threads=1
   run_identifier_quoting mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1

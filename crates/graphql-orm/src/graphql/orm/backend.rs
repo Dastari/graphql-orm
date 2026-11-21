@@ -231,6 +231,14 @@ pub trait WriteBackend: OrmBackend {
 
 /// Backend capability used by the public ORM-managed transaction runner.
 pub trait TransactionBackend: WriteBackend {
+    /// Begin a read-only snapshot on one connection.
+    #[doc(hidden)]
+    fn begin_read_snapshot(
+        _pool: &Self::Pool,
+    ) -> BoxFuture<'_, Result<Self::Transaction<'_>, super::ReadSnapshotError>> {
+        Box::pin(async { Err(super::ReadSnapshotError::UnsupportedBackend) })
+    }
+
     /// Establish the narrowly scoped append-only retention bypass for one
     /// generated entity in the current transaction.
     #[doc(hidden)]
@@ -562,6 +570,7 @@ impl SqlxBackend for SqliteBackend {
         values: &'a [SqlValue],
     ) -> BoxFuture<'a, crate::Result<Self::QueryResult>> {
         Box::pin(async move {
+            super::ensure_sql_write_allowed()?;
             let mut query = sqlx::query(sql);
             for value in values {
                 query = bind_sqlite_value(query, value);
@@ -579,6 +588,7 @@ impl SqlxBackend for SqliteBackend {
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e,
     {
         Box::pin(async move {
+            super::ensure_sql_write_allowed()?;
             let mut query = sqlx::query(&sql);
             for value in &values {
                 query = bind_sqlite_value(query, value);
@@ -610,6 +620,7 @@ impl WriteBackend for SqliteBackend {
         mode: super::core::TransactionMode,
     ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
+            super::ensure_sql_write_allowed()?;
             match mode {
                 super::core::TransactionMode::Default => pool.begin().await,
                 super::core::TransactionMode::StateMachine => {
@@ -660,6 +671,26 @@ impl WriteBackend for SqliteBackend {
 }
 #[cfg(feature = "sqlite")]
 impl TransactionBackend for SqliteBackend {
+    fn begin_read_snapshot(
+        pool: &Self::Pool,
+    ) -> BoxFuture<'_, Result<Self::Transaction<'_>, super::ReadSnapshotError>> {
+        Box::pin(async move {
+            let classify = crate::db::classify_read_snapshot_error::<Self>;
+            let mut tx = pool.begin().await.map_err(classify)?;
+            require_sqlite_snapshot_schema(tx.as_mut(), "main").await?;
+            let databases: Vec<(i32, String, String)> = sqlx::query_as("PRAGMA database_list")
+                .fetch_all(tx.as_mut())
+                .await
+                .map_err(classify)?;
+            for (_, schema, file) in databases {
+                if schema != "main" && schema != "temp" && !file.is_empty() {
+                    require_sqlite_snapshot_schema(tx.as_mut(), &schema).await?;
+                }
+            }
+            Ok(tx)
+        })
+    }
+
     fn set_retention_context<'a>(
         tx: &'a mut Self::Transaction<'_>,
         table_name: &'a str,
@@ -690,6 +721,33 @@ impl TransactionBackend for SqliteBackend {
         })
     }
 }
+#[cfg(feature = "sqlite")]
+async fn require_sqlite_snapshot_schema(
+    connection: &mut sqlx::SqliteConnection,
+    schema: &str,
+) -> Result<(), super::ReadSnapshotError> {
+    use super::ReadSnapshotError;
+
+    let classify = crate::db::classify_read_snapshot_error::<SqliteBackend>;
+    // SQLite returns raw schema names. Quote the entire name as one identifier.
+    let schema = DatabaseBackend::Sqlite.delimit_raw_identifier(schema);
+    let journal: String = sqlx::query_scalar(&format!("PRAGMA {schema}.journal_mode"))
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(classify)?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        return Err(ReadSnapshotError::SqliteWalRequired);
+    }
+    let locking: String = sqlx::query_scalar(&format!("PRAGMA {schema}.locking_mode"))
+        .fetch_one(connection)
+        .await
+        .map_err(classify)?;
+    if !locking.eq_ignore_ascii_case("normal") {
+        return Err(ReadSnapshotError::SqliteNormalLockingRequired);
+    }
+    Ok(())
+}
+
 #[cfg(feature = "sqlite")]
 impl SubscriptionBackend for SqliteBackend {}
 
@@ -878,6 +936,7 @@ impl SqlxBackend for PostgresBackend {
         values: &'a [SqlValue],
     ) -> BoxFuture<'a, crate::Result<Self::QueryResult>> {
         Box::pin(async move {
+            super::ensure_sql_write_allowed()?;
             let sql = Self::normalize_sql(sql, 1);
             let mut query = sqlx::query(&sql);
             for value in values {
@@ -896,6 +955,7 @@ impl SqlxBackend for PostgresBackend {
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e,
     {
         Box::pin(async move {
+            super::ensure_sql_write_allowed()?;
             let sql = Self::normalize_sql(&sql, 1);
             let mut query = sqlx::query(&sql);
             for value in &values {
@@ -940,6 +1000,7 @@ impl WriteBackend for PostgresBackend {
         mode: super::core::TransactionMode,
     ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
+            super::ensure_sql_write_allowed()?;
             let mut transaction = pool.begin().await?;
             if mode == super::core::TransactionMode::StateMachine {
                 sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
@@ -998,6 +1059,16 @@ impl WriteBackend for PostgresBackend {
 }
 #[cfg(feature = "postgres")]
 impl TransactionBackend for PostgresBackend {
+    fn begin_read_snapshot(
+        pool: &Self::Pool,
+    ) -> BoxFuture<'_, Result<Self::Transaction<'_>, super::ReadSnapshotError>> {
+        Box::pin(async move {
+            pool.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .await
+                .map_err(crate::db::classify_read_snapshot_error::<Self>)
+        })
+    }
+
     fn set_retention_context<'a>(
         tx: &'a mut Self::Transaction<'_>,
         table_name: &'a str,
@@ -1131,7 +1202,13 @@ impl WriteBackend for MssqlBackend {
 }
 
 #[cfg(feature = "mssql")]
-impl TransactionBackend for MssqlBackend {}
+impl TransactionBackend for MssqlBackend {
+    fn begin_read_snapshot(
+        pool: &Self::Pool,
+    ) -> BoxFuture<'_, Result<Self::Transaction<'_>, super::ReadSnapshotError>> {
+        Box::pin(async move { pool.begin_read_snapshot().await })
+    }
+}
 
 #[cfg(feature = "mssql")]
 impl SubscriptionBackend for MssqlBackend {}

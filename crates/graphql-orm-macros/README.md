@@ -14,6 +14,10 @@ Version 0.195.0 groups selected ORM integration tests. The
 [testing guide](../../docs/development/testing.md) lists the grouped selectors.
 
 
+Version 0.191.0 aligns with the ORM's
+[read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
+Existing generated reads work through the snapshot context.
+
 In version 0.190.0, `GraphQLOperations` reports malformed keyset orders at
 the keyset attribute. Use `field asc|desc [nulls first|last]` for each
 comma-separated entry and end the order with the complete primary key.

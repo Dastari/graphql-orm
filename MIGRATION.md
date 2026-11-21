@@ -16,6 +16,14 @@ supersedes: []
 checkouts, use the [grouped test selectors](docs/development/testing.md).
 
 
+## 0.190.0 to 0.191.0: read snapshot transactions
+
+**No action.** The snapshot runner is opt-in and uses the existing generated
+read helpers. Before opting in, configure WAL and normal locking for the
+SQLite primary database and every file-backed attachment, or enable
+`ALLOW_SNAPSHOT_ISOLATION ON` on SQL Server.
+See [snapshot transactions](crates/graphql-orm/README.md#read-snapshot-transactions).
+
 ## 0.189.0 to 0.190.0: generated query resolvers
 
 Upgrade ORM and macros together.
