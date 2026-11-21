@@ -611,3 +611,45 @@ async fn journaled_target_clear_uses_the_restore_transaction()
     assert!(adapter.restore_target_is_empty().await?);
     Ok(())
 }
+
+#[cfg(feature = "orm-sqlite")]
+#[tokio::test]
+async fn read_snapshot_refuses_backup_target_clear() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+
+    let directory = TempDir::new()?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(directory.path().join("backup.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await?;
+    let database = Arc::new(Database::new(pool.clone()));
+    let catalog = catalog()?;
+    apply_schema(database.as_ref(), &catalog).await?;
+    insert_fixture(&pool).await?;
+
+    let adapter = OrmBackupAdapter::new(database.clone(), catalog.entities().to_vec());
+    let result = database
+        .read_snapshot_transaction(|_| Box::pin(async move {
+            assert!(matches!(
+                adapter.clear_restore_target().await,
+                Err(BackupError::Database { .. }),
+            ));
+            Ok(())
+        }))
+        .await;
+    assert!(matches!(result, Err(ReadSnapshotError::WriteRefused)));
+    let counts: (i64, i64) = graphql_orm::sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM conformance_identity_accounts), \
+                (SELECT COUNT(*) FROM conformance_activity_events)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (1, 1));
+    pool.close().await;
+    Ok(())
+}

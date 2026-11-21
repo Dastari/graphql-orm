@@ -13,6 +13,9 @@ supersedes: []
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 
+Version 0.191.0 adds [read snapshot transactions](#read-snapshot-transactions)
+for policy-aware reads on SQLite, PostgreSQL, and SQL Server.
+
 In version 0.190.0, generated query roots, Changed subscriptions and the
 NodeId object field return field errors when required schema data is missing.
 The generated `schema_builder(database)` registers the data for its roots.
@@ -914,6 +917,62 @@ select `TransactionMode::StateMachine` automatically; an upsert composed inside
 `Database::transaction` must explicitly select that mode so an absent-key
 decision is fenced across every backend. See [runtime writes and repository
 operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
+
+## Read snapshot transactions
+
+Use `Database::read_snapshot_transaction` for related reads that need one
+consistent database snapshot. The callback receives a `ReadSnapshotContext`
+with entity queries, projections and primary-key lookups. Each
+uses the same ORM read policies as an ordinary transaction. If the request
+uses transaction-local database authorization, call
+`read_snapshot_transaction_with_auth` with its `DbAuthContext`.
+
+```rust,ignore
+let (account, accounts) = db
+    .read_snapshot_transaction(|tx| {
+        Box::pin(async move {
+            let account = tx.find_by_key::<Account>(&[SqlValue::Int(account_id)]).await?;
+            let accounts = tx.query::<Account>().count().await?;
+            Ok((account, accounts))
+        })
+    })
+    .await?;
+```
+
+- SQLite uses a deferred `BEGIN`. The primary database and every
+  file-backed attachment must use WAL and normal locking. A rollback-journal
+  reader takes a SHARED lock that can block a concurrent commit, so the
+  runner returns `ReadSnapshotError::SqliteWalRequired` for a file outside WAL
+  mode and `ReadSnapshotError::SqliteNormalLockingRequired` for exclusive
+  locking. Temporary schemas and in-memory attachments are exempt. In WAL
+  mode the first read of each file establishes that file's snapshot, and
+  writers on other connections can commit while it is open. Shared-cache
+  connections are unsupported. See [SQLite WAL](https://www.sqlite.org/wal.html).
+- PostgreSQL uses `REPEATABLE READ READ ONLY` with the same transaction-local
+  RLS settings as `transaction_with_auth`. It provides a consistent snapshot
+  with repeatable-read isolation. A read-only observer can still see a
+  result with no equivalent serial order, even when concurrent writers use
+  `SERIALIZABLE`. Hosts that need a serializable read can use PostgreSQL's
+  `SERIALIZABLE READ ONLY DEFERRABLE` in a separate transaction. It lets
+  ordinary data writers proceed and may wait for a safe snapshot before its
+  first read. Both modes take normal read locks that can conflict with DDL.
+  See [PostgreSQL transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html)
+  and [transaction characteristics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
+  The [PostgreSQL SSI paper](https://drkp.net/papers/ssi-vldb12.pdf) gives an example of the read-only anomaly.
+- SQL Server uses `SNAPSHOT` after checking the current database setting.
+  `ReadSnapshotError::MssqlSnapshotIsolationRequired` means
+  `ALLOW_SNAPSHOT_ISOLATION` is disabled or transitioning. Snapshot reads
+  can still take schema-stability locks. The shared restore lock allows
+  ordinary concurrent writers and excludes restores.
+
+The context exposes typed reads. The pinned driver connection, raw SQL,
+writes, savepoints and post-commit hooks are private to the ORM. Same-task
+ORM writes through a captured handle return a refusal, and the runner
+returns `ReadSnapshotError::WriteRefused` even if the callback catches it.
+Nested ORM transactions on that task are refused. Use the context for
+every read that must share the snapshot. Driver handles and spawned tasks
+have their own scope. Decisions that perform a write belong in
+`Database::transaction` with `TransactionMode::StateMachine`.
 
 ## Minimum entity
 
