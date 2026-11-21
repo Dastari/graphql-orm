@@ -214,6 +214,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                             "stable_type_id must contain 1–1024 printable ASCII bytes without whitespace or control characters"));
                     }
                     metadata.stable_type_id = Some(value);
+                } else if meta.path.is_ident("propagate_change_action") {
+                    return Err(meta.error("propagate_change_action belongs inside #[relation(...)]"));
                 } else if meta.path.is_ident("table") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -1797,6 +1799,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
+    pub(crate) relation_propagate_as_updated: bool,
     pub(crate) relation_source_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_filter: bool,
@@ -1980,6 +1983,7 @@ impl Default for FieldMetadata {
             relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
+            relation_propagate_as_updated: false,
             relation_source_condition: None,
             relation_target_condition: None,
             relation_filter: false,
@@ -2376,6 +2380,7 @@ pub(crate) struct ParsedField {
 
 pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> {
     let mut meta = FieldMetadata::default();
+    let mut propagation_action_span = None;
 
     for attr in &field.attrs {
         if let Some(ident) = attr.path().get_ident() {
@@ -2431,6 +2436,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.order = false;
                             meta.subscribe = false;
                             meta.skip_input = true;
+                        } else if nested.path.is_ident("propagate_change_action") {
+                            return Err(nested.error("propagate_change_action belongs inside #[relation(...)]"));
                         } else if nested.path.is_ident("sensitive") {
                             meta.sensitive = true;
                         } else if nested.path.is_ident("description") {
@@ -2911,6 +2918,19 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.relation_propagate_change = Some(lit.value());
+                        } else if nested.path.is_ident("propagate_change_action") {
+                            if propagation_action_span.is_some() {
+                                return Err(nested.error("duplicate relation propagate_change_action"));
+                            }
+                            let lit: syn::LitStr = nested.value()?.parse()?;
+                            if lit.value() != "updated" {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "relation propagate_change_action only supports \"updated\"",
+                                ));
+                            }
+                            propagation_action_span = Some(nested.path.span());
+                            meta.relation_propagate_as_updated = true;
                         } else if nested.path.is_ident("source_condition") {
                             if meta.relation_source_condition.is_some() {
                                 return Err(nested.error("duplicate relation source condition"));
@@ -3068,6 +3088,15 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
         return Err(syn::Error::new_spanned(
             field,
             "decimal metadata is only valid on rust_decimal::Decimal fields",
+        ));
+    }
+
+    if let Some(span) = propagation_action_span
+        && meta.relation_propagate_change.as_deref() != Some("up")
+    {
+        return Err(syn::Error::new(
+            span,
+            "relation propagate_change_action requires propagate_change = \"up\"",
         ));
     }
 
