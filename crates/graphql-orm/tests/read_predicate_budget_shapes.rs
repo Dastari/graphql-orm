@@ -762,10 +762,12 @@ fn balanced_grouping_matches_the_unbalanced_form() {
 }
 
 #[test]
-fn not_of_a_fifty_thousand_term_or_stays_flat() {
+fn not_of_a_twenty_five_thousand_term_or_stays_flat() {
     on_thread(2 << 20, || {
         let mut wide = leaf();
-        for _ in 0..50_000 {
+        // About 30 bytes a term, the column bound to its table, so about
+        // 750 KB, within the byte budget.
+        for _ in 0..25_000 {
             wide = wide
                 .or(ReadPredicate::is_null::<B, ZrKid>("id").unwrap())
                 .unwrap();
@@ -774,7 +776,7 @@ fn not_of_a_fifty_thousand_term_or_stays_flat() {
         let sql = rendered(&negated);
         let (depth, units_, _) = units(&sql);
         eprintln!(
-            "not(or 50k): depth {depth} units {units_} bytes {}",
+            "not(or 25k): depth {depth} units {units_} bytes {}",
             sql.len()
         );
         assert!(depth < 24);

@@ -10,12 +10,16 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.151.1
+
+- **Fixed (lint and documentation lanes, #814):** warnings-denied Clippy with `--no-default-features --features postgres,provider-openai` no longer fails on an unused test-only `MockBackgroundRetrievalFailure` re-export, which is now compiled only where its SQLite-only consumer exists, and Rustdoc with `--no-default-features --features mssql` no longer fails on an intra-doc link to `AiProviderCallExecutor`, which the SQL Server build does not provide. No runtime, API or persistence change.
+
 ## Unreleased - 0.151.0 (breaking release)
 
-The AI part of the single breaking release, with ORM/macros 0.190.0, operation
+The AI part of the single breaking release, with ORM/macros 0.187.0, operation
 catalogue 0.10.0 and AI tool profiles 0.27.0. Host steps are in the root
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) and the
-[AI migration guide](MIGRATION.md#breaking-release-unreleased). The entries
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) and the
+[AI migration guide](MIGRATION.md#01502-to-01510-breaking-release). The entries
 below were written on the integration branch as separate steps; they ship
 together, and the release has one AI schema module version, `0.83.0`.
 

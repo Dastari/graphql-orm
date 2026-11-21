@@ -3,20 +3,27 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
 
-The next ORM/macros minor after the breaking release qualifies generated root
-search filters with the entity table (#799). See the
-[migration guide](../../MIGRATION.md#next-ormmacros-minor-after-the-breaking-release).
+Version 0.189.0 qualifies generated root search filters with the entity table
+(#799). See the [migration guide](../../MIGRATION.md#01880-to-01890-root-search-filter-binding).
 
-Version 0.190.0 is the **breaking release**: every change that breaks hosts or
+Version 0.188.0 binds every column a read predicate renders to its own row: through the entity's
+table path at the root of a statement, and through an alias no other scope uses inside a relation,
+`not_related`, closure or count subquery. A column missing from a target table then fails the read
+instead of resolving against an outer row (#796). The generated alias names are
+reserved as table names, and a hand-written `ReadVisibilityFilter` may only hold single-row
+expressions, with every column written through `__gom_self` where it is evaluated in a subquery.
+See the [migration guide](../../MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row).
+
+Version 0.187.0 is the **breaking release**: every change that breaks hosts or
 invalidates stored fingerprints ships in it, and the
-[migration guide](../../MIGRATION.md#breaking-release-unreleased) lists the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) lists the
 steps in upgrade order. In short:
 
 - **Schema and storage.** Migration plans no longer drop tables the target
@@ -55,6 +62,9 @@ steps in upgrade order. In short:
   `Key`/`Keys` subscribers.
 
 Upgrade ORM and macros together.
+
+Version 0.186.0 fixes startup races in the owned PostgreSQL test harness.
+See the [migration guide](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
 
 Version 0.185.0 renders SQL Server filtered-index strings as Unicode literals,
 including ASCII values. Filters introspected as opaque SQL are replayed

@@ -66,8 +66,8 @@ fn generated_search_sql_keeps_ordinary_filter_operators_and_binds() {
     let table = dialect.render_identifier_path(SearchFilterRecord::TABLE_NAME);
     let (clauses, values) = filter.to_sql_search_conditions(dialect, &table);
     let (expected_search, expected_non_search) = match dialect {
-        DatabaseBackend::Sqlite => ("s.title = ?", "title = ?"),
-        DatabaseBackend::Postgres => ("s.title = $1", "title = $1"),
+        DatabaseBackend::Sqlite => ("s.\"title\" = ?", "title = ?"),
+        DatabaseBackend::Postgres => ("s.\"title\" = $1", "title = $1"),
         DatabaseBackend::Mssql => ("[s].[title] = @P1", "[title] = @P1"),
         DatabaseBackend::Mysql => unreachable!(),
     };

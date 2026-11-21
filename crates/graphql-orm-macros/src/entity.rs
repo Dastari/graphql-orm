@@ -4044,6 +4044,14 @@ fn generate_entity_tokens(
         }
     }
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
+    if crate::backend::backend_table_name_is_reserved(backend, raw_table_name) {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            format!(
+                "table `{raw_table_name}` is not allowed: `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` and `__gom_closure_<n>` (with any `_<suffix>`) are the row aliases and common table expressions that generated read-policy SQL renders"
+            ),
+        ));
+    }
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
     if let Some(rls) = entity_meta.rls.as_ref() {
         validate_rls_columns(rls, fields.iter())?;
@@ -4774,7 +4782,20 @@ fn generate_entity_tokens(
                     related_render.push(quote! {
                         if self.#field_name.is_some() {
                             if let Some((clauses, binds)) = self.__gom_related.get(#graphql_name) {
-                                conditions.extend(clauses.clone());
+                                // The source keys refer to the governed
+                                // row as a value: bind it to the requested
+                                // row, or to this entity's table at the
+                                // root of a statement (#796).
+                                let row = match _gom_table {
+                                    Some(row) => ::std::borrow::Cow::Borrowed(row),
+                                    None => ::std::borrow::Cow::Owned(
+                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT
+                                            .render_table_identifier_path(
+                                                <#struct_name as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                                            ),
+                                    ),
+                                };
+                                conditions.extend(clauses.iter().map(|clause| clause.bind(&row)));
                                 values.extend(binds.clone());
                             }
                         }
@@ -4846,9 +4867,11 @@ fn generate_entity_tokens(
                         ));
                     }
                     let target_type = syn::Ident::new(&target_type, field.span());
-                    let relation_alias = "__graphql_orm_order_relation";
                     let dialect = backend_dialect_tokens(backend);
-                    let predicates = source_columns
+                    // `(target column, source column)` pairs as generated
+                    // SQL renders them. The count joins them through an
+                    // alias allocated at run time (#796).
+                    let count_keys = source_columns
                         .iter()
                         .zip(target_columns.iter())
                         .map(|(source_column, target_column)| {
@@ -4864,20 +4887,15 @@ fn generate_entity_tokens(
                                 .expect("relation source columns were validated above");
                             let source_physical =
                                 source.meta.db_column.as_deref().unwrap_or(source_column);
-                            format!(
-                                "{relation_alias}.{} = {}.{}",
-                                backend_render_identifier_path(backend, target_column),
-                                backend_render_identifier_path(backend, raw_table_name),
-                                backend_render_identifier_path(backend, source_physical),
-                            )
+                            let target_key = backend_render_identifier_path(backend, target_column);
+                            let source_key =
+                                backend_render_identifier_path(backend, source_physical);
+                            quote! { (#target_key, #source_key) }
                         })
-                        .collect::<Vec<_>>()
-                        .join(" AND ");
+                        .collect::<Vec<_>>();
                     // Unprepared inputs render a count that matches no rows and
                     // fail `validate_order`, so no builder executes them.
-                    let unauthorized_format = format!(
-                        "(SELECT COUNT(*) FROM {{}} AS {relation_alias} WHERE {predicates} AND 1 = 0) {{}}"
-                    );
+                    let unauthorized_format = "(SELECT COUNT(*) FROM {} WHERE 1 = 0) {}";
                     relation_order_match_arms.push(quote! {
                         if let Some(dir) = &self.#order_field_name {
                             match self.__gom_relation_counts.get(#aggregate_name) {
@@ -4920,7 +4938,12 @@ fn generate_entity_tokens(
                                 .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                             let prepared = ::graphql_orm::graphql::orm::prepare_relation_count_order::<
                                 #backend_marker, #target_type
-                            >(ctx, #relation_alias, #predicates, budget).await?;
+                            >(
+                                ctx,
+                                <#struct_name as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                                &[#(#count_keys),*],
+                                budget,
+                            ).await?;
                             self.__gom_relation_counts.insert(#aggregate_name.to_owned(), prepared);
                         }
                     });
@@ -5760,12 +5783,16 @@ fn generate_entity_tokens(
                     &field_meta,
                 )?;
                 where_input_fields.push(input_field);
+                // Unqualified, or `row.<column>` for the row `_gom_table`
+                // names, the column delimited as generated DDL and DML
+                // address it (#796).
                 filter_to_sql.push(quote! {
                     {
                         let __gom_bound_column;
                         let __gom_column: &str = match _gom_table {
                             Some(table) => {
-                                __gom_bound_column = format!("{}.{}", table, #column_part);
+                                __gom_bound_column = <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT
+                                    .row_bound_filter_column(table, #db_col_sql);
                                 &__gom_bound_column
                             }
                             None => #db_col_sql,
@@ -6609,7 +6636,7 @@ fn generate_entity_tokens(
             /// Request-authorized relation predicates. Internal to generated resolvers.
             #[doc(hidden)]
             #[graphql(skip)]
-            pub __gom_related: ::std::collections::BTreeMap<String, (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>)>,
+            pub __gom_related: ::std::collections::BTreeMap<String, (Vec<::graphql_orm::graphql::orm::RowBoundSql>, Vec<::graphql_orm::graphql::orm::SqlValue>)>,
         }
     };
     let related_clear = if related_prepare.is_empty() {
@@ -6783,6 +6810,17 @@ fn generate_entity_tokens(
         impl ::graphql_orm::graphql::orm::ReadVisibilityFilter for #where_input_name {
             fn entity_type_id() -> ::std::any::TypeId { ::std::any::TypeId::of::<#struct_name>() }
             fn backend() -> ::graphql_orm::graphql::orm::DatabaseBackend { <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT }
+            fn __gom_row_bound_filter(&self) -> Option<::graphql_orm::graphql::orm::RowBoundFilter> {
+                // The filter renders its own conditions for the row it is
+                // given: no row name is substituted into its SQL (#796).
+                let filter = self.clone();
+                Some(::graphql_orm::graphql::orm::RowBoundFilter::new(move |row| {
+                    filter.__gom_sql_conditions(false, Some(row))
+                }))
+            }
+            fn table_name() -> Option<&'static str> {
+                Some(<#struct_name as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME)
+            }
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseFilter for #where_input_name {
@@ -6950,6 +6988,8 @@ fn generate_entity_tokens(
                 self.__gom_sql_conditions(true, None)
             }
 
+            /// The filter's conditions, each column qualified by the row
+            /// `_gom_table` names when it is given, or unqualified.
             fn __gom_sql_conditions(
                 &self,
                 _gom_spatial_prefilter: bool,

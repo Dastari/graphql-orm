@@ -27,7 +27,7 @@ GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
 Version `0.27.0` (**breaking release**) requires operation catalogue 0.10.0
-and ORM/macros 0.190.0. Operation contracts and tool manifests record the
+and ORM/macros 0.187.0. Operation contracts and tool manifests record the
 generated-operation algorithm `graphql-orm-sha256-len-v2`, which no longer
 includes the Rust module path; regenerate manifests bound under version 1. The
 capability index groups the generated query roots of each entity into one
@@ -36,7 +36,7 @@ entry and fingerprint. Search uses an inverted index with unchanged fixed
 per-entry weights, `AiCapabilitySignature` renders compact typed signatures
 for capability broker version 2, and runtime live key inputs compile under
 both ORM identity modes. See the
-[migration guide](MIGRATION.md#breaking-release-unreleased).
+[migration guide](MIGRATION.md#0261-to-0270-breaking-release).
 
 Version `0.24.0` adds a shared type dictionary rendering of plan schemas,
 precomputed capability search terms, per-root exclusion of oversized schemas,
