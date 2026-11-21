@@ -378,6 +378,43 @@ mod tests {
         row_version: i64,
     }
 
+    /// The legacy receipt shape plus an index the AI module never declared.
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+        PartialEq,
+    )]
+    #[graphql_entity(
+        table = "graphql_orm_ai_provider_webhook_receipts",
+        plural = "LegacyExtraIndexGraphqlOrmAiProviderWebhookReceipts",
+        default_sort = "received_at DESC"
+    )]
+    struct LegacyWebhookReceiptWithExtraIndexRecord {
+        #[primary_key]
+        #[filterable(type = "uuid")]
+        id: graphql_orm::uuid::Uuid,
+        #[filterable(type = "string")]
+        provider_kind: String,
+        #[filterable(type = "string")]
+        provider_event_id: String,
+        provider_response_id: Option<String>,
+        run_id: Option<graphql_orm::uuid::Uuid>,
+        attempt_id: Option<graphql_orm::uuid::Uuid>,
+        #[filterable(type = "bool")]
+        signature_verified: bool,
+        state: String,
+        safe_error_code: Option<String>,
+        #[sortable]
+        received_at: i64,
+        processed_at: Option<i64>,
+        #[graphql_orm(version, default = "0")]
+        row_version: i64,
+    }
+
     struct TestSecrets(SecretRef, String);
 
     #[async_trait]
@@ -543,12 +580,87 @@ mod tests {
             )
             .await
             .expect("current webhook schema should plan");
+        // The legacy provider_kind index is replaced by the composite index,
+        // which the default gate refuses and the module admits.
         database
             .schema()
             .apply_migration(&current_plan, ApplyOptions::default())
             .await
+            .expect_err("the default gate refuses the index drop");
+        let options = module.admit_index_replacements(&current_plan, ApplyOptions::default());
+        assert!(options.allow_destructive);
+        database
+            .schema()
+            .apply_migration(&current_plan, options)
+            .await
             .expect("empty legacy webhook schema should migrate");
         crate::orm_runtime_recovery::open_test_epoch(&database).await;
+    }
+
+    #[tokio::test]
+    async fn index_replacement_admission_refuses_any_other_destructive_step() {
+        use graphql_orm::graphql::orm::MigrationStep;
+
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let legacy = [LegacyWebhookReceiptWithExtraIndexRecord::metadata()];
+        let legacy_plan = database
+            .schema()
+            .plan_migration_to_entities("ai-webhook-receipt-legacy-v1", "legacy", &legacy)
+            .await
+            .expect("legacy webhook schema should plan");
+        database
+            .schema()
+            .apply_migration(&legacy_plan, ApplyOptions::default())
+            .await
+            .expect("legacy webhook schema should apply");
+
+        let module = AiSchemaModule;
+        let current_plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-webhook-receipt-current-v1",
+                "current",
+                module.entities(),
+            )
+            .await
+            .expect("current webhook schema should plan");
+        let drops = current_plan
+            .steps
+            .iter()
+            .filter_map(|step| match &step.step {
+                MigrationStep::DropIndex { index_name, .. } => Some(index_name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let unexpected = "idx_graphql_orm_ai_provider_webhook_receipts_signature_verified";
+        assert!(
+            drops
+                .iter()
+                .any(|name| name == "idx_graphql_orm_ai_provider_webhook_receipts_provider_kind"),
+            "{drops:?}"
+        );
+        assert!(drops.iter().any(|name| name == unexpected), "{drops:?}");
+
+        let options = module.admit_index_replacements(&current_plan, ApplyOptions::default());
+        assert_eq!(options, ApplyOptions::default());
+        let refusal = database
+            .schema()
+            .apply_migration(&current_plan, options)
+            .await
+            .expect_err("an unexpected destructive step stays refused");
+        assert!(refusal.to_string().contains("destructive"), "{refusal}");
+        // Nothing ran: the unexpected index is still live.
+        let live = graphql_orm::graphql::orm::introspect_schema(&database)
+            .await
+            .expect("live schema should introspect");
+        assert!(
+            live.tables
+                .iter()
+                .flat_map(|table| table.indexes.iter())
+                .any(|index| index.name == unexpected)
+        );
     }
 
     async fn verified_event_at(

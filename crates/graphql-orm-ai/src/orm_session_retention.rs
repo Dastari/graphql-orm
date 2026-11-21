@@ -537,30 +537,36 @@ impl OrmAiSessionRetentionService {
 
     async fn candidates(&self, after: Option<String>) -> Result<SessionCandidatePage, AiError> {
         validate_cursor(after.as_deref())?;
-        let connection =
-            AiSessionRecord::keyset_connection_page(
-                &self.database,
-                AiSessionRecordWhereInput {
-                    state: Some(StringFilter {
-                        in_list: Some(vec![
-                            "active".to_owned(),
-                            "archived".to_owned(),
-                            "deleting".to_owned(),
-                        ]),
-                        ..Default::default()
-                    }),
+        let connection = {
+            let filter = AiSessionRecordWhereInput {
+                state: Some(StringFilter {
+                    in_list: Some(vec![
+                        "active".to_owned(),
+                        "archived".to_owned(),
+                        "deleting".to_owned(),
+                    ]),
                     ..Default::default()
-                },
+                }),
+                ..Default::default()
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
                 KeysetConnectionInput {
                     after,
+                    // Exactly `maximum_sessions` per pass: `keyset_window` reads
+                    // them in pages within the database maximum.
                     first: Some(i64::try_from(self.limits.maximum_sessions).map_err(|_| {
                         AiError::InvalidConfiguration("invalid scan limit".to_owned())
                     })?),
                     ..Default::default()
                 },
+                move |chunk| {
+                    AiSessionRecord::keyset_connection_page(&self.database, filter.clone(), chunk)
+                },
             )
-            .await
-            .map_err(map_orm)?;
+        }
+        .await
+        .map_err(map_orm)?;
         let next_cursor = connection
             .page_info
             .has_next_page
@@ -6334,15 +6340,25 @@ mod tests {
             .expect("checkpoint tool dependency should bind");
     }
 
+    // The seeded session has a single message, so position 1 is its only valid
+    // checkpoint position, and a session holds one checkpoint per position.
     async fn seed_context_checkpoints(database: &Database<SqliteBackend>, session_id: Uuid) {
-        for index in 0..2 {
+        seed_context_checkpoint_positions(database, session_id, &[1]).await;
+    }
+
+    async fn seed_context_checkpoint_positions(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        positions: &[i64],
+    ) {
+        for through_sequence in positions {
             AiContextCheckpointRecord::insert(
                 database,
                 CreateAiContextCheckpointRecordInput {
                     id: Uuid::new_v4(),
                     session_id,
-                    through_sequence: 1,
-                    source_hash: format!("context-source-{index}"),
+                    through_sequence: *through_sequence,
+                    source_hash: format!("context-source-{through_sequence}"),
                     token_estimate: 10,
                     provider_kind: "mock".to_owned(),
                     provider_model: "retention-test".to_owned(),
@@ -6666,7 +6682,7 @@ mod tests {
         assert_eq!(report.sessions_scanned, 1);
         assert_eq!(report.sessions_changed, 1);
         assert_eq!(report.live_delta_events_deleted, 1);
-        assert_eq!(report.context_checkpoints_invalidated, 2);
+        assert_eq!(report.context_checkpoints_invalidated, 1);
         assert_eq!(report.message_contents_purged, 1);
         assert_eq!(report.message_blocks_deleted, 1);
         assert!(report.next_session_cursor.is_none());
@@ -6796,7 +6812,9 @@ mod tests {
         seed_policy(&database, &scope).await;
         let session_id = seed_session(&database, &scope).await;
         let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
-        seed_context_checkpoints(&database, session_id).await;
+        // Two checkpoints against a bound of one. The bound is checked before
+        // any checkpoint is read, so the second position is never validated.
+        seed_context_checkpoint_positions(&database, session_id, &[1, 2]).await;
         let limits = AiSessionRetentionLimits::new_with_context_checkpoints(10, 10, 1, 10, 100)
             .expect("retention limits should validate");
         let service = OrmAiSessionRetentionService::new(
@@ -6889,21 +6907,14 @@ mod tests {
         assert_eq!(report.message_contents_purged, 0);
         assert_eq!(report.message_blocks_deleted, 0);
 
-        let next_page = service
-            .prune_session_content(None)
-            .await
-            .expect("next bounded deleting-session retention pass should succeed");
-        assert_eq!(next_page.sessions_changed, 1);
-        assert_eq!(next_page.deleting_session_events_deleted, 1);
-        assert_eq!(next_page.deleting_session_context_checkpoints_deleted, 1);
-        assert_eq!(next_page.message_contents_purged, 0);
-
+        // The one context checkpoint is already gone, so the pass that deletes
+        // the last event also reaches the message content.
         let content_page = service
             .prune_session_content(None)
             .await
             .expect("post-checkpoint deleting-session retention pass should succeed");
         assert_eq!(content_page.sessions_changed, 1);
-        assert_eq!(content_page.deleting_session_events_deleted, 0);
+        assert_eq!(content_page.deleting_session_events_deleted, 1);
         assert_eq!(content_page.deleting_session_context_checkpoints_deleted, 0);
         assert_eq!(content_page.message_contents_purged, 1);
         assert_eq!(content_page.message_blocks_deleted, 1);
@@ -7013,7 +7024,9 @@ mod tests {
         assert!(events.is_empty());
         assert!(context_checkpoints.is_empty());
         assert!(run_checkpoints.is_empty());
-        assert_eq!(audits.len(), 8);
+        // One audit per changing pass; the single context checkpoint needs one
+        // pass fewer than two did.
+        assert_eq!(audits.len(), 7);
         assert_eq!(
             audits
                 .iter()
@@ -7026,7 +7039,7 @@ mod tests {
                 .iter()
                 .filter(|audit| audit.reason_code == "session_deletion_retention_expired")
                 .count(),
-            6
+            5
         );
         assert_eq!(
             audits
@@ -9923,6 +9936,75 @@ mod tests {
         assert!(requests[1].delete_previously_requested());
         let debug = format!("{:?}", requests[0]);
         assert!(!debug.contains("resp_one") && !debug.contains("profile-openai"));
+    }
+
+    /// Records the largest row count of any read of the stored-response
+    /// ledger, and how many such reads ran.
+    #[derive(Clone, Default)]
+    struct LedgerReads(Arc<Mutex<(usize, usize)>>);
+
+    impl graphql_orm::graphql::orm::ReadQueryObserver for LedgerReads {
+        fn on_read(&self, sql: &str, rows: usize) {
+            if sql.contains("graphql_orm_ai_stored_provider_responses") {
+                let mut seen = self.0.lock().unwrap();
+                seen.0 += 1;
+                seen.1 = seen.1.max(rows);
+            }
+        }
+    }
+
+    /// The cleanup batch (50 by default) may exceed the database's maximum
+    /// page limit, which a host read refuses rather than shortens. The
+    /// candidate scan reads the whole batch in pages within that maximum:
+    /// every due response is deleted in one pass, and no single read returns
+    /// more rows than the maximum.
+    #[tokio::test]
+    async fn a_cleanup_batch_above_the_page_maximum_is_read_completely_in_pages() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        for response in ["resp_a", "resp_b", "resp_c", "resp_d", "resp_e"] {
+            record_response(&database, session_id, "openai", response).await;
+        }
+        mark_session_deleting(&database, session_id, 120).await;
+        let reads = LedgerReads::default();
+        let capped = database
+            .clone()
+            .with_pagination_config(database.pagination_config().with_max_limit(Some(2)))
+            .with_read_query_observer(reads.clone());
+        let deletion = ScriptedResponseDeletion::new(vec![true; 5]);
+        let service = OrmAiSessionRetentionService::new(
+            capped,
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        )
+        .with_stored_response_deletion_service(deletion.clone());
+        // Release pages within the maximum; the shell waits for all of them.
+        // `ledger` reads through the uncapped handle, outside the observer.
+        let mut finalized = 0;
+        for _ in 0..6 {
+            finalized += service
+                .prune_session_content(None)
+                .await
+                .unwrap()
+                .deleting_sessions_finalized;
+        }
+        assert_eq!(finalized, 1);
+        assert_eq!(ledger(&database).await.len(), 5);
+
+        let report = service.delete_stored_provider_responses().await.unwrap();
+        assert_eq!(
+            (report.deleted, report.retried, report.unconfirmed),
+            (5, 0, 0)
+        );
+        assert_eq!(ledger(&database).await.len(), 0);
+        assert_eq!(deletion.requests.lock().unwrap().len(), 5);
+        let (ledger_reads, largest) = *reads.0.lock().unwrap();
+        assert!(ledger_reads >= 3, "the scan pages through the database");
+        // A keyset page of the maximum (2) reads one look-ahead row to set
+        // its has-next flag; one read of the whole batch would return 5.
+        assert!(largest <= 2 + 1, "a ledger read returned {largest} rows");
     }
 
     #[tokio::test]

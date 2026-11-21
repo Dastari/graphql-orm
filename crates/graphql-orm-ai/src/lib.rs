@@ -151,6 +151,7 @@ mod run_cancellation;
 mod run_disposition;
 mod run_state;
 mod runtime;
+mod schema_upgrade;
 mod secrets;
 mod session_execution;
 mod session_retention;

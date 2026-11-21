@@ -9,7 +9,8 @@ use super::execution::{
     applied_migration_records, applied_version_set, ensure_managed_policy, ensure_planning_policy,
 };
 use super::migrations::{
-    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
+    build_migration_plan, classify_migration_steps_for_backend,
+    validate_migration_step_capabilities,
 };
 use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{
@@ -328,6 +329,17 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     {
         ensure_planning_policy(self.policy(), "plan schema target")?;
         target.schema.validate_physical_contract()?;
+        // The plan would install the change journal recorder. Refuse a target
+        // in which the database changes rows the journal cannot record.
+        if cfg!(feature = "change-journal")
+            && B::DIALECT == super::DatabaseBackend::Postgres
+            && matches!(
+                self.policy(),
+                SchemaPolicy::Managed | SchemaPolicy::PlanOnly
+            )
+        {
+            super::rls::refuse_change_journal_cascade_gaps(&target.schema)?;
+        }
         let version = version.into();
         let description = description.into();
         let current = B::introspect_schema_including(
@@ -408,6 +420,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         refuse_taken_search_helpers::<B>(self.database.pool(), plan).await?;
+        refuse_unique_index_duplicates::<B>(self.database.pool(), plan).await?;
         B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
@@ -482,6 +495,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         refuse_taken_search_helpers::<B>(self.database.pool(), &plan.migration).await?;
+        refuse_unique_index_duplicates::<B>(self.database.pool(), &plan.migration).await?;
         B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
@@ -548,18 +562,26 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &declared_tables(path.iter().map(|stage| &stage.target_schema)),
         )
         .await?;
+        let mut source_schema_hash = current_schema.stable_hash();
+        // A live table that no stage of the ABI declares is not the ORM's to
+        // drop: it is left out of the plan.
+        retain_stage_tables(
+            &mut current_schema,
+            abi.stages.iter().map(|stage| &stage.target_schema),
+        );
         let mut stages = Vec::new();
 
         for stage in path {
             let planned = plan_migration_for_backend::<B>(
                 stage.version.clone(),
                 stage.description.clone(),
-                Some(current_schema.stable_hash()),
+                Some(source_schema_hash),
                 stage.target_schema_hash.clone(),
                 &current_schema,
                 &stage.target_schema,
             )?;
             current_schema = stage.target_schema.clone();
+            source_schema_hash = current_schema.stable_hash();
             stages.push(planned);
         }
 
@@ -869,6 +891,21 @@ pub(super) fn declared_tables<'a>(
         .collect()
 }
 
+/// Keep only the live tables that some stage declares.
+pub(super) fn retain_stage_tables<'a>(
+    current: &mut SchemaModel,
+    stages: impl IntoIterator<Item = &'a SchemaModel>,
+) {
+    let declared = stages
+        .into_iter()
+        .flat_map(|target| target.tables.iter())
+        .map(|table| table.table_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    current
+        .tables
+        .retain(|table| declared.contains(table.table_name.as_str()));
+}
+
 fn schema_current_for_plan(
     current: &SchemaModel,
     target: &SchemaModel,
@@ -994,6 +1031,23 @@ async fn refuse_taken_search_helpers<B: OrmBackend>(
     }
 }
 
+/// Refuses a plan before any of its statements run when existing rows repeat
+/// the key of a unique index the plan creates.
+async fn refuse_unique_index_duplicates<B: OrmBackend>(
+    pool: &B::Pool,
+    plan: &PlannedMigration,
+) -> crate::Result<()> {
+    let steps = plan
+        .steps
+        .iter()
+        .map(|step| StepRef::from(&step.step))
+        .collect::<Vec<_>>();
+    match super::migrations::unique_index_duplicates::<B>(pool, &steps).await? {
+        Some(duplicates) => Err(duplicates.into_error()),
+        None => Ok(()),
+    }
+}
+
 fn plan_migration_for_backend<B: OrmBackend>(
     version: String,
     description: String,
@@ -1018,7 +1072,7 @@ fn plan_migration_for_backend<B: OrmBackend>(
     }
     let plan = build_migration_plan(B::DIALECT, current, target);
     validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
-    let steps = classify_migration_steps(&plan.steps);
+    let steps = classify_migration_steps_for_backend(B::DIALECT, &plan.steps, current);
     let plan_hash = stable_plan_hash(B::DIALECT.name(), &steps, &plan.statements);
     Ok(PlannedMigration {
         version,

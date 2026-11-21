@@ -258,9 +258,8 @@ impl OrmAiConfigurationService {
             AiConfigurationAction::ManageProviderCredentials,
         )
         .await?;
-        let page = AiSecretCleanupRecord::keyset_connection_page(
-            &self.database,
-            AiSecretCleanupRecordWhereInput {
+        let page = {
+            let filter = AiSecretCleanupRecordWhereInput {
                 scope_key: Some(StringFilter {
                     eq: Some(crate::ai_scope_key(scope)),
                     ..Default::default()
@@ -270,16 +269,23 @@ impl OrmAiConfigurationService {
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-            graphql_orm::graphql::pagination::KeysetConnectionInput {
-                after,
-                first: Some(crate::orm_read_bounds::client_page_limit(
-                    self.database.pagination_config(),
-                    100,
-                )),
-                ..Default::default()
-            },
-        )
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                graphql_orm::graphql::pagination::KeysetConnectionInput {
+                    after,
+                    first: Some(100),
+                    ..Default::default()
+                },
+                move |chunk| {
+                    AiSecretCleanupRecord::keyset_connection_page(
+                        &self.database,
+                        filter.clone(),
+                        chunk,
+                    )
+                },
+            )
+        }
         .await
         .map_err(map_orm)?;
         let entries = page

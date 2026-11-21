@@ -19,11 +19,14 @@ static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// The typed `*Null` variants let generated code preserve the intended
 /// database type for nullable fields when a backend requires typed null binds.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SqlValue {
     /// Text value.
     String(String),
     /// Typed null for text-like values.
     StringNull,
+    /// Date or timestamp with a legacy text representation.
+    Temporal(TemporalValue),
     /// Binary value.
     Bytes(Vec<u8>),
     /// Typed null for binary values.
@@ -56,6 +59,118 @@ pub enum SqlValue {
     Null,
 }
 
+/// A temporal parameter with the text spelling used by compatibility binds.
+///
+/// Construct one with [`SqlValue::from`] for a chrono value or
+/// [`SqlValue::temporal_text`] for an explicitly temporal text field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemporalValue {
+    kind: TemporalKind,
+    text: TemporalText,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TemporalText {
+    Input(String),
+    Chrono(String),
+}
+
+/// Parsed type of a temporal parameter.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum TemporalKind {
+    /// Calendar date.
+    Date(chrono::NaiveDate),
+    /// Timestamp without an offset.
+    DateTime(chrono::NaiveDateTime),
+    /// Timestamp with a fixed offset.
+    DateTimeOffset(chrono::DateTime<chrono::FixedOffset>),
+    /// Text accepted by compatibility binds that has no supported native representation.
+    Unparsed,
+}
+
+impl TemporalValue {
+    /// Return the parsed temporal type and value.
+    pub fn kind(&self) -> &TemporalKind {
+        &self.kind
+    }
+
+    /// Return the spelling used by text-compatible binders.
+    pub fn as_text(&self) -> &str {
+        match &self.text {
+            TemporalText::Input(text) | TemporalText::Chrono(text) => text,
+        }
+    }
+
+    #[cfg(feature = "mssql")]
+    pub(crate) fn is_chrono(&self) -> bool {
+        matches!(self.text, TemporalText::Chrono(_))
+    }
+}
+
+impl SqlValue {
+    /// Construct a parameter from an explicitly temporal text field or filter.
+    ///
+    /// The original text is retained. SQL Server native binding requires an
+    /// ISO date or an ISO timestamp with seconds and an optional offset.
+    pub fn temporal_text(text: String) -> Self {
+        let value = text.trim();
+        let naive = value.strip_suffix(" UTC").unwrap_or(value);
+        let kind = if let Ok(date) = value.parse::<chrono::NaiveDate>() {
+            TemporalKind::Date(date)
+        } else if let Ok(date_time) = value.parse::<chrono::DateTime<chrono::FixedOffset>>() {
+            TemporalKind::DateTimeOffset(date_time)
+        } else if let Ok(date_time) = naive
+            .parse::<chrono::NaiveDateTime>()
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(naive, "%Y-%m-%d %H:%M:%S%.f"))
+        {
+            TemporalKind::DateTime(date_time)
+        } else {
+            TemporalKind::Unparsed
+        };
+        Self::Temporal(TemporalValue {
+            kind,
+            text: TemporalText::Input(text),
+        })
+    }
+}
+
+impl From<chrono::NaiveDate> for SqlValue {
+    fn from(date: chrono::NaiveDate) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::Date(date),
+            text: TemporalText::Chrono(date.to_string()),
+        })
+    }
+}
+
+impl From<chrono::NaiveDateTime> for SqlValue {
+    fn from(date_time: chrono::NaiveDateTime) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTime(date_time),
+            text: TemporalText::Chrono(date_time.to_string()),
+        })
+    }
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for SqlValue {
+    fn from(date_time: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTime(date_time.naive_utc()),
+            text: TemporalText::Chrono(date_time.to_string()),
+        })
+    }
+}
+
+impl From<chrono::DateTime<chrono::FixedOffset>> for SqlValue {
+    fn from(date_time: chrono::DateTime<chrono::FixedOffset>) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTimeOffset(date_time),
+            text: TemporalText::Chrono(date_time.to_string()),
+        })
+    }
+}
+
 /// Produce a stable internal event/search identifier for a binary entity key.
 ///
 /// SQL bindings always retain the original bytes; this encoding is used only
@@ -77,6 +192,10 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
     fn component(value: &SqlValue) -> String {
         match value {
             SqlValue::String(value) => format!("s{}:{value}", value.len()),
+            SqlValue::Temporal(value) => {
+                let value = value.as_text();
+                format!("s{}:{value}", value.len())
+            }
             SqlValue::Bytes(value) => binary_key_id(value),
             SqlValue::Uuid(value) => format!("u:{value}"),
             SqlValue::Int(value) => format!("i:{value}"),
@@ -3341,11 +3460,14 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// explicitly support this contract (including typed projections and group pages). Errors fail the request closed.
     ///
     /// With [`DatabaseBuilder::narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
-    /// on (it is off by default), generated GraphQL `updateMany` and
+    /// on, which is the default since the breaking release (pass `false` to
+    /// opt out), generated GraphQL `updateMany` and
     /// `deleteMany` also ask, on the `GraphqlMutation` surface, when
     /// [`Self::write_target_prefilter`] returns `None`. A `Prefilter` or
     /// `Complete` predicate then narrows their locking read: rows outside it
     /// are never passed to a row callback, and are never locked on PostgreSQL.
+    /// An error returned here on that surface then refuses the bulk write, so
+    /// return `CallbackOnly` for callers whose bulk writes must keep working.
     /// On SQL Server they are not locked only with the separate opt-in
     /// [`DatabaseBuilder::mssql_snapshot_bulk_write_targets`](crate::db::DatabaseBuilder::mssql_snapshot_bulk_write_targets),
     /// which gives up a serializable bulk-write transaction for it.
@@ -3425,11 +3547,11 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// row callbacks, so it can never grant a write. A row it leaves out is
     /// treated exactly like a missing row, including a row the callbacks
     /// would have allowed, so it must not exclude rows the caller can write.
-    /// The default, `None`, keeps the callback-only behaviour; a bulk write
-    /// on a database that opted into
-    /// [`narrow_bulk_writes_to_read_visibility`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility)
-    /// then narrows by the SQL predicate of [`Self::read_visibility`], when it
-    /// has one. A returned predicate takes precedence over read visibility in
+    /// The default, `None`, declares no prefilter. A bulk write then narrows
+    /// by the SQL predicate of [`Self::read_visibility`], when it has one,
+    /// unless the database opted out with
+    /// [`narrow_bulk_writes_to_read_visibility(false)`](crate::db::DatabaseBuilder::narrow_bulk_writes_to_read_visibility),
+    /// which keeps the callback-only behaviour. A returned predicate takes precedence over read visibility in
     /// both modes. `policy_key` is the
     /// entity's write policy key. Errors fail the write closed. Repository
     /// writes do not ask.
@@ -5028,23 +5150,36 @@ impl SchemaAbi {
     }
 }
 
-/// One pending [`SchemaStage`] planned against the stage before it, or against
-/// the live schema for the first pending stage.
+/// One pending [`SchemaStage`] planned against the schema before it: the
+/// previous stage's target, or, for the first pending stage, the target of
+/// the last stage recorded as applied (the live schema when none is).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedSchemaStage {
     pub version: String,
     pub description: String,
     pub target_schema_hash: String,
     pub plan: MigrationPlan,
+    /// The schema this stage is planned against. For the first pending stage
+    /// it is the target of the last stage recorded as applied or, when no
+    /// stage is recorded yet, the introspected live schema restricted to
+    /// stage-declared tables. For each later stage it is the previous stage's
+    /// target.
+    pub source_schema: SchemaModel,
 }
 
 impl PlannedSchemaStage {
-    /// The stage's steps classified with the same rules as
-    /// [`SchemaManager::plan_migration_to_entities`](super::SchemaManager::plan_migration_to_entities).
+    /// The stage's steps classified for [`MigrationPlan::backend`] against
+    /// [`source_schema`](Self::source_schema), as
+    /// [`SchemaManager::plan_migration_to_entities`](super::SchemaManager::plan_migration_to_entities)
+    /// classifies against the live schema.
     ///
     /// Stage application refuses these steps according to [`ApplyOptions`].
     pub fn steps(&self) -> Vec<PlannedMigrationStep> {
-        super::migrations::classify_migration_steps(&self.plan.steps)
+        super::migrations::classify_migration_steps_for_backend(
+            self.plan.backend,
+            &self.plan.steps,
+            &self.source_schema,
+        )
     }
 
     /// The highest step risk in this stage, or `None` when it has no steps.
@@ -5613,25 +5748,38 @@ impl Default for ApplyOptions {
 }
 
 /// Options that affect how migration plans are built.
+///
+/// The default is [`PlanOptions::managed_tables_only`]: a plan never drops a
+/// live table merely because the target schema does not declare it. The ORM
+/// keeps no record of which tables it created, so an undeclared table may
+/// belong to the host or to another application in a shared database.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanOptions {
     /// Ignore live tables that are not present in the target schema.
     ///
-    /// Existing behavior treats extra live tables as drift and plans drops for
-    /// them. Enable this when graphql-orm owns only a subset of tables in a
-    /// shared database.
+    /// `true` by default. With `false`, every live table the target does not
+    /// declare is treated as drift and a `DROP TABLE` is planned for it,
+    /// whoever created it.
     pub ignore_unmanaged_tables: bool,
 }
 
 impl PlanOptions {
-    /// Plan against the full current and target schemas.
+    /// Plan against the full current and target schemas: every live table the
+    /// target does not declare gets a destructive `DropTable` step.
+    ///
+    /// This is an explicit statement that the ORM owns every table the
+    /// introspected schema reports. Use it to remove a table whose entity was
+    /// deleted, in a database (or PostgreSQL schema) that holds no tables of
+    /// the host's own. Applying the drops still needs
+    /// [`ApplyOptions::allow_destructive`].
     pub const fn strict() -> Self {
         Self {
             ignore_unmanaged_tables: false,
         }
     }
 
-    /// Plan only tables present in the target schema and ignore unrelated live tables.
+    /// Plan only tables present in the target schema and ignore unrelated
+    /// live tables. This is the default.
     pub const fn managed_tables_only() -> Self {
         Self {
             ignore_unmanaged_tables: true,
@@ -5641,7 +5789,7 @@ impl PlanOptions {
 
 impl Default for PlanOptions {
     fn default() -> Self {
-        Self::strict()
+        Self::managed_tables_only()
     }
 }
 

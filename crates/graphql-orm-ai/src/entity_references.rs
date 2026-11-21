@@ -55,7 +55,7 @@ const MAXIMUM_REGISTERED_KINDS: usize = 256;
 /// model to see; the host decides, for the principal current at each use,
 /// whether any data is produced.
 #[derive(Clone, Debug, InputObject, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiEntityReferenceInput {
     /// Host-registered reference kind.
     pub kind: String,
@@ -68,7 +68,7 @@ pub struct AiEntityReferenceInput {
 /// A notice describes that one moment. The reference is stored either way and
 /// is resolved again at every later use.
 #[derive(Clone, Copy, Debug, Enum, PartialEq, Eq)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiEntityReferenceNoticeCode {
     /// The host produced no data. This one code covers an entity that does
     /// not exist, one the sender may not read, and a resolver failure, so it
@@ -81,7 +81,7 @@ pub enum AiEntityReferenceNoticeCode {
 
 /// Typed notice for one reference that produced no data at submission.
 #[derive(Clone, Debug, SimpleObject, PartialEq, Eq)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiEntityReferenceNotice {
     /// Zero-based position of the reference in the submitted list.
     pub reference_index: i32,

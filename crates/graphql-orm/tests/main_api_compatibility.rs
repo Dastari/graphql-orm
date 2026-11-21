@@ -1,8 +1,9 @@
+//! Configuration literals stay compatible; cursor enums include breaking variants.
 use graphql_orm::graphql::orm::{
     PaginationConfig, RuntimeQueryErrorCode, RuntimeRelationErrorCode,
 };
 #[test]
-fn main_struct_literal_and_exhaustive_matches_compile() {
+fn configuration_literal_and_breaking_cursor_variants_compile() {
     let _ = PaginationConfig {
         default_limit: Some(50),
         max_limit: Some(100),
@@ -23,6 +24,7 @@ fn main_struct_literal_and_exhaustive_matches_compile() {
         RuntimeQueryErrorCode::Decode => (),
         RuntimeQueryErrorCode::BackendExecution => (),
         RuntimeQueryErrorCode::InvalidSearch => (),
+        RuntimeQueryErrorCode::CursorKeyTooLarge => (),
     }
     let code = RuntimeRelationErrorCode::InvalidRequest;
     match code {
@@ -38,5 +40,6 @@ fn main_struct_literal_and_exhaustive_matches_compile() {
         RuntimeRelationErrorCode::CardinalityViolation => (),
         RuntimeRelationErrorCode::Decode => (),
         RuntimeRelationErrorCode::BackendExecution => (),
+        RuntimeRelationErrorCode::CursorKeyTooLarge => (),
     }
 }

@@ -155,6 +155,49 @@ async fn literal_non_object_values_for_input_objects_are_refused_before_any_reso
     }
 }
 
+/// The same entity in a schema whose maximum page limit is declared at
+/// compile time with a value other than the default 100.
+mod declared_maximum {
+    use super::*;
+    schema_roots! {
+        backend: "sqlite",
+        max_page_limit: 250,
+        query_custom_ops: [],
+        entities: [ShapeItem],
+    }
+}
+
+/// A schema built through the breaking batch's compile-time maximum path
+/// (`schema_roots!(max_page_limit: N)`) installs the same input check.
+#[tokio::test]
+async fn a_declared_maximum_schema_refuses_non_object_values_before_any_resolver() {
+    let fixture = fixture().await;
+    let db = fixture
+        .db
+        .clone()
+        .with_pagination_config(fixture.db.pagination_config().with_max_limit(Some(250)));
+    let schema = declared_maximum::schema_builder(db).finish();
+    for (query, variables) in [
+        (LIST.replace("WHERE", "5"), serde_json::json!({})),
+        (
+            "query($w: ShapeItemWhereInput) { shapeItems(where: $w) { edges { node { id } } } }"
+                .to_string(),
+            serde_json::json!({ "w": "alpha" }),
+        ),
+    ] {
+        let response = schema
+            .execute(
+                Request::new(query.as_str())
+                    .variables(Variables::from_json(variables))
+                    .data(AuthSubject::new("fixture-principal")),
+            )
+            .await;
+        assert_refused(&response, &query);
+    }
+    assert_eq!(fixture.decisions.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.reads.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn variable_non_object_values_for_input_objects_are_refused_before_any_resolver() {
     let declared =
@@ -674,4 +717,109 @@ async fn a_nullable_or_null_variable_in_a_oneof_field_is_refused_in_every_mode()
             assert_eq!(bumps.load(Ordering::SeqCst), 1, "{mode:?} {query}");
         }
     }
+}
+
+/// A schema built by hand from generated roots without
+/// `GeneratedInputValidation` fails closed (#753): every generated resolver
+/// that takes an input object refuses with `INPUT_VALIDATION_REQUIRED` before
+/// policy or database work, even for well-formed values, so the missing
+/// extension shows on the first such request. Installing it is the one-line
+/// fix.
+#[tokio::test]
+async fn hand_built_schemas_without_input_validation_fail_closed() {
+    use graphql_orm::async_graphql::{EmptySubscription, Schema};
+    let fixture = fixture().await;
+    let hand_built = |validated: bool| {
+        let builder = Schema::build(
+            QueryRoot::default(),
+            MutationRoot::default(),
+            EmptySubscription,
+        )
+        .data(fixture.db.clone());
+        if validated {
+            builder
+                .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+                .finish()
+        } else {
+            builder.finish()
+        }
+    };
+    let schema = hand_built(false);
+    for (query, variables) in [
+        (
+            "{ shapeItems(where: { name: { eq: \"alpha\" } }) { edges { node { id } } } }",
+            serde_json::json!({}),
+        ),
+        (
+            "query($w: ShapeItemWhereInput) { shapeItems(where: $w) { edges { node { id } } } }",
+            serde_json::json!({ "w": { "name": { "eq": "alpha" } } }),
+        ),
+        (
+            "{ shapeItems { edges { node { id } } } }",
+            serde_json::json!({}),
+        ),
+        (
+            "mutation { createShapeItem(input: { id: \"c\", name: \"gamma\" }) { success } }",
+            serde_json::json!({}),
+        ),
+        (
+            "mutation { deleteShapeItems(where: { id: { eq: \"a\" } }) { deletedCount } }",
+            serde_json::json!({}),
+        ),
+        (
+            "mutation { first: updateShapeItems(where: { id: { eq: \"a\" } }, input: { name: \"changed\" }) { affectedCount } second: createShapeItem(input: { id: \"c\", name: \"gamma\" }) { success } }",
+            serde_json::json!({}),
+        ),
+    ] {
+        let response = schema
+            .execute(
+                Request::new(query)
+                    .variables(Variables::from_json(variables.clone()))
+                    .data(AuthSubject::new("fixture-principal")),
+            )
+            .await;
+        let probe = format!("{query} {variables}");
+        assert!(!response.errors.is_empty(), "{probe}: {response:?}");
+        let codes = response
+            .errors
+            .iter()
+            .map(|error| {
+                error
+                    .extensions
+                    .as_ref()
+                    .and_then(|extensions| extensions.get("code"))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            codes
+                .iter()
+                .all(|code| code == &Some(Value::String("INPUT_VALIDATION_REQUIRED".into()))),
+            "{probe}: {:?}",
+            response.errors
+        );
+    }
+    assert_eq!(fixture.decisions.load(Ordering::SeqCst), 0, "a policy ran");
+    assert_eq!(fixture.reads.load(Ordering::SeqCst), 0, "a read ran");
+    assert_eq!(names(&fixture.db).await, ["alpha", "beta"]);
+
+    // A scalar-only generated resolver needs no mark.
+    let response = schema
+        .execute(
+            Request::new("{ shapeItem(id: \"a\") { name } }")
+                .data(AuthSubject::new("fixture-principal")),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{response:?}");
+
+    // With the extension the same hand-built schema serves the request.
+    let response = hand_built(true)
+        .execute(
+            Request::new(
+                "{ shapeItems(where: { name: { eq: \"alpha\" } }) { edges { node { id } } } }",
+            )
+            .data(AuthSubject::new("fixture-principal")),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{response:?}");
 }

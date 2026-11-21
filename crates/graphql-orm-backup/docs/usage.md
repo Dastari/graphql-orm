@@ -435,8 +435,7 @@ lock. An error from the observer aborts before that snapshot is touched.
 
 `with_known_snapshots` takes the opposite record, the ids that are live, and
 also refuses snapshots the host never recorded. Every manifest read refuses a
-snapshot the records do not admit with a `ManifestAuthenticationFailed` error
-for which `BackupError::is_snapshot_not_admitted()` is true. `prune` refuses
+snapshot the records do not admit with `BackupError::SnapshotNotAdmitted`. `prune` refuses
 to run while such a snapshot is listed; remove it with `delete_snapshot`,
 which then deletes it without reading its manifest. See the
 [trust model](architecture.md#trust-model).

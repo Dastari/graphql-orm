@@ -332,6 +332,7 @@ async fn graphql_keyset_root_binds_filter_and_entity() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db)
     .data(AuthSubject::builder("reader").build())
     .finish();

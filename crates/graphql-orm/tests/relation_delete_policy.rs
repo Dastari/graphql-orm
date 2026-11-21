@@ -492,8 +492,19 @@ async fn relation_delete_policies_apply_and_execute_correctly()
         .ok_or("missing staged fk before upgrade")?;
     assert_eq!(before_fk.on_delete, DeletePolicy::Restrict);
 
-    stage_database
+    let refused = stage_database
         .apply_schema_stages(&stages)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("destructive"), "{refused}");
+    stage_database
+        .apply_schema_stages_with_options(
+            &stages,
+            graphql_orm::graphql::orm::ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|error| format!("apply staged cascade migration failed: {error}"))?;
     let after_upgrade = introspect_schema(&stage_pool).await?;

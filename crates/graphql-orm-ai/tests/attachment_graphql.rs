@@ -27,7 +27,7 @@ fn attachment_roots_follow_the_complete_configured_graphql_case() {
     .finish()
     .sdl();
 
-    #[cfg(not(feature = "graphql-case-pascal"))]
+    #[cfg(not(graphql_case_pascal))]
     {
         assert!(sdl.contains("aiAttachments(sessionId:"));
         assert!(sdl.contains("createAiAttachmentUpload(input:"));
@@ -35,7 +35,7 @@ fn attachment_roots_follow_the_complete_configured_graphql_case() {
         assert!(!sdl.contains("AiAttachments("));
     }
 
-    #[cfg(feature = "graphql-case-pascal")]
+    #[cfg(graphql_case_pascal)]
     {
         assert!(sdl.contains("AiAttachments(SessionId:"));
         assert!(sdl.contains("CreateAiAttachmentUpload(Input:"));

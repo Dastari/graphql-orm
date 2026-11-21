@@ -211,7 +211,21 @@ async fn runtime_collections_reach_the_capability_index() {
             .find(|entry| entry.entity_name.as_deref() == Some(entity))
             .expect("runtime collection is indexed")
     };
-    let invoice = entry("Invoice");
+    let invoice_entity = entry("Invoice");
+    // One entity capability groups the collection's roots; each root keeps
+    // its own entry.
+    assert_eq!(invoice_entity.kind, AiCapabilityKind::GeneratedEntity);
+    assert_eq!(invoice_entity.description, "Customer invoice");
+    assert!(
+        invoice_entity
+            .operations
+            .iter()
+            .any(|operation| operation.operation_name == "invoices")
+    );
+    let invoice = index
+        .operation_entry(&invoice_entity.id, "invoices")
+        .expect("the invoices root keeps its entry");
+    assert_eq!(invoice.kind, AiCapabilityKind::GeneratedQuery);
     assert_eq!(invoice.operation_name, "invoices");
     assert_eq!(invoice.description, "Page through Invoice records");
     assert_eq!(
@@ -323,4 +337,116 @@ async fn runtime_node_and_live_catalog_keeps_typed_lists_usable_by_ai() {
             .any(|capability| capability.field_name() == "node"),
         "polymorphic node is intentionally not a provider-exportable query"
     );
+}
+
+/// Live key inputs use the derived `UUID` scalar for UUID members in both
+/// identity modes, and `RuntimeInt64` (default) or `Int` (legacy) for integer
+/// members. Every capability catalogue must accept each combination.
+#[tokio::test]
+async fn runtime_live_key_inputs_compile_under_default_and_legacy_identities() {
+    struct Source(tokio::sync::broadcast::Sender<RuntimeLiveEvent>);
+    impl RuntimeLiveSource for Source {
+        fn subscribe(
+            &self,
+            _: &SchemaFingerprint,
+            _: &CollectionId,
+        ) -> Result<tokio::sync::broadcast::Receiver<RuntimeLiveEvent>, RuntimeGraphqlError>
+        {
+            Ok(self.0.subscribe())
+        }
+    }
+    let shapes: [(&str, Vec<RuntimeValueKind>); 3] = [
+        ("uuid", vec![RuntimeValueKind::Uuid]),
+        ("integer", vec![RuntimeValueKind::Integer]),
+        (
+            "composite",
+            vec![RuntimeValueKind::Integer, RuntimeValueKind::Uuid],
+        ),
+    ];
+    for (shape, key_kinds) in shapes {
+        for legacy in [false, true] {
+            let mut fields = key_kinds
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    let name = if index == 0 { "id" } else { "scope" };
+                    let mut key = field(&format!("tickets.{name}"), name, *kind);
+                    key.unique = key_kinds.len() == 1;
+                    key
+                })
+                .collect::<Vec<_>>();
+            let primary_key = fields.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+            fields.push(field("tickets.title", "title", RuntimeValueKind::String));
+            fields.push(field(
+                "tickets.version",
+                "rowVersion",
+                RuntimeValueKind::Integer,
+            ));
+            let mut tickets = collection("tickets", "Ticket", fields);
+            tickets.primary_key = primary_key;
+            tickets.node_identity = Some(RuntimeNodeIdentity {
+                version_field: FieldId::new("tickets.version").unwrap(),
+            });
+            tickets.live_subscriptions = Some(RuntimeLiveSubscriptions {
+                subscription_key_limit: 8,
+                deleted_images: false,
+            });
+            let definition = RuntimeSchema {
+                repository_only: false,
+                format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
+                collections: vec![tickets],
+            };
+            let (sender, _) = tokio::sync::broadcast::channel(8);
+            let mut options = RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_live_source(Arc::new(Source(sender)), RuntimeLiveProfile::NativeRls)
+                .with_mutations(RuntimeGraphqlMutationOptions::default());
+            if legacy {
+                options = options.with_legacy_int_identities();
+            }
+            let module =
+                RuntimeGraphqlModule::compile(Arc::new(definition.validate().unwrap()), options)
+                    .unwrap();
+            let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+                .await
+                .unwrap();
+            let (api, catalog) = RuntimeGraphqlComposer::new(database, "Query", Default::default())
+                .unwrap()
+                .mutation_root("Mutation")
+                .unwrap()
+                .install(module)
+                .unwrap()
+                .finish_with_semantic_catalog()
+                .unwrap();
+            let target = GraphqlExecutionTargetId::parse("runtime-application").unwrap();
+            let sdl = api.sdl();
+            let context = format!("{shape} key, legacy identities {legacy}");
+            AiGraphqlQueryCapabilityCatalog::compile(
+                "runtime-live-keys",
+                target.clone(),
+                &sdl,
+                &catalog,
+                AiGraphqlQueryCapabilityLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("query catalogue, {context}: {error:?}"));
+            // Runtime mutations are unclassified and so not admitted; the
+            // catalogue must still compile.
+            AiGraphqlMutationCapabilityCatalog::compile(
+                "runtime-live-keys",
+                target.clone(),
+                &sdl,
+                &catalog,
+                AiGraphqlQueryCapabilityLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("mutation catalogue, {context}: {error:?}"));
+            AiGraphqlSubscriptionCapabilityCatalog::compile(
+                "runtime-live-keys",
+                target,
+                &sdl,
+                &catalog,
+                AiGraphqlSubscriptionCapabilityLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("subscription catalogue, {context}: {error:?}"));
+        }
+    }
 }

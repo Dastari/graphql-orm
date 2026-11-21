@@ -293,6 +293,11 @@ deployment grace period exceeds the router drain deadline.
 - **Dynamic registration rejected:** verify service subject and exact trusted
   ID/name/origins, IP-literal execution origin, host/port/CIDR policy, and all
   DNS answers.
+- **Client cannot tell whether a refused write ran:** enable
+  [`refusalOutcome`](configuration.md#refusal-outcome). Each error of an
+  operation the router refused before any subgraph request then carries
+  `outcome: "refused"`; an error without it may come from execution, so the
+  client treats it as unknown unless the subgraph sent its own `outcome`.
 - **HTTP allowed by router but denied downstream:** expected defence in depth.
   Align protocol metadata and the authoritative subgraph guard; do not weaken
   the guard.

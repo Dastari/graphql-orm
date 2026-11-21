@@ -142,6 +142,7 @@ async fn non_id_primary_key_orders_repository_and_generated_reads() -> graphql_o
         graphql_orm::async_graphql::EmptyMutation,
         graphql_orm::async_graphql::EmptySubscription,
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
     .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     .finish();

@@ -3,7 +3,7 @@ title: "Federation entities, keys, and operation roots"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-11-16
 review_by: 2027-03-01
 supersedes: []
 ---
@@ -105,8 +105,9 @@ therefore generates one such resolver per declared key on `{Entity}Queries`,
 and renames each argument to the entity's exported field name.
 
 That rename is load-bearing. The ORM configures argument case
-(`argument-case-*`) independently of field case (`field-case-*`). Under
-`field-case-pascal` with `argument-case-snake` the generated single read takes
+(`GRAPHQL_ORM_ARGUMENT_CASE`) independently of field case
+(`GRAPHQL_ORM_FIELD_CASE`). Under `PascalCase` fields with `snake_case`
+arguments the generated single read takes
 `zone_id` while the entity exports `ZoneId`; a resolver that accepted the
 default argument name would export `@key(fields: "zone_id slot")`, naming
 fields that do not exist.
@@ -240,17 +241,27 @@ Two further details hold in both shapes:
   cannot read the owning subgraph's wording through the router, so operational
   detail must come from the subgraph's own logs.
 
-### The router does not authorize a joined field
+### What the router authorizes on a joined field
 
-`graphql-orm-router` enforces its authorization contract over **root fields
-only**, and it deliberately skips underscore-prefixed root fields, so
-`_entities` and `_service` are outside that contract. A field reached by
-following a `@key` into another subgraph is therefore authorized **only by the
-subgraph that owns the entity**. Any entity whose rows are not universally
-readable must declare its own entity policy, row policy, scope requirement, or
+<a id="the-router-does-not-authorize-a-joined-field"></a>
+
+`graphql-orm-router` applies two checks before any downstream request. Its
+protocol descriptor contract covers **root fields only**; Federation's
+planner-owned `_entities` and `_service` are outside it. Since router 0.16.0
+it also evaluates the composed `@authenticated` and `@requiresScopes`
+directives on **every selected field**, including a field reached by following
+a `@key` into another subgraph, fragments, aliases, interfaces and unions. A
+selection those directives refuse refuses the whole operation; see the
+[router configuration reference](../../../crates/graphql-orm-router/docs/configuration.md#nested-directive-authorization).
+
+Neither check grants anything. A joined field is still authorized by the
+subgraph that owns the entity, and most ORM policies (row policies, entity
+policies, argument-templated scopes, custom guards) have no SDL directive the
+router could evaluate. Any entity whose rows are not universally readable must
+declare its own entity policy, row policy, scope requirement, or
 `auth = "required"`; a router-level rule on the parent query grants nothing on
-the far side of the join. Router-level enforcement of nested directives is a
-separate router decision and does not exist today.
+the far side of the join. The router decision is recorded in
+[ADR-0015](../../decisions/ADR-0015-router-enforces-composed-authorization-directives.md).
 
 ## Referencing an entity owned by another subgraph
 

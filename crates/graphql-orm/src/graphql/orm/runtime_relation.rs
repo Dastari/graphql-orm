@@ -43,6 +43,8 @@ pub enum RuntimeRelationErrorCode {
     CardinalityViolation,
     Decode,
     BackendExecution,
+    /// A stored order key cannot fit within the cursor byte bound.
+    CursorKeyTooLarge,
 }
 
 impl RuntimeRelationErrorCode {
@@ -61,6 +63,7 @@ impl RuntimeRelationErrorCode {
             Self::CardinalityViolation => "cardinality_violation",
             Self::Decode => "decode",
             Self::BackendExecution => "backend_execution",
+            Self::CursorKeyTooLarge => "cursor_key_too_large",
         }
     }
 }
@@ -81,7 +84,7 @@ impl RuntimeRelationError {
     }
 
     fn cursor_key_too_large() -> Self {
-        let mut error = Self::new(RuntimeRelationErrorCode::ResourceLimit);
+        let mut error = Self::new(RuntimeRelationErrorCode::CursorKeyTooLarge);
         error.detail = Some("cursor_key_too_large");
         error
     }
@@ -157,7 +160,9 @@ impl From<RuntimeRecordError> for RuntimeRelationError {
 
 impl From<RuntimeQueryError> for RuntimeRelationError {
     fn from(error: RuntimeQueryError) -> Self {
-        if error.detail() == Some("cursor_key_too_large") {
+        if error.code() == super::RuntimeQueryErrorCode::CursorKeyTooLarge
+            || error.detail() == Some("cursor_key_too_large")
+        {
             Self::cursor_key_too_large().source(error)
         } else {
             Self::new(RuntimeRelationErrorCode::InvalidRequest).source(error)

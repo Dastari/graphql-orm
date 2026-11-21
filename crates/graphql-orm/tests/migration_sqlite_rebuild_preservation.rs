@@ -449,7 +449,13 @@ async fn storage_class_changes_abort_without_replacing_the_original() -> graphql
                 .plan_migration("conversion", "refuse changed values", &current, &target)?;
         let error = db
             .schema()
-            .apply_migration(&plan, ApplyOptions::default())
+            .apply_migration(
+                &plan,
+                ApplyOptions {
+                    allow_destructive: true,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap_err();
         assert!(error.to_string().contains("UnsupportedCapability"));

@@ -10,6 +10,19 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.17.0 (**breaking release**) enforces the composed `@authenticated`
+and `@requiresScopes` directives on every selected field, not only root
+fields, before any downstream request: nested object fields, interface and
+union members, fragments and aliases. A refused selection refuses the whole
+operation with `UNAUTHENTICATED` or `FORBIDDEN` and its response path. It also
+adds the opt-in `refusalOutcome` setting
+(`RouterConfig::with_refusal_outcome`): each error of an operation the router
+refused before any subgraph request carries `extensions.outcome: "refused"`,
+in the vocabulary generated ORM services use. See
+[MIGRATION.md](MIGRATION.md#0168-to-0170-breaking-release),
+[nested directive authorization](docs/configuration.md#nested-directive-authorization)
+and [refusal outcome](docs/configuration.md#refusal-outcome).
+
 Version 0.16.8 changes documentation and source comments only. The
 [operations runbook](docs/operations.md#startup-hand-off-and-ownership)
 now records the scoped startup hand-off into the Hive plugin and why the

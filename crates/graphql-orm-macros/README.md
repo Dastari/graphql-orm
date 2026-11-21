@@ -10,6 +10,29 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.187.0 is the **breaking release**; see the
+[migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) for the steps
+in upgrade order. For the macros:
+
+- The 15 `resolver-case-*`, `argument-case-*` and `field-case-*` features are
+  removed; the build script reads `GRAPHQL_ORM_RESOLVER_CASE`,
+  `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` instead. The unused
+  `mysql` feature is removed.
+- Every `schema_roots!` schema has a compile-time maximum page limit
+  (`max_page_limit: N`, 100 when omitted), and generated resolvers that take
+  an input object require `GeneratedInputValidation`, which generated schema
+  builders install.
+- Generated-operation fingerprints no longer include the Rust module path
+  (operation catalogue 0.10.0), so every fingerprint changes once.
+  `stable_type_id` is still accepted and no longer affects fingerprints.
+- The generated `load_relations`/`bulk_load_relations` preloads are removed.
+- Generated writes carry temporal types for chrono dates and timestamps and
+  for text fields marked `#[date_field]` or `#[filterable(type = "date")]`.
+- `#[graphql_entity(key_only_deletes)]` adds an opt-in key-only delete signal
+  for `Key`/`Keys` subscribers.
+
+Upgrade ORM and macros together.
+
 Version 0.186.0 aligns with the ORM's
 [owned PostgreSQL test harness fix](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness).
 
@@ -805,9 +828,11 @@ features. The macro compiler rejects a build with no backend and a consumer
 must select an explicit backend when Cargo feature unification enables more
 than one.
 
-The independent `resolver-case-*`, `argument-case-*`, and `field-case-*`
-groups each permit at most one feature: `pascal`, `snake`,
-`screaming-snake`, `lower`, or `upper`.
+Generated GraphQL naming is selected per build by the
+`GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and
+`GRAPHQL_ORM_FIELD_CASE` environment variables, which replaced the
+`*-case-*` features. See
+[naming configuration](../../docs/reference/graphql-orm/macros-and-attributes.md#naming-configuration).
 
 ## Minimum use
 

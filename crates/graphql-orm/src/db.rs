@@ -99,12 +99,14 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     schema_policy: SchemaPolicy,
     pagination_config: PaginationConfig,
     refuse_oversized_limit: bool,
+    expose_uncoded_callback_messages: bool,
     max_page_offset: Option<i64>,
     /// Opt-in `SUBSCRIPTION_SELECTION_UNSUPPORTED` for an unstreamable selection.
     subscription_selection_unsupported_code: bool,
     /// Opt-in `extensions.outcome` on generated mutation root errors.
     mutation_error_outcome: bool,
-    /// Opt-in narrowing of GraphQL bulk-write targets by read visibility.
+    /// Narrowing of GraphQL bulk-write targets by read visibility. On by
+    /// default; it never turns on the SQL Server snapshot target selection.
     narrow_bulk_writes_to_read_visibility: bool,
     /// Opt-in SQL Server snapshot target selection for narrowed bulk writes.
     mssql_snapshot_bulk_write_targets: bool,
@@ -134,6 +136,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
+            expose_uncoded_callback_messages: self.expose_uncoded_callback_messages,
             subscription_selection_unsupported_code: self.subscription_selection_unsupported_code,
             mutation_error_outcome: self.mutation_error_outcome,
             narrow_bulk_writes_to_read_visibility: self.narrow_bulk_writes_to_read_visibility,
@@ -216,11 +219,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy,
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -253,11 +257,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -287,11 +292,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -321,11 +327,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -355,11 +362,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -392,11 +400,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -436,11 +445,12 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             subscription_selection_unsupported_code: false,
             mutation_error_outcome: false,
-            narrow_bulk_writes_to_read_visibility: false,
+            narrow_bulk_writes_to_read_visibility: true,
             mssql_snapshot_bulk_write_targets: false,
-            max_page_offset: None,
+            max_page_offset: PaginationConfig::DEFAULT_MAX_OFFSET,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -485,6 +495,27 @@ impl<B: OrmBackend> Database<B> {
     /// Set whether oversized GraphQL page limits are refused instead of reduced.
     pub fn with_oversized_page_limit_refusal(mut self, refuse: bool) -> Self {
         self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Whether schemas built from this handle render uncoded host callback
+    /// errors as written; see
+    /// [`UncodedCallbackMessages`](crate::graphql::errors::UncodedCallbackMessages).
+    /// Off by default.
+    pub fn exposes_uncoded_callback_messages(&self) -> bool {
+        self.expose_uncoded_callback_messages
+    }
+
+    /// Return a copy whose generated schemas render, or hide, the text of an
+    /// uncoded entity-policy, row-policy, write-transform or mutation-hook
+    /// error; see
+    /// [`UncodedCallbackMessages`](crate::graphql::errors::UncodedCallbackMessages).
+    ///
+    /// The setting applies only to schemas built from the returned handle
+    /// (or a clone of it) after the call. Off by default: an uncoded error is
+    /// `INTERNAL_ERROR` with the default message.
+    pub fn with_uncoded_callback_messages_exposed(mut self, expose: bool) -> Self {
+        self.expose_uncoded_callback_messages = expose;
         self
     }
 
@@ -545,8 +576,8 @@ impl<B: OrmBackend> Database<B> {
         self
     }
 
-    /// Set the largest client page offset served; see
-    /// [`DatabaseBuilder::max_page_offset`].
+    /// Set the largest client page offset served, or `None` for unbounded
+    /// client offsets; see [`DatabaseBuilder::max_page_offset`].
     pub fn with_max_page_offset(mut self, max_offset: Option<i64>) -> Self {
         self.max_page_offset = max_offset;
         self
@@ -2358,19 +2389,30 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
         self
     }
 
+    /// Let generated schemas built from this database render the text of an
+    /// uncoded host callback error; see
+    /// [`Database::with_uncoded_callback_messages_exposed`]. Off by default.
+    pub fn expose_uncoded_callback_messages(mut self, expose: bool) -> Self {
+        self.database.expose_uncoded_callback_messages = expose;
+        self
+    }
+
     /// Refuse a client page offset above `max_offset` with
     /// `PAGE_LIMIT_EXCEEDED`, on every backend.
     ///
-    /// `None`, the default, leaves client offsets unbounded. Every backend
+    /// The default is [`PaginationConfig::DEFAULT_MAX_OFFSET`]
+    /// (`Some(10_000)`). `None` is the explicit opt-out: it leaves client
+    /// offsets unbounded, as before the breaking release. Every backend
     /// reads and discards the rows an offset skips, so one large offset costs
-    /// a scan of that many rows; set a maximum such as
-    /// [`PaginationConfig::RECOMMENDED_MAX_OFFSET`] and page deeper with
-    /// keyset cursors. The bound applies to generated list roots, to-many
+    /// a scan of that many rows; page deeper with keyset cursors. The bound
+    /// applies to generated list roots, to-many
     /// relation pages and search pages, to custom resolvers that resolve
     /// their page through
     /// [`ClientPaginationConfig::resolve_client_page`](crate::graphql::orm::ClientPaginationConfig::resolve_client_page),
-    /// and to Rust reads that take a `PageInput` (`EntityQuery::paginate`,
-    /// `EntitySearchQuery::paginate`). An offset set with a builder's own
+    /// and to Rust reads that take a `PageInput`: `EntityQuery::paginate`
+    /// followed by `fetch_connection*` (its `fetch_all` and `fetch_one` reads
+    /// do not check the offset), and `EntitySearchQuery::paginate` followed
+    /// by any fetch. An offset set with a builder's own
     /// `offset(n)`, including the search builders', is trusted code and is
     /// not bounded.
     pub fn max_page_offset(mut self, max_offset: Option<i64>) -> Self {
@@ -2433,8 +2475,11 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     }
 
     /// Narrow the target rows of generated GraphQL `updateMany` and
-    /// `deleteMany` to the caller's read visibility. Off by default, so bulk
-    /// writes select the same rows as before.
+    /// `deleteMany` to the caller's read visibility. On by default since the
+    /// breaking release; pass `false` to select targets as releases before it
+    /// did. The default does not enable
+    /// [`mssql_snapshot_bulk_write_targets`](Self::mssql_snapshot_bulk_write_targets),
+    /// which stays a separate opt-in.
     ///
     /// When on and the row policy declares no
     /// [`write_target_prefilter`](crate::graphql::orm::RowPolicy::write_target_prefilter),
@@ -2458,6 +2503,10 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// write, so a policy that returns `Err` for some callers (for example
     /// write-only ones) must return `CallbackOnly` instead to keep their bulk
     /// writes working. Single-row and repository writes are unaffected.
+    ///
+    /// When off, a bulk write selects every row its filter matches and the
+    /// row callbacks classify each one, so rows outside the caller's read
+    /// visibility are locked and passed to the callbacks.
     pub fn narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
         self.database.narrow_bulk_writes_to_read_visibility = enabled;
         self

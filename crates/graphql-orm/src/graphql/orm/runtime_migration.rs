@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::core::*;
 use super::dialect::{DatabaseBackend, SqlDialect};
 use super::migrations::{
-    DefaultEquivalence, build_migration_plan_views_with, classify_migration_step_view,
+    DefaultEquivalence, build_migration_plan_views_with, classify_migration_step_context,
     migration_step_table_name,
 };
 use super::owned_schema::{
@@ -1424,7 +1424,16 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             .steps
             .into_iter()
             .map(|step| {
-                let (risk, reason) = classify_migration_step_view(&StepRef::from(&step));
+                let prior = match &step {
+                    OwnedMigrationStep::SetAppendOnly { table_name, .. } => scoped
+                        .tables
+                        .iter()
+                        .find(|table| &table.table_name == table_name)
+                        .map(|table| (table.append_only, table.retention_purge)),
+                    _ => None,
+                };
+                let (risk, reason) =
+                    classify_migration_step_context(Some(B::DIALECT), &StepRef::from(&step), prior);
                 OwnedPlannedMigrationStep {
                     step,
                     risk,

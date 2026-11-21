@@ -10,6 +10,84 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.17.0 (breaking release)
+
+The router part of the single breaking release. See the
+[migration guide](MIGRATION.md#0168-to-0170-breaking-release).
+
+- **Added (opt-in): the router says when it refused an operation before
+  execution.** With `RouterConfig::with_refusal_outcome(true)` (file
+  configuration `refusalOutcome: true`), each error of an operation the router
+  refused before it sent any subgraph request carries
+  `extensions.outcome: "refused"`, the value generated ORM services use on
+  their mutation errors. It covers the router's own refusals (bearer and
+  authority checks, root and nested authorization, the field limit,
+  subscriptions over HTTP, anonymous introspection, persisted documents and
+  the WebSocket gateway's admission refusals) and the engine's refusals before
+  execution (request, parse, validation and its limits, variable coercion,
+  `INTROSPECTION_DISABLED`, `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`), over HTTP
+  and the WebSocket gateway. An operation for which any subgraph request
+  started, an execution failure and the request timeout are never marked, and
+  a subgraph's own `outcome` passes through unchanged. Off by default; codes,
+  messages, paths and HTTP status are unchanged either way.
+  ([#764](https://github.com/Dastari/graphql-orm/issues/764))
+
+- **Breaking: composed `@authenticated` and `@requiresScopes` are enforced on
+  every selected field.** An authenticated router used to evaluate only its
+  protocol descriptors, and only for root fields: the composed directives were
+  kept in the supergraph, with their `SECURITY` links, but nothing below the
+  root evaluated them. Before any downstream request opens, the router now
+  walks the normalized operation against the composed schema, over HTTP and
+  the WebSocket gateway, including subscription admission. For each included
+  field `P.f` returning `R` it requires the rules on `P`, `P.f` and `R`; a
+  field selected on an interface also requires the rules of every
+  implementation of it, and a field of an implementation also requires the
+  rules declared on the same interface field and on the interface, including
+  those declared on an `@interfaceObject` type in another subgraph; an inline
+  fragment requires the rule on its type condition. `@requiresScopes` is an
+  OR of AND sets and implies authentication. Aliases, fragment spreads,
+  inline fragments, `@defer` fragments, `@stream` fields, interfaces and
+  union members reach the same rules. Root fields are covered too, in
+  addition to their descriptor requirements.
+- Per-subgraph scope requirements are combined with AND semantics.
+  Composition merges the `@requiresScopes` sets that several subgraphs
+  declare for one type or field into a single list of alternatives; the
+  router reads each subgraph's declaration from its SDL, resolving directive
+  names as composition does (`@link` imports and `as:` renames, namespace
+  prefixes, an unknown prefix stripped, and the unprefixed names when
+  Federation v2 is not linked or the composite-schemas specification is), and
+  requires every one. `@authenticated` is resolved the same way.
+  ([#729](https://github.com/Dastari/graphql-orm/issues/729))
+- A refused selection refuses the whole operation with no `data`, as a refused
+  root field does. Each error is `UNAUTHENTICATED` (no caller) or `FORBIDDEN`
+  (missing scope), names only the selection's response path by response key,
+  and at most 32 are reported. The router never trims a selection or returns
+  partial data for it. Subgraph guards and policies stay authoritative: the
+  router may deny early but grants nothing.
+- `__typename` is never refused at any depth. `__schema` and `__type` keep
+  the introspection policy. Anonymous development mode, which has no
+  authorization catalogue, enforces nothing, as before.
+- Graph construction fails, so the last-known-good graph stays active, when a
+  subgraph's `@requiresScopes` argument is not a non-empty list of non-empty
+  lists of non-empty strings (an empty set, or a value composition would drop,
+  is refused rather than read as always satisfied); when a directive
+  application that composition could read as `@requiresScopes` or
+  `@authenticated` does not resolve to one; when either directive is placed
+  on an argument, input field, enum value, union, input object, directive
+  argument or the schema, in a subgraph or the composed supergraph; or when
+  the composed directives do not match the subgraph declarations they came
+  from. The comparison of the composed scope sets with the per-subgraph
+  declarations is a secondary defence: composition deduplicates
+  alternatives, so a declaration that repeats another's scope sets leaves the
+  composed union unchanged. The name-based refusal of any authorization
+  directive application that does not resolve to a recorded site is the
+  primary defence.
+- Each distinct rule is evaluated once per operation, and selection sets that
+  cannot reach a rule are not walked. A graph with no composed directives
+  skips the walk.
+- **Tests:** a dedicated assertion pins that Hive's inbound request
+  deduplication stays disabled, which the refusal outcome relies on (#764).
+
 ## Unreleased - 0.16.8
 
 - Document the scoped startup hand-off of prepared runtimes into the Hive

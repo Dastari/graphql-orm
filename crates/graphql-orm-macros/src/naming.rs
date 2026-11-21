@@ -31,15 +31,15 @@ impl GraphqlNameCase {
 }
 
 pub(crate) fn selected_resolver_case() -> GraphqlNameCase {
-    if cfg!(feature = "resolver-case-pascal") {
+    if cfg!(graphql_orm_resolver_case = "pascal") {
         GraphqlNameCase::Pascal
-    } else if cfg!(feature = "resolver-case-snake") {
+    } else if cfg!(graphql_orm_resolver_case = "snake") {
         GraphqlNameCase::Snake
-    } else if cfg!(feature = "resolver-case-screaming-snake") {
+    } else if cfg!(graphql_orm_resolver_case = "screaming_snake") {
         GraphqlNameCase::ScreamingSnake
-    } else if cfg!(feature = "resolver-case-lower") {
+    } else if cfg!(graphql_orm_resolver_case = "lower") {
         GraphqlNameCase::Lower
-    } else if cfg!(feature = "resolver-case-upper") {
+    } else if cfg!(graphql_orm_resolver_case = "upper") {
         GraphqlNameCase::Upper
     } else {
         GraphqlNameCase::Camel
@@ -47,15 +47,15 @@ pub(crate) fn selected_resolver_case() -> GraphqlNameCase {
 }
 
 pub(crate) fn selected_field_case() -> GraphqlNameCase {
-    if cfg!(feature = "field-case-pascal") {
+    if cfg!(graphql_orm_field_case = "pascal") {
         GraphqlNameCase::Pascal
-    } else if cfg!(feature = "field-case-snake") {
+    } else if cfg!(graphql_orm_field_case = "snake") {
         GraphqlNameCase::Snake
-    } else if cfg!(feature = "field-case-screaming-snake") {
+    } else if cfg!(graphql_orm_field_case = "screaming_snake") {
         GraphqlNameCase::ScreamingSnake
-    } else if cfg!(feature = "field-case-lower") {
+    } else if cfg!(graphql_orm_field_case = "lower") {
         GraphqlNameCase::Lower
-    } else if cfg!(feature = "field-case-upper") {
+    } else if cfg!(graphql_orm_field_case = "upper") {
         GraphqlNameCase::Upper
     } else {
         GraphqlNameCase::Camel
@@ -63,15 +63,15 @@ pub(crate) fn selected_field_case() -> GraphqlNameCase {
 }
 
 pub(crate) fn selected_argument_case() -> GraphqlNameCase {
-    if cfg!(feature = "argument-case-pascal") {
+    if cfg!(graphql_orm_argument_case = "pascal") {
         GraphqlNameCase::Pascal
-    } else if cfg!(feature = "argument-case-snake") {
+    } else if cfg!(graphql_orm_argument_case = "snake") {
         GraphqlNameCase::Snake
-    } else if cfg!(feature = "argument-case-screaming-snake") {
+    } else if cfg!(graphql_orm_argument_case = "screaming_snake") {
         GraphqlNameCase::ScreamingSnake
-    } else if cfg!(feature = "argument-case-lower") {
+    } else if cfg!(graphql_orm_argument_case = "lower") {
         GraphqlNameCase::Lower
-    } else if cfg!(feature = "argument-case-upper") {
+    } else if cfg!(graphql_orm_argument_case = "upper") {
         GraphqlNameCase::Upper
     } else {
         GraphqlNameCase::Camel
@@ -79,15 +79,15 @@ pub(crate) fn selected_argument_case() -> GraphqlNameCase {
 }
 
 pub(crate) fn selected_field_case_rule() -> &'static str {
-    if cfg!(feature = "field-case-pascal") {
+    if cfg!(graphql_orm_field_case = "pascal") {
         "PascalCase"
-    } else if cfg!(feature = "field-case-snake") {
+    } else if cfg!(graphql_orm_field_case = "snake") {
         "snake_case"
-    } else if cfg!(feature = "field-case-screaming-snake") {
+    } else if cfg!(graphql_orm_field_case = "screaming_snake") {
         "SCREAMING_SNAKE_CASE"
-    } else if cfg!(feature = "field-case-lower") {
+    } else if cfg!(graphql_orm_field_case = "lower") {
         "lowercase"
-    } else if cfg!(feature = "field-case-upper") {
+    } else if cfg!(graphql_orm_field_case = "upper") {
         "UPPERCASE"
     } else {
         "camelCase"
@@ -145,11 +145,11 @@ pub(crate) fn graphql_field_name(
     } else if let Some(rule) = graphql_rename_fields {
         apply_rename_rule(rust_name, rule)
     } else if cfg!(any(
-        feature = "field-case-pascal",
-        feature = "field-case-snake",
-        feature = "field-case-screaming-snake",
-        feature = "field-case-lower",
-        feature = "field-case-upper"
+        graphql_orm_field_case = "pascal",
+        graphql_orm_field_case = "snake",
+        graphql_orm_field_case = "screaming_snake",
+        graphql_orm_field_case = "lower",
+        graphql_orm_field_case = "upper"
     )) {
         apply_graphql_case(rust_name, selected_field_case())
     } else if let Some(serde_name) = &meta.serde_name {

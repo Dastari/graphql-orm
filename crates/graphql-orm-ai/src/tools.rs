@@ -783,6 +783,23 @@ impl AiToolCatalog {
             .shared_type_plan_schema()
     }
 
+    /// Compact typed signature of one registered automatic query capability,
+    /// as broker version 2's describe and describe-type return it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or a schema that cannot
+    /// be rendered.
+    pub fn query_capability_signature(
+        &self,
+        id: &AiToolId,
+    ) -> Result<crate::AiCapabilitySignature, AiError> {
+        self.query_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?
+            .capability_signature()
+    }
+
     /// Compiles one provider-authored typed plan against the exact registered
     /// semantic capability.
     ///

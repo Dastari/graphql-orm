@@ -369,6 +369,7 @@ async fn denial_matrix() -> Result<(), Box<dyn std::error::Error>> {
         async_graphql::EmptyMutation,
         async_graphql::EmptySubscription,
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
     .finish();
     let list_schema = async_graphql::Schema::build(
@@ -376,6 +377,7 @@ async fn denial_matrix() -> Result<(), Box<dyn std::error::Error>> {
         async_graphql::EmptyMutation,
         async_graphql::EmptySubscription,
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
     .finish();
     assert!(schema.sdl().contains("optional: Target"));

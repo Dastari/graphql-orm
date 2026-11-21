@@ -83,8 +83,125 @@ pub enum ReadPredicateOp {
 pub struct ReadPredicate {
     entity: TypeId,
     backend: DatabaseBackend,
+    /// TRUE exactly for the rows the predicate admits.
     expression: FilterExpression,
     cost: Cost,
+    /// How [`Self::not`] renders the rows where the predicate is FALSE.
+    negation: Negation,
+}
+
+/// The rendering [`ReadPredicate::not`] uses. Each predicate is TRUE, FALSE or
+/// UNKNOWN per row, and only TRUE admits. Its admitting rendering may answer
+/// FALSE where the predicate is UNKNOWN (a relation's `EXISTS` does), which is
+/// harmless under `and` and `or` but not under SQL `NOT`. So each predicate
+/// also knows a rendering that is TRUE exactly where it is FALSE, built by
+/// De Morgan through `and`/`or` and swapped by `not`.
+#[derive(Clone, Debug)]
+enum Negation {
+    /// `NOT (expression)`: the expression is three-valued SQL.
+    Sql,
+    /// TRUE exactly where the predicate is FALSE, with its checked cost.
+    Explicit(FilterExpression, Cost),
+    /// Built from a part that cannot be negated, or whose negation is over
+    /// the composition budget; `not` refuses it.
+    Unsupported,
+}
+
+/// Render with anonymous placeholders; composing queries rebase them.
+fn render(expression: &FilterExpression) -> (String, Vec<SqlValue>) {
+    let mut values = Vec::new();
+    let clause = render_filter_expression(DatabaseBackend::Sqlite, expression, &mut 1, &mut values);
+    (clause, values)
+}
+
+/// The rendering TRUE exactly where a predicate is FALSE, with its checked
+/// cost, or `None` when the predicate cannot be negated: an empty fragment or
+/// conjunction, the deny fallback `1 = 0` (its negation would be a blanket
+/// grant), or a negation over the composition budget.
+fn negated(
+    backend: DatabaseBackend,
+    expression: &FilterExpression,
+    cost: Cost,
+    negation: Negation,
+) -> Option<(FilterExpression, Cost)> {
+    match negation {
+        Negation::Sql => {
+            if !negatable(expression) {
+                return None;
+            }
+            reserve(cost.bytes, 1, 16).ok()?;
+            let (clause, values) = render(expression);
+            if contains_match_nothing(&clause) {
+                return None;
+            }
+            let clause = format!("NOT ({clause})");
+            let cost = Cost::of(&clause).check(backend).ok()?;
+            Some((FilterExpression::trusted_fragment(clause, values), cost))
+        }
+        Negation::Explicit(expression, cost) => Some((expression, cost)),
+        Negation::Unsupported => None,
+    }
+}
+
+/// `and`/`or` of two measured expressions. A child of the same kind is
+/// flattened into the node, so a fold of any length stays one level deep:
+/// `(a) OR (b) OR (c)`. Its rendered depth is its deepest child plus one,
+/// plus the grouping levels a long chain is rendered with. The cost is not
+/// checked here.
+fn join(
+    left: (FilterExpression, Cost),
+    right: (FilterExpression, Cost),
+    and: bool,
+) -> (FilterExpression, Cost) {
+    let (left_cost, right_cost) = (left.1, right.1);
+    let mut children = Vec::new();
+    let (mut inner, mut inner_units) = (0, 0);
+    for (expression, cost) in [left, right] {
+        match expression {
+            FilterExpression::And(nested) if and && !nested.is_empty() => {
+                inner = inner.max(cost.inner);
+                inner_units = inner_units.max(cost.inner_units);
+                children.extend(nested);
+            }
+            FilterExpression::Or(nested) if !and && !nested.is_empty() => {
+                inner = inner.max(cost.inner);
+                inner_units = inner_units.max(cost.inner_units);
+                children.extend(nested);
+            }
+            expression => {
+                inner = inner.max(cost.depth);
+                inner_units = inner_units.max(cost.units);
+                children.push(expression);
+            }
+        }
+    }
+    // Each child is wrapped in plain parentheses, one unit each.
+    let levels = 1 + super::query::filter_chain_levels(children.len());
+    let cost = Cost {
+        bytes: left_cost
+            .bytes
+            .saturating_add(right_cost.bytes)
+            // Each operand of a balanced pair tree costs at most its own
+            // `(` `)`, one separator and one grouping pair: nine bytes
+            // with ` AND `, eight with ` OR `.
+            .saturating_add(if and { 9 } else { 8 }),
+        depth: inner.saturating_add(levels),
+        inner,
+        units: inner_units.saturating_add(levels),
+        inner_units,
+        nesting: left_cost.nesting.max(right_cost.nesting),
+        relations: left_cost.relations.max(right_cost.relations),
+        exists: left_cost.exists.saturating_add(right_cost.exists),
+        instances: left_cost.instances.saturating_add(right_cost.instances),
+        cases: left_cost.cases.max(right_cost.cases),
+        closures: left_cost.closures.max(right_cost.closures),
+    };
+    let expression = if and {
+        FilterExpression::And(children)
+    } else {
+        FilterExpression::Or(children)
+    };
+    (expression, cost)
 }
 /// A persisted physical column of `T`. A table-qualified column is accepted
 /// only when its qualifier names `T`'s own table: the predicate binds the
@@ -266,9 +383,12 @@ const MSSQL_CLOSURE_RELATION_WEIGHT: u32 = 1;
 
 /// The deepest nesting of `CASE` expressions one [`ReadPredicate`] may
 /// render, on every backend. SQL Server refuses `CASE` nested deeper than
-/// ten (error 125). [`ReadPredicate::not_related`] adds two levels and a
-/// closure one, so this also bounds `not_related` chains, whose target is
-/// inlined twice per level, to five levels.
+/// ten (error 125). A closure adds one level, and the negation of a relation
+/// ([`ReadPredicate::related`] under [`ReadPredicate::not`], or
+/// [`ReadPredicate::not_related`]) adds one around its target's own
+/// negation. So this also bounds negation: a chain of more than ten nested
+/// relations builds but cannot be negated, and a `not_related` chain stops at
+/// twenty levels.
 pub const READ_PREDICATE_MAX_CASE_NESTING: u32 = MAX_CASE_NESTING;
 const MAX_CASE_NESTING: u32 = 10;
 
@@ -553,6 +673,7 @@ fn render_mssql_closure(
     keys: &[(&str, &str)],
     quantifier: ReadPredicateQuantifier,
     predicate: &str,
+    false_rows: &str,
     max_depth: u32,
 ) -> String {
     let columns = |render: &dyn Fn(usize, &str, &str) -> String, separator: &str| {
@@ -630,7 +751,7 @@ fn render_mssql_closure(
         String::new()
     };
     // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
-    let truth = format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END");
+    let truth = format!("CASE WHEN ({predicate}) THEN 2 WHEN {false_rows} THEN 0 ELSE 1 END");
     let reached = format!("{prefix}_r");
     let truths = format!("{prefix}_x");
     let summary = format!("{prefix}_s");
@@ -669,6 +790,8 @@ fn render_mssql_closure(
 struct Relation {
     table: String,
     joins: String,
+    /// `<source key> IS NOT NULL` for every key column.
+    present_keys: String,
     predicate: String,
     values: Vec<SqlValue>,
 }
@@ -682,30 +805,27 @@ impl Relation {
         if keys.is_empty() || target.entity != TypeId::of::<T>() || target.backend != B::DIALECT {
             return Err(invalid());
         }
+        let source_table = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
         let mut joins = Vec::new();
+        let mut present_keys = Vec::new();
         for (source, destination) in keys {
             if validate_column::<B, S>(source).is_err()
                 || validate_column::<B, T>(destination).is_err()
             {
                 return Err(invalid());
             }
+            let source = B::DIALECT.quote_column_identifier(source);
             joins.push(format!(
-                "__gom_visibility.{} = {}.{}",
+                "__gom_visibility.{} = {source_table}.{source}",
                 B::DIALECT.quote_column_identifier(destination),
-                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
-                B::DIALECT.quote_column_identifier(source)
             ));
+            present_keys.push(format!("{source_table}.{source} IS NOT NULL"));
         }
-        let mut values = Vec::new();
-        let predicate = render_filter_expression(
-            DatabaseBackend::Sqlite,
-            &target.expression,
-            &mut 1,
-            &mut values,
-        );
+        let (predicate, values) = render(&target.expression);
         Ok(Self {
             table: B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
             joins: joins.join(" AND "),
+            present_keys: present_keys.join(" AND "),
             predicate,
             values,
         })
@@ -734,6 +854,7 @@ impl ReadPredicate {
             backend,
             expression,
             cost,
+            negation: Negation::Sql,
         })
     }
 
@@ -750,7 +871,19 @@ impl ReadPredicate {
             backend,
             expression: FilterExpression::trusted_fragment(clause, values),
             cost,
+            negation: Negation::Sql,
         })
+    }
+
+    /// The rendering TRUE exactly where this predicate is FALSE; see
+    /// [`negated`].
+    fn negated(&self) -> Option<(FilterExpression, Cost)> {
+        negated(
+            self.backend,
+            &self.expression,
+            self.cost,
+            self.negation.clone(),
+        )
     }
 
     /// Compare a validated persisted physical column with a bound value.
@@ -816,8 +949,7 @@ impl ReadPredicate {
         )
     }
 
-    /// SQL negation, rendered as `NOT (...)` with the inner bind values in
-    /// their original order.
+    /// Negation: the rows where this predicate is FALSE.
     ///
     /// Predicates use SQL three-valued logic and only TRUE admits a row.
     /// `not(p)` is TRUE exactly when `p` is FALSE; when `p` is UNKNOWN (for
@@ -831,6 +963,14 @@ impl ReadPredicate {
     /// NULL rows, say so explicitly:
     /// `p.not()?.or(ReadPredicate::is_null::<B, T>("column")?)?`.
     ///
+    /// A column comparison, NULL test, generated filter or closure renders as
+    /// `NOT (...)` with the inner bind values in their original order.
+    /// [`Self::related`] is three-valued, so its negation never admits a row
+    /// whose relation key is NULL or whose related rows leave the target
+    /// UNKNOWN, also inside `and`/`or` under a `not` (De Morgan); see there
+    /// for the rendering. To allow absent or matching rows, compose
+    /// `exists_any.not()?.or(exists_matching)?`.
+    ///
     /// Refused with `AUTHORIZATION_MISCONFIGURED`:
     /// - empty inner fragments or conjunctions;
     /// - a predicate that renders the deny fallback `1 = 0` anywhere,
@@ -839,29 +979,26 @@ impl ReadPredicate {
     ///   [`crate::graphql::filters::MAX_FILTER_LIST_OPERANDS`] operands), or
     ///   an invalid filter value. Its negation would be a blanket grant. Omit
     ///   the term, or use [`Self::is_not_null`] or
-    ///   [`ReadVisibility::Unrestricted`] deliberately.
-    ///
-    /// Relation EXISTS is two-valued, so `related(..).not()` is plain
-    /// `NOT EXISTS`: a source row with a NULL key, or whose related rows all
-    /// have an UNKNOWN target predicate, is admitted. For the fail-closed
-    /// absence test use [`Self::not_related`].
+    ///   [`ReadVisibility::Unrestricted`] deliberately;
+    /// - a negation over the composition budget.
     #[allow(clippy::should_implement_trait)] // Fallible policy construction.
     pub fn not(self) -> async_graphql::Result<Self> {
-        if !negatable(&self.expression) {
-            return Err(invalid());
-        }
-        reserve(self.cost.bytes, 1, 16)?;
-        let mut values = Vec::new();
-        let clause = render_filter_expression(
-            DatabaseBackend::Sqlite,
-            &self.expression,
-            &mut 1,
-            &mut values,
-        );
-        if contains_match_nothing(&clause) {
-            return Err(invalid());
-        }
-        Self::fragment(self.entity, self.backend, format!("NOT ({clause})"), values)
+        let Self {
+            entity,
+            backend,
+            expression,
+            cost,
+            negation,
+        } = self;
+        let (negated, negated_cost) =
+            negated(backend, &expression, cost, negation).ok_or_else(invalid)?;
+        Ok(Self {
+            entity,
+            backend,
+            expression: negated,
+            cost: negated_cost,
+            negation: Negation::Explicit(expression, cost),
+        })
     }
 
     /// Reject filters requiring residual Rust matching on this backend. A partial
@@ -876,12 +1013,39 @@ impl ReadPredicate {
         Self::measured(F::entity_type_id(), B::DIALECT, expression)
     }
 
-    /// A parameterized EXISTS join over validated persisted columns. `keys`
-    /// maps source columns to target columns; composite keys are supported.
-    /// Target restrictions come from a typed target predicate. This is an
-    /// explicit equality relation, not a named relation resolver: include any
-    /// discriminator constraints in source/target predicates yourself. Target
-    /// entity/row policies are not implicit grants; the policy owns this join.
+    /// A parameterized relation test over validated persisted columns: "some
+    /// related row matches `target`". `keys` maps source columns to target
+    /// columns; composite keys are supported. Target restrictions come from a
+    /// typed target predicate. This is an explicit equality relation, not a
+    /// named relation resolver: include any discriminator constraints in
+    /// source/target predicates yourself. Target entity/row policies are not
+    /// implicit grants; the policy owns this join.
+    ///
+    /// The relation is three-valued, so it composes with [`Self::not`], `and`
+    /// and `or` under the same rule as every other predicate. For each source
+    /// row it is:
+    ///
+    /// - UNKNOWN when any source key column is NULL: the relation cannot be
+    ///   evaluated;
+    /// - TRUE when a related row has `target` TRUE;
+    /// - UNKNOWN when no related row has `target` TRUE but one has it UNKNOWN
+    ///   (it might match);
+    /// - FALSE otherwise, including when there is no related row at all.
+    ///
+    /// Only TRUE admits a row, so it renders as the plain correlated
+    /// `EXISTS (<related rows where target>)`. A negation, including one that
+    /// reaches the relation through `and`/`or`, renders the rows where the
+    /// relation is FALSE: `<every key IS NOT NULL> AND NOT EXISTS (<related
+    /// rows where target is TRUE or UNKNOWN>)`. It never admits a row whose key
+    /// is NULL or whose related rows only leave `target` UNKNOWN. To admit rows
+    /// with a NULL key, add [`Self::is_null`] on the key with `or`. Both forms
+    /// are single correlated subqueries that use an index on the target key
+    /// (PostgreSQL plans the negation as an anti-join). Each form binds the
+    /// target's values once.
+    ///
+    /// A target that renders the deny fallback `1 = 0` (such as an empty
+    /// `in_list`) is accepted here, because the admitting form only denies
+    /// with it; [`Self::not`] refuses to negate such a relation.
     pub fn related<B, S, T>(keys: &[(&str, &str)], target: Self) -> async_graphql::Result<Self>
     where
         B: OrmBackend,
@@ -891,19 +1055,45 @@ impl ReadPredicate {
         reserve(target.cost.bytes, 1, 1024)?;
         let relation = Relation::new::<B, S, T>(keys, &target)?;
         let clause = relation.exists(&relation.predicate);
-        Self::fragment(TypeId::of::<S>(), B::DIALECT, clause, relation.values)
+        let cost = Cost::of(&clause).check(B::DIALECT)?;
+        // Related rows where the target is TRUE or UNKNOWN: not FALSE.
+        let negation = match target.negated() {
+            Some((false_rows, false_cost))
+                if reserve(false_cost.bytes, 1, 2048 + relation.present_keys.len()).is_ok() =>
+            {
+                let (false_rows, values) = render(&false_rows);
+                let clause = format!(
+                    "{} AND NOT {}",
+                    relation.present_keys,
+                    relation.exists(&format!("CASE WHEN {false_rows} THEN 0 ELSE 1 END = 1"))
+                );
+                match Cost::of(&clause).check(B::DIALECT) {
+                    Ok(cost) => {
+                        Negation::Explicit(FilterExpression::trusted_fragment(clause, values), cost)
+                    }
+                    Err(_) => Negation::Unsupported,
+                }
+            }
+            _ => Negation::Unsupported,
+        };
+        Ok(Self {
+            entity: TypeId::of::<S>(),
+            backend: B::DIALECT,
+            expression: FilterExpression::trusted_fragment(clause, relation.values),
+            cost,
+            negation,
+        })
     }
 
-    /// Fail-closed absence: "no related row can match `target`".
+    /// Fail-closed absence: "no related row can match `target`". Exactly
+    /// `ReadPredicate::related::<B, S, T>(keys, target)?.not()`.
     ///
-    /// `keys` and `target` are validated exactly as for [`Self::related`], and
-    /// as there the policy owns the join: target row policies are not
-    /// imported, and a hidden target row counts like any other. The outcome
-    /// reveals what `related(keys, target)` reveals plus whether some related
-    /// row has `target` UNKNOWN (a hidden one included), and that case fails
-    /// closed: it can deny a row, never admit one. The result is
-    /// three-valued, so it composes with [`Self::not`], `and` and `or` under
-    /// the same rule as every other predicate. For each source row it is:
+    /// `keys` and `target` are validated as for [`Self::related`], and as
+    /// there the policy owns the join: target row policies are not imported,
+    /// and a hidden target row counts like any other. The outcome reveals
+    /// what `related(keys, target)` reveals plus whether some related row has
+    /// `target` UNKNOWN (a hidden one included), and that case fails closed:
+    /// it can deny a row, never admit one. For each source row it is:
     ///
     /// - UNKNOWN when any source key column is NULL: the relation cannot be
     ///   evaluated, so the row is not admitted;
@@ -916,52 +1106,19 @@ impl ReadPredicate {
     /// `related(keys, p)`. To admit rows with a NULL key, add
     /// `.or(ReadPredicate::is_null::<B, S>("key")?)?` explicitly.
     ///
-    /// It renders as `(CASE WHEN <key IS NULL> THEN NULL WHEN EXISTS (<related
-    /// rows where target>) THEN 0 WHEN EXISTS (<related rows where target is
-    /// not FALSE>) THEN NULL ELSE 1 END) = 1` on SQLite, PostgreSQL and SQL
-    /// Server. The target's bind values appear twice, in that order. A target
-    /// that renders the deny fallback `1 = 0` (such as an empty `in_list`) is
-    /// refused with `AUTHORIZATION_MISCONFIGURED`, as for [`Self::not`].
+    /// It renders as `<every key IS NOT NULL> AND NOT EXISTS (<related rows
+    /// where target is TRUE or UNKNOWN>)` on SQLite, PostgreSQL and SQL
+    /// Server, binding the target's values once. A target that cannot be
+    /// negated, such as one that renders the deny fallback `1 = 0` (an empty
+    /// `in_list`), is refused with `AUTHORIZATION_MISCONFIGURED`, as for
+    /// [`Self::not`].
     pub fn not_related<B, S, T>(keys: &[(&str, &str)], target: Self) -> async_graphql::Result<Self>
     where
         B: OrmBackend,
         S: Entity + 'static,
         T: Entity + 'static,
     {
-        if !negatable(&target.expression) {
-            return Err(invalid());
-        }
-        reserve(target.cost.bytes, 2, 2048)?;
-        let relation = Relation::new::<B, S, T>(keys, &target)?;
-        if relation.predicate.trim().is_empty() || contains_match_nothing(&relation.predicate) {
-            return Err(invalid());
-        }
-        let source = B::DIALECT.render_table_identifier_path(S::TABLE_NAME);
-        let null_key = keys
-            .iter()
-            .map(|(column, _)| {
-                format!(
-                    "{source}.{} IS NULL",
-                    B::DIALECT.quote_column_identifier(column)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let matching = relation.exists(&relation.predicate);
-        let possible = relation.exists(&format!(
-            "CASE WHEN NOT ({}) THEN 0 ELSE 1 END = 1",
-            relation.predicate
-        ));
-        let mut values = relation.values.clone();
-        values.extend(relation.values);
-        Self::fragment(
-            TypeId::of::<S>(),
-            B::DIALECT,
-            format!(
-                "(CASE WHEN {null_key} THEN NULL WHEN {matching} THEN 0 WHEN {possible} THEN NULL ELSE 1 END) = 1"
-            ),
-            values,
-        )
+        Self::related::<B, S, T>(keys, target)?.not()
     }
 
     /// Existential closure: "some row reachable from this one matches
@@ -1137,17 +1294,48 @@ impl ReadPredicate {
         } else {
             0
         };
-        reserve(target.cost.bytes, 4, 4096 + walk)?;
+        // The rows where the target is FALSE. `NOT (target)` is exact for a
+        // target SQL negates. A three-valued relation target supplies its own
+        // FALSE rows. A target that cannot be negated still decides which
+        // rows the closure admits, so it keeps `NOT`, and the closure then
+        // refuses negation.
+        let explicit = match &target.negation {
+            Negation::Explicit(expression, cost) => Some((expression, cost.bytes)),
+            Negation::Sql | Negation::Unsupported => None,
+        };
+        let false_bytes = explicit.map_or(target.cost.bytes.saturating_add(8), |(_, bytes)| bytes);
+        reserve(
+            target.cost.bytes.saturating_add(false_bytes),
+            2,
+            4096 + walk,
+        )?;
         let relation = Relation::new::<B, T, T>(keys, &target)?;
         if relation.predicate.trim().is_empty() {
             return Err(invalid());
         }
+        let (false_rows, false_values) = match explicit {
+            Some((expression, _)) => {
+                let (clause, values) = render(expression);
+                (format!("({clause})"), values)
+            }
+            None => (
+                format!("NOT ({})", relation.predicate),
+                relation.values.clone(),
+            ),
+        };
+        let negation = match target.negation {
+            Negation::Unsupported => Negation::Unsupported,
+            Negation::Sql | Negation::Explicit(..) => Negation::Sql,
+        };
         let dialect = B::DIALECT;
         let table = dialect.render_table_identifier_path(T::TABLE_NAME);
         let cte = format!("__gom_closure_{}", closure_level(&relation.predicate));
-        let mut values = Vec::with_capacity(relation.values.len() * 4);
-        for _ in 0..4 {
+        // Each of the two truth expressions binds the target, then its
+        // FALSE rows.
+        let mut values = Vec::with_capacity((relation.values.len() + false_values.len()) * 2);
+        for _ in 0..2 {
             values.extend(relation.values.iter().cloned());
+            values.extend(false_values.iter().cloned());
         }
         if dialect == DatabaseBackend::Mssql {
             let clause = render_mssql_closure(
@@ -1157,9 +1345,13 @@ impl ReadPredicate {
                 keys,
                 quantifier,
                 &relation.predicate,
+                &false_rows,
                 max_depth,
             );
-            return Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values);
+            return Ok(Self {
+                negation,
+                ..Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values)?
+            });
         }
         let join = |items: Vec<String>, separator: &str| items.join(separator);
         let indexed = |render: &dyn Fn(usize, &str, &str) -> String| {
@@ -1177,8 +1369,7 @@ impl ReadPredicate {
         let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
         let predicate = &relation.predicate;
         // 2 = TRUE, 1 = UNKNOWN, 0 = FALSE for the row in scope as `table`.
-        let truth =
-            format!("CASE WHEN ({predicate}) THEN 2 WHEN NOT ({predicate}) THEN 0 ELSE 1 END");
+        let truth = format!("CASE WHEN ({predicate}) THEN 2 WHEN {false_rows} THEN 0 ELSE 1 END");
         // The anchor has no FROM, so `table` is the row being authorized.
         // In the step, the unaliased join makes `table` the reached row, so
         // the target (including any nested relation) is evaluated on it.
@@ -1242,7 +1433,10 @@ impl ReadPredicate {
              WHERE {cte}.__gom_depth < {max_depth}) \
              SELECT {verdict} FROM {cte}) = 1"
         );
-        Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values)
+        Ok(Self {
+            negation,
+            ..Self::fragment(TypeId::of::<T>(), B::DIALECT, clause, values)?
+        })
     }
 
     pub fn and(self, other: Self) -> async_graphql::Result<Self> {
@@ -1255,65 +1449,37 @@ impl ReadPredicate {
         if self.entity != other.entity || self.backend != other.backend {
             return Err(invalid());
         }
-        // A child of the same kind is flattened into this node, so a fold of
-        // any length stays one level deep: `(a) OR (b) OR (c)`. Its rendered
-        // depth is its deepest child plus one, plus the grouping levels a long
-        // chain is rendered with.
-        let mut children = Vec::new();
-        let (mut inner, mut inner_units) = (0, 0);
-        for (expression, cost) in [(self.expression, self.cost), (other.expression, other.cost)] {
-            match expression {
-                FilterExpression::And(nested) if and && !nested.is_empty() => {
-                    inner = inner.max(cost.inner);
-                    inner_units = inner_units.max(cost.inner_units);
-                    children.extend(nested);
+        let backend = self.backend;
+        // De Morgan: `a AND b` is FALSE where either is FALSE, `a OR b` where
+        // both are. Two SQL-negatable operands stay SQL-negatable, so nothing
+        // is rendered for an ordinary fold.
+        let negation = match (self.negation, other.negation) {
+            (Negation::Sql, Negation::Sql) => Negation::Sql,
+            (left, right) => match (
+                negated(backend, &self.expression, self.cost, left),
+                negated(backend, &other.expression, other.cost, right),
+            ) {
+                (Some(left), Some(right)) => {
+                    let (expression, cost) = join(left, right, !and);
+                    match cost.check(backend) {
+                        Ok(cost) => Negation::Explicit(expression, cost),
+                        Err(_) => Negation::Unsupported,
+                    }
                 }
-                FilterExpression::Or(nested) if !and && !nested.is_empty() => {
-                    inner = inner.max(cost.inner);
-                    inner_units = inner_units.max(cost.inner_units);
-                    children.extend(nested);
-                }
-                expression => {
-                    inner = inner.max(cost.depth);
-                    inner_units = inner_units.max(cost.units);
-                    children.push(expression);
-                }
-            }
-        }
-        // Each child is wrapped in plain parentheses, one unit each.
-        let levels = 1 + super::query::filter_chain_levels(children.len());
-        let depth = inner.saturating_add(levels);
-        let units = inner_units.saturating_add(levels);
-        let cost = Cost {
-            bytes: self
-                .cost
-                .bytes
-                .saturating_add(other.cost.bytes)
-                // Each operand of a balanced pair tree costs at most its own
-                // `(` `)`, one separator and one grouping pair: nine bytes
-                // with ` AND `, eight with ` OR `.
-                .saturating_add(if and { 9 } else { 8 }),
-            depth,
-            inner,
-            units,
-            inner_units,
-            nesting: self.cost.nesting.max(other.cost.nesting),
-            relations: self.cost.relations.max(other.cost.relations),
-            exists: self.cost.exists.saturating_add(other.cost.exists),
-            instances: self.cost.instances.saturating_add(other.cost.instances),
-            cases: self.cost.cases.max(other.cost.cases),
-            closures: self.cost.closures.max(other.cost.closures),
-        }
-        .check(self.backend)?;
+                _ => Negation::Unsupported,
+            },
+        };
+        let (expression, cost) = join(
+            (self.expression, self.cost),
+            (other.expression, other.cost),
+            and,
+        );
         Ok(Self {
             entity: self.entity,
-            backend: self.backend,
-            expression: if and {
-                FilterExpression::And(children)
-            } else {
-                FilterExpression::Or(children)
-            },
-            cost,
+            backend,
+            expression,
+            cost: cost.check(backend)?,
+            negation,
         })
     }
 }
@@ -2424,9 +2590,19 @@ where
         let page_config = db
             .client_pagination_config()
             .with_read_maximum(base.max_limit);
-        page_config
-            .admit_client_limit(requested_limit)
-            .map_err(|error| error.into_graphql_error())?;
+        match (ctx, requested_limit) {
+            // A trusted Rust caller: a limit above the maximum is an error,
+            // never a shorter page than the caller asked for.
+            (None, Some(requested)) => {
+                page_config
+                    .checked_explicit_limit(requested)
+                    .map_err(|error| error.into_graphql_error())?;
+            }
+            // A GraphQL client: reduced, or refused when the host opted in.
+            _ => page_config
+                .admit_client_limit(requested_limit)
+                .map_err(|error| error.into_graphql_error())?,
+        }
         let limit = page_config
             .resolve_page(
                 Some(&PageInput {
@@ -2540,9 +2716,16 @@ where
         if page.include_total_count && visibility.requires_residual_checks() {
             return Err(input_error());
         }
-        let limit = db
+        let page_config = db
             .client_pagination_config()
-            .with_read_maximum(self.max_limit)
+            .with_read_maximum(self.max_limit);
+        if let (None, Some(requested)) = (ctx, page.limit) {
+            // A trusted Rust caller's limit is honoured exactly or refused.
+            page_config
+                .checked_explicit_limit(requested)
+                .map_err(|error| error.into_graphql_error())?;
+        }
+        let limit = page_config
             .resolve_client_page(
                 Some(&PageInput {
                     limit: page.limit,
@@ -2724,6 +2907,7 @@ mod predicate_tests {
                 backend: DatabaseBackend::Sqlite,
                 expression,
                 cost: Cost::default(),
+                negation: Negation::Sql,
             };
             assert!(predicate.not().is_err());
         }
@@ -2735,6 +2919,7 @@ mod predicate_tests {
             backend: DatabaseBackend::Sqlite,
             expression: FilterExpression::trusted_fragment(clause, values),
             cost: Cost::of(clause),
+            negation: Negation::Sql,
         }
     }
 
@@ -2770,34 +2955,43 @@ mod predicate_tests {
                 let copy = wide.clone();
                 assert!(copy.expression == wide.expression);
                 drop((copy, wide));
-                // Alternating `and`/`or` and `not` chains are refused at the
-                // depth limit; the deepest that builds is measured exactly.
-                for alternate in [true, false] {
-                    let (mut deepest, mut levels) = (leaf(), 0);
-                    loop {
-                        let next = if !alternate {
-                            deepest.clone().not()
-                        } else if levels % 2 == 0 {
-                            deepest.clone().and(leaf())
-                        } else {
-                            deepest.clone().or(leaf())
-                        };
-                        match next {
-                            Ok(next) => {
-                                deepest = next;
-                                levels += 1;
-                            }
-                            Err(_) => break,
+                // An alternating `and`/`or` chain is refused at the depth
+                // limit; the deepest that builds is measured exactly.
+                let (mut deepest, mut levels) = (leaf(), 0);
+                loop {
+                    let next = if levels % 2 == 0 {
+                        deepest.clone().and(leaf())
+                    } else {
+                        deepest.clone().or(leaf())
+                    };
+                    match next {
+                        Ok(next) => {
+                            deepest = next;
+                            levels += 1;
                         }
+                        Err(_) => break,
                     }
-                    assert_eq!(levels, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
-                    let clause = render(&deepest);
-                    assert_eq!(Cost::of(&clause).depth, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
-                    assert_eq!(deepest.cost.depth, Cost::of(&clause).depth);
-                    assert!(!format!("{deepest:?}").is_empty());
-                    let copy = deepest.clone();
-                    assert!(copy.expression == deepest.expression);
-                    drop((copy, deepest));
+                }
+                assert_eq!(levels, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
+                let clause = render(&deepest);
+                assert_eq!(Cost::of(&clause).depth, READ_PREDICATE_MAX_EXPRESSION_DEPTH);
+                assert_eq!(deepest.cost.depth, Cost::of(&clause).depth);
+                assert!(!format!("{deepest:?}").is_empty());
+                let copy = deepest.clone();
+                assert!(copy.expression == deepest.expression);
+                drop((copy, deepest));
+                // `not` swaps a predicate with its negation, so a `not` chain
+                // of any length alternates between two renderings and never
+                // deepens.
+                let mut negated = leaf();
+                for step in 1..=1_000 {
+                    negated = negated.not().unwrap();
+                    let clause = render(&negated);
+                    assert_eq!(
+                        clause,
+                        if step % 2 == 0 { "x = ?" } else { "NOT (x = ?)" }
+                    );
+                    assert_eq!(negated.cost.depth, Cost::of(&clause).depth);
                 }
             })
             .unwrap()
@@ -2959,6 +3153,7 @@ mod predicate_tests {
                 backend: DatabaseBackend::Sqlite,
                 expression,
                 cost: Cost::default(),
+                negation: Negation::Sql,
             };
             assert!(predicate.clone().not().is_err(), "{predicate:?}");
             assert!(predicate.not().is_err());

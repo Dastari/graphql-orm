@@ -5,7 +5,7 @@ title: Using graphql-orm
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -39,7 +39,7 @@ For an entity `Order` with `plural = "Orders"`, in the default naming:
 | Subscription | `orderChanged` |
 | Rust | `Order::insert`, `update_by_id`, `delete_by_id`, `find_many`, `count` and more, plus `CreateOrderInput`, `UpdateOrderInput` and `OrderWhereInput` |
 
-The `resolver-case-*`, `argument-case-*` and `field-case-*` features change these names. Check your
+The `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE` and `GRAPHQL_ORM_FIELD_CASE` build environment variables change these names. Check your
 own SDL with `schema.sdl()`.
 
 ## Decide in this order
@@ -83,7 +83,9 @@ a GraphQL entity:
    refers to generated types such as `OrderQueries`.
 6. Add validators, a transform or a hook only if the fields need them.
 7. Plan a migration with a new version, passing **every** entity, as
-   `&graphql_orm_entity_metadata()`. An entity left out is planned as a `DROP TABLE`.
+   `&graphql_orm_entity_metadata()`. The default plan leaves the table of an entity left out in
+   place; only a plan made with `PlanOptions::strict()` drops it, and applying the drop needs
+   `allow_destructive: true`.
 
 ## Worked example
 
@@ -282,8 +284,13 @@ client tells a deliberate refusal from an internal failure, so keep it:
   with `?`. The conversion keeps the ORM error as the source, and the ORM restores its public code from
   it. Or map it with `graphql_error_from_sqlx`, which does the same explicitly.
 - **Never stringify it**, as in `async_graphql::Error::new(error.to_string())`. That drops the source
-  and the code: the client gets the driver's text as written, with no `code`, and can't tell a refusal
-  from a bug.
+  and the code, so the refusal becomes an internal error: the client gets `INTERNAL_ERROR` with the
+  default message, and the text stays server-side.
+
+An error with no `code` extension is never a public refusal. Generated operations report it as
+`INTERNAL_ERROR` with the default message, so give every refusal a client may read a public code, as
+above. Only a schema whose `Database` opts in with `DatabaseBuilder::expose_uncoded_callback_messages(true)`
+renders uncoded text as written.
 
 ### Which work goes where
 
@@ -511,7 +518,9 @@ for the snapshot scope and validation contract.
   split multi-root operations or expect `subscription_root_limit_exceeded` before sources open.
   Generated builders install admission. Hand-built schemas must install
   `GeneratedSubscriptionAdmission(vec!["recordChanged"])` with every actual Changed field name;
-  missing or misconfigured admission refuses with `SUBSCRIPTION_ADMISSION_REQUIRED`.
+  missing or misconfigured admission refuses with `SUBSCRIPTION_ADMISSION_REQUIRED`. They must
+  also install `graphql_orm::graphql::input_validation::GeneratedInputValidation`: without it every
+  generated resolver that takes an input object refuses with `INPUT_VALIDATION_REQUIRED`.
 - **Set `propagate_change = "up"`** on relations whose parent views show child state, rather than
   computing parent invalidations in hooks or keeping dependency tables in the frontend. The parent's
   stream gets a `PROPAGATED` event with `sourceEntity`, `sourceId` and `path`, limited to 16 hops and
@@ -615,9 +624,10 @@ See [strict authorization](../../docs/reference/graphql-orm/strict-authorization
   The registry only knows what it was built from: add runtime roots with
   `RuntimeGraphqlComposer::register_assurance_operations` and check static schemas with
   `AssuranceEnforcement::finish_schema`. An unregistered mutation still gets the default policy.
-- **The router doesn't protect joined fields.** Its gate covers root fields. A joined entity is
-  authorized only by the subgraph that owns it, so an entity that isn't universally readable needs its
-  own policy there.
+- **The router doesn't grant joined fields.** Its descriptor gate covers root fields; since router
+  0.16.0 it also refuses any field whose composed `@authenticated` or `@requiresScopes` the caller does
+  not meet. A joined entity is still authorized by the subgraph that owns it, so an entity that isn't
+  universally readable needs its own policy there.
 - **PostgreSQL RLS is defence in depth.** Keep resolver, row and field policy as well.
 
 ### In-process writes
@@ -728,7 +738,8 @@ Only for services that use them:
 | Hand-written twin of a generated mutation | The generated mutation stays callable and skips the domain logic | Put the logic in a hook on the generated mutation |
 | Custom resolver with a generated name | `schema_roots!` refuses to compile it, naming both sides: a merged root would serve only one of them | Hook or transform. Pick a distinct name only for a genuine action |
 | Validation inside a custom resolver | Generated writes and repository writes bypass it | Field validators or the transform |
-| Stringifying a nested write's error in a hook (`Error::new(error.to_string())`) | The public `code` is lost, and driver text reaches the client | `?`, or `graphql_error_from_sqlx` |
+| Stringifying a nested write's error in a hook (`Error::new(error.to_string())`) | The public `code` is lost, so the client gets `INTERNAL_ERROR` instead of the refusal | `?`, or `graphql_error_from_sqlx` |
+| Returning a refusal as plain text (`Error::new("seat taken")`) | No `code`, so the client gets `INTERNAL_ERROR` with the default message | `OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken").into_graphql_error()` |
 | Irreversible or slow side effect in a hook | A rollback can't undo it, and it holds locks | `hook_ctx.defer`, or a job row |
 | Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row in the transaction for anything that must happen, with `defer` only to wake the worker |
 | A hand-spawned delayed task from a hook | Racy: it can run before the commit or after a rollback | `hook_ctx.defer` |

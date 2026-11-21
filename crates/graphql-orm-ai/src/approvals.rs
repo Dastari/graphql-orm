@@ -479,7 +479,7 @@ pub trait AiApprovalAccessPolicy: Send + Sync {
 
 /// Human approval decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_items = "PascalCase"))]
 pub enum AiApprovalDecision {
     /// Approve one exact future consumption.
     Approve,
@@ -489,7 +489,7 @@ pub enum AiApprovalDecision {
 
 /// Authorized/decrypted approval view.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiApprovalView {
     /// Approval identifier.
     pub id: Uuid,
@@ -519,7 +519,7 @@ pub struct AiApprovalView {
 
 /// Approval connection edge.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiApprovalEdge {
     /// Approval node.
     pub node: AiApprovalView,
@@ -529,7 +529,7 @@ pub struct AiApprovalEdge {
 
 /// Bounded approval connection.
 #[derive(Clone, Debug, SimpleObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct AiApprovalConnection {
     /// Bounded edges.
     pub edges: Vec<AiApprovalEdge>,
@@ -539,7 +539,7 @@ pub struct AiApprovalConnection {
 
 /// CAS-bound approval decision input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct DecideAiApprovalInput {
     /// Approval identifier.
     pub id: Uuid,
@@ -551,7 +551,7 @@ pub struct DecideAiApprovalInput {
 
 /// CAS-bound approval revocation input.
 #[derive(Clone, Debug, InputObject)]
-#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(graphql_case_pascal, graphql(rename_fields = "PascalCase"))]
 pub struct RevokeAiApprovalInput {
     /// Approval identifier.
     pub id: Uuid,
@@ -597,10 +597,10 @@ pub trait AiApprovalService: Send + Sync {
 pub struct AiApprovalQueryRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiApprovalQueryRoot {
     /// Returns a bounded approval window for one visible session.
     async fn ai_approvals(
@@ -636,10 +636,10 @@ impl AiApprovalQueryRoot {
 pub struct AiApprovalMutationRoot;
 
 #[cfg_attr(
-    feature = "graphql-case-pascal",
+    graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
 )]
-#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+#[cfg_attr(not(graphql_case_pascal), Object)]
 impl AiApprovalMutationRoot {
     /// Approves or denies one exact pending action.
     async fn decide_ai_approval(

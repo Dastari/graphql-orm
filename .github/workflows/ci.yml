@@ -172,10 +172,23 @@ jobs:
       # requires this list to be exactly the tests those binaries define.
       - run: cargo test -p graphql-orm -- --exact --skip sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip direct_host_dependency_resolves_one_exact_agql_auth_universe --skip generated_relationships_execute_across_real_crate_boundaries --skip two_orm_subgraphs_compose_and_join_through_the_router --skip external_legacy_migration_surface_compiles --skip pascal_relationship_semantics_compile_as_a_complete_query_capability --skip external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots
-      - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
+      - run: cargo test -p graphql-orm --no-default-features --features sqlite --test federation_entity_keys_case_features
+        env:
+          GRAPHQL_ORM_FIELD_CASE: PascalCase
+          GRAPHQL_ORM_ARGUMENT_CASE: snake_case
       - name: Check Changed catalogue and provenance with PascalCase arguments
-        run: cargo test -p graphql-orm --features router-protocol,resolver-case-pascal,argument-case-pascal,field-case-pascal --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics --test composite_subscription_scopes --test node_id_version_relations --test link_relation_patterns --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
+        env:
+          GRAPHQL_ORM_RESOLVER_CASE: PascalCase
+          GRAPHQL_ORM_ARGUMENT_CASE: PascalCase
+          GRAPHQL_ORM_FIELD_CASE: PascalCase
+        run: cargo test -p graphql-orm --features router-protocol --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics --test composite_subscription_scopes --test node_id_version_relations --test link_relation_patterns --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
+      # The opt-in replay feature reads cfgs that graphql-orm's build script
+      # sets; only the release replay profile built it before (#774 review).
+      - name: Lint and run owned-planning replay on the qualified toolchain
+        run: |
+          cargo clippy -p graphql-orm --locked --no-default-features --features sqlite,owned-planning-replay --lib -- -D warnings
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,owned-planning-replay --lib replay_positive
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
   schema-export:
@@ -258,8 +271,8 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "1"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test postgres_rls --test postgres_rls_drift --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test postgres_table_case --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
-          cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test postgres_rls --test postgres_rls_drift --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
       - name: Execute the global node lookup through the router on owned PostgreSQL
@@ -278,7 +291,7 @@ jobs:
         run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example runtime_strings
       - name: Execute owned runtime migration preservation and compatibility
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql --test runtime_migrations_unsupported
           for backend in postgres mssql; do
             cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features "$backend"
@@ -332,7 +345,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Execute portable security regressions on an owned backend
-        run: bash scripts/run-security-test-targets.sh "${{ matrix.backend }}" subscription_portable_authorization bounded_protected_scans authorized_page_context_binding identifier_quoting_properties qualified_read_predicates
+        run: bash scripts/run-security-test-targets.sh "${{ matrix.backend }}" subscription_portable_authorization bounded_protected_scans migration_safety authorized_page_context_binding identifier_quoting_properties qualified_read_predicates
       - name: Compile and lint current-authority policy on the selected backend
         run: cargo clippy -p graphql-orm --locked --no-default-features --features "${{ matrix.backend }},auth-agql" --lib -- -D warnings
 
@@ -410,18 +423,23 @@ jobs:
           done
 
   # The suites that spell names through tests/support/graphql_case.rs, under
-  # every snake-case feature together (#267).
+  # every snake-case naming variable together (#267, #508).
   orm-case-features:
     name: ORM snake-case naming
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      GRAPHQL_ORM_RESOLVER_CASE: snake_case
+      GRAPHQL_ORM_ARGUMENT_CASE: snake_case
+      GRAPHQL_ORM_FIELD_CASE: snake_case
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test compile_ui record_version_ui
 
   # Provider tests and companion lint/docs use separate runners, while provider
   # lanes run sequentially to avoid consuming nine hosted runner slots per PR.
@@ -474,7 +492,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
+      - run: cargo test -p graphql-orm-ai --test graphql_naming
+        env:
+          GRAPHQL_ORM_AI_CASE: PascalCase
+          GRAPHQL_ORM_RESOLVER_CASE: PascalCase
+          GRAPHQL_ORM_ARGUMENT_CASE: PascalCase
+          GRAPHQL_ORM_FIELD_CASE: PascalCase
       - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,provider-chat-completions,local-harness -- -D warnings
       - run: cargo clippy -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --features graphql-orm-ai/provider-openai,graphql-orm-ai/provider-anthropic,graphql-orm-ai/provider-xai,graphql-orm-ai/provider-ollama,graphql-orm-ai/provider-openai-compatible,graphql-orm-ai/provider-chat-completions,graphql-orm-ai/local-harness --no-deps

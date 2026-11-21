@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version `0.10.0` (**breaking fingerprints**) removes the Rust module path from
+generated-operation fingerprints and from the catalogue order.
+`GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` is `graphql-orm-sha256-len-v2`.
+Moving or re-exporting an entity no longer changes any fingerprint; every
+operation, catalogue and router-export fingerprint changes once at this
+upgrade. See the [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release).
+
 Version 0.9.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
@@ -181,7 +188,7 @@ read-only policy.
 | `GraphqlSemanticFilterOperator` | closed public filter capabilities, including exact date comparison, range, null, calendar, and relative-date operators |
 | `GraphqlSubscriptionObservationDescriptor` | truthful best-effort or replay-then-live subscription semantics plus bounded wait and closed condition capabilities; metadata alone does not register a runtime replay source |
 | `AiMutationExecutionPolicy` | closed `Automatic`, `ApprovalRequired`, or default `Prohibited` classification for public mutations; metadata never grants execution or resolver authority |
-| discovery fingerprint | algorithm `graphql-orm-sha256-len-v1`; detects generated declaration/exposure drift, not authorization or disclosure |
+| discovery fingerprint | algorithm `graphql-orm-sha256-len-v2`; detects generated declaration/exposure drift, not authorization or disclosure |
 | authorization fingerprint | algorithm `graphql-orm-authorization-sha256-len-v2`; binds core static authorization separately |
 | router-export fingerprint | algorithm `graphql-orm-router-export-sha256-len-v1`; combines the previous two for protocol adapters |
 
@@ -218,12 +225,21 @@ and [operation assurance architecture](../../docs/architecture/operation-assuran
 
 ## Stable entity identity
 
-Generated descriptors use an optional entity `stable_type_id` as their existing
-`entity_rust_type()` fingerprint/sort input. The default remains the Rust module
-path. The override is an opaque token, normally the old Rust path: a string
-literal of 1–1024 printable ASCII bytes without whitespace or control characters.
-No fingerprint algorithm, name, input order or serialized export changes.
-`diagnostic_rust_type()` records the real Rust path outside hashes and exports.
+No fingerprint depends on where an entity is declared. A generated operation
+is identified by its entity name, table, backend, root coordinate, arguments,
+result type and schema signature, and the catalogue is ordered by kind, root
+field, entity name, table and category. Moving an entity to another module or
+crate, or re-exporting it, keeps every fingerprint.
+
+`entity_rust_type()` returns the entity's declared identity: an optional
+`stable_type_id`, or by default the Rust module path and type name. It
+distinguishes entity groups at composition and appears in diagnostics.
+`diagnostic_rust_type()` records the real Rust path. Neither is hashed or
+exported. `stable_type_id` is an opaque string literal of 1–1024 printable
+ASCII bytes without whitespace or control characters.
+
+The schema signature still records field types, argument types and relation
+targets as spelled in source, so changing such a spelling changes fingerprints.
 
 `GraphqlOperationCatalog::compose` panics if entity groups repeat an identity,
 including declared IDs that collide with default paths, and names both real Rust

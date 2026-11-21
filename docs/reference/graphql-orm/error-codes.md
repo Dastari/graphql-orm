@@ -25,7 +25,7 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `CONFLICT` | State conflict |
 | `CONSTRAINT_VIOLATION` | Database constraint failed without schema leak |
 | `CURSOR_INVALID` | Pagination cursor malformed, corrupted, bound to another entity, order or filter, or of another version. A static keyset cursor is not authenticated; see [what a keyset cursor is bound to](pagination-migration.md#what-a-keyset-cursor-is-bound-to) |
-| `PAGE_LIMIT_EXCEEDED` | A Rust repository `limit` exceeds the configured maximum, a GraphQL page limit exceeds it while `DatabaseBuilder::refuse_oversized_page_limit(true)` is set (by default it is reduced instead), a client page offset exceeds `DatabaseBuilder::max_page_offset`, a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
+| `PAGE_LIMIT_EXCEEDED` | A Rust repository `limit`, a host keyset or scan page size, or a host `EntityQuery::paginate`/`EntitySearchQuery::paginate` limit exceeds the configured (or per-read) maximum, a GraphQL page limit exceeds it while `DatabaseBuilder::refuse_oversized_page_limit(true)` is set (by default it is reduced instead), a client page offset exceeds `DatabaseBuilder::max_page_offset` (10,000 by default; `max_page_offset(None)` leaves client offsets unbounded), a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
 | `SERVICE_UNAVAILABLE` | Temporary dependency failure |
 | `INTERNAL_ERROR` | Unexpected failure |
 | `AUTHORIZATION_MISCONFIGURED` | A declared policy key has no provider. Under `DeclaredPoliciesRequired` this covers every key; in every mode it covers an entity `write_policy` without a row provider on generated writes |
@@ -66,14 +66,15 @@ mapping between the two:
 | `SERVICE_UNAVAILABLE` | ORM, router | A dependency is temporarily unavailable. A retry may succeed |
 | `SUBSCRIPTION_CONTINUITY_LOST` | ORM, router | The stream ended and missed events. Subscribe again and refetch |
 | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT_VIOLATION`, `CURSOR_INVALID`, `PAGE_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `AUTHORIZATION_MISCONFIGURED`, `STEP_UP_REQUIRED` | ORM | See [codes](#codes) |
-| `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
+| `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED`, `INPUT_VALIDATION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
 | `SUBSCRIPTION_SELECTION_UNSUPPORTED` | ORM, opt-in | The `Changed` selection can never be streamed (a relation, a computed field or an unavailable key). Subscribe with a smaller selection, for example keys only |
 | `SUBSCRIPTIONS_NOT_SUPPORTED` | router | A subscription was sent over HTTP, or the router has no subscription gateway. Subscribe over the router's `graphql-transport-ws` endpoint |
 | `MUTATION_NOT_ALLOWED_OVER_HTTP_GET` | router | A mutation was sent with HTTP `GET`. Send it with `POST` |
 | `GRAPHQL_VALIDATION_FAILED`, `REQUEST_TOO_LARGE`, `OPERATION_LIMIT_EXCEEDED`, `INTROSPECTION_DISABLED`, `SUBGRAPH_FAILURE`, `SUBGRAPH_UNAVAILABLE`, `SUBSCRIPTION_LIMIT_EXCEEDED`, `SUBSCRIPTION_AUTHORIZATION_CHANGED`, `SUBSCRIPTION_SCHEMA_RELOAD`, `PERSISTED_DOCUMENT_*`, `BYTE_ROUTE_*` | router | See the [router configuration reference](../../../crates/graphql-orm-router/docs/configuration.md) |
 
 The router's wire tests show a subgraph error's `extensions.code` and
-`extensions.outcome` reaching the client unchanged over HTTP.
+`extensions.outcome` reaching the client unchanged, over HTTP and the
+WebSocket gateway.
 
 ## Unsupported subscription selection
 
@@ -117,6 +118,26 @@ vocabulary on their own errors, without the setting.
 
 An entity with `dependent_deletes` runs its delete through the dependent
 delete plan; an error raised once that plan runs reports `unknown`.
+
+## Router refusal outcome
+
+With `RouterConfig::with_refusal_outcome(true)` (`refusalOutcome: true` in the
+file configuration), `graphql-orm-router` adds `outcome: "refused"` to
+each error of an operation it refused before it sent any subgraph request, so
+a client handles a router refusal and a service refusal the same way. It
+covers the router's own refusals (bearer and authority checks, root and
+nested authorization, the field limit, subscriptions over HTTP, persisted
+documents, and the WebSocket gateway's admission refusals) and the engine's
+refusals before execution (request, parse, validation, depth, alias and
+directive limits, variable coercion, `INTROSPECTION_DISABLED` and
+`MUTATION_NOT_ALLOWED_OVER_HTTP_GET`).
+
+The router adds only `refused`, and only before any subgraph request. It never
+marks an operation that reached a subgraph, even partly, nor the request
+timeout or an execution failure, and it keeps an `outcome` a subgraph sent.
+An absent `outcome` still means unknown. The setting is off by default and
+changes no code, message, path or HTTP status. See the
+[router configuration reference](../../../crates/graphql-orm-router/docs/configuration.md#refusal-outcome).
 
 ## Mutation result error codes
 
@@ -223,9 +244,12 @@ refusal:
 | authored error without a code, or with a host-specific code | `INTERNAL_ERROR`, default message | `FORBIDDEN`; no message |
 | propagated error (it has a source) | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message | the same failure class; no message |
 
-The text of an uncoded callback error is a server-side diagnostic only on
-these paths, also when a custom resolver maps a repository error with
-`graphql_error_from_sqlx`. The rule is stated once in
+The text of an uncoded callback error is a server-side diagnostic only, on
+these paths and for every other callback family (entity policy, row policy,
+write-input transform and mutation hook), also when a custom resolver maps a
+repository error with `graphql_error_from_sqlx`. Generated GraphQL operations
+report it as `INTERNAL_ERROR` with the default message unless the schema's
+`Database` opted in with `DatabaseBuilder::expose_uncoded_callback_messages(true)`. The rule is stated once in
 [policy callback errors](strict-authorization.md#policy-callback-errors). A missing field policy provider for a declared key
 is `AUTHORIZATION_MISCONFIGURED` in both strict modes.
 
@@ -261,7 +285,9 @@ per surface.
   `SUBSCRIPTION_SOURCE_CLOSED` on generated `Changed` subscriptions.
   Their structural multi-root admission refusal uses `subscription_root_limit_exceeded`.
   Missing/misconfigured admission on a hand-built schema refuses with
-  `SUBSCRIPTION_ADMISSION_REQUIRED`. An event-independent authority timer uses
+  `SUBSCRIPTION_ADMISSION_REQUIRED`, and a hand-built schema without
+  `GeneratedInputValidation` refuses every generated resolver that takes an
+  input object with `INPUT_VALIDATION_REQUIRED`. An event-independent authority timer uses
   `FORBIDDEN` for definite subscriber denial and `SUBSCRIPTION_CONTINUITY_LOST`
   for host/DB failures, once, then ends. A stream that lagged ends on that
   timer's next tick, with `FORBIDDEN` when its authority is gone and

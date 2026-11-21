@@ -517,19 +517,127 @@ pub(crate) const CHANGE_JOURNAL_TRIGGER: &str = "graphql_orm_change_journal";
 /// Trigger function that records one journal entry per changed row.
 pub(crate) const CHANGE_JOURNAL_FUNCTION: &str = "record_change_journal_entry";
 
-/// Transaction-local setting the ORM turns on for its own write transactions.
+/// PostgreSQL setting that selects which transactions the change journal
+/// records.
 ///
-/// It only selects which transactions are recorded. The entity, key and
-/// action of every entry come from the trigger and the changed row, so a
-/// session that sets it can at most journal its own real changes.
-#[cfg_attr(
-    not(any(
-        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-    )),
-    allow(dead_code)
-)]
-pub(crate) const CHANGE_JOURNAL_SETTING: &str = "graphql_orm.change_journal";
+/// The ORM turns it `on`, transaction-locally, for its own write
+/// transactions. The entity, key and action of every entry come from the
+/// trigger and the changed row, so a session that sets it can at most journal
+/// its own real changes. A transaction that sets it to `off` declares that it
+/// writes without journaling, as a restore does; only such a transaction may
+/// `TRUNCATE` a journaled table.
+pub const CHANGE_JOURNAL_SETTING: &str = "graphql_orm.change_journal";
+
+/// Statement trigger that refuses `TRUNCATE` on every journaled table.
+pub(crate) const CHANGE_JOURNAL_TRUNCATE_TRIGGER: &str = "graphql_orm_change_journal_truncate";
+
+/// Trigger function behind [`CHANGE_JOURNAL_TRUNCATE_TRIGGER`].
+pub(crate) const CHANGE_JOURNAL_TRUNCATE_FUNCTION: &str = "refuse_change_journal_truncate";
+
+/// `tgtype` of a `BEFORE TRUNCATE ... FOR EACH STATEMENT` trigger.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+pub(crate) const CHANGE_JOURNAL_TRUNCATE_TRIGGER_TYPE: i32 = 2 | 32;
+
+/// Body of `graphql_orm.refuse_change_journal_truncate()`.
+///
+/// `TRUNCATE` fires no row trigger, so the journal cannot record the rows it
+/// removes and an incremental restore would bring them back. The guard
+/// refuses it with SQLSTATE `0A000` unless the transaction set
+/// [`CHANGE_JOURNAL_SETTING`] to `off`, which is how a restore clears its
+/// target. PostgreSQL fires it for every table a `TRUNCATE ... CASCADE`
+/// reaches, so a cascade into a journaled table is refused too.
+pub(crate) const CHANGE_JOURNAL_TRUNCATE_FUNCTION_BODY: &str = concat!(
+    " BEGIN",
+    " IF TG_OP <> 'TRUNCATE' OR TG_WHEN <> 'BEFORE' OR TG_LEVEL <> 'STATEMENT' OR TG_NAME <> 'graphql_orm_change_journal_truncate' THEN RAISE EXCEPTION 'graphql-orm change journal truncate guard is misconfigured'; END IF;",
+    " IF pg_catalog.current_setting('graphql_orm.change_journal', true) IS NOT DISTINCT FROM 'off' THEN RETURN NULL; END IF;",
+    " RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = pg_catalog.format('graphql-orm change journal refuses TRUNCATE on %I.%I: the journal cannot record it', TG_TABLE_SCHEMA, TG_TABLE_NAME),",
+    " HINT = 'Delete the rows instead, or set graphql_orm.change_journal to off in the transaction to remove them without journaling.';",
+    " END ",
+);
+
+/// A foreign key through which the database changes rows of a table the
+/// change journal cannot record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeJournalCascadeGap {
+    /// Declared path of the table without a recorder.
+    pub table_name: String,
+    /// Declared path of the journaled table its foreign key references.
+    pub journaled_table: String,
+    /// The foreign key's action when a referenced row is deleted.
+    pub on_delete: super::core::DeletePolicy,
+}
+
+impl std::fmt::Display for ChangeJournalCascadeGap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the change journal cannot record table {child} (it needs a single-column primary key), but its foreign key to journaled table {parent} changes its rows when a {parent} row is deleted ({action:?}); give {child} a single-column primary key or make the foreign key restrict the delete",
+            child = self.table_name,
+            parent = self.journaled_table,
+            action = self.on_delete,
+        )
+    }
+}
+
+impl std::error::Error for ChangeJournalCascadeGap {}
+
+impl ChangeJournalCascadeGap {
+    /// The gap carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+}
+
+/// Every foreign key in `schema` from a table without a recorder to a
+/// journaled table whose delete action changes the referencing rows.
+///
+/// A cascading or nulling delete runs inside the database. On a journaled
+/// table the recorder trigger sees those row changes; on a table without one
+/// they would leave no journal entry, so an incremental restore would bring
+/// the rows back or keep stale references.
+pub fn change_journal_cascade_gaps(
+    schema: &super::core::SchemaModel,
+) -> Vec<ChangeJournalCascadeGap> {
+    let journaled = change_journal_tables(schema)
+        .into_iter()
+        .map(|table| table.table_name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut gaps = Vec::new();
+    for table in &schema.tables {
+        if journaled.contains(&table.table_name) {
+            continue;
+        }
+        for foreign_key in &table.foreign_keys {
+            if foreign_key.on_delete != super::core::DeletePolicy::Restrict
+                && journaled.contains(&foreign_key.target_table)
+            {
+                gaps.push(ChangeJournalCascadeGap {
+                    table_name: table.table_name.clone(),
+                    journaled_table: foreign_key.target_table.clone(),
+                    on_delete: foreign_key.on_delete.clone(),
+                });
+            }
+        }
+    }
+    gaps.sort_by(|left, right| {
+        (&left.table_name, &left.journaled_table).cmp(&(&right.table_name, &right.journaled_table))
+    });
+    gaps.dedup();
+    gaps
+}
+
+/// Fail with the first [`ChangeJournalCascadeGap`] of `schema`, if it has one.
+pub(crate) fn refuse_change_journal_cascade_gaps(
+    schema: &super::core::SchemaModel,
+) -> crate::Result<()> {
+    match change_journal_cascade_gaps(schema).into_iter().next() {
+        Some(gap) => Err(sqlx::Error::Decode(Box::new(gap))),
+        None => Ok(()),
+    }
+}
 
 /// `tgtype` of an `AFTER INSERT OR UPDATE OR DELETE ... FOR EACH ROW` trigger.
 pub(crate) const CHANGE_JOURNAL_TRIGGER_TYPE: i32 = 1 | 4 | 8 | 16;
@@ -769,9 +877,32 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
              EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.target); END LOOP; END $graphql_orm$",
             trigger = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
         ),
+        format!(
+            "CREATE OR REPLACE FUNCTION graphql_orm.{CHANGE_JOURNAL_TRUNCATE_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $graphql_orm${CHANGE_JOURNAL_TRUNCATE_FUNCTION_BODY}$graphql_orm$"
+        ),
     ];
     statements.extend(tables.iter().map(render_change_journal_trigger_sql));
+    // Checked last, against the catalog, so it also sees tables no schema
+    // target declares: a foreign key whose delete or update action changes
+    // rows of a table without the recorder, when a journaled row changes.
+    statements.push(format!(
+        "DO $graphql_orm$ DECLARE gap pg_catalog.record; BEGIN \
+         FOR gap IN {cascade_query} ORDER BY 2, 1 LOOP \
+         RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = pg_catalog.format('graphql-orm change journal cannot record table %s, but foreign key %I changes its rows when a row of journaled table %s is deleted or updated', gap.child, gap.conname, gap.parent), \
+         HINT = 'Give the table a single-column primary key so it is journaled, or make the foreign key restrict the change.'; \
+         END LOOP; END $graphql_orm$",
+        cascade_query = change_journal_cascade_catalog_query(),
+    ));
     statements
+}
+
+/// Catalog gaps used by both recorder installation and validation.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+pub(super) fn change_journal_cascade_catalog_query() -> &'static str {
+    "SELECT con.conname, con.conrelid::pg_catalog.regclass::pg_catalog.text AS child, con.confrelid::pg_catalog.regclass::pg_catalog.text AS parent FROM pg_catalog.pg_constraint con \
+     WHERE con.contype OPERATOR(pg_catalog.=) 'f' AND (con.confdeltype OPERATOR(pg_catalog.=) ANY (ARRAY['c', 'n', 'd']::pg_catalog.\"char\"[]) OR con.confupdtype OPERATOR(pg_catalog.=) ANY (ARRAY['c', 'n', 'd']::pg_catalog.\"char\"[])) \
+     AND EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid OPERATOR(pg_catalog.=) con.confrelid AND NOT t.tgisinternal AND t.tgname OPERATOR(pg_catalog.=) 'graphql_orm_change_journal' AND t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.record_change_journal_entry()')) \
+     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid OPERATOR(pg_catalog.=) con.conrelid AND NOT t.tgisinternal AND t.tgenabled OPERATOR(pg_catalog.=) 'O' AND t.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.=) 29 AND t.tgqual IS NULL AND t.tgname OPERATOR(pg_catalog.=) 'graphql_orm_change_journal' AND t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.record_change_journal_entry()'))"
 }
 
 /// Bind one table in the registry and (re)create its change journal trigger.
@@ -803,8 +934,11 @@ fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
          ON CONFLICT (journal_schema, declared_table) DO UPDATE SET entity_name = EXCLUDED.entity_name, key_column = EXCLUDED.key_column, relid = EXCLUDED.relid; \
          EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {trigger_name}, target); \
          EXECUTE pg_catalog.format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L, %L, %L)', {trigger_name}, target, journal_ns, target_ns, target_rel, {entity}, {table_name}, {key}, {encoding}); \
+         EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {truncate_trigger}, target); \
+         EXECUTE pg_catalog.format('CREATE TRIGGER %I BEFORE TRUNCATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_TRUNCATE_FUNCTION}()', {truncate_trigger}, target); \
          END $graphql_orm$",
         trigger_name = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
+        truncate_trigger = sql_string_literal(CHANGE_JOURNAL_TRUNCATE_TRIGGER),
         base_literal = sql_string_literal(&base),
     )
 }
@@ -1536,6 +1670,15 @@ pub struct LiveRlsEnforcement {
     /// Every trigger that calls `graphql_orm.record_change_journal_entry()`,
     /// as `(`[`change_journal_table_key`]`, trigger name)`.
     pub change_journal_recorder_triggers: Vec<(String, String)>,
+    /// `pg_proc.prosrc` of `graphql_orm.refuse_change_journal_truncate()`,
+    /// when present.
+    pub change_journal_truncate_function: Option<String>,
+    /// Cascading foreign keys into live tables without an enabled recorder.
+    pub change_journal_cascade_gaps: Vec<(String, String, String)>,
+    /// [`change_journal_table_key`] of every table with an enabled,
+    /// unconditional `BEFORE TRUNCATE` statement trigger named
+    /// `graphql_orm_change_journal_truncate` that calls that function.
+    pub change_journal_truncate_guards: std::collections::BTreeSet<String>,
     /// Whether the current role is a member of the change journal's owner
     /// (a superuser is a member of every role).
     pub change_journal_owned_by_current_role: bool,
@@ -1882,6 +2025,24 @@ pub(crate) fn validate_change_journal(
             "graphql_orm.{CHANGE_JOURNAL_FUNCTION}() is missing or differs from the definition graphql-orm installs"
         )));
     }
+    if live.change_journal_truncate_function.as_deref()
+        != Some(CHANGE_JOURNAL_TRUNCATE_FUNCTION_BODY)
+    {
+        diagnostics.push(error(format!(
+            "graphql_orm.{CHANGE_JOURNAL_TRUNCATE_FUNCTION}() is missing or differs from the definition graphql-orm installs; re-apply the schema target"
+        )));
+    }
+    for (constraint, child, parent) in &live.change_journal_cascade_gaps {
+        diagnostics.push(rls_diagnostic(SchemaDiagnosticSeverity::Error, child,
+            format!("Unjournaled cascade: foreign key {constraint} changes rows of {child} when journaled table {parent} changes")));
+    }
+    for gap in change_journal_cascade_gaps(&target.schema) {
+        diagnostics.push(rls_diagnostic(
+            SchemaDiagnosticSeverity::Error,
+            &gap.table_name,
+            format!("Unjournaled cascade: {gap}"),
+        ));
+    }
     for name in &live.change_journal_table_triggers {
         diagnostics.push(error(format!(
             "Trigger or rule {name} on {CHANGE_LOG_TABLE} would run as the journal owner; remove it"
@@ -2037,6 +2198,14 @@ fn change_journal_binding_problem(
     if !trigger.function_owns_table {
         return Some(format!(
             "graphql_orm.{CHANGE_JOURNAL_FUNCTION}() is not owned by the owner of {name}; apply the schema target as the role that owns the tables and the journal"
+        ));
+    }
+    if !live
+        .change_journal_truncate_guards
+        .contains(&change_journal_table_key(schema, relation))
+    {
+        return Some(format!(
+            "Missing change journal TRUNCATE guard {CHANGE_JOURNAL_TRUNCATE_TRIGGER} on {name}: a TRUNCATE would remove rows without a journal entry; re-apply the schema target"
         ));
     }
     None
@@ -2512,6 +2681,9 @@ mod change_journal_tests {
                 config: vec![CHANGE_JOURNAL_FUNCTION_CONFIG.to_string()],
                 security_definer: true,
             }),
+            change_journal_truncate_function: Some(
+                CHANGE_JOURNAL_TRUNCATE_FUNCTION_BODY.to_string(),
+            ),
             ..Default::default()
         }
     }
@@ -2608,7 +2780,129 @@ mod change_journal_tests {
                 journal_owned_by_function_owner: true,
             },
         );
+        live.change_journal_truncate_guards
+            .insert(change_journal_table_key("public", "users"));
         live
+    }
+
+    #[test]
+    fn a_missing_truncate_guard_or_function_is_reported() {
+        let mut live = bound_live();
+        assert_eq!(
+            change_journal_binding_problem(&live, &users(), Some(&binding())),
+            None
+        );
+        live.change_journal_truncate_guards.clear();
+        assert!(
+            change_journal_binding_problem(&live, &users(), Some(&binding()))
+                .is_some_and(|message| message.contains("Missing change journal TRUNCATE guard"))
+        );
+        let altered = LiveRlsEnforcement {
+            change_journal_truncate_function: Some("BEGIN RETURN NULL; END".to_string()),
+            ..self::live(false)
+        };
+        assert!(messages(&altered).iter().any(|message| {
+            message.contains(CHANGE_JOURNAL_TRUNCATE_FUNCTION) && message.contains("differs")
+        }));
+    }
+
+    #[test]
+    fn cascades_into_tables_without_a_recorder_are_gaps() {
+        use crate::graphql::orm::{
+            ColumnModel, DeletePolicy, ForeignKeyColumnPairModel, ForeignKeyModel, SchemaModel,
+            TableModel,
+        };
+        let column = |name: &str, key: bool| ColumnModel {
+            name: name.into(),
+            sql_type: "TEXT".into(),
+            spatial: None,
+            nullable: false,
+            is_primary_key: key,
+            is_unique: false,
+            default: None,
+        };
+        let table = |name: &str, keys: &[&str], parent: Option<(&str, DeletePolicy)>| TableModel {
+            entity_name: name.into(),
+            table_name: name.into(),
+            primary_key: keys[0].into(),
+            primary_keys: keys.iter().map(|key| key.to_string()).collect(),
+            default_sort: String::new(),
+            columns: vec![column("id", true), column("parent_id", keys.len() > 1)],
+            indexes: Vec::new(),
+            composite_unique_indexes: Vec::new(),
+            foreign_keys: parent
+                .into_iter()
+                .map(|(target, on_delete)| ForeignKeyModel {
+                    constraint_name: None,
+                    column_pairs: vec![ForeignKeyColumnPairModel {
+                        source_column: "parent_id".into(),
+                        target_column: "id".into(),
+                    }],
+                    target_table: target.into(),
+                    is_multiple: false,
+                    on_delete,
+                })
+                .collect(),
+            search_indexes: Vec::new(),
+            append_only: false,
+            retention_purge: false,
+            check_constraints: Vec::new(),
+        };
+        let composite = &["id", "parent_id"][..];
+        let schema = |children: Vec<TableModel>| SchemaModel {
+            extensions: Vec::new(),
+            tables: std::iter::once(table("parents", &["id"], None))
+                .chain(children)
+                .collect(),
+        };
+        // A journaled child records its own cascaded deletes.
+        assert!(
+            change_journal_cascade_gaps(&schema(vec![table(
+                "children",
+                &["id"],
+                Some(("parents", DeletePolicy::Cascade))
+            )]))
+            .is_empty()
+        );
+        // A restricting foreign key changes no row on its own.
+        assert!(
+            change_journal_cascade_gaps(&schema(vec![table(
+                "links",
+                composite,
+                Some(("parents", DeletePolicy::Restrict))
+            )]))
+            .is_empty()
+        );
+        for on_delete in [DeletePolicy::Cascade, DeletePolicy::SetNull] {
+            let schema = schema(vec![table(
+                "links",
+                composite,
+                Some(("parents", on_delete.clone())),
+            )]);
+            assert_eq!(
+                change_journal_cascade_gaps(&schema),
+                [ChangeJournalCascadeGap {
+                    table_name: "links".into(),
+                    journaled_table: "parents".into(),
+                    on_delete,
+                }]
+            );
+            let error = refuse_change_journal_cascade_gaps(&schema).expect_err("refused");
+            assert!(ChangeJournalCascadeGap::from_error(&error).is_some());
+            assert!(error.to_string().contains("links"), "{error}");
+        }
+        // A cascade between two tables without a recorder starts from no
+        // journaled row.
+        assert!(
+            change_journal_cascade_gaps(&SchemaModel {
+                extensions: Vec::new(),
+                tables: vec![
+                    table("roots", composite, None),
+                    table("links", composite, Some(("roots", DeletePolicy::Cascade))),
+                ],
+            })
+            .is_empty()
+        );
     }
 
     #[test]

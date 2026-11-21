@@ -9,6 +9,7 @@
 
 mod canonical_json;
 mod capability_index;
+mod capability_signature;
 mod data;
 mod disclosure;
 mod error;
@@ -22,6 +23,7 @@ mod tool_media;
 mod tools;
 
 pub use capability_index::*;
+pub use capability_signature::*;
 pub use data::*;
 pub use disclosure::*;
 pub use error::*;

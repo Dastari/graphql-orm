@@ -99,12 +99,17 @@ impl Default for KeepPolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 /// Summary returned by `prune`.
 pub struct PruneResult {
     /// Number of retained snapshot manifests.
     pub retained_snapshots: usize,
     /// Number of expired snapshot manifests.
     pub deleted_snapshots: usize,
+    /// Ids of the expired snapshots, in ascending order. A call that fails
+    /// returns no result: record ids through a [`SnapshotDeletionObserver`],
+    /// which has them on every path.
+    pub deleted_snapshot_ids: Vec<Uuid>,
     /// Number of blobs deleted, including orphaned payloads.
     pub deleted_blobs: usize,
     /// Number of deleted snapshot payloads that no manifest owned, such as
@@ -236,6 +241,7 @@ async fn prune_inner(
     Ok(PruneResult {
         retained_snapshots: retained_ids.len(),
         deleted_snapshots: expired_ids.len(),
+        deleted_snapshot_ids: expired_ids,
         deleted_blobs,
         deleted_orphan_blobs,
     })
@@ -274,12 +280,15 @@ async fn delete_orphaned_payloads(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 /// Summary returned by `delete_snapshot`.
 pub struct DeleteSnapshotResult {
     /// Number of blobs deleted, including unreferenced object blobs.
     pub deleted_blobs: usize,
     /// Number of snapshot manifests remaining after deletion.
     pub retained_snapshots: usize,
+    /// Id of the deleted snapshot, as in [`PruneResult::deleted_snapshot_ids`].
+    pub deleted_snapshot_ids: Vec<Uuid>,
 }
 
 /// Deletes one snapshot and any object blobs no other snapshot references.
@@ -397,6 +406,7 @@ async fn delete_snapshot_inner(
     Ok(DeleteSnapshotResult {
         deleted_blobs,
         retained_snapshots: remaining_ids.len(),
+        deleted_snapshot_ids: vec![snapshot_id],
     })
 }
 

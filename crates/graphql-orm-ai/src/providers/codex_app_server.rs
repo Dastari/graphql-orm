@@ -8307,12 +8307,11 @@ pub(crate) mod tests {
             .map(|argument| format!("{}: {}", argument.graphql_name(), argument.graphql_type()))
             .collect::<Vec<_>>()
             .join(", ");
-        let (page_argument, page_first, page_info, total_count) =
-            if cfg!(feature = "graphql-case-pascal") {
-                ("Page", "First", "PageInfo", "TotalCount")
-            } else {
-                ("page", "first", "pageInfo", "totalCount")
-            };
+        let (page_argument, page_first, page_info, total_count) = if cfg!(graphql_case_pascal) {
+            ("Page", "First", "PageInfo", "TotalCount")
+        } else {
+            ("page", "first", "pageInfo", "totalCount")
+        };
         let sdl = format!(
             r#"
             schema {{ query: Query }}
@@ -8678,7 +8677,7 @@ pub(crate) mod tests {
 
         let wrong_identity = AiProviderCapabilitySessionBinding::new(
             crate::AiCapabilityDeliveryMode::FixedBroker,
-            binding.capability_index_fingerprint(),
+            "c".repeat(64),
             binding.static_bootstrap_tool_fingerprints().clone(),
             binding.provider_projection_version(),
             binding.model(),
@@ -8695,7 +8694,7 @@ pub(crate) mod tests {
 
         let wrong_model = AiProviderCapabilitySessionBinding::new(
             crate::AiCapabilityDeliveryMode::FixedBroker,
-            binding.capability_index_fingerprint(),
+            "c".repeat(64),
             binding.static_bootstrap_tool_fingerprints().clone(),
             binding.provider_projection_version(),
             "other-model",
@@ -9556,12 +9555,20 @@ pub(crate) mod tests {
 
     #[test]
     fn fixed_broker_definitions_project_their_nullable_scalar_unions_for_codex() {
-        let definitions = crate::capability_broker_definitions(&"a".repeat(64))
-            .expect("fixed broker definitions should compile");
-        assert_eq!(definitions.len(), 3);
+        let definitions = crate::capability_broker_definitions();
+        assert_eq!(definitions.len(), 4);
         let projected = project_codex_dynamic_tools(&definitions)
             .expect("every crate-authored fixed broker schema should project");
-        assert_eq!(projected.protocol_values.len(), 3);
+        assert_eq!(projected.protocol_values.len(), 4);
+        let describe_type = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_describe_type")))
+            .expect("describe_type projection should exist");
+        assert_eq!(
+            describe_type.pointer("/inputSchema/required"),
+            Some(&json!(["loadedReference", "type"]))
+        );
 
         let discover = projected
             .protocol_values
@@ -9574,7 +9581,12 @@ pub(crate) mod tests {
         );
         assert_eq!(
             discover.pointer("/inputSchema/properties/kind/enum"),
-            Some(&json!(["generated_query", null]))
+            Some(&json!([
+                "generated_query",
+                "generated_entity",
+                "reviewed_static",
+                null
+            ]))
         );
 
         let execute = projected

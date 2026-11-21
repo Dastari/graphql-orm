@@ -38,6 +38,8 @@ pub enum RuntimeQueryErrorCode {
     /// The collection declares no search, or the search input is empty or
     /// malformed.
     InvalidSearch,
+    /// A stored order key cannot fit within the cursor byte bound.
+    CursorKeyTooLarge,
 }
 
 impl RuntimeQueryErrorCode {
@@ -55,6 +57,7 @@ impl RuntimeQueryErrorCode {
             Self::Decode => "decode",
             Self::BackendExecution => "backend_execution",
             Self::InvalidSearch => "invalid_search",
+            Self::CursorKeyTooLarge => "cursor_key_too_large",
         }
     }
 }
@@ -75,7 +78,7 @@ impl RuntimeQueryError {
     }
 
     fn cursor_key_too_large() -> Self {
-        let mut error = Self::new(RuntimeQueryErrorCode::ResourceLimit);
+        let mut error = Self::new(RuntimeQueryErrorCode::CursorKeyTooLarge);
         error.detail = Some("cursor_key_too_large");
         error
     }

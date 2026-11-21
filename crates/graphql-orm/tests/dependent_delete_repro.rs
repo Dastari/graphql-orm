@@ -611,7 +611,8 @@ async fn rollback_discards_dependent_events() {
             .data(FailAfter),
         )
         .await;
-    assert_eq!(response.errors[0].message, "private hook diagnostic");
+    // The hook's uncoded text is a server-side diagnostic, not a refusal (#682).
+    assert_eq!(response.errors[0].message, "internal error");
     assert_intact(&pool).await;
     assert!(changes.try_recv().is_err());
 }

@@ -921,8 +921,13 @@ where
     }
 
     /// Apply runtime pagination defaults and caps to connection-style search execution.
+    ///
+    /// The client page-offset maximum already set on this search (from the
+    /// `Database` it was built on) is kept, because a `PaginationConfig`
+    /// carries none; replace it with [`Self::client_pagination_config`].
     pub fn pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
-        self.pagination_config = pagination_config.into();
+        self.pagination_config = super::ClientPaginationConfig::from(pagination_config)
+            .with_max_offset(self.pagination_config.max_offset());
         self
     }
 
@@ -982,8 +987,8 @@ where
     ///
     /// A limit above the configured maximum page limit fails with
     /// `PAGE_LIMIT_EXCEEDED` instead of being reduced; see
-    /// [`PaginationConfig::checked_explicit_limit`]. [`Self::paginate`] keeps
-    /// GraphQL page semantics and clamps.
+    /// [`PaginationConfig::checked_explicit_limit`]. [`Self::paginate`]
+    /// checks its limit the same way.
     pub fn limit(mut self, limit: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.limit = Some(limit);
@@ -1024,12 +1029,21 @@ where
         self
     }
 
-    /// Apply a generated page input with GraphQL page semantics: a limit
-    /// above the configured maximum is clamped, and a client offset above
-    /// a configured maximum offset is refused.
+    /// Read the offset/limit page `page`.
+    ///
+    /// Like [`Self::limit`], an explicit `page.limit` is honoured exactly or
+    /// refused: a limit above the configured maximum page limit fails with
+    /// `PAGE_LIMIT_EXCEEDED`, never a shorter page. Raise the maximum for one
+    /// trusted search with [`Self::pagination_config`]. `page.offset` is a
+    /// client offset: one above the configured maximum page offset
+    /// (`DatabaseBuilder::max_page_offset`) is refused with
+    /// `PAGE_LIMIT_EXCEEDED`; set a trusted offset with [`Self::offset`]
+    /// instead. To apply GraphQL client page semantics to a client-supplied
+    /// page, resolve it first with
+    /// [`ClientPaginationConfig::resolve_client_page`](super::ClientPaginationConfig::resolve_client_page).
     pub fn paginate(mut self, page: PageInput) -> Self {
         self.query = self.query.paginate(&page);
-        self.explicit_limit = None;
+        self.explicit_limit = page.limit;
         self.builder_offset = false;
         self
     }
@@ -1434,12 +1448,19 @@ where
         if self.query.requires_in_memory_filtering() {
             return Err(invalid());
         }
-        // A client page: the opt-in limit refusal and the offset bound apply
-        // before either path reads a row, the native index included.
-        db.client_pagination_config()
-            .admit_client_page(page.as_ref())
+        // A client page, before either executor reads a row, the native
+        // index included: the offset bound applies, and an oversized limit
+        // is reduced, or refused when the host opted in.
+        let resolved = db
+            .client_pagination_config()
+            .resolve_client_page(page.as_ref(), true)
             .map_err(|error| error.into_graphql_error())?;
+        let page = Some(PageInput {
+            limit: resolved.limit,
+            offset: Some(resolved.offset),
+        });
         self.query.page = page.clone();
+        self.explicit_limit = None;
         self.builder_offset = false;
         if matches!(
             visibility,

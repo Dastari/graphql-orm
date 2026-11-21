@@ -1,0 +1,8 @@
+error[E0599]: no associated function or constant named `bulk_load_relations` found for struct `Board` in the current scope
+  --> tests/ui/relation_preload_removed.rs:15:12
+   |
+ 5 | struct Board {
+   | ------------ associated function or constant `bulk_load_relations` not found for this struct
+...
+15 |     Board::bulk_load_relations(boards, pool, &[]).await
+   |            ^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Board`

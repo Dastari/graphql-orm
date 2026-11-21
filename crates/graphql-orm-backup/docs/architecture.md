@@ -106,8 +106,7 @@ such records, both held outside the repository:
   the host never recorded, and needs updating after every backup.
 
 Every manifest read refuses a snapshot the records do not admit, after its
-seal verified, with a `ManifestAuthenticationFailed` error for which
-`BackupError::is_snapshot_not_admitted` is true, and a revoked id is never
+seal verified, with `BackupError::SnapshotNotAdmitted`, and a revoked id is never
 sealed again. `prune` refuses to run while such a snapshot is listed;
 `delete_snapshot` removes it by id without reading its manifest. Without
 either record a pruned snapshot can still be replayed. The records are as

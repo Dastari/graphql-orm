@@ -394,24 +394,29 @@ impl OrmAiSessionRetentionService {
             }
             let remaining =
                 i64::try_from(batch - candidates.len()).map_err(|_| AiError::PersistenceFailed)?;
-            let rows = self
-                .database
-                .transaction(TransactionMode::Default, move |tx| {
-                    Box::pin(async move {
-                        tx.query::<AiStoredProviderResponseRecord>()
-                            .filter(filter)
-                            .order_by(AiStoredProviderResponseRecordOrderByInput {
-                                created_at: Some(OrderDirection::Asc),
-                            })
-                            .internal_limit(remaining)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)
-                    })
-                })
-                .await
-                .map_err(map_transaction)?;
-            candidates.extend(rows);
+            // The configured batch may exceed the database's maximum page
+            // limit, which a host page refuses rather than shortens:
+            // `keyset_window` reads exactly `remaining` rows (or the rest of
+            // the set) in canonical `created_at, id` pages within that
+            // maximum. Each candidate is claimed under its own fence later,
+            // so the pages need not share a snapshot.
+            let connection = crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                KeysetConnectionInput {
+                    first: Some(remaining),
+                    ..Default::default()
+                },
+                |chunk| {
+                    AiStoredProviderResponseRecord::keyset_connection_page(
+                        &self.database,
+                        filter.clone(),
+                        chunk,
+                    )
+                },
+            )
+            .await
+            .map_err(map_orm)?;
+            candidates.extend(connection.edges.into_iter().map(|edge| edge.node));
         }
         Ok(candidates)
     }

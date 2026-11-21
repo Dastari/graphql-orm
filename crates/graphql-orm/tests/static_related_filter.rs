@@ -82,6 +82,7 @@ fn generated_where_can_filter_a_collection() {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .finish()
     .sdl();
     let input = sdl
@@ -287,6 +288,7 @@ async fn setup_options(callback: bool, include_denied: bool) -> Schema {
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
+    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db)
     .data(AuthSubject::builder("reader").build());
     #[cfg(any(feature = "postgres", feature = "mssql"))]
@@ -478,6 +480,9 @@ fn exists_sql_is_quoted_and_parameterized_for_the_selected_backend() {
     assert_eq!(query.values, vec![SqlValue::String(value.into())]);
     let sql = query.where_clauses.join(" AND ");
     assert!(sql.contains("EXISTS (SELECT 1 FROM"), "{sql}");
+    // The positive relation is one plain EXISTS (#770 review: the three-valued
+    // form is rendered only where a negation reaches it).
+    assert!(!sql.contains("CASE") && !sql.contains("IS NULL"), "{sql}");
     assert!(!sql.contains(value), "{sql}");
     #[cfg(feature = "mssql")]
     assert!(

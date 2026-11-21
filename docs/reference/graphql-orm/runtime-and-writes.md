@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -374,8 +374,11 @@ or an `OrmPublicError` returned with `?`. Any other hook error, including one
 with an application-defined code, reads as `INTERNAL_ERROR` with the default
 message, and its text stays a server-side diagnostic. GraphQL clients of
 generated mutations see a deliberate public refusal with the same code and
-message. They still see an application-defined refusal as the hook wrote it,
-as does `into_graphql_error()` on the repository error. `INTERNAL_ERROR`
+message. They still see a refusal with an application-defined `code` as the
+hook wrote it, as does `into_graphql_error()` on the repository error. A
+refusal with no `code` extension reads as `INTERNAL_ERROR` with the default
+message for GraphQL clients too, unless the schema's `Database` opted in with
+`DatabaseBuilder::expose_uncoded_callback_messages(true)`. `INTERNAL_ERROR`
 always has the default message, on every surface. Entity and row policy refusals
 on repository paths keep their public code in the same way, so an entity write
 denial reads as `FORBIDDEN`.
@@ -635,9 +638,9 @@ write:
   more candidates fails with `PAGE_LIMIT_EXCEEDED` and the scan-budget message, before any row
   changes. Whether the budget runs out can depend on rows the caller cannot see; that is the
   documented residual of the budget, and it is the only way hidden rows can affect a bulk write.
-  A `write_target_prefilter`, or without one and with
-  `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(true)` a SQL predicate from the row
-  policy's `read_visibility` (see [row policy on generated
+  A `write_target_prefilter`, or without one a SQL predicate from the row
+  policy's `read_visibility` (the default; `DatabaseBuilder::narrow_bulk_writes_to_read_visibility(false)`
+  turns it off) (see [row policy on generated
   writes](strict-authorization.md#row-policy-on-generated-writes)), removes hidden rows in SQL, so
   they are not counted against the budget. Set the budget in trusted code.
 - **Per field.** The bound applies to each bulk mutation field. A request with several aliased
@@ -681,8 +684,11 @@ the pool-bound `Entity::query(pool)` (`FindQuery`) and `EntitySearchQuery::limit
 - Without a limit, the write-input, pool-bound and search builders stay unbounded, as before.
   GraphQL-enabled `find_all` and `find_many` also stay unbounded.
 - `paginate(PageInput)` on `tx.query::<T>()` and `write_ctx.query::<T>()` is shorthand for
-  `limit` plus `offset` and is not clamped. `EntityQuery::paginate` and
-  `EntitySearchQuery::paginate` keep the GraphQL page semantics above.
+  `limit` plus `offset` and is not clamped. `EntityQuery::paginate` (read through
+  `fetch_connection*`) and `EntitySearchQuery::paginate` are exact or refused in the same way:
+  a `page.limit` above the maximum, or above `EntityQuery::with_max_limit(n)`, fails with
+  `PAGE_LIMIT_EXCEEDED`. Generated resolvers apply the GraphQL page semantics above to the
+  client's page before they call `paginate`.
 
 So a `limit(bound + 1)` overflow check either sees the extra row or gets an error. When trusted
 code needs a bound above the maximum, raise the maximum for that one read with `with_max_limit`.
@@ -781,11 +787,14 @@ reduced to the page maximum. `limit` may be at most `SIMILAR_SEARCH_MAX_LIMIT` (
 limit fails with `PAGE_LIMIT_EXCEEDED` and a negative one with `INVALID_INPUT`. Without a limit,
 every matching row is scored, as before. Bounded `update_where`/`delete_where`, retention
 purges and dependent deletes use their own `MutationLimit` look-ahead and are not capped by
-`max_limit`. Keyset helpers clamp the requested page size and report more rows through
+`max_limit`. Keyset helpers called from Rust refuse a page size above the maximum with
+`PAGE_LIMIT_EXCEEDED`; called with a GraphQL context they reduce it, or refuse it when
+`refuse_oversized_page_limit` is set. Either way more rows are reported through
 `pageInfo.hasNextPage`.
 
-Host code that handles `PageInput` directly should call `limit_with_config(database.pagination_config())`
-or `database.pagination_config().resolve_page(...)`. The compatibility helper `PageInput::limit()` is
+Host code that receives a client's `PageInput` should resolve it with
+`database.client_pagination_config().resolve_client_page(...)` before paginating, so the client
+page is reduced, or refused when the host opted in. The compatibility helper `PageInput::limit()` is
 deprecated because it only has access to the default `100` cap and cannot observe per-application
 settings such as `.max_page_limit(Some(5_000))`.
 

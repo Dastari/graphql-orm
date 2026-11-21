@@ -860,11 +860,20 @@ async fn a_hook_passes_a_nested_write_refusal_on_with_its_code() {
     }
 }
 
+/// Stringifying a nested write error drops its public code. Since #682 the
+/// resulting uncoded error is not a public refusal: clients see
+/// `INTERNAL_ERROR` with the default message, and the text stays server-side.
 #[tokio::test]
-async fn stringifying_a_nested_write_error_in_a_hook_loses_the_code() {
+async fn stringifying_a_nested_write_error_in_a_hook_becomes_an_internal_error() {
     let response = create_order_through_nested_write_hook(NestedWriteError::Stringify).await;
     assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
-    assert_eq!(error_code(&response), None, "{:?}", response.errors);
+    assert_eq!(
+        error_code(&response),
+        Some(async_graphql::Value::from("INTERNAL_ERROR")),
+        "{:?}",
+        response.errors
+    );
+    assert_eq!(response.errors[0].message, "internal error");
 }
 
 #[tokio::test]
@@ -1479,40 +1488,80 @@ async fn repository_entities_persist_without_a_graphql_surface() {
 }
 
 #[tokio::test]
-async fn a_migration_plan_drops_entities_left_out_of_it() {
+async fn a_migration_plan_drops_entities_left_out_of_it_only_when_strict() {
+    use graphql_orm::graphql::orm::PlanOptions;
+
     let db = database().await;
+    // The default plan leaves every table the target does not declare alone.
     let partial = db
         .schema()
         .plan_migration_to_entities("partial", "partial", &[Customer::metadata()])
         .await
         .unwrap();
     assert!(
-        partial
+        !partial
             .statements
             .iter()
             .any(|sql| sql.contains("DROP TABLE")),
         "{:?}",
         partial.statements
     );
+    // A strict plan drops them, and the drop needs destructive admission.
+    let strict = db
+        .schema()
+        .plan_migration_to_entities_with_options(
+            "partial",
+            "partial",
+            &[Customer::metadata()],
+            PlanOptions::strict(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        strict
+            .statements
+            .iter()
+            .any(|sql| sql.contains("DROP TABLE")),
+        "{:?}",
+        strict.statements
+    );
     assert!(
         db.schema()
-            .apply_migration(&partial, ApplyOptions::default())
+            .apply_migration(&strict, ApplyOptions::default())
             .await
             .is_err()
     );
+    assert_eq!(Order::count_all(&db).await.unwrap(), 0);
 }
 
 #[tokio::test]
 async fn a_schema_stage_that_drops_entities_is_refused_without_opt_in() {
-    use graphql_orm::graphql::orm::{SchemaStage, SchemaStageRunner};
+    use graphql_orm::graphql::orm::{MigrationStep, SchemaStage, SchemaStageRunner};
 
     let db = database().await;
     seed(&db).await;
-    let stages = [SchemaStage::from_entities(
-        "partial-stage",
-        "partial stage",
-        &[Customer::metadata()],
-    )];
+    // A stage never drops a table that no stage declared.
+    let undeclared = db
+        .plan_schema_stages(&[SchemaStage::from_entities(
+            "customer-only-stage",
+            "customer only",
+            &[Customer::metadata()],
+        )])
+        .await
+        .unwrap();
+    assert!(
+        undeclared.iter().all(|stage| stage
+            .plan
+            .steps
+            .iter()
+            .all(|step| !matches!(step, MigrationStep::DropTable { .. }))),
+        "{undeclared:?}"
+    );
+    // A later stage that omits a table an earlier stage declared drops it.
+    let stages = [
+        SchemaStage::from_entities("full-stage", "full stage", &entities()),
+        SchemaStage::from_entities("partial-stage", "partial stage", &[Customer::metadata()]),
+    ];
     let refusal = db.apply_schema_stages(&stages).await.unwrap_err();
     assert!(
         matches!(
@@ -1538,10 +1587,17 @@ async fn a_schema_stage_that_drops_entities_is_refused_without_opt_in() {
 
 #[tokio::test]
 async fn additive_only_rejects_a_plan_with_a_non_additive_step() {
+    use graphql_orm::graphql::orm::PlanOptions;
+
     let db = database().await;
     let partial = db
         .schema()
-        .plan_migration_to_entities("partial", "partial", &[Customer::metadata()])
+        .plan_migration_to_entities_with_options(
+            "partial",
+            "partial",
+            &[Customer::metadata()],
+            PlanOptions::strict(),
+        )
         .await
         .unwrap();
     let options = ApplyOptions {
@@ -1720,8 +1776,19 @@ fn callback_error_privacy_preserves_authored_refusals() {
         masked.extensions.unwrap().get("code"),
         Some(&async_graphql::Value::from("INTERNAL_ERROR"))
     );
+    // #682: an authored error without a `code` is not a public refusal, so
+    // its text stays server-side unless the schema's `Database` opted in.
+    let uncoded = graphql_error_from_callback(async_graphql::Error::new("authored text"));
+    assert_eq!(uncoded.message, "internal error");
+    assert_eq!(
+        uncoded.extensions.unwrap().get("code"),
+        Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+    );
+    // A coded refusal keeps its message and every extension.
     for error in [
-        async_graphql::Error::new("authored refusal"),
+        async_graphql::Error::new("authored refusal").extend_with(|_, ext| {
+            ext.set("code", "CUSTOM_REFUSAL");
+        }),
         async_graphql::Error::from(std::io::Error::other("authored refusal")).extend_with(
             |_, ext| {
                 ext.set("code", "CUSTOM_REFUSAL");
@@ -1785,6 +1852,43 @@ async fn hand_built_changed_schema_requires_admission() {
         Some(&async_graphql::Value::from(
             "SUBSCRIPTION_ADMISSION_REQUIRED"
         ))
+    );
+}
+
+#[tokio::test]
+async fn hand_built_schema_requires_input_validation() {
+    let schema = |validated: bool| {
+        let builder = async_graphql::Schema::build(
+            QueryRoot::default(),
+            MutationRoot::default(),
+            SubscriptionRoot::default(),
+        );
+        async move {
+            let builder = builder.data(database().await);
+            if validated {
+                builder
+                    .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+                    .finish()
+            } else {
+                builder.finish()
+            }
+        }
+    };
+    let query = "{ orders(where: { customerId: { eq: \"00000000-0000-0000-0000-000000000001\" } }) { edges { node { id } } } }";
+    let response = schema(false).await.execute(as_user(query)).await;
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from("INPUT_VALIDATION_REQUIRED"))
+    );
+    let response = schema(true).await.execute(as_user(query)).await;
+    assert!(
+        response.errors.iter().all(|error| error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            != Some(&async_graphql::Value::from("INPUT_VALIDATION_REQUIRED"))),
+        "{:?}",
+        response.errors
     );
 }
 

@@ -340,6 +340,7 @@ certificate settings checked.
 | `max_lifetime` | 30 min | Connections older than this are closed when next released or acquired. |
 | `health_check_after_idle` | 30 s | A connection idle this long is reset and checked before reuse. |
 | `transport` | `verified()` | See above. |
+| `typed_temporal_parameters` | `false` | Enable [native parameters for temporal text](#native-temporal-parameters). |
 
 A statement timeout has two caveats. First, the outcome of a timed-out
 autocommit write is indeterminate: the server can still finish and commit the
@@ -705,7 +706,7 @@ pub contacts: Vec<LegacyCardFileContact>,
 pub details: Vec<LegacyCardFileDetail>,
 ```
 
-With Pascal-case feature flags, nested reads keep the expected legacy GraphQL shape:
+With the `PascalCase` naming variables, nested reads keep the expected legacy GraphQL shape:
 
 ```graphql
 query {
@@ -774,8 +775,7 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
   PostgreSQL backends hold: a type without an offset is read as UTC
   (`2026-11-09T12:34:56Z`, with the fraction when it is not zero) and a `datetimeoffset`
   keeps its offset (`2026-11-09T12:34:56+02:00`). `date` stays `2026-11-09`. What is read does
-  not depend on the session language or `DATEFORMAT`. Values are still
-  bound as text, so write ISO 8601 with a `T` to columns of the legacy `datetime` type.
+  not depend on the session language or `DATEFORMAT`.
 - a `DECIMAL` value beyond `rust_decimal`'s range (more than 28 decimal places or a 96-bit
   mantissa) is a column decode error. The driver cannot read a non-NULL value in a column
   declared with scale 38 (`DECIMAL(38,38)`) at all: it asserts while it decodes the row. The
@@ -800,6 +800,47 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
 SQL Server-specific types such as `xml`, `hierarchyid`,
 `geography`, `geometry`, `sql_variant`, `rowversion`, and table-valued columns are not first-class
 ORM scalar types in this phase.
+
+### Native temporal parameters
+
+Chrono parameters use native SQL Server types on every pool.
+Generated column metadata and DDL use the corresponding types.
+
+- `chrono::NaiveDate` binds as `date`.
+- `chrono::NaiveDateTime` and `chrono::DateTime<Utc>` bind as `datetime2`.
+- `chrono::DateTime<FixedOffset>` binds as `datetimeoffset`.
+
+To use native parameters for temporal text too, pass
+`MssqlPoolOptions::new().typed_temporal_parameters(true)` to
+`MssqlPool::connect_ado_with` for reads or
+`MssqlPool::connect_ado_external_writable_with` for reads and writes. Use the
+resulting pool to construct your `Database`. Generated date filters and writes
+to text fields marked `#[date_field]` or `#[filterable(type = "date")]` then
+bind ISO dates and timestamps as `date`, `datetime2`, or `datetimeoffset`.
+When including a time, supply seconds, such as `2026-04-09T12:34:00`.
+Minute-only forms such as `2026-04-09T12:34` are rejected. Text compatibility
+mode sends the input as written. Use ISO 8601 with a `T` when writing a
+timestamp as text to legacy `datetime` columns.
+
+Native parameters avoid interpreting input using session language and
+`DATEFORMAT`. Review these effects before enabling them for temporal text.
+
+- On a date-filterable `String` field stored as `NVARCHAR(MAX)`, a write can
+  store SQL Server's spelling of the value. Filters convert column values
+  to the temporal parameter type and compare temporally instead of
+  lexically. One row with non-ISO text that SQL Server cannot convert can
+  fail the entire query.
+- When a filter operand has an offset and the column is `datetime2` or
+  `datetime`, SQL Server treats the column as UTC and compares instants.
+  Text binding dropped the offset and compared wall-clock times. Filters
+  and read policies can therefore admit a different set of rows.
+- At database compatibility level 130 or later, comparisons that promote
+  legacy `datetime` to higher precision can expose its 1/300-second ticks.
+  An `eq` operand or a `BETWEEN` endpoint at the displayed millisecond can
+  stop matching that stored value. Native writes can also round differently.
+
+Runtime GraphQL date-time values, keyset cursor values, and backup restore
+values still use text binds.
 
 ## Introspection and rendered DDL
 
@@ -868,7 +909,7 @@ cargo test -p graphql-orm --test query_ir
 MSSQL compile-time policy checks run with the MSSQL feature:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
+cargo test -p graphql-orm --no-default-features --features mssql --test compile_ui mssql_write_unavailable_ui::
 ```
 
 Composite-key read rendering and MSSQL read-only schema checks are covered by:

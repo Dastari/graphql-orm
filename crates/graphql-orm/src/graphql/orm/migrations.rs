@@ -68,6 +68,181 @@ impl TableIdentifierConflict {
     }
 }
 
+/// A planned unique index whose key already repeats in the table's rows.
+///
+/// [`SchemaManager::apply_migration`](super::SchemaManager::apply_migration)
+/// and [`SchemaManager::apply_schema_target`](super::SchemaManager::apply_schema_target)
+/// look for such rows before they run any statement of the plan, and refuse
+/// the whole plan with this error when they find one. Nothing has been
+/// changed: no DDL has run and no migration version has been recorded. The
+/// host removes or merges the duplicate rows and applies the same plan again.
+///
+/// The value names the table, the index and its key columns only. It carries
+/// no row data.
+///
+/// The check covers a `CREATE UNIQUE INDEX` step on a table that exists
+/// before the plan, over columns that exist before the plan. It follows the
+/// backend's own uniqueness rule for `NULL`: PostgreSQL and SQLite treat
+/// `NULL` keys as distinct, so rows with a `NULL` key column are ignored;
+/// SQL Server treats them as equal, so they are compared. A unique index over
+/// a column the same plan adds, a column-level `UNIQUE` and a composite
+/// unique constraint are not checked here; if existing rows violate one, the
+/// database rejects that statement and the transactional apply rolls back.
+/// Conditional indexes apply their structured closed-set predicate to the
+/// check, rendered exactly as the `CREATE INDEX` statement renders it (on SQL
+/// Server with Unicode `N'...'` literals), so the check reads the rows the
+/// index will cover. If the plan adds the predicate column, the check is
+/// skipped too. Predicate dependencies are tracked structurally, never
+/// inferred from SQL. An opaque SQL Server catalogue filter, which names no
+/// column, is checked with its validated text; it is not checked, and the
+/// database enforces uniqueness when the index is created, when the same plan
+/// adds any column to the table or the filter fails validation (rendering
+/// then refuses the plan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniqueIndexDuplicates {
+    /// The declared table the index belongs to.
+    pub table: String,
+    /// The unique index the plan creates.
+    pub index: String,
+    /// The index key columns, in index order.
+    pub columns: Vec<String>,
+}
+
+impl std::fmt::Display for UniqueIndexDuplicates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "table {} has rows that repeat the key ({}) of planned unique index {}; \
+             no migration statement was run",
+            self.table,
+            self.columns.join(", "),
+            self.index
+        )
+    }
+}
+impl std::error::Error for UniqueIndexDuplicates {}
+impl UniqueIndexDuplicates {
+    /// Read a duplicate-key refusal carried by an ORM error.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+    pub(crate) fn into_error(self) -> crate::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+}
+
+/// Finds the first planned unique index whose key existing rows repeat.
+///
+/// Read-only. See [`UniqueIndexDuplicates`] for the exact coverage.
+pub(super) async fn unique_index_duplicates<B: super::OrmBackend>(
+    pool: &B::Pool,
+    steps: &[StepRef<'_>],
+) -> crate::Result<Option<UniqueIndexDuplicates>> {
+    let backend = B::DIALECT;
+    if backend == DatabaseBackend::Mysql {
+        return Ok(None);
+    }
+    // A table or column the plan itself creates has no rows or values to
+    // repeat yet, and cannot be read before the plan runs.
+    let created_tables = steps
+        .iter()
+        .filter_map(|step| match step {
+            StepRef::CreateTable(table) => Some(table.table_name.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let added_columns = steps
+        .iter()
+        .filter_map(|step| match step {
+            StepRef::AddColumn { table_name, column } => {
+                Some((table_name.as_str(), column.name.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for step in steps {
+        let StepRef::CreateIndex { table_name, index } = step else {
+            continue;
+        };
+        if !index.is_unique
+            || index.is_spatial
+            || index.columns.is_empty()
+            || created_tables.contains(table_name.as_str())
+            || index
+                .columns
+                .iter()
+                .any(|column| added_columns.contains(&(table_name.as_str(), column)))
+        {
+            continue;
+        }
+        // Closed-set predicates track their sole column explicitly. Do not
+        // query a predicate column before this plan creates it (SQLite may
+        // even interpret the missing quoted identifier as a string literal).
+        // Any future predicate form without known dependencies must skip this
+        // preflight and let CREATE UNIQUE INDEX enforce uniqueness instead.
+        if index.predicate.as_ref().is_some_and(|predicate| {
+            added_columns.contains(&(table_name.as_str(), predicate.column))
+        }) {
+            continue;
+        }
+        // An opaque SQL Server catalogue filter names no column. It is probed
+        // with the same validated text the index is created with. It is not
+        // probed when it fails that validation (the apply refuses the plan
+        // before any DDL), on another backend, or when this plan adds a
+        // column to the table, which the filter may reference.
+        if index.predicate.as_ref().is_some_and(|predicate| {
+            predicate.column.is_empty()
+                && (backend != DatabaseBackend::Mssql
+                    || validate_mssql_step_predicates(step).is_err()
+                    || added_columns
+                        .iter()
+                        .any(|(table, _)| *table == table_name.as_str()))
+        }) {
+            continue;
+        }
+        let key = index
+            .columns
+            .iter()
+            .map(|column| backend.quote_identifier(column))
+            .collect::<Vec<_>>();
+        let mut conditions = Vec::new();
+        if backend != DatabaseBackend::Mssql {
+            conditions.extend(key.iter().map(|column| format!("{column} IS NOT NULL")));
+        }
+        if let Some(predicate) = index.predicate.as_ref() {
+            // The rows the index will cover: the predicate exactly as
+            // `CREATE INDEX` renders it.
+            conditions.push(render_index_predicate(backend, predicate));
+        }
+        let filter = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+        let (top, limit) = if backend == DatabaseBackend::Mssql {
+            ("TOP 1 ", "")
+        } else {
+            ("", " LIMIT 1")
+        };
+        let sql = format!(
+            "SELECT {top}1 AS present FROM {}{filter} GROUP BY {} HAVING COUNT(*) > 1{limit}",
+            backend.render_table_identifier_path(table_name),
+            key.join(", "),
+        );
+        if !B::fetch_rows(pool, &sql, &[]).await?.is_empty() {
+            return Ok(Some(UniqueIndexDuplicates {
+                table: table_name.to_string(),
+                index: index.name.to_string(),
+                columns: index.columns.iter().map(ToString::to_string).collect(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn table_identifier_conflict<'a>(
     backend: DatabaseBackend,
     tables: impl IntoIterator<Item = &'a str>,
@@ -1228,6 +1403,151 @@ fn postgres_binary_compatible_widening(before: &str, after: &str) -> bool {
         ("numeric", [before_precision, before_scale], [after_precision, after_scale]) => {
             before_scale == after_scale && after_precision >= before_precision
         }
+        _ => false,
+    }
+}
+
+/// The value domain of a column type, as far as the risk classifier knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueDomain {
+    /// An integer of this many bits.
+    Integer(u32),
+    /// IEEE 754 single precision.
+    Real,
+    /// IEEE 754 double precision.
+    Double,
+    /// Exact decimal with `(precision, scale)`, or unconstrained.
+    Numeric(Option<(u32, u32)>),
+    /// Variable-length text with a length limit, or unlimited.
+    Text {
+        limit: Option<u32>,
+        /// Whether the type stores every Unicode character. PostgreSQL and
+        /// SQLite text is Unicode for the whole database; SQL Server stores
+        /// Unicode only in its `n`-prefixed types, and its other text types
+        /// keep only the characters of the collation's code page.
+        unicode: bool,
+    },
+}
+
+/// The domain of the closed set of types whose widenings are known to keep
+/// every stored value. Spellings of PostgreSQL, SQLite and SQL Server are
+/// recognised; anything else has no known domain.
+fn value_domain(backend: DatabaseBackend, sql_type: &str) -> Option<ValueDomain> {
+    let mssql = backend == DatabaseBackend::Mssql;
+    if let Some(name) = postgres_type_name(sql_type) {
+        if name.array {
+            return None;
+        }
+        return match (name.base, name.modifiers.as_slice()) {
+            ("smallint", []) => Some(ValueDomain::Integer(16)),
+            ("integer", []) => Some(ValueDomain::Integer(
+                if backend == DatabaseBackend::Sqlite {
+                    64
+                } else {
+                    32
+                },
+            )),
+            ("bigint", []) => Some(ValueDomain::Integer(64)),
+            ("real", []) => Some(ValueDomain::Real),
+            ("double precision", []) => Some(ValueDomain::Double),
+            ("numeric", []) => Some(ValueDomain::Numeric(
+                if backend == DatabaseBackend::Postgres {
+                    None
+                } else {
+                    Some((18, 0))
+                },
+            )),
+            ("numeric", [precision, scale]) => {
+                Some(ValueDomain::Numeric(Some((*precision, *scale))))
+            }
+            // SQL Server reads a length-less `varchar` column as `varchar(1)`.
+            ("character varying", []) if mssql => None,
+            ("character varying", []) => Some(ValueDomain::Text {
+                limit: None,
+                unicode: true,
+            }),
+            ("character varying", [length]) => Some(ValueDomain::Text {
+                limit: Some(*length),
+                unicode: !mssql,
+            }),
+            _ => None,
+        };
+    }
+    let name = sql_type
+        .split_ascii_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    // A length-less `nvarchar`, `char` or `nchar` has no domain: SQL Server
+    // reads each as a one-character column.
+    match name.as_str() {
+        "text" | "varchar(max)" => Some(ValueDomain::Text {
+            limit: None,
+            unicode: !mssql,
+        }),
+        "nvarchar(max)" => Some(ValueDomain::Text {
+            limit: None,
+            unicode: true,
+        }),
+        "tinyint" => Some(ValueDomain::Integer(8)),
+        _ => name
+            .strip_prefix("nvarchar(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .and_then(|length| length.parse().ok())
+            .map(|length| ValueDomain::Text {
+                limit: Some(length),
+                unicode: true,
+            }),
+    }
+}
+
+/// Whether changing a column from `before` to `after` keeps every value the
+/// column can hold, exactly. Only a closed set of widenings qualifies: a
+/// larger integer, an integer into a wide enough exact numeric or a float
+/// that represents it exactly, single into double precision, a numeric with
+/// at least the same integer digits and scale, and a longer or unlimited
+/// text that stores at least the same characters. Everything else, including
+/// every type this function does not recognise, may round, truncate or reject
+/// stored values.
+fn lossless_type_widening(backend: DatabaseBackend, before: &str, after: &str) -> bool {
+    use ValueDomain::{Double, Integer, Numeric, Real, Text};
+    let (Some(before), Some(after)) = (value_domain(backend, before), value_domain(backend, after))
+    else {
+        return false;
+    };
+    // Decimal digits that hold every value of an integer of `bits` bits.
+    let digits = |bits: u32| match bits {
+        8 => 3,
+        16 => 5,
+        32 => 10,
+        _ => 19,
+    };
+    match (before, after) {
+        (Integer(before), Integer(after)) => after >= before,
+        (Integer(_), Numeric(None)) => true,
+        (Integer(bits), Numeric(Some((precision, scale)))) => {
+            precision.saturating_sub(scale) >= digits(bits)
+        }
+        // A float represents every integer up to its mantissa width.
+        (Integer(bits), Real) => bits <= 16,
+        (Integer(bits), Double) => bits <= 32,
+        (Real, Double) => true,
+        (Numeric(_), Numeric(None)) => true,
+        (Numeric(Some((before_precision, before_scale))), Numeric(Some((precision, scale)))) => {
+            scale >= before_scale
+                && precision.saturating_sub(scale) >= before_precision.saturating_sub(before_scale)
+        }
+        // Unicode text into a code-page type may replace characters.
+        (Text { unicode: true, .. }, Text { unicode: false, .. }) => false,
+        (Text { .. }, Text { limit: None, .. }) => true,
+        (
+            Text {
+                limit: Some(before),
+                ..
+            },
+            Text {
+                limit: Some(after), ..
+            },
+        ) => after >= before,
         _ => false,
     }
 }
@@ -2540,6 +2860,38 @@ fn mssql_closed_opaque_filter(filter: &str) -> bool {
     depth == 0
 }
 
+/// The filter of a partial index, as `CREATE INDEX ... WHERE` takes it. The
+/// unique-index duplicate preflight probes with the same text, so it examines
+/// exactly the rows the index will cover.
+fn render_index_predicate(
+    backend: DatabaseBackend,
+    predicate: &super::owned_schema::IndexPredicateRef<'_>,
+) -> String {
+    if backend == DatabaseBackend::Mssql
+        && predicate.column.is_empty()
+        && let [filter] = predicate.values.as_slice()
+    {
+        // Introspection retained the catalog's opaque filter verbatim.
+        return (*filter).to_string();
+    }
+    let values = predicate
+        .values
+        .iter()
+        .map(|value| {
+            if backend == DatabaseBackend::Mssql {
+                render_mssql_index_literal(value)
+            } else {
+                sql_string_literal(value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} IN ({values})",
+        backend.quote_identifier(predicate.column)
+    )
+}
+
 fn render_create_index_statement(
     backend: DatabaseBackend,
     table_name: &str,
@@ -2568,29 +2920,7 @@ fn render_create_index_statement(
         .predicate
         .as_ref()
         .map_or_else(String::new, |predicate| {
-            if backend == DatabaseBackend::Mssql
-                && predicate.column.is_empty()
-                && let [filter] = predicate.values.as_slice()
-            {
-                // Introspection retained the catalog's opaque filter verbatim.
-                return format!(" WHERE {filter}");
-            }
-            let values = predicate
-                .values
-                .iter()
-                .map(|value| {
-                    if backend == DatabaseBackend::Mssql {
-                        render_mssql_index_literal(value)
-                    } else {
-                        sql_string_literal(value)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                " WHERE {} IN ({values})",
-                backend.quote_identifier(predicate.column)
-            )
+            format!(" WHERE {}", render_index_predicate(backend, predicate))
         });
     format!(
         "CREATE {}INDEX {} ON {}{} ({}){}",
@@ -3918,6 +4248,14 @@ fn mssql_unquoted_identifier(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+/// Classify without a backend or source schema.
+///
+/// A type widening must preserve values on every supported backend. Enabling
+/// append-only enforcement without retention purge is additive; enabling
+/// retention purge is destructive because the prior enforcement state is
+/// unknown, and disabling append-only enforcement is always destructive.
+/// Database planners and [`PlannedSchemaStage::steps`](super::PlannedSchemaStage::steps)
+/// classify with their backend and source schema instead.
 pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
     let (risk, reason) = classify_migration_step_view(&StepRef::from(step));
     PlannedMigrationStep {
@@ -3927,6 +4265,14 @@ pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
     }
 }
 pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk, &'static str) {
+    classify_migration_step_context(None, step, None)
+}
+
+pub(super) fn classify_migration_step_context(
+    backend: Option<DatabaseBackend>,
+    step: &StepRef<'_>,
+    prior_append_only: Option<(bool, bool)>,
+) -> (MigrationRisk, &'static str) {
     let (risk, reason) = match step {
         StepRef::EnableExtension { .. } => (
             MigrationRisk::Additive,
@@ -3953,25 +4299,63 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             "drops an existing column and its data",
         ),
         StepRef::AlterColumn { before, after, .. } => {
-            if before.nullable && !after.nullable {
+            let type_changed = !postgres_types_equivalent(&before.sql_type, &after.sql_type);
+            // A type change that can lose stored values outranks every other
+            // change the same step makes.
+            if (before.is_unique && !after.is_unique)
+                || (before.is_primary_key && !after.is_primary_key)
+            {
+                (
+                    MigrationRisk::Destructive,
+                    "removes column uniqueness or primary-key enforcement",
+                )
+            } else if type_changed
+                && !backend.map_or_else(
+                    || {
+                        [
+                            DatabaseBackend::Postgres,
+                            DatabaseBackend::Sqlite,
+                            DatabaseBackend::Mssql,
+                        ]
+                        .into_iter()
+                        .all(|backend| {
+                            lossless_type_widening(backend, &before.sql_type, &after.sql_type)
+                        })
+                    },
+                    |backend| lossless_type_widening(backend, &before.sql_type, &after.sql_type),
+                )
+            {
+                (
+                    MigrationRisk::Destructive,
+                    "changes an existing column to a type that may round, truncate, or reject stored values",
+                )
+            } else if before.nullable && !after.nullable {
                 (
                     MigrationRisk::Risky,
                     "tightens nullability on an existing column",
                 )
-            } else if before.sql_type == after.sql_type {
+            } else if !type_changed {
                 (
                     MigrationRisk::Compatible,
                     "changes column metadata without changing the SQL type",
                 )
             } else {
-                (MigrationRisk::Risky, "changes an existing column type")
+                (
+                    MigrationRisk::Risky,
+                    "widens an existing column type without losing stored values",
+                )
             }
         }
         StepRef::CreateIndex { .. } => (
             MigrationRisk::Additive,
             "creates an index without changing row data",
         ),
-        StepRef::DropIndex { .. } => (MigrationRisk::Risky, "drops an existing index"),
+        // The step names the index but not whether it is unique, and a unique
+        // index is a constraint: every index drop needs the destructive gate.
+        StepRef::DropIndex { .. } => (
+            MigrationRisk::Destructive,
+            "drops an existing index and any uniqueness it enforces",
+        ),
         StepRef::CreateSearchIndex { .. } => (
             MigrationRisk::Additive,
             "creates full-text search structures without backfilling row data",
@@ -3988,28 +4372,92 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             "adds a constraint that may reject existing rows",
         ),
         StepRef::DropForeignKey { .. } => (
-            MigrationRisk::Risky,
+            MigrationRisk::Destructive,
             "drops an existing referential constraint",
         ),
-        StepRef::SetAppendOnly { enabled: true, .. } => (
+        // Enforcement without the retention-purge exception is the strictest
+        // append-only state, so reaching it never relaxes anything.
+        StepRef::SetAppendOnly {
+            enabled: true,
+            retention_purge: false,
+            ..
+        } => (
             MigrationRisk::Additive,
-            "adds database enforcement that prevents row mutation",
+            "adds append-only database enforcement that prevents row mutation",
+        ),
+        // Purge-enabled enforcement adds protection to an unprotected table
+        // but relaxes a table that already rejects every delete. Without a
+        // known prior state the step fails closed.
+        StepRef::SetAppendOnly {
+            enabled: true,
+            retention_purge: true,
+            ..
+        } if prior_append_only.is_some_and(|(enabled, purge)| !enabled || purge) => (
+            MigrationRisk::Additive,
+            "adds append-only database enforcement that admits bounded retention purge",
+        ),
+        StepRef::SetAppendOnly { enabled: true, .. } => (
+            MigrationRisk::Destructive,
+            "enables retention purge on append-only enforcement, or has no known prior enforcement state",
         ),
         StepRef::SetAppendOnly { enabled: false, .. } => (
-            MigrationRisk::Risky,
+            MigrationRisk::Destructive,
             "removes append-only database enforcement",
         ),
+        StepRef::SetCompositeUniques { before, after, .. }
+            if before.iter().any(|unique| !after.contains(unique)) =>
+        {
+            (
+                MigrationRisk::Destructive,
+                "removes or changes existing composite uniqueness",
+            )
+        }
         StepRef::SetCompositeUniques { .. } => (
             MigrationRisk::Risky,
-            "changes composite uniqueness and may reject existing duplicate rows",
+            "adds composite uniqueness that may reject existing duplicate rows",
         ),
+        StepRef::SetCheckConstraints { before, after, .. }
+            if before.iter().any(|constraint| !after.contains(constraint)) =>
+        {
+            (
+                MigrationRisk::Destructive,
+                "removes or changes existing same-row check constraints",
+            )
+        }
         StepRef::SetCheckConstraints { .. } => (
             MigrationRisk::Risky,
-            "adds, removes, or changes same-row check constraints",
+            "adds same-row check constraints that may reject existing rows",
         ),
     };
 
     (risk, reason)
+}
+
+pub(super) fn classify_migration_steps_for_backend(
+    backend: DatabaseBackend,
+    steps: &[MigrationStep],
+    current: &SchemaModel,
+) -> Vec<PlannedMigrationStep> {
+    steps
+        .iter()
+        .map(|step| {
+            let prior = match step {
+                MigrationStep::SetAppendOnly { table_name, .. } => current
+                    .tables
+                    .iter()
+                    .find(|t| &t.table_name == table_name)
+                    .map(|t| (t.append_only, t.retention_purge)),
+                _ => None,
+            };
+            let (risk, reason) =
+                classify_migration_step_context(Some(backend), &StepRef::from(step), prior);
+            PlannedMigrationStep {
+                step: step.clone(),
+                risk,
+                reason: reason.into(),
+            }
+        })
+        .collect()
 }
 
 pub fn classify_migration_steps(steps: &[MigrationStep]) -> Vec<PlannedMigrationStep> {
@@ -5866,6 +6314,45 @@ async fn postgres_rls_enforcement(
             security_definer: row.try_get("security_definer")?,
         });
     }
+    for row in sqlx::query(super::rls::change_journal_cascade_catalog_query())
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        live.change_journal_cascade_gaps.push((
+            row.try_get("conname")?,
+            row.try_get("child")?,
+            row.try_get("parent")?,
+        ));
+    }
+    live.change_journal_truncate_function = sqlx::query_scalar(
+        "SELECT p.prosrc::pg_catalog.text FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_FUNCTION)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let truncate_guards = sqlx::query(
+        "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name
+         FROM pg_catalog.pg_trigger t
+         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE NOT t.tgisinternal AND t.tgname = $1 AND t.tgenabled = 'O'
+           AND t.tgtype::pg_catalog.int4 = $2 AND t.tgqual IS NULL
+           AND t.tgfoid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', $3::pg_catalog.text))",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_TRIGGER)
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_TRIGGER_TYPE)
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_FUNCTION)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in truncate_guards {
+        live.change_journal_truncate_guards
+            .insert(super::rls::change_journal_table_key(
+                &row.try_get::<String, _>("schema_name")?,
+                &row.try_get::<String, _>("table_name")?,
+            ));
+    }
     Ok(live)
 }
 
@@ -6772,6 +7259,97 @@ impl IntrospectionBackend for super::MssqlBackend {
 #[cfg(feature = "mssql")]
 impl RlsIntrospectionBackend for super::MssqlBackend {}
 
+/// The unique-index duplicate preflight on SQL Server. No public apply path
+/// reaches it there yet (SQL Server has no `MigrationBackend`), so these
+/// tests call it directly, on a disposable SQL Server they own.
+#[cfg(all(test, feature = "mssql"))]
+mod mssql_unique_preflight_tests {
+    use super::super::owned_schema::StepRef;
+    use super::{MigrationStep, unique_index_duplicates};
+    use crate::db::mssql::owned_mssql::{OwnedSqlServer, execute_batch};
+    use crate::graphql::orm::{IndexDef, MssqlBackend};
+
+    /// The probe filters with the predicate exactly as `CREATE INDEX` renders
+    /// it. With a plain string literal, a value outside the database code
+    /// page compared as `'??'`, the probe saw no covered row, and duplicates
+    /// reached `CREATE UNIQUE INDEX`. An opaque catalogue filter is probed
+    /// with its validated text, and skipped when it is not valid.
+    #[tokio::test]
+    #[ignore = "requires Docker; owns a disposable loopback SQL Server container"]
+    async fn the_probe_reads_the_rows_the_filtered_index_covers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut server = OwnedSqlServer::start().await?;
+        execute_batch(
+            &server.connection_string,
+            "CREATE TABLE dbo.preflight_items (id int NOT NULL PRIMARY KEY, \
+                 digest nvarchar(40) NOT NULL, state nvarchar(20) NULL); \
+             INSERT INTO dbo.preflight_items VALUES \
+                 (1, N'same', N'状態'), (2, N'same', N'状態'), (3, N'other', N'状態'), \
+                 (4, N'once', N'open'); \
+             IF EXISTS (SELECT 1 FROM dbo.preflight_items WHERE [state] IN ('状態')) \
+                 THROW 50001, 'the database code page represents the test value', 1;",
+        )
+        .await?;
+        let pool = crate::db::mssql::MssqlPool::connect_ado(&server.connection_string).await?;
+        let probe = |index: IndexDef| {
+            let pool = pool.clone();
+            async move {
+                let step = MigrationStep::CreateIndex {
+                    table_name: "dbo.preflight_items".to_owned(),
+                    index,
+                };
+                unique_index_duplicates::<MssqlBackend>(&pool, &[StepRef::from(&step)]).await
+            }
+        };
+        let unique = |column, values| {
+            IndexDef::new("uq_preflight", &["digest"])
+                .unique()
+                .where_in(column, values)
+        };
+
+        // A closed set with a value outside the code page: the duplicates
+        // are found before any DDL, and named by table, index and key only.
+        let found = probe(unique("state", &["状態"]))
+            .await?
+            .expect("duplicates");
+        assert_eq!(found.table, "dbo.preflight_items");
+        assert_eq!(found.index, "uq_preflight");
+        assert_eq!(found.columns, ["digest"]);
+        // A closed set that covers no repeated key.
+        assert!(probe(unique("state", &["open"])).await?.is_none());
+        // An opaque catalogue filter is probed with its own text.
+        assert!(
+            probe(unique("", &["([state]=N'状態' AND [id]<(3))"]))
+                .await?
+                .is_some()
+        );
+        assert!(
+            probe(unique("", &["([state]=N'状態' AND [id]>(1))"]))
+                .await?
+                .is_none()
+        );
+        // An opaque filter that fails validation is never sent to the
+        // server; rendering the plan refuses it.
+        assert!(
+            probe(unique(
+                "",
+                &["([id]>(0)); DROP TABLE dbo.preflight_items; --"]
+            ))
+            .await?
+            .is_none()
+        );
+        execute_batch(
+            &server.connection_string,
+            "IF OBJECT_ID(N'dbo.preflight_items') IS NULL THROW 50002, 'table was dropped', 1; \
+             IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uq_preflight') \
+                 THROW 50003, 'the probe created an index', 1;",
+        )
+        .await?;
+        server.cleanup()?;
+        Ok(())
+    }
+}
+
 #[cfg(all(test, feature = "postgres"))]
 #[allow(dead_code)]
 #[path = "../../../tests/support/owned_postgres.rs"]
@@ -6935,5 +7513,101 @@ mod catalog_read_cancellation_tests {
                 .await?;
         assert_eq!(committed, i64::try_from(steps)?);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backend_risk_regressions {
+    use super::*;
+    #[test]
+    fn widening_respects_backend_value_domains() {
+        for (backend, before, after) in [
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "VARCHAR(50)"),
+            (DatabaseBackend::Mssql, "NVARCHAR(MAX)", "VARCHAR(MAX)"),
+            // SQL Server `TEXT` and the standard `varchar` spellings are
+            // code-page types, not Unicode ones.
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "TEXT"),
+            (DatabaseBackend::Mssql, "NVARCHAR(MAX)", "TEXT"),
+            (
+                DatabaseBackend::Mssql,
+                "NVARCHAR(20)",
+                "CHARACTER VARYING(50)",
+            ),
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "char varying(50)"),
+            (DatabaseBackend::Mssql, "nvarchar(20)", "varchar(50)"),
+            // A length-less type is one character wide on SQL Server.
+            (DatabaseBackend::Mssql, "VARCHAR(20)", "VARCHAR"),
+            (DatabaseBackend::Mssql, "VARCHAR(20)", "CHARACTER VARYING"),
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "NVARCHAR"),
+            (DatabaseBackend::Mssql, "VARCHAR(20)", "CHAR"),
+            (DatabaseBackend::Mssql, "NVARCHAR(20)", "NCHAR"),
+            (DatabaseBackend::Mssql, "VARCHAR", "NVARCHAR(MAX)"),
+            (DatabaseBackend::Mssql, "DECIMAL(20,4)", "DECIMAL"),
+            (DatabaseBackend::Mssql, "BIGINT", "NUMERIC"),
+            (DatabaseBackend::Sqlite, "INTEGER", "DOUBLE PRECISION"),
+        ] {
+            let column = |sql_type: &str| ColumnModel {
+                name: "value".into(),
+                sql_type: sql_type.into(),
+                spatial: None,
+                nullable: false,
+                is_primary_key: false,
+                is_unique: false,
+                default: None,
+            };
+            let step = MigrationStep::AlterColumn {
+                table_name: "records".into(),
+                before: column(before),
+                after: column(after),
+            };
+            assert_eq!(
+                classify_migration_step_context(Some(backend), &StepRef::from(&step), None).0,
+                MigrationRisk::Destructive,
+                "{backend:?}: {before} -> {after}"
+            );
+        }
+        // Code-page text into Unicode or a longer code-page type keeps every
+        // value on SQL Server.
+        for (before, after) in [
+            ("VARCHAR(20)", "NVARCHAR(20)"),
+            ("VARCHAR(20)", "NVARCHAR(MAX)"),
+            ("VARCHAR(20)", "TEXT"),
+            ("VARCHAR(20)", "CHARACTER VARYING(50)"),
+            ("NVARCHAR(20)", "NVARCHAR(MAX)"),
+        ] {
+            assert!(
+                lossless_type_widening(DatabaseBackend::Mssql, before, after),
+                "{before} -> {after}"
+            );
+        }
+        // PostgreSQL and SQLite text is Unicode, and a length-less varchar is
+        // unlimited.
+        for backend in [DatabaseBackend::Postgres, DatabaseBackend::Sqlite] {
+            for (before, after) in [
+                ("VARCHAR(20)", "VARCHAR"),
+                ("VARCHAR(20)", "TEXT"),
+                ("CHARACTER VARYING(20)", "VARCHAR(50)"),
+            ] {
+                assert!(
+                    lossless_type_widening(backend, before, after),
+                    "{backend:?}: {before} -> {after}"
+                );
+            }
+        }
+        assert!(lossless_type_widening(
+            DatabaseBackend::Postgres,
+            "DECIMAL(20,4)",
+            "DECIMAL"
+        ));
+        assert!(lossless_type_widening(
+            DatabaseBackend::Postgres,
+            "BIGINT",
+            "NUMERIC"
+        ));
+        assert!(lossless_type_widening(
+            DatabaseBackend::Postgres,
+            "INTEGER",
+            "DOUBLE PRECISION"
+        ));
     }
 }

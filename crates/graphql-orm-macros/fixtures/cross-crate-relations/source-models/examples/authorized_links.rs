@@ -6,11 +6,11 @@ mod support;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use async_graphql::{
-        Context, EmptyMutation, EmptySubscription, Object, Schema, dataloader::DataLoader,
+        Context, EmptyMutation, EmptySubscription, Object, Schema,
     };
     use cross_crate_source_models::Session;
     use cross_crate_target_models::{CreateEndpointInput, Endpoint};
-    use graphql_orm::{db::Database, graphql::loaders::RelationLoader, prelude::*};
+    use graphql_orm::{db::Database, prelude::*};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -73,12 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     db.set_field_policy(support::EndpointFixturePolicy);
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("example-user"))
-        .data(DataLoader::new(
-            RelationLoader::<Endpoint, SqliteBackend>::new(db),
-            tokio::spawn,
-        ))
+        .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, SqliteBackend>(db))
         .finish();
     let query =
         "{ session { id link: endpoint { ...Target } } } fragment Target on Endpoint { id name }";
