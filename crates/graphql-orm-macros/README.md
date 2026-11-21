@@ -11,7 +11,9 @@ supersedes: []
 # `graphql-orm-macros`
 
 `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
-and semantic catalogue functions. `GraphQLOperations` supplies each entity's
+and semantic catalogue functions, and `GraphQLRelations` and
+`#[graphql_complex_object]` (with any options) record which generated
+relation resolvers an object mounts. `GraphQLOperations` supplies each entity's
 resolvable `@key` field sets and the roots whose static requirement its
 traversals and entity resolvers enforce. Generated SDL and resolvers are
 unchanged.

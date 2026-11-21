@@ -557,6 +557,19 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         quote! {}
     };
 
+    // The generated wrapper is mounted above whatever the options are, so the
+    // resolver-mount witness is unconditional. It proves mounting only; the
+    // exposure witness above keeps its stricter eligibility.
+    let output_witness = quote! {
+        #output_witness
+        impl #self_ty {
+            #[doc(hidden)]
+            pub fn __gom_mounted_relation_fields() -> &'static [&'static str] {
+                Self::__gom_generated_relation_fields()
+            }
+        }
+    };
+
     let attribute = if args.is_empty() {
         quote::quote! { #[::graphql_orm::async_graphql::ComplexObject] }
     } else {

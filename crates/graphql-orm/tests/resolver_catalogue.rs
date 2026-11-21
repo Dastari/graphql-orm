@@ -26,7 +26,7 @@ mod graphql_case;
 use graphql_case::{field_name, resolver_name};
 
 mod catalogued {
-    use graphql_orm::async_graphql::SimpleObject;
+    use graphql_orm::async_graphql::{ComplexObject, SimpleObject};
     use graphql_orm::prelude::*;
 
     /// Two keys and a global identity; fixed scopes on both traversal shapes.
@@ -239,10 +239,185 @@ mod catalogued {
         pub owner: Option<CatOwner>,
     }
 
+    /// Declares a key and a relation, but its handwritten object is an
+    /// unresolvable Federation reference and serves `ledger` as a string.
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        SimpleObject,
+        Clone,
+        Debug,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[graphql(complex, unresolvable = "id")]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "tbl_cat_stubs",
+        plural = "CatStubs",
+        auth = "none",
+        federation_key
+    )]
+    pub struct CatStub {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[sortable]
+        pub id: String,
+        pub ledger_id: String,
+        #[graphql(skip)]
+        #[relation(target = "CatLedger", from = "ledger_id", to = "id", emit_fk = false)]
+        pub ledger: Option<CatLedger>,
+    }
+
+    #[cfg_attr(
+        graphql_orm_field_case = "pascal",
+        ComplexObject(rename_fields = "PascalCase")
+    )]
+    #[cfg_attr(not(graphql_orm_field_case = "pascal"), ComplexObject)]
+    impl CatStub {
+        /// Shares the declared relation's name, not its type.
+        async fn ledger(&self) -> String {
+            self.ledger_id.clone()
+        }
+    }
+
     schema_roots! {
         backend: "sqlite",
         query_custom_ops: [],
-        entities: [CatOwner, CatLedger, CatSealed, CatListed, CatNote],
+        entities: [CatOwner, CatLedger, CatSealed, CatListed, CatNote, CatStub],
+    }
+}
+
+/// Another schema whose types happen to carry the names of `catalogued`
+/// entities. They are different Rust types.
+mod shadow {
+    use graphql_orm::async_graphql::SimpleObject;
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "tbl_shadow_ledgers",
+        plural = "CatLedgers",
+        auth = "none"
+    )]
+    pub struct CatLedger {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[sortable]
+        pub id: String,
+    }
+    impl BatchLoadEntity for CatLedger {
+        fn batch_column() -> &'static str {
+            "id"
+        }
+        fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
+            DefaultBackend::try_get_string(row, "id")
+        }
+    }
+
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        SimpleObject,
+        Clone,
+        Debug,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[graphql(complex)]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "tbl_shadow_owners",
+        plural = "CatOwners",
+        auth = "none"
+    )]
+    pub struct CatOwner {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[sortable]
+        pub id: String,
+        pub ledger_id: String,
+        #[graphql(skip)]
+        #[relation(target = "CatLedger", from = "ledger_id", to = "id", emit_fk = false)]
+        pub ledger: Option<CatLedger>,
+    }
+
+    schema_roots! {
+        backend: "sqlite",
+        query_custom_ops: [],
+        entities: [CatOwner, CatLedger],
+    }
+}
+
+/// A schema whose semantic catalogue cannot compose: one handwritten
+/// semantic type has more fields than the catalogue allows.
+mod oversized {
+    use graphql_orm::graphql::orm::{
+        GraphqlEntitySemanticMetadata, GraphqlSemanticClassification, GraphqlSemanticExport,
+        GraphqlSemanticFieldMetadata, GraphqlSemanticObjectMetadata, GraphqlSemanticTypeKind,
+        GraphqlSemanticTypeRef,
+    };
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql_entity(backend = "sqlite", table = "tbl_cat_small", plural = "CatSmallRows")]
+    pub struct CatSmall {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+    }
+
+    pub struct Oversized;
+
+    impl GraphqlSemanticObjectMetadata for Oversized {
+        fn graphql_semantic_object() -> &'static GraphqlEntitySemanticMetadata {
+            static METADATA: std::sync::OnceLock<GraphqlEntitySemanticMetadata> =
+                std::sync::OnceLock::new();
+            METADATA.get_or_init(|| GraphqlEntitySemanticMetadata {
+                entity_name: "Oversized".to_owned(),
+                description: "An object with more fields than a catalogue entity may have."
+                    .to_owned(),
+                default_classification: GraphqlSemanticClassification::Internal,
+                fields: (0..=2_048)
+                    .map(|index| GraphqlSemanticFieldMetadata {
+                        field_name: format!("f{index}"),
+                        description: format!("Field {index}."),
+                        type_ref: GraphqlSemanticTypeRef::named(
+                            "String",
+                            GraphqlSemanticTypeKind::Scalar,
+                            false,
+                        ),
+                        selectable: true,
+                        filter_operators: Vec::new(),
+                        filter_input: None,
+                        sortable: false,
+                        groupable: false,
+                        aggregate_operators: Vec::new(),
+                        aggregate_value_kind: None,
+                        relationship: None,
+                        classification: GraphqlSemanticClassification::Internal,
+                        export: GraphqlSemanticExport::Exportable,
+                        has_field_policy: false,
+                    })
+                    .collect(),
+                generated_input_members: Vec::new(),
+                label_fields: Vec::new(),
+                record_version: None,
+            })
+        }
+    }
+
+    schema_roots! {
+        backend: "sqlite",
+        query_custom_ops: [],
+        entities: [CatSmall],
+        semantic_types: [Oversized],
     }
 }
 
@@ -603,6 +778,109 @@ fn entities_the_schema_does_not_serve_are_not_listed() {
     assert_eq!(served.entities.len(), 1);
     assert_eq!(served.entities[0].type_name, "CatLedger");
     assert_eq!(served.entities[0].keys.len(), 1);
+}
+
+/// A Federation reference the subgraph marks unresolvable is not an entity
+/// it resolves, whatever keys are registered for it; and a handwritten field
+/// that only shares a declared relation's name is not that relationship.
+#[tokio::test]
+async fn an_unresolvable_type_and_a_same_named_field_of_another_type_are_not_listed() {
+    let sdl = federation_sdl().await;
+    let header = sdl
+        .lines()
+        .find(|line| line.starts_with("type CatStub "))
+        .expect("CatStub is served");
+    // The registered keys include the declared one, and the type is marked
+    // unresolvable.
+    assert!(header.contains("resolvable: false"), "{header}");
+    assert!(!sdl_keys(&sdl, "CatStub").is_empty(), "{header}");
+    let start = sdl.find("type CatStub ").unwrap();
+    let stub = &sdl[start..start + sdl[start..].find("\n}").unwrap()];
+    let ledger = field_name("ledger");
+    assert!(
+        stub.lines()
+            .any(|line| line.trim() == format!("{ledger}: String!")),
+        "{stub}"
+    );
+    // The semantic catalogue still describes the declared relationship.
+    let semantic = catalogued::graphql_orm_semantic_catalog();
+    let declared = semantic
+        .entities
+        .iter()
+        .find(|entity| entity.entity_name == "CatStub")
+        .unwrap()
+        .fields
+        .iter()
+        .find(|field| field.field_name == ledger)
+        .expect("the declared relation is catalogued");
+    assert_eq!(declared.relationship.as_ref().unwrap().target, "CatLedger");
+
+    let resolvers = resolvers();
+    assert!(resolvers.entity("CatStub").is_none());
+    assert!(resolvers.relation("CatStub", ledger).is_none());
+    assert!(
+        resolvers
+            .relations
+            .iter()
+            .all(|relation| relation.type_name != "CatStub" && relation.target != "CatStub")
+    );
+}
+
+/// An entity the schema does not register is not matched to another type
+/// that carries its name. `shadow` serves `CatOwner.ledger: CatLedger`, with
+/// the names and shape the `catalogued` semantic catalogue describes, but
+/// its types are not the catalogued entities.
+#[tokio::test]
+async fn an_unregistered_entity_is_not_matched_to_a_same_named_type() {
+    let database = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+    let sdl = shadow::schema_builder(database).finish().sdl();
+    let start = sdl
+        .find("type CatOwner ")
+        .expect("shadow serves a CatOwner");
+    let owner = &sdl[start..start + sdl[start..].find("\n}").unwrap()];
+    let ledger = field_name("ledger");
+    assert!(
+        owner
+            .lines()
+            .any(|line| line.trim() == format!("{ledger}: CatLedger")),
+        "{owner}"
+    );
+
+    let sources = vec![
+        ResolverEntitySource::of::<catalogued::CatOwner>(
+            catalogued::CatOwner::__GOM_RESOLVER_FACTS,
+            catalogued::CatOwner::__gom_mounted_relation_fields(),
+        ),
+        ResolverEntitySource::of::<catalogued::CatLedger>(
+            catalogued::CatLedger::__GOM_RESOLVER_FACTS,
+            &[],
+        ),
+    ];
+    let semantic = catalogued::graphql_orm_semantic_catalog();
+    let resolvers = compose_resolver_catalog::<shadow::QueryRoot>(semantic, sources).unwrap();
+    assert!(resolvers.entities.is_empty());
+    assert!(resolvers.relations.iter().all(|relation| {
+        !["CatOwner", "PublicOwner", "CatLedger"].contains(&relation.type_name.as_str())
+            && !["CatOwner", "PublicOwner", "CatLedger"].contains(&relation.target.as_str())
+    }));
+
+    // The same schema, catalogued as itself, lists that relation.
+    let own = shadow::graphql_orm_resolver_catalog().unwrap();
+    let relation = own.relation("CatOwner", ledger).expect("its own relation");
+    assert_eq!(relation.source, GraphqlSemanticOperationSource::Generated);
+    assert_eq!(relation.target, "CatLedger");
+}
+
+/// When the semantic catalogue itself cannot compose, the helper returns
+/// that error instead of panicking. The semantic accessor keeps its
+/// signature, and still panics.
+#[test]
+fn a_semantic_catalogue_that_cannot_compose_is_an_error_not_a_panic() {
+    for _ in 0..2 {
+        let error = oversized::graphql_orm_resolver_catalog().expect_err("over the field limit");
+        assert_eq!(error.to_string(), "semantic entity has too many fields");
+    }
+    assert!(std::panic::catch_unwind(oversized::graphql_orm_semantic_catalog).is_err());
 }
 
 /// The document discloses nothing new: every string in it is a fixed

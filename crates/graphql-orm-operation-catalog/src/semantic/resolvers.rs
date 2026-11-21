@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     GraphqlEntitySemanticMetadata, GraphqlSemanticCatalog, GraphqlSemanticError,
-    GraphqlSemanticOperationSource, GraphqlSemanticRelationshipCardinality, MAXIMUM_ENTITIES,
+    GraphqlSemanticOperationSource, GraphqlSemanticRelationshipCardinality,
+    GraphqlSemanticRelationshipDescriptor, GraphqlSemanticTypeRef, MAXIMUM_ENTITIES,
     MAXIMUM_FIELDS_PER_ENTITY, hex_sha256, valid_fingerprint, valid_graphql_name,
 };
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationKind, rfc8785_canonical_json};
@@ -201,6 +202,10 @@ pub struct GraphqlGeneratedResolverSource {
     /// Name the served schema registers for the entity's type, when it
     /// differs from [`Self::entity_name`].
     pub type_name: Option<String>,
+    /// Whether the served schema registers no type for this entity. Such an
+    /// entity has no coordinate: nothing of it is listed, even when the
+    /// schema serves an unrelated type with the entity's name.
+    pub unregistered: bool,
     /// Relationship fields of this entity whose generated resolver the
     /// schema mounts.
     pub relation_fields: Vec<String>,
@@ -231,6 +236,13 @@ impl GraphqlGeneratedResolverSource {
     pub fn with_type_name(mut self, type_name: impl Into<String>) -> Self {
         let type_name = type_name.into();
         self.type_name = (type_name != self.entity_name).then_some(type_name);
+        self
+    }
+
+    /// Marks the entity as having no type in the served schema.
+    #[must_use]
+    pub fn unregistered(mut self) -> Self {
+        self.unregistered = true;
         self
     }
 
@@ -268,6 +280,41 @@ impl GraphqlGeneratedResolverSource {
     }
 }
 
+/// One field a schema serves, as input to
+/// [`GraphqlResolverCatalog::compose`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphqlServedField {
+    name: String,
+    result_type: String,
+    arguments: Vec<(String, String)>,
+}
+
+impl GraphqlServedField {
+    /// Creates a field from its name and its GraphQL type as the schema
+    /// spells it, for example `[Child!]!`. Only the named type is kept.
+    pub fn new(name: impl Into<String>, graphql_type: &str) -> Self {
+        Self {
+            name: name.into(),
+            result_type: graphql_type
+                .chars()
+                .filter(|character| !matches!(character, '[' | ']' | '!'))
+                .collect(),
+            arguments: Vec::new(),
+        }
+    }
+
+    /// Adds one argument, with its GraphQL type as the schema spells it.
+    #[must_use]
+    pub fn with_argument(
+        mut self,
+        name: impl Into<String>,
+        graphql_type: impl Into<String>,
+    ) -> Self {
+        self.arguments.push((name.into(), graphql_type.into()));
+        self
+    }
+}
+
 /// The object types a schema serves and the fields of each, as input to
 /// [`GraphqlResolverCatalog::compose`].
 ///
@@ -275,7 +322,7 @@ impl GraphqlGeneratedResolverSource {
 /// value yields an empty resolver catalogue.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GraphqlServedObjects {
-    objects: BTreeMap<String, BTreeSet<String>>,
+    objects: BTreeMap<String, BTreeMap<String, GraphqlServedField>>,
 }
 
 impl GraphqlServedObjects {
@@ -284,17 +331,17 @@ impl GraphqlServedObjects {
         Self::default()
     }
 
-    /// Adds one served object type and its field names.
+    /// Adds one served object type and its fields.
     #[must_use]
-    pub fn with_object<I, S>(mut self, type_name: impl Into<String>, fields: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
+    pub fn with_object(
+        mut self,
+        type_name: impl Into<String>,
+        fields: impl IntoIterator<Item = GraphqlServedField>,
+    ) -> Self {
         self.objects
             .entry(type_name.into())
             .or_default()
-            .extend(fields.into_iter().map(Into::into));
+            .extend(fields.into_iter().map(|field| (field.name.clone(), field)));
         self
     }
 
@@ -305,9 +352,63 @@ impl GraphqlServedObjects {
 
     /// Whether the schema serves this field of this object type.
     pub fn has_field(&self, type_name: &str, field_name: &str) -> bool {
-        self.objects
-            .get(type_name)
-            .is_some_and(|fields| fields.contains(field_name))
+        self.field(type_name, field_name).is_some()
+    }
+
+    fn field(&self, type_name: &str, field_name: &str) -> Option<&GraphqlServedField> {
+        self.objects.get(type_name)?.get(field_name)
+    }
+
+    /// Whether the served field is the relationship the catalogue describes:
+    /// it returns `target`, directly or as the nodes of a connection, and
+    /// takes exactly the catalogue's arguments with the same types.
+    fn serves_relationship(
+        &self,
+        type_name: &str,
+        field_name: &str,
+        target: &str,
+        relationship: &GraphqlSemanticRelationshipDescriptor,
+    ) -> bool {
+        let Some(field) = self.field(type_name, field_name) else {
+            return false;
+        };
+        // A member of `object` named `name` under any naming rule.
+        let member = |object: &str, name: &str| {
+            self.objects.get(object).and_then(|fields| {
+                fields
+                    .values()
+                    .find(|field| field.name.eq_ignore_ascii_case(name))
+            })
+        };
+        let returns_target = field.result_type == target
+            || (relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many
+                && member(&field.result_type, "edges")
+                    .and_then(|edges| member(&edges.result_type, "node"))
+                    .is_some_and(|node| node.result_type == target));
+        returns_target
+            && field.arguments.len() == relationship.arguments.len()
+            && relationship.arguments.iter().all(|argument| {
+                field.arguments.iter().any(|(name, graphql_type)| {
+                    *name == argument.graphql_name
+                        && *graphql_type == graphql_type_text(&argument.type_ref)
+                })
+            })
+    }
+}
+
+/// A semantic type as GraphQL spells it, for example `[Child!]!`.
+fn graphql_type_text(type_ref: &GraphqlSemanticTypeRef) -> String {
+    match type_ref {
+        GraphqlSemanticTypeRef::Named { name, nullable, .. } => {
+            format!("{name}{}", if *nullable { "" } else { "!" })
+        }
+        GraphqlSemanticTypeRef::List { item, nullable, .. } => {
+            format!(
+                "[{}]{}",
+                graphql_type_text(item),
+                if *nullable { "" } else { "!" }
+            )
+        }
     }
 }
 
@@ -315,10 +416,16 @@ impl GraphqlResolverCatalog {
     /// Composes the resolver catalogue of one semantic catalogue.
     ///
     /// A relationship field of the catalogue becomes a relation descriptor
-    /// when `served` has that field on the owning type and has the related
-    /// type; every other relationship is left out. A field is `generated`
-    /// when `sources` lists it for its entity, and `custom` otherwise. An
-    /// entity is listed with its keys when `served` has its type. Sources
+    /// when `served` has that field on the owning type, the field returns
+    /// the related type (directly, or as the nodes of a connection for a
+    /// to-many relationship) and it takes exactly the catalogue's arguments
+    /// with the same types; every other relationship is left out. A field
+    /// is `generated` when `sources` lists it for its entity, and `custom`
+    /// otherwise. An entity is listed with its keys when `served` has its
+    /// type. An entity whose source is
+    /// [`unregistered`](GraphqlGeneratedResolverSource::unregistered) is
+    /// never listed, as an owner, a target or a keyed type; an entity with
+    /// no source is taken to be served under its catalogue name. Sources
     /// naming an entity the catalogue does not publish are ignored.
     ///
     /// # Errors
@@ -372,13 +479,24 @@ impl GraphqlResolverCatalog {
         let mut entities = Vec::new();
         for entity in &catalog.entities {
             let owner = source(&entity.entity_name);
+            if owner.is_some_and(|owner| owner.unregistered) {
+                continue;
+            }
             let (type_name, semantic_entity_name) = served_name(&entity.entity_name);
             for field in &entity.fields {
                 let Some(relationship) = &field.relationship else {
                     continue;
                 };
                 let (target, semantic_target) = served_name(&relationship.target);
-                if !served.has_field(&type_name, &field.field_name) || !served.has_object(&target) {
+                if source(&relationship.target).is_some_and(|target| target.unregistered)
+                    || !served.has_object(&target)
+                    || !served.serves_relationship(
+                        &type_name,
+                        &field.field_name,
+                        &target,
+                        relationship,
+                    )
+                {
                     continue;
                 }
                 let generated =
@@ -1006,17 +1124,54 @@ mod tests {
         }
     }
 
-    /// A schema that serves every type and field of the catalogue.
-    fn serving(catalog: &GraphqlSemanticCatalog) -> GraphqlServedObjects {
+    /// A schema that serves the catalogue's types and fields as declared.
+    /// `type_name` gives each entity's served name, or `None` when the schema
+    /// does not serve it; `keep` chooses the served fields.
+    fn serving_with(
+        catalog: &GraphqlSemanticCatalog,
+        type_name: impl Fn(&str) -> Option<String>,
+        keep: impl Fn(&str, &str) -> bool,
+    ) -> GraphqlServedObjects {
+        let served_field = |field: &GraphqlSemanticFieldMetadata| match &field.relationship {
+            Some(relationship) => {
+                let target =
+                    type_name(&relationship.target).unwrap_or_else(|| relationship.target.clone());
+                relationship.arguments.iter().fold(
+                    GraphqlServedField::new(field.field_name.clone(), &target),
+                    |served, argument| {
+                        served.with_argument(
+                            argument.graphql_name.clone(),
+                            graphql_type_text(&argument.type_ref),
+                        )
+                    },
+                )
+            }
+            None => GraphqlServedField::new(
+                field.field_name.clone(),
+                &graphql_type_text(&field.type_ref),
+            ),
+        };
         catalog
             .entities
             .iter()
             .fold(GraphqlServedObjects::new(), |served, entity| {
+                let Some(name) = type_name(&entity.entity_name) else {
+                    return served;
+                };
                 served.with_object(
-                    entity.entity_name.clone(),
-                    entity.fields.iter().map(|field| field.field_name.clone()),
+                    name,
+                    entity
+                        .fields
+                        .iter()
+                        .filter(|field| keep(&entity.entity_name, &field.field_name))
+                        .map(&served_field),
                 )
             })
+    }
+
+    /// A schema that serves every type and field of the catalogue.
+    fn serving(catalog: &GraphqlSemanticCatalog) -> GraphqlServedObjects {
+        serving_with(catalog, |name| Some(name.to_owned()), |_, _| true)
     }
 
     fn compose(
@@ -1345,22 +1500,11 @@ mod tests {
         let catalog = catalog();
         let all = serving(&catalog);
         let without = |type_name: &str, dropped: Option<&str>| {
-            catalog
-                .entities
-                .iter()
-                .filter(|entity| dropped.is_some() || entity.entity_name != type_name)
-                .fold(GraphqlServedObjects::new(), |served, entity| {
-                    served.with_object(
-                        entity.entity_name.clone(),
-                        entity
-                            .fields
-                            .iter()
-                            .map(|field| field.field_name.clone())
-                            .filter(|field| {
-                                entity.entity_name != type_name || Some(field.as_str()) != dropped
-                            }),
-                    )
-                })
+            serving_with(
+                &catalog,
+                |name| (dropped.is_some() || name != type_name).then(|| name.to_owned()),
+                |entity, field| entity != type_name || Some(field) != dropped,
+            )
         };
         assert!(all.has_field("Child", "Parent"));
         assert!(!all.has_field("Child", "Missing"));
@@ -1418,19 +1562,17 @@ mod tests {
         // A name equal to the entity name is not a rename.
         sources[1] = sources[1].clone().with_type_name("Child");
         assert_eq!(sources[1].type_name, None);
-        let served = catalog
-            .entities
-            .iter()
-            .fold(GraphqlServedObjects::new(), |served, entity| {
-                served.with_object(
-                    if entity.entity_name == "Parent" {
-                        "PublicParent".to_owned()
-                    } else {
-                        entity.entity_name.clone()
-                    },
-                    entity.fields.iter().map(|field| field.field_name.clone()),
-                )
-            });
+        let served = serving_with(
+            &catalog,
+            |name| {
+                Some(if name == "Parent" {
+                    "PublicParent".to_owned()
+                } else {
+                    name.to_owned()
+                })
+            },
+            |_, _| true,
+        );
         let resolvers = GraphqlResolverCatalog::compose(&catalog, sources, &served).unwrap();
         resolvers.validate_against(&catalog).unwrap();
 
@@ -1465,6 +1607,104 @@ mod tests {
         let unserved = GraphqlResolverCatalog::compose(&catalog, self::sources(), &served).unwrap();
         assert!(unserved.entities.is_empty());
         assert!(unserved.relation("Parent", "Children").is_none());
+    }
+
+    /// A served field with the relationship's name is the relationship only
+    /// when it returns the related type and takes the catalogue's arguments.
+    #[test]
+    fn a_same_named_field_of_another_shape_is_not_the_relationship() {
+        let catalog = catalog();
+        let listed = |served: &GraphqlServedObjects, type_name: &str, field: &str| {
+            GraphqlResolverCatalog::compose(&catalog, sources(), served)
+                .unwrap()
+                .relation(type_name, field)
+                .cloned()
+        };
+        let base = serving(&catalog);
+        assert!(listed(&base, "Child", "Parent").is_some());
+        assert!(listed(&base, "Parent", "Children").is_some());
+
+        // `Child.Parent` is served, but as a string or as another object.
+        for other in ["String", "Summary", "[Summary!]!"] {
+            let served = base
+                .clone()
+                .with_object("Child", [GraphqlServedField::new("Parent", other)]);
+            assert!(served.has_field("Child", "Parent"));
+            assert!(listed(&served, "Child", "Parent").is_none(), "{other}");
+            // Its other relationships are unaffected.
+            assert!(listed(&served, "Child", "Guarded").is_some());
+        }
+
+        // `Parent.Children` returns the target but takes other arguments.
+        let children = || GraphqlServedField::new("Children", "[Child!]!");
+        for field in [
+            children(),
+            children().with_argument("Page", "String"),
+            children().with_argument("Limit", "Int"),
+            children()
+                .with_argument("Page", "Int")
+                .with_argument("Extra", "Int"),
+        ] {
+            let served = base.clone().with_object("Parent", [field]);
+            assert!(listed(&served, "Parent", "Children").is_none());
+        }
+
+        // A to-many relationship may return a connection over the target,
+        // under any naming rule, but not a connection over another type.
+        let connection = |edges: &str, node: &str, node_type: &str| {
+            base.clone()
+                .with_object(
+                    "Parent",
+                    [GraphqlServedField::new("Children", "ChildConnection!")
+                        .with_argument("Page", "Int")],
+                )
+                .with_object(
+                    "ChildConnection",
+                    [GraphqlServedField::new(edges, "[ChildEdge!]!")],
+                )
+                .with_object("ChildEdge", [GraphqlServedField::new(node, node_type)])
+        };
+        for (edges, node) in [("edges", "node"), ("Edges", "Node"), ("EDGES", "NODE")] {
+            let relation = listed(&connection(edges, node, "Child!"), "Parent", "Children")
+                .expect("a connection over the target");
+            assert_eq!(relation.source, GraphqlSemanticOperationSource::Generated);
+            assert_eq!(relation.authorization, same_as("Children"));
+        }
+        assert!(
+            listed(
+                &connection("edges", "node", "Summary!"),
+                "Parent",
+                "Children"
+            )
+            .is_none()
+        );
+        assert!(listed(&connection("items", "node", "Child!"), "Parent", "Children").is_none());
+    }
+
+    /// An entity with a generated source that the schema does not register
+    /// has no coordinate, even when the schema serves a type with its name.
+    /// A catalogue type with no generated source is different: it is taken
+    /// to be served under its catalogue name.
+    #[test]
+    fn an_unregistered_entity_is_not_matched_to_a_same_named_type() {
+        let catalog = catalog();
+        let served = serving(&catalog);
+        assert!(served.has_object("Parent") && served.has_field("Parent", "Children"));
+        let mut sources = sources();
+        sources[0] = sources[0].clone().unregistered();
+        let resolvers = GraphqlResolverCatalog::compose(&catalog, sources, &served).unwrap();
+        assert!(resolvers.entities.is_empty());
+        assert!(
+            resolvers
+                .relations
+                .iter()
+                .all(|relation| relation.type_name != "Parent" && relation.target != "Parent")
+        );
+        // `Summary` has no source at all and is still a target.
+        let summary = resolvers.relation("Child", "Summary").unwrap();
+        assert_eq!(summary.source, GraphqlSemanticOperationSource::Custom);
+        assert_eq!(resolvers.relations.len(), 1);
+        resolvers.validate_against(&catalog).unwrap();
     }
 
     /// A key may name as many fields as an entity can have, and a document

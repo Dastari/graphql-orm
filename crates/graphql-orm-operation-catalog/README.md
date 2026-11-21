@@ -241,9 +241,17 @@ version `GRAPHQL_RESOLVER_CATALOG_VERSION` 1) lists both:
 Coordinates are those of the served schema, not of the Rust declarations:
 
 - A relationship the semantic catalogue describes is listed only when the
-  schema has that field on the owning type. An entity that declares a relation
-  but mounts no resolver for it has no entry, and neither does a key the
-  schema does not resolve.
+  schema serves it: the owning type has a field of that name, the field
+  returns the related type (directly, or as the nodes of a connection for a
+  to-many relationship), and it takes exactly the catalogue's arguments with
+  the same types. A handwritten field that only shares a relation's name is
+  not listed. An entity that declares a relation but mounts no resolver for it
+  has no entry.
+- A key is listed only when the schema resolves it. A type the subgraph marks
+  unresolvable (a Federation reference) is not listed, whatever keys are
+  registered for it.
+- An entity whose Rust type the schema does not register has no entry at all,
+  even when the schema serves an unrelated type with the same name.
 - `type_name` and `target` are the names the schema registers. Where a type
   is registered under another name than its semantic catalogue entity
   (`#[graphql(name = "...")]`), the descriptor also carries
@@ -259,9 +267,11 @@ catalogue by `semantic_catalog_fingerprint`. `schema_roots!` emits
 query root's type registry and returns a `Result`: a document that does not
 validate is an error, never a panic. A host that never calls it is unaffected.
 `GraphqlResolverCatalog::compose(&semantic, sources, &served)` builds one for
-a schema composed some other way. `served` is a `GraphqlServedObjects` naming
-the object types and fields that schema serves; nothing outside it is listed,
-and every served relationship field no source claims is `custom`.
+a schema composed some other way. `served` is a `GraphqlServedObjects` holding
+the object types that schema serves and each field's type and arguments
+(`GraphqlServedField`); nothing outside it is listed, and every served
+relationship field no source claims is `custom`. A source marked
+`unregistered()` says the schema registers no type for that entity.
 
 ```rust,ignore
 let resolvers = my_service::graphql_orm_resolver_catalog()?;

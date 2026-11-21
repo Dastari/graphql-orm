@@ -170,6 +170,30 @@ pub struct InputInventoryKey {
 }
 schema_roots! {auth: "none", query_custom_ops: [], entities: [InputInventoryRecord, InputInventoryChild, InputInventoryKey]}
 
+/// `InputInventoryRecord` mounts its generated relation object through
+/// `graphql_complex_object`, with `rename_fields` under the PascalCase field
+/// rule. Either way the resolver catalogue (#544) reports the mounted
+/// relation as generated.
+#[test]
+fn a_composed_object_reports_its_generated_relations_as_generated() {
+    let resolvers = graphql_orm_resolver_catalog().expect("resolver catalogue");
+    let children = resolvers
+        .relations
+        .iter()
+        .find(|relation| relation.type_name == "InputInventoryRecord")
+        .expect("InputInventoryRecord.children is served");
+    assert_eq!(children.source, GraphqlSemanticOperationSource::Generated);
+    assert_eq!(children.target, "InputInventoryChild");
+    assert_eq!(
+        children.cardinality,
+        GraphqlSemanticRelationshipCardinality::Many
+    );
+    assert_eq!(
+        InputInventoryRecord::__gom_mounted_relation_fields(),
+        [children.field_name.as_str()]
+    );
+}
+
 fn render(ty: &GraphqlSemanticTypeRef) -> String {
     match ty {
         GraphqlSemanticTypeRef::Named { name, nullable, .. } => {

@@ -7,16 +7,17 @@
 //! other catalogue or fingerprint.
 //!
 //! The served schema decides what is listed. The query root's type registry
-//! gives each entity's registered type name, its fields and its resolvable
-//! keys, so a relation whose resolver is not mounted, or a key the schema
-//! does not resolve, has no entry.
+//! gives each entity's registered type name, its fields with their types and
+//! arguments, and its resolvable keys. A relation whose resolver is not
+//! mounted, a field that only shares a relation's name, and a key the schema
+//! does not resolve have no entry.
 
 use async_graphql::OutputType;
 use async_graphql::registry::{MetaType, Registry};
 
 use super::{
     Entity, GraphqlGeneratedResolverSource, GraphqlResolverCatalog, GraphqlSemanticCatalog,
-    GraphqlSemanticError, GraphqlServedObjects,
+    GraphqlSemanticError, GraphqlServedField, GraphqlServedObjects,
 };
 
 /// Compile-time resolver facts of one entity, emitted by `GraphQLOperations`.
@@ -83,16 +84,24 @@ pub fn compose_resolver_catalog<Q: OutputType>(
     let mut served = GraphqlServedObjects::new();
     for (type_name, registered) in &registry.types {
         if let MetaType::Object { fields, .. } = registered {
-            served = served.with_object(type_name, fields.keys());
+            served = served.with_object(
+                type_name,
+                fields.values().map(|field| {
+                    field.args.values().fold(
+                        GraphqlServedField::new(&field.name, &field.ty),
+                        |served, argument| served.with_argument(&argument.name, &argument.ty),
+                    )
+                }),
+            );
         }
     }
     let sources = sources.into_iter().filter_map(|source| {
         let entity_name = source.semantic_name?;
         // The object the schema registers for this Rust type gives the
         // served type name and the keys the schema resolves for it, as it
-        // spells them in `@key(fields: "...")`. An entity with no registered
-        // object is not served, and has no entry.
-        let (type_name, resolvable) =
+        // spells them in `@key(fields: "...")`. A type the subgraph marks
+        // unresolvable resolves none of its keys.
+        let registered =
             registry
                 .types
                 .iter()
@@ -100,12 +109,19 @@ pub fn compose_resolver_catalog<Q: OutputType>(
                     MetaType::Object {
                         rust_typename: Some(rust_type),
                         keys,
+                        resolvable,
                         ..
-                    } if *rust_type == source.rust_type => {
-                        Some((type_name.clone(), keys.as_deref().unwrap_or_default()))
-                    }
+                    } if *rust_type == source.rust_type => Some((
+                        type_name.clone(),
+                        keys.as_deref().filter(|_| *resolvable).unwrap_or_default(),
+                    )),
                     _ => None,
-                })?;
+                });
+        // An entity the schema does not register is kept as such, so that
+        // nothing of it is matched to another type with its name.
+        let Some((type_name, resolvable)) = registered else {
+            return Some(GraphqlGeneratedResolverSource::new(entity_name).unregistered());
+        };
         let owned = |name: Option<&str>| name.map(str::to_owned);
         Some(
             GraphqlGeneratedResolverSource::new(entity_name)

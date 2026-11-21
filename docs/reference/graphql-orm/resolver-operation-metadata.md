@@ -159,8 +159,10 @@ let customer = resolvers.entity("Customer").unwrap();
 assert_eq!(customer.keys[0].fields, ["id"]);
 ```
 
-The function returns a `Result`; a document that does not validate against
-the semantic catalogue is an error, not a panic.
+The function returns a `Result`. A document that does not validate against
+the semantic catalogue is an error, and so is a semantic catalogue that does
+not compose; neither is a panic. `graphql_orm_semantic_catalog()` keeps its
+signature and still panics in the second case.
 
 The served schema decides what is listed and under which names. The function
 reads the query root's type registry, so:
@@ -169,7 +171,17 @@ reads the query root's type registry, so:
   resolver for it (no `GraphQLRelations`, or a composed object that omits it)
   is not listed, although the semantic catalogue and the client metadata still
   describe it;
-- a declared key the schema does not resolve is not listed;
+- a served field counts as the relationship only when it returns the related
+  type (or a connection over it) and takes the declared arguments. A
+  handwritten `parent: String` beside a declared `parent: Parent` relation is
+  not listed;
+- a relation is `generated` when the entity's object mounts the generated
+  resolver, including through `#[graphql_complex_object(...)]` with any
+  options; any other served relationship is `custom`;
+- a declared key the schema does not resolve is not listed, and neither is
+  any key of a type marked `unresolvable`;
+- an entity whose type the schema does not register has no entry, even when
+  another served type has its name;
 - a type is listed under its registered name. An entity served as
   `#[graphql(name = "PublicCustomer")]` appears as `PublicCustomer`, with
   `semantic_entity_name: "Customer"` so the entry still binds to the semantic

@@ -1132,6 +1132,14 @@ pub(crate) fn generate_graphql_relations(
                 pub fn __gom_exposed_relation_fields() -> &'static [&'static str] {
                     Self::__gom_generated_relation_fields()
                 }
+
+                /// Relation fields whose generated resolver this object
+                /// mounts. Unlike the exposure witness above, this proves
+                /// mounting only, not unrestricted output eligibility.
+                #[doc(hidden)]
+                pub fn __gom_mounted_relation_fields() -> &'static [&'static str] {
+                    Self::__gom_generated_relation_fields()
+                }
             }
         } else {
             quote! {}
