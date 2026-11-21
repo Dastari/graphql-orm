@@ -4869,11 +4869,7 @@ impl AiProviderCallExecutor {
             .map(|tool| {
                 (
                     tool.tool_id.clone(),
-                    (
-                        tool.provider_name.clone(),
-                        tool.fingerprint.clone(),
-                        tool.parameters.clone(),
-                    ),
+                    crate::provider::ModelToolOffer::new(tool.clone()),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -5161,13 +5157,11 @@ impl AiProviderCallExecutor {
                     if completed_tool_calls.contains_key(call_id) {
                         return Err(AiError::ProviderFailed);
                     }
-                    let Some((provider_name, fingerprint, argument_schema)) =
-                        offered_tools.get(tool_id)
-                    else {
+                    let Some(offer) = offered_tools.get(tool_id) else {
                         return Err(AiError::ProviderFailed);
                     };
-                    let validator = jsonschema::validator_for(argument_schema)
-                        .map_err(|_| AiError::ProviderFailed)?;
+                    let validator = offer.validator().map_err(|_| AiError::ProviderFailed)?;
+                    let definition = offer.definition();
                     if !validator.is_valid(arguments) {
                         let rejected = if let Some(responder) = &dynamic_responder {
                             responder
@@ -5186,8 +5180,8 @@ impl AiProviderCallExecutor {
                             call_id: call_id.clone(),
                             tool_id: crate::AiToolId::parse(tool_id.clone())
                                 .map_err(|_| AiError::ProviderFailed)?,
-                            provider_name: provider_name.clone(),
-                            tool_fingerprint: fingerprint.clone(),
+                            provider_name: definition.provider_name.clone(),
+                            tool_fingerprint: definition.fingerprint.clone(),
                             arguments: arguments.clone(),
                         },
                     );
