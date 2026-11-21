@@ -1507,6 +1507,11 @@ impl MssqlColumnIndex for usize {
     where
         T: tiberius::FromSql<'a>,
     {
+        if self >= row.len() {
+            return Err(tiberius::error::Error::Conversion(
+                format!("Could not find column with index {self}").into(),
+            ));
+        }
         row.try_get::<T, _>(self)
     }
 
@@ -1542,38 +1547,71 @@ where
     }
 }
 
+/// Read the wire value once, so compatible conversions select by type and
+/// never treat a failed decode as a signal to try the next type.
+struct RawColumn<'a>(&'a ColumnData<'static>);
+
+impl<'a> tiberius::FromSql<'a> for RawColumn<'a> {
+    fn from_sql(value: &'a ColumnData<'static>) -> tiberius::Result<Option<Self>> {
+        Ok(Some(Self(value)))
+    }
+}
+
+fn decode_column<I, T>(
+    row: &MssqlRow,
+    index: I,
+    decode: impl FnOnce(&ColumnData<'static>) -> tiberius::Result<Option<T>>,
+) -> tiberius::Result<Option<T>>
+where
+    I: MssqlColumnIndex,
+{
+    match index.try_get_raw::<RawColumn<'_>>(&row.inner)? {
+        Some(RawColumn(value)) => decode(value),
+        None => Ok(None),
+    }
+}
+
+fn incompatible_column(expected: &'static str) -> tiberius::error::Error {
+    tiberius::error::Error::Conversion(expected.into())
+}
+
 impl MssqlScalar for String {
     fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
-        if let Ok(value) = index.try_get_raw::<&str>(&row.inner) {
-            return Ok(value.map(str::to_owned));
-        }
-        // RFC 3339, the text SQLite and PostgreSQL date columns hold. A
-        // `datetime2`, `datetime` or `smalldatetime` carries no offset and is
-        // read as UTC, like the `SYSUTCDATETIME()` defaults the ORM writes.
-        if let Ok(value) = index.try_get_raw::<tiberius::time::chrono::NaiveDateTime>(&row.inner) {
-            return Ok(value.map(naive_utc_rfc3339));
-        }
-        if let Ok(value) = index.try_get_raw::<chrono::DateTime<chrono::FixedOffset>>(&row.inner) {
-            return Ok(
-                value.map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
-            );
-        }
-        if let Ok(value) = index.try_get_raw::<tiberius::time::chrono::NaiveDate>(&row.inner) {
-            return Ok(value.map(|value| value.to_string()));
-        }
-        if let Ok(value) = index.try_get_raw::<tiberius::time::chrono::NaiveTime>(&row.inner) {
-            return Ok(value.map(|value| value.to_string()));
-        }
-        if let Ok(value) = index.try_get_raw::<uuid::Uuid>(&row.inner) {
-            return Ok(value.map(|value| value.to_string()));
-        }
+        use tiberius::FromSql;
 
-        Err(sqlx::Error::ColumnDecode {
+        decode_column(row, index, |value| {
+            Ok(match value {
+                ColumnData::String(value) => value.as_deref().map(str::to_owned),
+                // Offset-free SQL Server date-times use the ORM's UTC convention.
+                ColumnData::DateTime(_)
+                | ColumnData::SmallDateTime(_)
+                | ColumnData::DateTime2(_) => {
+                    chrono::NaiveDateTime::from_sql(value)?.map(naive_utc_rfc3339)
+                }
+                ColumnData::DateTimeOffset(_) => {
+                    chrono::DateTime::<chrono::FixedOffset>::from_sql(value)?
+                        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+                }
+                ColumnData::Date(_) => {
+                    chrono::NaiveDate::from_sql(value)?.map(|value| value.to_string())
+                }
+                ColumnData::Time(_) => {
+                    chrono::NaiveTime::from_sql(value)?.map(|value| value.to_string())
+                }
+                ColumnData::Guid(value) => value.map(|value| value.to_string()),
+                _ => {
+                    return Err(incompatible_column(
+                        "could not decode SQL Server column as String",
+                    ));
+                }
+            })
+        })
+        .map_err(|source| sqlx::Error::ColumnDecode {
             index: index.display(),
-            source: "could not decode SQL Server column as String".into(),
+            source: source.into(),
         })
     }
 }
@@ -1602,13 +1640,21 @@ impl MssqlScalar for chrono::DateTime<chrono::Utc> {
     where
         I: MssqlColumnIndex,
     {
-        if let Ok(value) = index.try_get_raw::<chrono::NaiveDateTime>(&row.inner) {
-            return Ok(value.map(|value| value.and_utc()));
-        }
-        index
-            .try_get_raw::<chrono::DateTime<chrono::FixedOffset>>(&row.inner)
-            .map(|value| value.map(|value| value.to_utc()))
-            .map_err(map_tiberius_error)
+        use tiberius::FromSql;
+
+        decode_column(row, index, |value| match value {
+            ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+                Ok(chrono::NaiveDateTime::from_sql(value)?.map(|value| value.and_utc()))
+            }
+            ColumnData::DateTimeOffset(_) => {
+                Ok(chrono::DateTime::<chrono::FixedOffset>::from_sql(value)?
+                    .map(|value| value.to_utc()))
+            }
+            _ => Err(incompatible_column(
+                "expected a SQL Server date-time column",
+            )),
+        })
+        .map_err(map_tiberius_error)
     }
 }
 
@@ -1659,13 +1705,16 @@ impl MssqlScalar for bool {
     where
         I: MssqlColumnIndex,
     {
-        if let Ok(value) = index.try_get_raw::<bool>(&row.inner) {
-            return Ok(value);
-        }
-        Ok(index
-            .try_get_raw::<i32>(&row.inner)
-            .map_err(map_tiberius_error)?
-            .map(|value| value != 0))
+        decode_column(row, index, |value| match value {
+            ColumnData::Bit(value) => Ok(*value),
+            ColumnData::I32(value) => Ok(value.map(|value| value != 0)),
+            // The driver uses U8(None) for some null integer wire types.
+            ColumnData::U8(None) => Ok(None),
+            _ => Err(incompatible_column(
+                "expected a SQL Server bit or int column",
+            )),
+        })
+        .map_err(map_tiberius_error)
     }
 }
 
@@ -1674,18 +1723,7 @@ impl MssqlScalar for i32 {
     where
         I: MssqlColumnIndex,
     {
-        if let Ok(value) = index.try_get_raw::<i32>(&row.inner) {
-            return Ok(value);
-        }
-        if let Ok(value) = index.try_get_raw::<i16>(&row.inner) {
-            return Ok(value.map(i32::from));
-        }
-        if let Ok(value) = index.try_get_raw::<u8>(&row.inner) {
-            return Ok(value.map(i32::from));
-        }
-        let value = index
-            .try_get_raw::<i64>(&row.inner)
-            .map_err(map_tiberius_error)?;
+        let value = <i64 as MssqlScalar>::try_get_optional(row, index)?;
         value
             .map(|value| {
                 i32::try_from(value).map_err(|error| sqlx::Error::ColumnDecode {
@@ -1702,19 +1740,14 @@ impl MssqlScalar for i64 {
     where
         I: MssqlColumnIndex,
     {
-        if let Ok(value) = index.try_get_raw::<i64>(&row.inner) {
-            return Ok(value);
-        }
-        if let Ok(value) = index.try_get_raw::<i32>(&row.inner) {
-            return Ok(value.map(i64::from));
-        }
-        if let Ok(value) = index.try_get_raw::<i16>(&row.inner) {
-            return Ok(value.map(i64::from));
-        }
-        Ok(index
-            .try_get_raw::<u8>(&row.inner)
-            .map_err(map_tiberius_error)?
-            .map(i64::from))
+        decode_column(row, index, |value| match value {
+            ColumnData::I64(value) => Ok(*value),
+            ColumnData::I32(value) => Ok(value.map(i64::from)),
+            ColumnData::I16(value) => Ok(value.map(i64::from)),
+            ColumnData::U8(value) => Ok(value.map(i64::from)),
+            _ => Err(incompatible_column("expected a SQL Server integer column")),
+        })
+        .map_err(map_tiberius_error)
     }
 }
 
@@ -1763,13 +1796,14 @@ impl MssqlScalar for f64 {
     where
         I: MssqlColumnIndex,
     {
-        if let Ok(value) = index.try_get_raw::<f64>(&row.inner) {
-            return Ok(value);
-        }
-        Ok(index
-            .try_get_raw::<f32>(&row.inner)
-            .map_err(map_tiberius_error)?
-            .map(f64::from))
+        decode_column(row, index, |value| match value {
+            ColumnData::F64(value) => Ok(*value),
+            ColumnData::F32(value) => Ok(value.map(f64::from)),
+            _ => Err(incompatible_column(
+                "expected a SQL Server floating-point column",
+            )),
+        })
+        .map_err(map_tiberius_error)
     }
 }
 

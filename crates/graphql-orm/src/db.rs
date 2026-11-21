@@ -30,6 +30,42 @@ tokio::task_local! {
     static ORM_TRANSACTION_ACTIVE: bool;
 }
 
+/// The missing-provider decision depends on which layer would have been asked.
+#[derive(Clone, Copy)]
+enum PolicyScope {
+    Entity,
+    Row,
+    Field,
+}
+
+fn missing_policy_access(
+    mode: AuthorizationMode,
+    scope: PolicyScope,
+    declared: bool,
+    diagnostic: impl FnOnce() -> String,
+) -> Result<bool, OrmPublicError> {
+    match (mode, scope, declared) {
+        (AuthorizationMode::DeclaredPoliciesRequired, _, true)
+        | (AuthorizationMode::ExplicitPolicyForAllExposedOperations, PolicyScope::Field, true) => {
+            Err(
+                OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                    .with_internal(diagnostic()),
+            )
+        }
+        (AuthorizationMode::ExplicitPolicyForAllExposedOperations, PolicyScope::Entity, _)
+        | (AuthorizationMode::ExplicitPolicyForAllExposedOperations, PolicyScope::Row, true) => {
+            Ok(false)
+        }
+        (AuthorizationMode::LegacyPermissive, _, _)
+        | (AuthorizationMode::DeclaredPoliciesRequired, _, false)
+        | (
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations,
+            PolicyScope::Row | PolicyScope::Field,
+            false,
+        ) => Ok(true),
+    }
+}
+
 /// Backend-neutral pool sizing options for ORM-owned connection helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectionOptions {
@@ -993,46 +1029,15 @@ impl<B: OrmBackend> Database<B> {
                 .into_graphql_error());
         }
 
-        match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.entity_policy {
-                    policy
-                        .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::DeclaredPoliciesRequired => {
-                if policy_key.is_some() && self.entity_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "entity {entity_name} declares a policy key but no entity policy provider is registered"
-                        ))
-                        .into_graphql_error());
-                }
-                if let Some(policy) = &self.entity_policy {
-                    policy
-                        .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if surface == crate::graphql::orm::EntityAccessSurface::GraphqlSubscription
-                    && self.entity_policy.is_none()
-                {
-                    return Ok(false);
-                }
-                let Some(policy) = &self.entity_policy else {
-                    return Ok(false);
-                };
-                policy
-                    .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
-                    .await
-            }
+        if let Some(policy) = &self.entity_policy {
+            return policy
+                .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
+                .await;
         }
+        missing_policy_access(self.authorization_mode, PolicyScope::Entity, policy_key.is_some(), || {
+            format!("entity {entity_name} declares a policy key but no entity policy provider is registered")
+        })
+        .map_err(OrmPublicError::into_graphql_error)
     }
 
     pub async fn ensure_entity_access(
@@ -1066,36 +1071,15 @@ impl<B: OrmBackend> Database<B> {
         policy_key: Option<&'static str>,
         record: Option<&(dyn Any + Send + Sync)>,
     ) -> async_graphql::Result<bool> {
-        match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            // A declared key without a provider is a configuration error in
-            // both strict modes, reported before the provider would be asked.
-            AuthorizationMode::DeclaredPoliciesRequired
-            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if policy_key.is_some() && self.field_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "field {entity_name}.{field_name} declares a policy key but no field policy provider is registered"
-                        ))
-                        .into_graphql_error());
-                }
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
+        if let Some(policy) = &self.field_policy {
+            return policy
+                .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
+                .await;
         }
+        missing_policy_access(self.authorization_mode, PolicyScope::Field, policy_key.is_some(), || {
+            format!("field {entity_name}.{field_name} declares a policy key but no field policy provider is registered")
+        })
+        .map_err(OrmPublicError::into_graphql_error)
     }
 
     pub async fn can_write_field(
@@ -1110,52 +1094,23 @@ impl<B: OrmBackend> Database<B> {
         if !self.schema_policy.allows_entity_writes() {
             return Ok(false);
         }
-        match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_write_field(
-                            ctx,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                            value,
-                        )
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            // A declared key without a provider is a configuration error in
-            // both strict modes, reported before the provider would be asked.
-            AuthorizationMode::DeclaredPoliciesRequired
-            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if policy_key.is_some() && self.field_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "field {entity_name}.{field_name} declares a write policy key but no field policy provider is registered"
-                        ))
-                        .into_graphql_error());
-                }
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_write_field(
-                            ctx,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                            value,
-                        )
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
+        if let Some(policy) = &self.field_policy {
+            return policy
+                .can_write_field(
+                    ctx,
+                    self,
+                    entity_name,
+                    field_name,
+                    policy_key,
+                    record,
+                    value,
+                )
+                .await;
         }
+        missing_policy_access(self.authorization_mode, PolicyScope::Field, policy_key.is_some(), || {
+            format!("field {entity_name}.{field_name} declares a write policy key but no field policy provider is registered")
+        })
+        .map_err(OrmPublicError::into_graphql_error)
     }
 
     /// Check a generated mutation input, rejecting denial unless its field
@@ -1239,50 +1194,29 @@ impl<B: OrmBackend> Database<B> {
         record: Option<&(dyn Any + Send + Sync)>,
     ) -> Result<(), OrmPublicError> {
         let access = self.repository_access(access);
-        let allowed = match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_read_repository_field(
-                            access,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from_callback)?
-                } else {
-                    true
-                }
-            }
-            // A declared key without a provider is a configuration error in
-            // both strict modes, reported before the provider would be asked.
-            AuthorizationMode::DeclaredPoliciesRequired
-            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if policy_key.is_some() && self.field_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "field {entity_name}.{field_name} declares a repository read policy but no field policy provider is registered"
-                        )));
-                }
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_read_repository_field(
-                            access,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from_callback)?
-                } else {
-                    true
-                }
-            }
+        let allowed = if let Some(policy) = &self.field_policy {
+            policy
+                .can_read_repository_field(
+                    access,
+                    self,
+                    entity_name,
+                    field_name,
+                    policy_key,
+                    record,
+                )
+                .await
+                .map_err(OrmPublicError::from_callback)?
+        } else {
+            missing_policy_access(
+                self.authorization_mode,
+                PolicyScope::Field,
+                policy_key.is_some(),
+                || {
+                    format!(
+                        "field {entity_name}.{field_name} declares a repository read policy but no field policy provider is registered"
+                    )
+                },
+            )?
         };
         if allowed {
             Ok(())
@@ -1325,52 +1259,30 @@ impl<B: OrmBackend> Database<B> {
             return Err(OrmPublicError::forbidden());
         }
         let access = self.repository_access(access);
-        let allowed = match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_write_repository_field(
-                            access,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                            value,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from_callback)?
-                } else {
-                    true
-                }
-            }
-            // A declared key without a provider is a configuration error in
-            // both strict modes, reported before the provider would be asked.
-            AuthorizationMode::DeclaredPoliciesRequired
-            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if policy_key.is_some() && self.field_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "field {entity_name}.{field_name} declares a repository write policy but no field policy provider is registered"
-                        )));
-                }
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_write_repository_field(
-                            access,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                            value,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from_callback)?
-                } else {
-                    true
-                }
-            }
+        let allowed = if let Some(policy) = &self.field_policy {
+            policy
+                .can_write_repository_field(
+                    access,
+                    self,
+                    entity_name,
+                    field_name,
+                    policy_key,
+                    record,
+                    value,
+                )
+                .await
+                .map_err(OrmPublicError::from_callback)?
+        } else {
+            missing_policy_access(
+                self.authorization_mode,
+                PolicyScope::Field,
+                policy_key.is_some(),
+                || {
+                    format!(
+                        "field {entity_name}.{field_name} declares a repository write policy but no field policy provider is registered"
+                    )
+                },
+            )?
         };
         if allowed {
             Ok(())
@@ -1546,27 +1458,24 @@ impl<B: OrmBackend> Database<B> {
                     surface,
                 )
                 .await?
-        } else if metadata.read_policy.is_some()
-            && self.authorization_mode == AuthorizationMode::DeclaredPoliciesRequired
-        {
-            // A declared row policy key without a provider is a misconfiguration.
-            // Refuse before any row is read, so an existing and a missing key
-            // answer alike.
-            return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                .with_internal(format!(
+        } else if missing_policy_access(
+            self.authorization_mode,
+            PolicyScope::Row,
+            metadata.read_policy.is_some(),
+            || {
+                format!(
                     "entity {} declares a row policy key but no row policy provider is registered",
                     metadata.entity_name
-                ))
-                .into_graphql_error());
-        } else if metadata.read_policy.is_some()
-            && self.authorization_mode == AuthorizationMode::ExplicitPolicyForAllExposedOperations
+                )
+            },
+        )
+        .map_err(OrmPublicError::into_graphql_error)?
         {
-            // Defer every row to `can_read_row`, which refuses it in this mode,
-            // so list and point reads share one decision.
-            ReadVisibility::CallbackOnly
-        } else {
-            // No RowPolicy is installed: retain the existing entity-policy-only contract.
             ReadVisibility::Unrestricted
+        } else {
+            // Defer every row to `can_read_row`, so list and point reads share
+            // one decision when the explicit mode denies a missing provider.
+            ReadVisibility::CallbackOnly
         };
         Ok(visibility)
     }
@@ -1579,44 +1488,15 @@ impl<B: OrmBackend> Database<B> {
         surface: crate::graphql::orm::EntityAccessSurface,
         row: &(dyn Any + Send + Sync),
     ) -> async_graphql::Result<bool> {
-        match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.row_policy {
-                    policy
-                        .can_read_row(ctx, self, entity_name, policy_key, surface, row)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::DeclaredPoliciesRequired => {
-                if policy_key.is_some() && self.row_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "entity {entity_name} declares a row policy key but no row policy provider is registered"
-                        ))
-                        .into_graphql_error());
-                }
-                if let Some(policy) = &self.row_policy {
-                    policy
-                        .can_read_row(ctx, self, entity_name, policy_key, surface, row)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if let Some(policy) = &self.row_policy {
-                    policy
-                        .can_read_row(ctx, self, entity_name, policy_key, surface, row)
-                        .await
-                } else if policy_key.is_some() {
-                    Ok(false)
-                } else {
-                    Ok(true)
-                }
-            }
+        if let Some(policy) = &self.row_policy {
+            return policy
+                .can_read_row(ctx, self, entity_name, policy_key, surface, row)
+                .await;
         }
+        missing_policy_access(self.authorization_mode, PolicyScope::Row, policy_key.is_some(), || {
+            format!("entity {entity_name} declares a row policy key but no row policy provider is registered")
+        })
+        .map_err(OrmPublicError::into_graphql_error)
     }
 
     pub async fn can_write_row(
@@ -1630,44 +1510,15 @@ impl<B: OrmBackend> Database<B> {
         if !self.schema_policy.allows_entity_writes() {
             return Ok(false);
         }
-        match self.authorization_mode {
-            AuthorizationMode::LegacyPermissive => {
-                if let Some(policy) = &self.row_policy {
-                    policy
-                        .can_write_row(ctx, self, entity_name, policy_key, surface, row)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::DeclaredPoliciesRequired => {
-                if policy_key.is_some() && self.row_policy.is_none() {
-                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-                        .with_internal(format!(
-                            "entity {entity_name} declares a row write policy key but no row policy provider is registered"
-                        ))
-                        .into_graphql_error());
-                }
-                if let Some(policy) = &self.row_policy {
-                    policy
-                        .can_write_row(ctx, self, entity_name, policy_key, surface, row)
-                        .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if let Some(policy) = &self.row_policy {
-                    policy
-                        .can_write_row(ctx, self, entity_name, policy_key, surface, row)
-                        .await
-                } else if policy_key.is_some() {
-                    Ok(false)
-                } else {
-                    Ok(true)
-                }
-            }
+        if let Some(policy) = &self.row_policy {
+            return policy
+                .can_write_row(ctx, self, entity_name, policy_key, surface, row)
+                .await;
         }
+        missing_policy_access(self.authorization_mode, PolicyScope::Row, policy_key.is_some(), || {
+            format!("entity {entity_name} declares a row write policy key but no row policy provider is registered")
+        })
+        .map_err(OrmPublicError::into_graphql_error)
     }
 
     pub async fn ensure_writable_row(
@@ -2727,9 +2578,12 @@ mod row_helpers {
         Ok(value.to_string())
     }
 
-    /// Decode a JSON array, reading text that is not one as an empty list.
-    /// Use the backend's `json_from_str` or `json_from_value` where corrupt
-    /// JSON must be an error.
+    /// Decode a legacy text-backed list. Malformed JSON, a non-array value, or
+    /// an element incompatible with `T` yields an empty list.
+    ///
+    /// Use the backend's `json_from_str` or `json_from_value` to report decode
+    /// errors. Generated fields declared with the JSON storage attribute use
+    /// those fallible conversions.
     pub fn json_to_vec<T>(value: &str) -> Vec<T>
     where
         T: serde::de::DeserializeOwned,
@@ -2764,4 +2618,56 @@ pub mod mssql_helpers {
     pub use super::row_helpers::{
         int_to_bool, json_from_str, json_to_vec, str_to_datetime, str_to_uuid, uuid_to_string,
     };
+}
+
+#[cfg(test)]
+mod database_contract_tests {
+    use super::*;
+
+    #[test]
+    fn missing_policy_uses_the_mode_and_policy_scope() {
+        use AuthorizationMode::*;
+        use PolicyScope::*;
+
+        for (mode, expected) in [
+            (LegacyPermissive, [Ok(true); 6]),
+            (
+                DeclaredPoliciesRequired,
+                [Ok(true), Err(()), Ok(true), Err(()), Ok(true), Err(())],
+            ),
+            (
+                ExplicitPolicyForAllExposedOperations,
+                [Ok(false), Ok(false), Ok(true), Ok(false), Ok(true), Err(())],
+            ),
+        ] {
+            let actual = [
+                (Entity, false),
+                (Entity, true),
+                (Row, false),
+                (Row, true),
+                (Field, false),
+                (Field, true),
+            ]
+            .map(|(scope, declared)| {
+                missing_policy_access(mode, scope, declared, || "missing provider".into()).map_err(
+                    |error| {
+                        assert_eq!(error.code, OrmErrorCode::AuthorizationMisconfigured);
+                    },
+                )
+            });
+            assert_eq!(actual, expected, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_array_fallback_and_explicit_json_decode_keep_their_contracts() {
+        for invalid in ["{", "null", r#"[1,"two"]"#] {
+            assert!(row_helpers::json_to_vec::<i32>(invalid).is_empty());
+            assert!(matches!(
+                row_helpers::json_from_str::<Vec<i32>>(invalid),
+                Err(sqlx::Error::Decode(_))
+            ));
+        }
+        assert_eq!(row_helpers::json_to_vec::<i32>("[1,2]"), [1, 2]);
+    }
 }

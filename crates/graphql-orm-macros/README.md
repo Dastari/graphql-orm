@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.193.0 keeps SQL Server generated identifiers delimited and extends
+the quoting cases shared with the runtime. The runtime's general SQL Server
+identifier renderer also supports bare temporary table and variable names.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-database-binding-and-decoding).
+
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 

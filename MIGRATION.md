@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.192.0 to 0.193.0: database binding and decoding
+
+**No action.** For handwritten binds, use `SqlValue::UuidNull` and
+`SqlValue::BytesNull` for UUID and binary columns. `SqlValue::Null` binds
+as text. Legacy text-backed array fields still decode incompatible JSON
+as an empty list. Use explicit JSON storage for fallible decoding.
+
 ## 0.191.0 to 0.192.0: propagated parent actions
 
 **No action.** Relations continue to use the source mutation's action by

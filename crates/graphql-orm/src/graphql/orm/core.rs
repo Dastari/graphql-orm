@@ -55,7 +55,10 @@ pub enum SqlValue {
     Bool(bool),
     /// Typed null for boolean values.
     BoolNull,
-    /// Untyped null used when a generated path has no more specific type.
+    /// Compatibility null that binds as text, including on PostgreSQL and SQL Server.
+    ///
+    /// Use the variant that matches the destination type when it is known, such
+    /// as [`Self::UuidNull`] for a UUID or [`Self::BytesNull`] for binary data.
     Null,
 }
 
