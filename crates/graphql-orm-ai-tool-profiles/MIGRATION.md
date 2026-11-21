@@ -10,12 +10,17 @@ supersedes: []
 
 # Migration Guide
 
-## Breaking release (unreleased)
+## 0.27.1 subscription validator reuse
+
+**No action.** Existing subscription plans and capability bindings remain
+compatible. No schema or data migration is needed.
+
+## 0.26.1 to 0.27.0: breaking release
 
 AI tool profiles 0.26.1 to 0.27.0. **Action needed.** Part of the single
 breaking release; upgrade together with operation catalogue 0.10.0,
-ORM/macros 0.190.0 and AI 0.151.0. Host steps for the whole workspace are in
-the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). No
+ORM/macros 0.187.0 and AI 0.151.0. Host steps for the whole workspace are in
+the root [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release). No
 SDL or data migration.
 
 - **Operation fingerprint algorithm v2. Action needed.** Generated-operation

@@ -13,7 +13,7 @@ supersedes: []
 ## Unreleased - 0.28.0 (breaking release)
 
 The backup part of the single breaking release. See the
-[migration guide](MIGRATION.md#breaking-release-unreleased).
+[migration guide](MIGRATION.md#0272-to-0280-breaking-release).
 
 - **Breaking:** `PruneResult` and `DeleteSnapshotResult` gain
   `deleted_snapshot_ids`, the ids whose deletion completed, in ascending
@@ -26,10 +26,10 @@ The backup part of the single breaking release. See the
   reason }` instead of `ManifestAuthenticationFailed`.
   `BackupError::is_snapshot_not_admitted()` keeps working.
 - `OrmBackupAdapter::clear_restore_target` clears a PostgreSQL target in a
-  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.190.0
+  transaction that sets `graphql_orm.change_journal` to `off`. ORM 0.187.0
   installs a `TRUNCATE` guard on journaled tables (#592) that admits only
   such a transaction; without this the clear would be refused on a journaled
-  database. The clear is not journaled, as before. Requires ORM 0.190.0 for
+  database. The clear is not journaled, as before. Requires ORM 0.187.0 for
   the optional ORM adapter. SQLite is unchanged.
 
 ## Unreleased - 0.27.2

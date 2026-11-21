@@ -318,8 +318,14 @@ async fn cursors_reauthorize_changes_and_cross_user_reuse_and_reject_tampering()
 async fn bounded_offsets_stay_exact_and_provider_errors_fail_before_querying() {
     for mode in [Mode::Callback, Mode::Partial] {
         let (db, _, capture) = setup(mode, 40, 128).await;
-        let result = data(&db, "a", "{ visibilityItems(page: {limit: 3, offset: 4}, orderBy: [{rank: ASC}]) { edges { node { rank } } pageInfo { totalCount } } }".into()).await;
+        let result = data(&db, "a", "{ visibilityItems(page: {limit: 3, offset: 4}, orderBy: [{rank: ASC}]) { edges { cursor node { rank } } pageInfo { totalCount hasNextPage hasPreviousPage startCursor endCursor } } }".into()).await;
         assert_eq!(result["visibilityItems"]["pageInfo"]["totalCount"], 20);
+        let page = &result["visibilityItems"]["pageInfo"];
+        assert_eq!(page["hasNextPage"], true);
+        assert_eq!(page["hasPreviousPage"], true);
+        assert_eq!(page["startCursor"], "4");
+        assert_eq!(page["endCursor"], "6");
+        assert_eq!(result["visibilityItems"]["edges"][1]["cursor"], "5");
         assert_eq!(result["visibilityItems"]["edges"][0]["node"]["rank"], 44);
         let rows = capture.take();
         assert!(rows.iter().all(|(_, count)| *count <= 7));

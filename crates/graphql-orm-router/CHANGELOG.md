@@ -13,7 +13,7 @@ supersedes: []
 ## Unreleased - 0.17.0 (breaking release)
 
 The router part of the single breaking release. See the
-[migration guide](MIGRATION.md#breaking-release-unreleased).
+[migration guide](MIGRATION.md#0168-to-0170-breaking-release).
 
 - **Added (opt-in): the router says when it refused an operation before
   execution.** With `RouterConfig::with_refusal_outcome(true)` (file

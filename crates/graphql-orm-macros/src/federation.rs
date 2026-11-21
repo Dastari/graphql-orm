@@ -328,7 +328,6 @@ pub(crate) fn federation_entity_resolver_tokens(
     entity_name_lit: &str,
     backend_marker: &proc_macro2::TokenStream,
     resolver_auth_mode: &proc_macro2::TokenStream,
-    relation_preload_single: &proc_macro2::TokenStream,
     keys: &[ResolvedFederationKey],
     scope_enforcements: &[proc_macro2::TokenStream],
     single_read_field: &str,
@@ -366,6 +365,19 @@ pub(crate) fn federation_entity_resolver_tokens(
                 .map(|argument| relation_key_part_kind_tokens(argument.kind))
                 .collect::<Vec<_>>();
 
+            let read_body = entity_read_body(
+                FederationRead {
+                    struct_name,
+                    entity_name_lit,
+                    backend_marker,
+                    single_read_field,
+                    loader_identity,
+                    key_columns: &key_columns,
+                    key_part_kinds: &key_part_kinds,
+                },
+                value_bindings,
+            );
+
             quote! {
                 #[doc = #description]
                 #[graphql(entity)]
@@ -373,7 +385,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                     #(#resolver_arguments)*
-                ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
+                ) -> ::graphql_orm::async_graphql::Result<::std::option::Option<#struct_name>> {
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(
                         ctx,
                         #resolver_auth_mode,
@@ -383,74 +395,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                 <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
             )?;
                     #scope_enforcement
-                    // The context field is `_entities`. This resolver stands in for
-                    // the entity's get-by-id root, so enforce that coordinate, and
-                    // any classification registered for `_entities` itself.
-                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
-                        ctx,
-                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
-                        #single_read_field,
-                    )?;
-                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
-                        ctx,
-                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
-                    )?;
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
-                    let pool = db.pool();
-                    let auth_context = ctx
-                        .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
-                        .cloned();
-                    db.ensure_entity_access(
-                        Some(ctx),
-                        #entity_name_lit,
-                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-
-                    let mut __gom_federation_values = Vec::new();
-                    let mut __gom_federation_parts = Vec::new();
-                    #(#value_bindings)*
-
-                    let __gom_federation_loader = ctx.data_unchecked::<
-                        ::graphql_orm::async_graphql::dataloader::DataLoader<
-                            ::graphql_orm::graphql::loaders::FederationKeyLoader<
-                                #struct_name,
-                                #backend_marker,
-                            >,
-                        >,
-                    >();
-                    // Loaded with its own outcome: another caller's failing key
-                    // group in the same batch does not fail this one.
-                    let __gom_federation_loaded = __gom_federation_loader
-                        .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::FederationEntityKey {
-                            key: #loader_identity,
-                            columns: vec![#(#key_columns),*],
-                            key_part_kinds: vec![#(#key_part_kinds),*],
-                            values: __gom_federation_values.clone(),
-                            representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
-                                __gom_federation_parts, &[#(#key_part_kinds),*],
-                            ),
-                            auth_context: auth_context.clone(),
-                        }))
-                        .await;
-                    let __gom_federation_loaded =
-                        ::graphql_orm::graphql::loaders::isolated_load_result(__gom_federation_loaded)
-                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
-
-                    // The same row authority as generated list reads.
-                    let mut entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(
-                        db,
-                        ctx,
-                        &[#(#key_columns),*],
-                        __gom_federation_values,
-                        __gom_federation_loaded.flatten(),
-                    ).await?;
-
-                    let _ = pool;
-                    #relation_preload_single
-
-                    Ok(entity)
+                    #read_body
                 }
             }
         })
@@ -503,7 +448,6 @@ pub(crate) fn node_id_entity_resolver_tokens(
     entity_name_lit: &str,
     backend_marker: &proc_macro2::TokenStream,
     resolver_auth_mode: &proc_macro2::TokenStream,
-    relation_preload_single: &proc_macro2::TokenStream,
     parts: &[NodeIdPart],
     scope_enforcement: &proc_macro2::TokenStream,
     single_read_field: &str,
@@ -516,11 +460,11 @@ pub(crate) fn node_id_entity_resolver_tokens(
     let decode_parts = parts.iter().zip(&idents).map(|(part, ident)| {
         let ty = &part.rust_type;
         quote! {
-            let Some(#ident) = __gom_node_parts
+            let ::std::option::Option::Some(#ident) = __gom_node_parts
                 .next()
                 .and_then(|part| ::graphql_orm::serde_json::from_value::<#ty>(part).ok())
             else {
-                return Ok(None);
+                return ::std::result::Result::Ok(::std::option::Option::None);
             };
         }
     });
@@ -544,6 +488,19 @@ pub(crate) fn node_id_entity_resolver_tokens(
         .map(|part| relation_key_part_kind_tokens(part.kind))
         .collect::<Vec<_>>();
 
+    let read_body = entity_read_body(
+        FederationRead {
+            struct_name,
+            entity_name_lit,
+            backend_marker,
+            single_read_field,
+            loader_identity: &loader_identity,
+            key_columns: &key_columns,
+            key_part_kinds: &key_part_kinds,
+        },
+        value_bindings,
+    );
+
     quote! {
         #[doc = #description]
         #[graphql(entity)]
@@ -551,7 +508,7 @@ pub(crate) fn node_id_entity_resolver_tokens(
             &self,
             ctx: &::graphql_orm::async_graphql::Context<'_>,
             #[graphql(name = "NodeId")] __gom_node_id: ::graphql_orm::async_graphql::ID,
-        ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
+        ) -> ::graphql_orm::async_graphql::Result<::std::option::Option<#struct_name>> {
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(
                 ctx,
                 #resolver_auth_mode,
@@ -560,90 +517,115 @@ pub(crate) fn node_id_entity_resolver_tokens(
                 ctx,
                 <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
             )?;
-            let Some(__gom_node_parts) = ::graphql_orm::graphql::federation::decode_node_id(
+            let ::std::option::Option::Some(__gom_node_parts) = ::graphql_orm::graphql::federation::decode_node_id(
                 &__gom_node_id,
                 #typename,
                 #part_count,
             ) else {
-                return Ok(None);
+                return ::std::result::Result::Ok(::std::option::Option::None);
             };
             let mut __gom_node_parts = __gom_node_parts.into_iter();
             #(#decode_parts)*
             // Typed values must re-encode to the same id, so one row has one NodeId.
-            if ::graphql_orm::graphql::federation::encode_node_id(#typename, vec![#(#canonical_parts),*]).0
+            if ::graphql_orm::graphql::federation::encode_node_id(#typename, ::std::vec![#(#canonical_parts),*]).0
                 != __gom_node_id.0
             {
-                return Ok(None);
+                return ::std::result::Result::Ok(::std::option::Option::None);
             }
             #scope_enforcement
-            // The context field is `_entities`: enforce the get-by-id root's
-            // coordinate and any classification registered for `_entities`.
-            ::graphql_orm::graphql::assurance::enforce_operation_assurance(
-                ctx,
-                ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
-                #single_read_field,
-            )?;
-            ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
-                ctx,
-                ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
-            )?;
-            let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
-            let pool = db.pool();
-            let auth_context = ctx
-                .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
-                .cloned();
-            db.ensure_entity_access(
-                Some(ctx),
-                #entity_name_lit,
-                <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-            ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-
-            let mut __gom_federation_values = Vec::new();
-            let mut __gom_federation_parts = Vec::new();
-            #(#value_bindings)*
-
-            let __gom_federation_loader = ctx.data_unchecked::<
-                ::graphql_orm::async_graphql::dataloader::DataLoader<
-                    ::graphql_orm::graphql::loaders::FederationKeyLoader<
-                        #struct_name,
-                        #backend_marker,
-                    >,
-                >,
-            >();
-            // Loaded with its own outcome: another caller's failing key
-            // group in the same batch does not fail this one.
-            let __gom_federation_loaded = __gom_federation_loader
-                .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::FederationEntityKey {
-                    key: #loader_identity,
-                    columns: vec![#(#key_columns),*],
-                    key_part_kinds: vec![#(#key_part_kinds),*],
-                    values: __gom_federation_values.clone(),
-                    representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
-                        __gom_federation_parts, &[#(#key_part_kinds),*],
-                    ),
-                    auth_context: auth_context.clone(),
-                }))
-                .await;
-            let __gom_federation_loaded =
-                ::graphql_orm::graphql::loaders::isolated_load_result(__gom_federation_loaded)
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
-
-            // The same row authority as generated list reads.
-            let mut entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(
-                db,
-                ctx,
-                &[#(#key_columns),*],
-                __gom_federation_values,
-                __gom_federation_loaded.flatten(),
-            ).await?;
-
-            let _ = pool;
-            #relation_preload_single
-
-            Ok(entity)
+            #read_body
         }
+    }
+}
+
+struct FederationRead<'a> {
+    struct_name: &'a syn::Ident,
+    entity_name_lit: &'a str,
+    backend_marker: &'a proc_macro2::TokenStream,
+    single_read_field: &'a str,
+    loader_identity: &'a str,
+    key_columns: &'a [proc_macro2::TokenStream],
+    key_part_kinds: &'a [proc_macro2::TokenStream],
+}
+
+fn entity_read_body(
+    read: FederationRead<'_>,
+    value_bindings: impl Iterator<Item = proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    let FederationRead {
+        struct_name,
+        entity_name_lit,
+        backend_marker,
+        single_read_field,
+        loader_identity,
+        key_columns,
+        key_part_kinds,
+    } = read;
+    quote! {
+        ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+            ctx,
+            ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            #single_read_field,
+        )?;
+        ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+            ctx,
+            ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+        )?;
+        let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
+        let auth_context = ctx
+            .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+            .cloned();
+        db.ensure_entity_access(
+            ::std::option::Option::Some(ctx),
+            #entity_name_lit,
+            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+            ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+
+        let mut __gom_federation_values = ::std::vec::Vec::new();
+        let mut __gom_federation_parts = ::std::vec::Vec::new();
+        #(#value_bindings)*
+
+        let __gom_federation_loader = ctx.data::<
+            ::graphql_orm::async_graphql::dataloader::DataLoader<
+                ::graphql_orm::graphql::loaders::FederationKeyLoader<
+                    #struct_name,
+                    #backend_marker,
+                >,
+            >,
+        >().map_err(|_| ::graphql_orm::async_graphql::Error::new(
+            "graphql-orm Federation loader not registered; build the schema with schema_builder(database)",
+        ))?;
+        // Loaded with its own outcome: another caller's failing key
+        // group in the same batch does not fail this one.
+        let __gom_federation_loaded = __gom_federation_loader
+            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::FederationEntityKey {
+                key: #loader_identity,
+                columns: ::std::vec![#(#key_columns),*],
+                key_part_kinds: ::std::vec![#(#key_part_kinds),*],
+                values: __gom_federation_values.clone(),
+                representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
+                    __gom_federation_parts, &[#(#key_part_kinds),*],
+                ),
+                auth_context: auth_context.clone(),
+            }))
+            .await;
+        let __gom_federation_loaded =
+            ::graphql_orm::graphql::loaders::isolated_load_result(__gom_federation_loaded)
+                .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
+
+        // The same row authority as generated list reads.
+        let entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(
+            db,
+            ctx,
+            &[#(#key_columns),*],
+            __gom_federation_values,
+            __gom_federation_loaded.flatten(),
+        ).await?;
+
+
+        ::std::result::Result::Ok(entity)
     }
 }
 
@@ -791,17 +773,17 @@ pub(crate) fn node_id_field_tokens(
             &self,
             ctx: &::graphql_orm::async_graphql::Context<'_>,
         ) -> ::graphql_orm::async_graphql::Result<::graphql_orm::async_graphql::ID> {
-            let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+            let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
             ::graphql_orm::graphql::federation::authorize_node_id_fields(
                 db,
                 ctx,
                 #entity_name,
                 &[#(#disclosed),*],
-                #record as &(dyn ::std::any::Any + Send + Sync),
+                #record as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
             ).await?;
-            Ok(::graphql_orm::graphql::federation::encode_node_id(
+            ::std::result::Result::Ok(::graphql_orm::graphql::federation::encode_node_id(
                 #struct_name_str,
-                vec![#(#values),*],
+                ::std::vec![#(#values),*],
             ))
         }
     }
