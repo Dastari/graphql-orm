@@ -189,6 +189,8 @@ run_mssql() {
     --test search_filter_binding -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test read_snapshot_transaction -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --lib snapshot_start_preserves_3952_from_restore_gate -- --ignored --test-threads=1
   run_identifier_quoting mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1

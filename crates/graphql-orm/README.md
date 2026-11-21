@@ -946,6 +946,7 @@ let (account, accounts) = db
   first read. Both modes take normal read locks that can conflict with DDL.
   See [PostgreSQL transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html)
   and [transaction characteristics](https://www.postgresql.org/docs/18/sql-set-transaction.html).
+  The [PostgreSQL SSI paper](https://drkp.net/papers/ssi-vldb12.pdf) gives an example of the read-only anomaly.
 - SQL Server uses `SNAPSHOT` after checking the current database setting.
   `ReadSnapshotError::MssqlSnapshotIsolationRequired` means
   `ALLOW_SNAPSHOT_ISOLATION` is disabled or transitioning. Snapshot reads

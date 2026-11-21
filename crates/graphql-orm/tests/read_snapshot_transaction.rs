@@ -401,7 +401,9 @@ async fn mssql_requires_snapshot_isolation_and_allows_concurrent_commits() {
     let reader = Database::new(
         graphql_orm::db::mssql::MssqlPool::connect_ado_with(
             &owned.connection_string,
-            graphql_orm::db::mssql::MssqlPoolOptions::default().max_connections(1),
+            graphql_orm::db::mssql::MssqlPoolOptions::default()
+                .max_connections(1)
+                .health_check_after_idle(None),
         )
         .await
         .unwrap(),

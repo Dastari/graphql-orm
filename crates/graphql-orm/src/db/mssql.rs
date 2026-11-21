@@ -2252,6 +2252,28 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    #[ignore = "requires Docker for an owned SQL Server"]
+    async fn snapshot_start_preserves_3952_from_restore_gate() {
+        use crate::graphql::orm::ReadSnapshotError;
+
+        let mut owned = owned_mssql::OwnedSqlServer::start().await.unwrap();
+        let pool = MssqlPool::connect_ado(&owned.connection_string)
+            .await
+            .unwrap();
+        let lease = pool.acquire().await.unwrap();
+        // Model a successful preflight followed by the database being OFF
+        // when the begin batch runs, without racing an ALTER DATABASE.
+        let Err(error) = pool.begin_transaction_on_lease(lease, "SNAPSHOT").await else {
+            panic!("snapshot began while snapshot isolation was disabled");
+        };
+        assert!(matches!(
+            classify_read_snapshot_start_error(error),
+            ReadSnapshotError::MssqlSnapshotIsolationRequired,
+        ));
+        owned.cleanup().unwrap();
+    }
+
     #[test]
     fn server_errors_keep_their_number_and_classification() {
         use sqlx::error::ErrorKind;
