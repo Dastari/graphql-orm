@@ -611,9 +611,9 @@ mod portable {
         // fold that builds renders within it.
         let term = || ReadPredicate::is_not_null::<B, ClosureNode>("id").unwrap();
         let mut fold = term();
-        // About 25 bytes a term: grow without copying well short of the
-        // budget, then step to the refusal.
-        for _ in 0..40_000 {
+        // About 41 bytes a term, the column bound to its table: grow without
+        // copying well short of the budget, then step to the refusal.
+        for _ in 0..20_000 {
             fold = fold.and(term()).unwrap();
         }
         loop {
@@ -771,10 +771,11 @@ mod portable {
         any(feature = "postgres", feature = "mssql"),
         ignore = "owned database lane"
     )]
-    async fn a_fifty_thousand_term_or_fold_builds_flat_and_runs() {
+    async fn a_twenty_five_thousand_term_or_fold_builds_flat_and_runs() {
         let (mut db, mut owner) = fixture().await;
         let mut wide = ReadPredicate::is_not_null::<B, ClosureNode>("score").unwrap();
-        for _ in 0..50_000 {
+        // About 36 bytes a term, so about 900 KB, within the byte budget.
+        for _ in 0..25_000 {
             wide = wide
                 .or(ReadPredicate::is_null::<B, ClosureNode>("id").unwrap())
                 .unwrap();

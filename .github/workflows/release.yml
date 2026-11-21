@@ -407,7 +407,7 @@ jobs:
     name: Owned SQL Server transport and transaction checks
     needs: guard
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
     steps:

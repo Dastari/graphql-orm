@@ -408,6 +408,35 @@ pub struct RelationLoadResult<T> {
     pub offset: i64,
 }
 
+impl<T> RelationLoadResult<T> {
+    /// Convert an already filtered and counted page to an offset connection.
+    #[doc(hidden)]
+    pub fn into_offset_connection(self) -> crate::graphql::pagination::Connection<T> {
+        use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
+
+        let offset = self.offset.max(0) as usize;
+        let edges: Vec<_> = self
+            .entities
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| Edge {
+                cursor: encode_cursor((offset + index) as i64),
+                node,
+            })
+            .collect();
+        Connection {
+            page_info: PageInfo {
+                has_next_page: (offset as i64 + edges.len() as i64) < self.total_count,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                total_count: Some(self.total_count),
+            },
+            edges,
+        }
+    }
+}
+
 /// Generated resolver support. Sanitize policy errors at a relationship
 /// boundary with the callback classification every generated path uses.
 ///
@@ -458,11 +487,16 @@ where
 {
     visibility.validate::<T, B>()?;
     if let Some(predicate) = visibility.predicate_expression() {
+        // The relation's own filter is composed with the policy: each of
+        // its clauses must hold exactly its bind values, and only
+        // placeholders the statement numbers itself.
+        if let Some(filter) = &key.filter {
+            crate::graphql::orm::ensure_composable_expression(B::DIALECT, filter)
+                .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+        }
         key.filter = Some(match key.filter {
-            Some(filter) => {
-                crate::graphql::orm::FilterExpression::And(vec![filter, predicate.clone()])
-            }
-            None => predicate.clone(),
+            Some(filter) => crate::graphql::orm::FilterExpression::And(vec![filter, predicate]),
+            None => predicate,
         });
         key.where_signature = Some(format!("{:?}", key.filter));
     }

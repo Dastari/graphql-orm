@@ -1,9 +1,12 @@
 #![cfg(feature = "postgres")]
 //! Owned disposable PostgreSQL parity for repository-only entities.
 
-use std::process::Command;
-
 use graphql_orm::prelude::*;
+
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
+use owned_postgres::OwnedPostgres;
 
 #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[repository_entity(
@@ -49,90 +52,11 @@ impl EntityPolicy<PostgresBackend> for AllowEntities {
     }
 }
 
-struct OwnedPostgres {
-    name: String,
-    url: String,
-}
-
-impl Drop for OwnedPostgres {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "--force", &self.name])
-            .output();
-    }
-}
-
-impl OwnedPostgres {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let name = format!("graphql-orm-repository-only-{suffix}");
-        let password = format!("repository_{suffix}");
-        let database = format!("repository_{suffix}");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--name",
-                &name,
-                "--memory",
-                "4g",
-                "--memory-swap",
-                "4g",
-                "--publish",
-                "127.0.0.1::5432",
-                "--env",
-                "POSTGRES_USER=repository_owner",
-                "--env",
-                &format!("POSTGRES_PASSWORD={password}"),
-                "--env",
-                &format!("POSTGRES_DB={database}"),
-                "postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to start disposable PostgreSQL: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        let mut owned = Self {
-            name,
-            url: String::new(),
-        };
-        for _ in 0..120 {
-            let ready = Command::new("docker")
-                .args(["exec", &owned.name, "pg_isready", "-U", "repository_owner"])
-                .output()?;
-            if ready.status.success() {
-                let output = Command::new("docker")
-                    .args(["port", &owned.name, "5432/tcp"])
-                    .output()?;
-                let published = String::from_utf8(output.stdout)?;
-                let port = published
-                    .lines()
-                    .find_map(|line| line.strip_prefix("127.0.0.1:"))
-                    .ok_or("Docker did not publish PostgreSQL on loopback")?;
-                owned.url =
-                    format!("postgres://repository_owner:{password}@127.0.0.1:{port}/{database}");
-                // `pg_isready` runs inside the container. Give Docker's
-                // loopback-published proxy a short settling window as well,
-                // especially while the full PostgreSQL matrix is under load.
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                return Ok(owned);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        Err("disposable PostgreSQL did not become ready".into())
-    }
-}
-
 #[tokio::test]
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn repository_only_postgres_crud_projection_and_serializable_transaction()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
+    let owned = OwnedPostgres::start_postgres_16("repository-only")?;
     let mut database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
     database.set_authorization_mode(AuthorizationMode::ExplicitPolicyForAllExposedOperations);
     database.set_entity_policy(AllowEntities);

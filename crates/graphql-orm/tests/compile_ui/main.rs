@@ -26,6 +26,7 @@ mod operation_authorization_ui;
 mod order_aggregate_ui;
 mod ordinary_index_ui;
 mod policy_decision_ui;
+mod query_hygiene_ui;
 mod read_projection_ui;
 mod recheck386_ui;
 mod record_version_ui;

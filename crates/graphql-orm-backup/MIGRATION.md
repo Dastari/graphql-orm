@@ -10,11 +10,11 @@ supersedes: []
 
 # Migration Guide
 
-## Breaking release (unreleased)
+## 0.27.2 to 0.28.0: breaking release
 
 Backup 0.27.2 to 0.28.0: result and error types, and target clear on
 journaled databases. Upgrade backup and, for the optional ORM adapter,
-ORM/macros to 0.190.0 on the same reviewed revision.
+ORM/macros to 0.187.0 on the same reviewed revision.
 
 - **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
   `#[non_exhaustive]`. Action needed** for code that builds one of the result
@@ -28,12 +28,12 @@ ORM/macros to 0.190.0 on the same reviewed revision.
   matched the refusal of a revoked or unlisted snapshot as
   `ManifestAuthenticationFailed`: match the new variant, or call
   `is_snapshot_not_admitted()`, which is unchanged.
-- **Target clear. No action.** ORM 0.190.0 makes journaled PostgreSQL tables
+- **Target clear. No action.** ORM 0.187.0 makes journaled PostgreSQL tables
   refuse `TRUNCATE`; `OrmBackupAdapter::clear_restore_target` now turns the
   journal setting off in its own transaction, which the guard admits. Hosts
   that clear a restore target with their own `TRUNCATE` must do the same, or
   delete the rows; see the
-  [workspace migration guide](../../MIGRATION.md#breaking-release-unreleased).
+  [workspace migration guide](../../MIGRATION.md#01860-to-01870-breaking-release).
   Take a full backup after a restore to start a new incremental chain.
 
 ## 0.27.1 to 0.27.2: install documentation

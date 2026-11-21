@@ -179,7 +179,8 @@ where
     T: Entity + Send + Sync + 'static,
     B: OrmBackend + 'static,
 {
-    let database = context.data_unchecked::<Database<B>>();
+    // A missing `Database` is a field error, as for the generated `NodeId`.
+    let database = crate::db::request_database::<B>(context)?;
     if context.query_env.operation.node.ty
         == crate::async_graphql::parser::types::OperationType::Subscription
         && !field.subscribe

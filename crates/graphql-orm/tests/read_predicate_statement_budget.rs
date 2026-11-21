@@ -31,11 +31,12 @@ struct BudgetLink {
 }
 schema_roots! { query_custom_ops: [], entities: [BudgetParent, BudgetLink], }
 
-/// About 290 KB of policy SQL: every link with a label, spelled as a wide
-/// `or` of terms that never match plus one that does.
+/// About 315 KB of policy SQL: every link with a label, spelled as a wide
+/// `or` of terms that never match plus one that does. Each term is about
+/// 35 bytes, its column bound to the link table.
 fn large_link_policy() -> async_graphql::Result<ReadPredicate> {
     let mut policy = ReadPredicate::is_not_null::<SqliteBackend, BudgetLink>("label")?;
-    for _ in 0..16_000 {
+    for _ in 0..9_000 {
         policy = policy.or(ReadPredicate::is_null::<SqliteBackend, BudgetLink>("id")?)?;
     }
     Ok(policy)
@@ -125,7 +126,7 @@ async fn parents(schema: &AppSchema, filters: usize) -> async_graphql::Response 
 async fn relation_filters_share_one_policy_budget_per_statement() {
     assert_eq!(READ_PREDICATE_MAX_STATEMENT_RELATION_BYTES, 1 << 20);
     let schema = schema().await;
-    // Three relation filters add about 870 KB of policy SQL: within budget.
+    // Three relation filters add about 950 KB of policy SQL: within budget.
     let response = parents(&schema, 3).await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let mut ids = response.data.into_json().unwrap()["rows"]["edges"]

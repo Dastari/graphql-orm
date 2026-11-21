@@ -89,9 +89,9 @@ fn has_flag(metas: &[syn::Meta], flag: &str) -> bool {
         .any(|meta| matches!(meta, syn::Meta::Path(path) if path.is_ident(flag)))
 }
 
-fn resolver_arguments(method: &syn::ImplItemFn) -> syn::Result<Vec<TokenStream>> {
+fn resolver_arguments(method: &mut syn::ImplItemFn) -> syn::Result<Vec<TokenStream>> {
     let mut arguments = Vec::new();
-    for input in &method.sig.inputs {
+    for input in &mut method.sig.inputs {
         let syn::FnArg::Typed(argument) = input else {
             continue;
         };
@@ -113,11 +113,20 @@ fn resolver_arguments(method: &syn::ImplItemFn) -> syn::Result<Vec<TokenStream>>
             )
         })?;
         let ty = &argument.ty;
+        // Consume the generator-only attribute before async-graphql sees the
+        // signature. User-supplied Rust types retain their original spelling.
+        let catalogue_type = argument
+            .attrs
+            .iter()
+            .position(|attr| attr.path().is_ident("__gom_catalogue_type"))
+            .map(|index| argument.attrs.remove(index).parse_args::<syn::Type>())
+            .transpose()?;
+        let catalogue_type = catalogue_type.as_ref().unwrap_or(ty);
         arguments.push(quote! {
             ::graphql_orm::graphql::orm::GraphqlOperationArgumentDescriptor::generated_with_description(
                 #name,
                 #description,
-                stringify!(#ty),
+                stringify!(#catalogue_type),
                 <#ty as ::graphql_orm::async_graphql::InputType>::qualified_type_name(),
             )
         });
@@ -151,18 +160,18 @@ fn root_kind_of(implementation: &syn::ItemImpl, entity: &str) -> Option<RootKind
 }
 
 fn collect_resolvers(
-    file: &syn::File,
+    file: &mut syn::File,
     entity: &str,
 ) -> syn::Result<BTreeMap<(RootKind, String), Resolver>> {
     let mut resolvers = BTreeMap::new();
-    for item in &file.items {
+    for item in &mut file.items {
         let syn::Item::Impl(implementation) = item else {
             continue;
         };
         let Some(kind) = root_kind_of(implementation, entity) else {
             continue;
         };
-        for item in &implementation.items {
+        for item in &mut implementation.items {
             let syn::ImplItem::Fn(method) = item else {
                 continue;
             };
@@ -273,4 +282,31 @@ pub(crate) fn fill(file: &mut syn::File, entity: &syn::Ident) -> syn::Result<()>
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_catalogue_spelling_does_not_change_the_rust_parameter_type() {
+        let mut method: syn::ImplItemFn = syn::parse_quote! {
+            async fn list(
+                #[__gom_catalogue_type(Option<Vec<Value>>)]
+                #[graphql(name = "arg", desc = "Arg")]
+                arg: ::std::option::Option<::std::vec::Vec<Value>>,
+            ) {}
+        };
+        let generated = resolver_arguments(&mut method).unwrap();
+        assert!(
+            generated[0]
+                .to_string()
+                .contains("stringify ! (Option < Vec < Value > >)")
+        );
+        assert!(!quote!(#method).to_string().contains("__gom_catalogue_type"));
+        let unmarked = resolver_arguments(&mut method).unwrap();
+        assert!(unmarked[0].to_string().contains(
+            "stringify ! (:: std :: option :: Option < :: std :: vec :: Vec < Value > >)"
+        ));
+    }
 }

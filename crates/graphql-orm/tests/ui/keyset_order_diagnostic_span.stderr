@@ -1,0 +1,5 @@
+error: keyset entries must use `field asc|desc [nulls first|last]`
+ --> tests/ui/keyset_order_diagnostic_span.rs:7:14
+  |
+7 |     keyset = "id desc nulls",
+  |              ^^^^^^^^^^^^^^^

@@ -477,8 +477,11 @@ fn exists_sql_is_quoted_and_parameterized_for_the_selected_backend() {
     let query = EntityQuery::<FilterLink, Backend>::new()
         .with_read_visibility(&ReadVisibility::Complete(predicate))
         .unwrap();
-    assert_eq!(query.values, vec![SqlValue::String(value.into())]);
-    let sql = query.where_clauses.join(" AND ");
+    // The policy is kept apart from the caller's own clauses and values
+    // and composed when a statement is rendered (#796).
+    assert!(query.where_clauses.is_empty() && query.values.is_empty());
+    let (sql, values) = query.try_build_delete_sql().unwrap();
+    assert_eq!(values, vec![SqlValue::String(value.into())]);
     assert!(sql.contains("EXISTS (SELECT 1 FROM"), "{sql}");
     // The positive relation is one plain EXISTS (#770 review: the three-valued
     // form is rendered only where a negation reaches it).

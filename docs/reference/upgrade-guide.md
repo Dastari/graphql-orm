@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-19
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,57 +70,82 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.151.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.193.0, `graphql-orm-macros` 0.193.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-After the breaking release:
+- **No action** — ORM/macros 0.193.0: a `GraphQLEntity`-generated object can host handwritten resolver fields with `#[graphql_orm(object_fields)]` and `#[graphql_object_fields]`; entities that do not opt in are unchanged (#808). [Migration](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects)
 
-- **No action** — ORM/macros, next ORM/macros minor after the breaking release: a `GraphQLEntity`-generated object can host handwritten resolver fields with `#[graphql_orm(object_fields)]` and `#[graphql_object_fields]`; entities that do not opt in are unchanged (#808). [Migration](../../MIGRATION.md#next-ormmacros-minor-after-the-breaking-release-handwritten-fields-on-generated-objects)
+### workspace-2026.11.21.2
 
-This is the single **breaking release**: every change that breaks hosts or invalidates stored fingerprints, bindings, approvals or sessions. The [migration guide](../../MIGRATION.md#breaking-release-unreleased) has one section for it, in upgrade order; the entry numbers below are that section's.
+Commit `3111331f3a31` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.2)
+
+Packages (changed in bold): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; **`graphql-orm-ai-tool-profiles` 0.27.1**; **`graphql-orm-ai` 0.151.2**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **Action needed** — ORM/macros 0.190.0: fix any keyset order with an incomplete null-order clause or trailing tokens (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)
+- **No action** — ORM/macros 0.190.0: generated query resolver emission is shared across writable and read-only entity profiles (#723), and generated queries, Changed subscriptions and the NodeId object field return field errors when required schema data is missing (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)
+- **No action** — ORM/macros 0.189.0: generated root search qualifies client filter columns with the entity table and keeps native search helper columns distinct from entity columns (#799). [Migration](../../MIGRATION.md#01880-to-01890-root-search-filter-binding)
+- **No action** — AI tool profiles 0.27.1: replayable subscriptions reuse compiled plan and condition validators (#543). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0271-subscription-validator-reuse)
+- **No action** — AI 0.151.2: skill content protection emits fixed debug reason codes and the proposal registry reuses validators (#543). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-skill-content-protection-diagnostics)
+
+### workspace-2026.11.21.1
+
+Commit `5c92c045f810` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.1)
+
+Packages (changed in bold): **`graphql-orm` 0.188.0, `graphql-orm-macros` 0.188.0**; **`graphql-orm-operation-catalog` 0.10.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.0**; **`graphql-orm-ai-tool-profiles` 0.27.0**; **`graphql-orm-ai` 0.151.1**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.0**.
+
+- **Action needed** — ORM/macros 0.188.0: read predicates bind every column to the row it describes: through the table path at the root of a statement (`"records"."owner_id" = ?`) and through an alias that no table or alias in scope has, such as `__gom_row_1`, inside relation, `not_related`, closure and count subqueries. Policies built with the `ReadPredicate` constructors and generated where inputs admit the same rows (#796). Act if a table lacks a column a read policy names (schema drift, an unapplied migration): such a column used to resolve against an outer row, and the read now fails. Act if you implement `ReadVisibilityFilter` by hand: its SQL may now only be a single-row expression (no `SELECT`/`FROM`/`JOIN`/`WITH`/set operators, comments, `U&` forms or adjacent strings; use `related`, `not_related` or closures to read another table), and wherever its predicate is evaluated in a correlated subquery every column must be written as `__gom_self.<column>` with `table_name` returning the table. Act too if a PostgreSQL policy names a mixed-case column declared without quotes, if a policy is near the 1 MiB rendered-size budget, if a table is named `__gom_self`, `__gom_row_<n>`, `__gom_visibility_<n>` or `__gom_closure_<n>`, or if you compare relation-count ordering SQL text. [Migration](../../MIGRATION.md#01870-to-01880-read-predicate-columns-bound-to-their-row) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01880)
+
+This is the single **breaking release**: every change that breaks hosts or invalidates stored fingerprints, bindings, approvals or sessions. The [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release) has one section for it, in upgrade order; the entry numbers below are that section's.
 
 Part 1, schema and storage:
 
-- **Action needed** — ORM/macros 0.190.0 (1.1): default plans preserve undeclared host tables; lossy type conversions, integrity-removing steps, column constraint removal and retention-purge relaxation require the existing destructive gate, and widening is backend-aware. Re-plan and review pending migrations (#441, #568, #569). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (1.2): re-install PostgreSQL journal recorders; `TRUNCATE` and cascades into tables without recorders fail closed, and live validation detects host-added cascade gaps. Avoid role or database journal-off defaults (#592). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — AI 0.151.0, ORM/macros 0.190.0 (1.3): apply AI schema module `0.83.0` (three unique indexes); applying a migration refuses repeated unique keys before any DDL, and upgrading an AI store with a legacy webhook-receipt index needs `AiSchemaModule::admit_index_replacements` or explicit destructive admission (#532). [Migration](../../MIGRATION.md#breaking-release-unreleased) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.187.0 (1.1): default plans preserve undeclared host tables; lossy type conversions, integrity-removing steps, column constraint removal and retention-purge relaxation require the existing destructive gate, and widening is backend-aware. Re-plan and review pending migrations (#441, #568, #569). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (1.2): re-install PostgreSQL journal recorders; `TRUNCATE` and cascades into tables without recorders fail closed, and live validation detects host-added cascade gaps. Avoid role or database journal-off defaults (#592). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — AI 0.151.0, ORM/macros 0.187.0 (1.3): apply AI schema module `0.83.0` (three unique indexes); applying a migration refuses repeated unique keys before any DDL, and upgrading an AI store with a legacy webhook-receipt index needs `AiSchemaModule::admit_index_replacements` or explicit destructive admission (#532). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
 
 Part 2, build configuration and Rust API:
 
-- **Action needed** — ORM/macros 0.190.0, AI 0.151.0 (2.1): the `resolver-case-*`, `argument-case-*` and `field-case-*` features (and AI's `graphql-case-pascal`) are replaced by the `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE`, `GRAPHQL_ORM_FIELD_CASE` (and `GRAPHQL_ORM_AI_CASE`) build environment variables; names are unchanged (#508). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — macros 0.190.0 (2.2): the unused `mysql` feature of `graphql-orm-macros` is removed; delete it from feature lists. [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (2.3): only for hosts that build a schema from generated roots by hand: install `GeneratedInputValidation`; without it, generated resolvers that take an input object refuse with `INPUT_VALIDATION_REQUIRED` (#753). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (2.4, 2.5): declare the schema page maximum and migrate oversized internal reads, including host `EntityQuery::paginate`/`EntitySearchQuery::paginate` reads, to exact-or-refused paging; resolve client pages in custom resolvers with `resolve_client_page` (#667, #674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (2.6): add a fallback to exhaustive `SqlValue` matches and handle `Temporal` in host hooks reading date changes (#521). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (2.7): handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches, and match it instead of `ResourceLimit` plus `detail()` (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (2.8): replace policy-free relation preload methods and direct `RelationLoader` use (prelude import, `new`, hand-built keys, string-key loads) with authorized queries; register the loader in handwritten schemas with `relation_data_loader` (#445). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — backup 0.28.0 (2.9): deletion results expose snapshot ids, and result/error types are non-exhaustive with a dedicated snapshot admission error. Update literals and exhaustive matches. [Migration](../../MIGRATION.md#breaking-release-unreleased) · [backup migration](../../crates/graphql-orm-backup/MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.187.0, AI 0.151.0 (2.1): the `resolver-case-*`, `argument-case-*` and `field-case-*` features (and AI's `graphql-case-pascal`) are replaced by the `GRAPHQL_ORM_RESOLVER_CASE`, `GRAPHQL_ORM_ARGUMENT_CASE`, `GRAPHQL_ORM_FIELD_CASE` (and `GRAPHQL_ORM_AI_CASE`) build environment variables; names are unchanged (#508). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — macros 0.187.0 (2.2): the unused `mysql` feature of `graphql-orm-macros` is removed; delete it from feature lists. [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (2.3): only for hosts that build a schema from generated roots by hand: install `GeneratedInputValidation`; without it, generated resolvers that take an input object refuse with `INPUT_VALIDATION_REQUIRED` (#753). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (2.4, 2.5): declare the schema page maximum and migrate oversized internal reads, including host `EntityQuery::paginate`/`EntitySearchQuery::paginate` reads, to exact-or-refused paging; resolve client pages in custom resolvers with `resolve_client_page` (#667, #674). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (2.6): add a fallback to exhaustive `SqlValue` matches and handle `Temporal` in host hooks reading date changes (#521). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (2.7): handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches, and match it instead of `ResourceLimit` plus `detail()` (#580). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (2.8): replace policy-free relation preload methods and direct `RelationLoader` use (prelude import, `new`, hand-built keys, string-key loads) with authorized queries; register the loader in handwritten schemas with `relation_data_loader` (#445). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — backup 0.28.0 (2.9): deletion results expose snapshot ids, and result/error types are non-exhaustive with a dedicated snapshot admission error. Update literals and exhaustive matches. [Migration](../../MIGRATION.md#01860-to-01870-breaking-release) · [backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0272-to-0280-breaking-release)
 
 Part 3, defaults and behaviour:
 
-- **Action needed** — ORM/macros 0.190.0 (3.1): generated GraphQL bulk writes are narrowed to the caller's read visibility by default; rows a caller may write but not read need a `write_target_prefilter`, and `read_visibility` must not return `Err` for callers whose bulk writes should work. `narrow_bulk_writes_to_read_visibility(false)` opts out. `mssql_snapshot_bulk_write_targets` stays a separate opt-in, off (#752). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (3.2): a `Database` refuses a client page offset above 10,000 with `PAGE_LIMIT_EXCEEDED` by default; opt out with `max_page_offset(None)` or page deeper with keyset cursors (#456). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (3.3): assign public codes to deliberate callback refusals, or opt in to uncoded text exposure per `Database`/schema (#682). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (3.4): only for row policies that negate `ReadPredicate::related`: the relation is three-valued, so its negation no longer admits rows with a NULL key or only UNKNOWN related values; `not_related` is `related(..).not()`, and a relation chain deeper than ten levels cannot be negated (#770). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.190.0 (3.5): use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — router 0.17.0 (3.6): composed `@authenticated` and `@requiresScopes` are enforced on nested fields, fragments, aliases, interfaces and unions; a refused selection refuses the whole operation before any subgraph request. Released routers never enforced them, so keep subgraph guards (#729, #485). [Migration](../../MIGRATION.md#breaking-release-unreleased) · [router migration](../../crates/graphql-orm-router/MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — AI 0.151.0 (3.7): `HighImpact` approvals always require recent MFA; the approval lifetime cap has a 7-day ceiling (#465). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.187.0 (3.1): generated GraphQL bulk writes are narrowed to the caller's read visibility by default; rows a caller may write but not read need a `write_target_prefilter`, and `read_visibility` must not return `Err` for callers whose bulk writes should work. `narrow_bulk_writes_to_read_visibility(false)` opts out. `mssql_snapshot_bulk_write_targets` stays a separate opt-in, off (#752). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (3.2): a `Database` refuses a client page offset above 10,000 with `PAGE_LIMIT_EXCEEDED` by default; opt out with `max_page_offset(None)` or page deeper with keyset cursors (#456). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (3.3): assign public codes to deliberate callback refusals, or opt in to uncoded text exposure per `Database`/schema (#682). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (3.4): only for row policies that negate `ReadPredicate::related`: the relation is three-valued, so its negation no longer admits rows with a NULL key or only UNKNOWN related values; `not_related` is `related(..).not()`, and a relation chain deeper than ten levels cannot be negated (#770). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — ORM/macros 0.187.0 (3.5): use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — router 0.17.0 (3.6): composed `@authenticated` and `@requiresScopes` are enforced on nested fields, fragments, aliases, interfaces and unions; a refused selection refuses the whole operation before any subgraph request. Released routers never enforced them, so keep subgraph guards (#729, #485). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release) · [router migration](../../crates/graphql-orm-router/MIGRATION.md#0168-to-0170-breaking-release)
+- **Action needed** — AI 0.151.0 (3.7): `HighImpact` approvals always require recent MFA; the approval lifetime cap has a 7-day ceiling (#465). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
 
 Part 4, fingerprints, bindings, approvals and sessions:
 
-- **Action needed** — ORM/macros 0.190.0, catalogue 0.10.0, AI tool profiles 0.27.0 (4.1): generated-operation fingerprints no longer include the Rust module path; every operation, catalogue and router-export fingerprint changes once. Regenerate exports and manifests and request stale approvals again (#683). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — AI 0.151.0 (4.2): fixed-broker provider sessions rebind once, then survive catalogue changes; `capability_stale` and `selection_stale` are separate codes (#551). [Migration](../../MIGRATION.md#breaking-release-unreleased) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — AI 0.151.0, AI tool profiles 0.27.0 (4.3): capability broker version 2 (compact signatures and `describe_type`, one entity capability per entity, inverted-index search) and the fixed broker by default for large surfaces, with an opt-out. Host capability policy must decide entity entries (#551). [Migration](../../MIGRATION.md#breaking-release-unreleased) · [tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.187.0, catalogue 0.10.0, AI tool profiles 0.27.0 (4.1): generated-operation fingerprints no longer include the Rust module path; every operation, catalogue and router-export fingerprint changes once. Regenerate exports and manifests and request stale approvals again (#683). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release)
+- **Action needed** — AI 0.151.0 (4.2): fixed-broker provider sessions rebind once, then survive catalogue changes; `capability_stale` and `selection_stale` are separate codes (#551). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
+- **Action needed** — AI 0.151.0, AI tool profiles 0.27.0 (4.3): capability broker version 2 (compact signatures and `describe_type`, one entity capability per entity, inverted-index search) and the fixed broker by default for large surfaces, with an opt-out. Host capability policy must decide entity entries (#551). [Migration](../../MIGRATION.md#01860-to-01870-breaking-release) · [tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0261-to-0270-breaking-release)
 
 No action:
 
-- **No action** — ORM/macros 0.190.0: opt in per SQL Server pool to native binding for temporal text; review legacy `datetime` storage and comparisons before enabling it (#521). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
-- **No action** — ORM/macros 0.190.0: opt-in key-only deletes; review key-existence disclosure before adopting them (#666). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
+- **No action** — ORM/macros 0.187.0: opt in per SQL Server pool to native binding for temporal text; review legacy `datetime` storage and comparisons before enabling it (#521). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
+- **No action** — ORM/macros 0.187.0: opt-in key-only deletes; review key-existence disclosure before adopting them (#666). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
 - **No action** — router 0.17.0: the opt-in `refusalOutcome` setting adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request; off by default (#764). [Migration](../../MIGRATION.md#also-in-this-release-no-action)
-- **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
+- **No action** — AI 0.151.0, AI tool profiles 0.27.0: runtime live key inputs compile under default string identities, and the runtime's own keyset windows larger than a host's page maximum are read completely in pages. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01502-to-01510-breaking-release)
+- **No action** — AI 0.151.1: warnings-denied Clippy and Rustdoc lanes pass for `postgres,provider-openai` and `mssql`; the changes are test-only gating and a doc link, with no runtime, API or persistence change (#814). [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01510-to-01511-lint-and-documentation-lanes)
 
-Also unreleased on main, before the breaking release:
+### workspace-2026.11.20.1
 
+Commit `ffd85c8075a7` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.20.1)
+
+Packages (changed in bold): **`graphql-orm` 0.186.0, `graphql-orm-macros` 0.186.0**; `graphql-orm-operation-catalog` 0.9.1; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.27.2; `graphql-orm-ai-tool-profiles` 0.26.1; `graphql-orm-ai` 0.150.2; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.16.8**.
+
+- **No action** — ORM/macros 0.186.0: the owned PostgreSQL test harness waits for TCP readiness before connecting. [Migration](../../MIGRATION.md#01850-to-01860-owned-postgresql-test-readiness)
 - **Action needed** — ORM/macros 0.185.0: if you compare generated SQL Server filtered-index DDL, update expected string literals to include the `N` prefix, even for ASCII values. [Migration](../../MIGRATION.md#01830-to-01850-sql-server-filtered-index-literals)
+- **No action** — router 0.16.8: the operations runbook records the startup hand-off and ownership rationale, and a few source comments are clearer; no behaviour, configuration or public API changes. [Migration](../../crates/graphql-orm-router/MIGRATION.md#0167-to-0168-operations-documentation)
 
 ### workspace-2026.11.19.2
 
