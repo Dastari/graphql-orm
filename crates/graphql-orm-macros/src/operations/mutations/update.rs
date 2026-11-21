@@ -1,3 +1,5 @@
+use crate::dependent_deletes::Boundary;
+
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -23,6 +25,7 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
     pub(in crate::operations) rls_request_guard: &'a TokenStream,
     pub(in crate::operations) update_scope_enforcement: &'a TokenStream,
+    pub(in crate::operations) dependent_deletes: bool,
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
@@ -76,6 +79,7 @@ pub(in crate::operations) fn update(
         resolver_auth_mode,
         rls_request_guard,
         update_scope_enforcement,
+        dependent_deletes,
         backend_marker,
         entity_name_lit,
         struct_name,
@@ -103,6 +107,14 @@ pub(in crate::operations) fn update(
         notify_bulk_updated,
         generates_public_update,
     } = input;
+    let transaction_start = Boundary::TransactionStart.emit(dependent_deletes);
+    let transaction_end = Boundary::TransactionEnd.emit(dependent_deletes);
+    let authority_boundary = Boundary::Authority.emit(dependent_deletes);
+    let write_boundary = Boundary::BeforeWrite.emit(dependent_deletes);
+    let after_transform = Boundary::AfterTransform.emit(dependent_deletes);
+    let field_checks_start = Boundary::FieldChecksStart.emit(dependent_deletes);
+    let field_checks_end = Boundary::FieldChecksEnd.emit(dependent_deletes);
+
     // A GraphQL input object must declare at least one field, so the update
     // input and the roots that accept it exist only with a public member.
     let graphql_update_input_definition = if generates_public_update {
@@ -169,11 +181,13 @@ pub(in crate::operations) fn update(
                     let __gom_client_input = &input;
                     #(#update_client_supplied)*
                 }
+                #transaction_start
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                #transaction_end
                 let current_entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
                     db,
                     ::std::option::Option::Some(ctx),
@@ -211,6 +225,7 @@ pub(in crate::operations) fn update(
                         ::graphql_orm::graphql::errors::OrmErrorCode::Conflict,
                     ).into_graphql_error());
                 }
+                #authority_boundary
                 {
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::graphql_in_transaction(
                         ctx,
@@ -224,12 +239,16 @@ pub(in crate::operations) fn update(
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
 
+                #after_transform
+
                 // Build dynamic UPDATE SQL based on provided fields
                 let mut set_clauses: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
                 let mut changed_fields: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
                 let mut values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
 
+                #field_checks_start
                 #(#update_policy_checks)*
+                #field_checks_end
                 #update_assignments_graphql_call
 
                 // Update timestamp column when this entity defines one
@@ -263,6 +282,7 @@ pub(in crate::operations) fn update(
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
+                #write_boundary
                 let sql = #struct_name::__gom_rebind_sql(&::std::format!(
                     "UPDATE {} SET {} WHERE {} = ?{}",
                     #sql_table_name,

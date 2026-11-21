@@ -6,6 +6,91 @@ use crate::{
 use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::{spanned::Spanned, visit_mut::VisitMut};
 
+/// Explicit seams shared by the direct mutation and dependent-delete emitter.
+/// These marker statements are consumed here before the derive returns Rust.
+#[derive(Clone, Copy)]
+pub(crate) enum Boundary {
+    TransactionStart,
+    TransactionEnd,
+    BeforeWrite,
+    Authority,
+    AfterTransform,
+    FieldChecksStart,
+    FieldChecksEnd,
+}
+
+impl Boundary {
+    fn name(self) -> &'static str {
+        match self {
+            Self::TransactionStart => "transaction_start",
+            Self::TransactionEnd => "transaction_end",
+            Self::BeforeWrite => "before_write",
+            Self::Authority => "authority",
+            Self::AfterTransform => "after_transform",
+            Self::FieldChecksStart => "field_checks_start",
+            Self::FieldChecksEnd => "field_checks_end",
+        }
+    }
+
+    pub(crate) fn emit(self, enabled: bool) -> proc_macro2::TokenStream {
+        if !enabled {
+            return quote! {};
+        }
+        let name = format_ident!("{}", self.name());
+        quote! { __gom_dependent_write_boundary!(#name); }
+    }
+
+    fn position(self, block: &syn::Block, span: proc_macro2::Span) -> syn::Result<usize> {
+        let mut positions = block
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let boundary = boundary_statement(statement)?;
+                let name = boundary.mac.parse_body::<syn::Ident>().ok()?;
+                (name == self.name()).then_some(index)
+            });
+        match (positions.next(), positions.next()) {
+            (Some(index), None) => Ok(index),
+            _ => Err(syn::Error::new(
+                span,
+                format!(
+                    "expected one generated dependent-delete boundary: {}",
+                    self.name()
+                ),
+            )),
+        }
+    }
+}
+
+fn boundary_statement(statement: &syn::Stmt) -> Option<&syn::StmtMacro> {
+    match statement {
+        syn::Stmt::Macro(marker) if marker.mac.path.is_ident("__gom_dependent_write_boundary") => {
+            Some(marker)
+        }
+        _ => None,
+    }
+}
+
+fn transaction_range(
+    block: &syn::Block,
+    span: proc_macro2::Span,
+) -> syn::Result<std::ops::RangeInclusive<usize>> {
+    let start = Boundary::TransactionStart.position(block, span)?;
+    let end = Boundary::TransactionEnd.position(block, span)?;
+    if start >= end {
+        return Err(syn::Error::new(
+            span,
+            "generated transaction boundaries are out of order",
+        ));
+    }
+    Ok(start..=end)
+}
+
+fn strip_boundaries(statements: &mut Vec<syn::Stmt>) {
+    statements.retain(|statement| boundary_statement(statement).is_none());
+}
+
 pub(crate) fn generate(
     input: &syn::DeriveInput,
     output: proc_macro2::TokenStream,
@@ -193,7 +278,8 @@ pub(crate) fn generate(
         ExplicitAssurance(operation_name).visit_block_mut(&mut body);
         // Both paths share the same generated checks, transforms and hooks. Only
         // transaction ownership and postcommit dispatch belong to the caller.
-        body.stmts.retain(|stmt| !matches!(stmt,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="hook_ctx")));
+        let transaction = transaction_range(&body, input.span())?;
+        body.stmts.drain(transaction);
         body.stmts.retain(|s| !matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Type(t) if t.pat.to_token_stream().to_string()=="__gom_expected_version")));
         struct Clean {
             handler: Option<syn::Path>,
@@ -289,8 +375,9 @@ pub(crate) fn generate(
         for notification in &mut notifications {
             resolve.visit_stmt_mut(notification);
         }
-        let split=body.stmts.iter().position(|s|matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="sql"))).ok_or_else(||error("missing generated write boundary"))?;
-        let suffix = body.stmts.split_off(split);
+        let split = Boundary::BeforeWrite.position(&body, input.span())?;
+        let mut suffix = body.stmts.split_off(split);
+        strip_boundaries(&mut suffix);
         // Retain direct false/not-found results separately from GraphQL errors.
         // The caller preserves root results and sanitizes dependent rejections.
         struct CaptureRejections(syn::Type);
@@ -321,30 +408,27 @@ pub(crate) fn generate(
         // Prepare all grants before writes, then recheck the same direct
         // GraphQL authority immediately before SQL: earlier dependent hooks may
         // revoke a later grant. Input transforms and mutation hooks run once.
-        let auth_end=body.stmts.iter().position(|stmt| {
-            if action=="update" {stmt.to_token_stream().to_string().contains("run_before_update_with_context")}
-            else {matches!(stmt,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="before_state"))}
-        }).ok_or_else(||error("missing direct GraphQL authority boundary"))?;
+        let auth_end = Boundary::Authority.position(&body, input.span())?;
         let reauthorize = body.stmts[..auth_end].to_vec();
         let reauthorize_fields = if action == "update" {
-            body.stmts
-                .iter()
-                .filter(|stmt| {
-                    stmt.to_token_stream()
-                        .to_string()
-                        .contains("__gom_field_write_allowed")
-                })
-                .cloned()
-                .collect::<Vec<_>>()
+            let after_transform = Boundary::AfterTransform.position(&body, input.span())?;
+            let start = Boundary::FieldChecksStart.position(&body, input.span())?;
+            let end = Boundary::FieldChecksEnd.position(&body, input.span())?;
+            if !(auth_end < after_transform && after_transform < start && start < end) {
+                return Err(error(
+                    "generated dependent-update boundaries are out of order",
+                ));
+            }
+            let fields = body.stmts[start + 1..end].to_vec();
+            body.stmts.insert(
+                after_transform + 1,
+                syn::parse_quote! {let __gom_authorized_input=input.clone();},
+            );
+            fields
         } else {
             Vec::new()
         };
-        if action == "update" {
-            body.stmts.insert(
-                auth_end + 1,
-                syn::parse_quote! {let __gom_authorized_input=input.clone();},
-            );
-        }
+        strip_boundaries(&mut body.stmts);
         let prepared = format_ident!("__Gom{}Prepared{}", name, action);
         let prep = format_ident!("__gom_prepare_graphql_{}", action);
         prep_names.push(prep.clone());
@@ -424,13 +508,19 @@ pub(crate) fn generate(
         if action == "delete" {
             let root = outcome_body_mut(&mut method.block)
                 .ok_or_else(|| error("missing generated outcome boundary"))?;
-            let boundary=root.stmts.iter().position(|s|matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="hook_ctx"))).ok_or_else(||error("missing direct transaction boundary"))?;
-            let end = root.stmts.iter().position(|s| matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="before_state"))).ok_or_else(||error("missing root authorization boundary"))?;
+            let transaction = transaction_range(root, input.span())?;
+            let end = Boundary::Authority.position(root, input.span())?;
+            if *transaction.end() >= end {
+                return Err(error(
+                    "generated dependent-delete boundaries are out of order",
+                ));
+            }
             let mut admission = syn::Block {
                 brace_token: Default::default(),
                 stmts: root.stmts[..end].to_vec(),
             };
-            admission.stmts.remove(boundary);
+            admission.stmts.drain(transaction);
+            strip_boundaries(&mut admission.stmts);
             struct UnlockedAdmission;
             impl VisitMut for UnlockedAdmission {
                 fn visit_expr_method_call_mut(&mut self, call: &mut syn::ExprMethodCall) {
@@ -452,6 +542,10 @@ pub(crate) fn generate(
                 let __gom_root_rejection=registry.delete::<#name>(ctx,#name::__gom_key_values(&id).remove(0),__gom_expected_version).await?;
                 Ok(::std::default::Default::default())
             }};
+        } else {
+            let root = outcome_body_mut(&mut method.block)
+                .ok_or_else(|| error("missing generated outcome boundary"))?;
+            strip_boundaries(&mut root.stmts);
         }
     }
     // The old bulk route must not bypass dependent authorization or limits.
@@ -569,4 +663,44 @@ fn outcome_body_mut(block: &mut syn::Block) -> Option<&mut syn::Block> {
         return None;
     };
     Some(&mut inner.block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_seam_is_independent_of_binding_names() {
+        let start = Boundary::TransactionStart.emit(true);
+        let end = Boundary::TransactionEnd.emit(true);
+        let mut body = syn::parse_quote! {{
+            before_transaction();
+            #start
+            let renamed = begin_transaction();
+            #end
+            after_transaction();
+        }};
+        let transaction = transaction_range(&body, proc_macro2::Span::call_site()).unwrap();
+        body.stmts.drain(transaction);
+        assert_eq!(
+            body.to_token_stream().to_string(),
+            quote!({
+                before_transaction();
+                after_transaction();
+            })
+            .to_string(),
+        );
+    }
+
+    #[test]
+    fn duplicate_and_inverted_transaction_seams_are_rejected() {
+        let start = Boundary::TransactionStart.emit(true);
+        let end = Boundary::TransactionEnd.emit(true);
+        for body in [
+            syn::parse_quote! {{ #start #start #end }},
+            syn::parse_quote! {{ #end #start }},
+        ] {
+            assert!(transaction_range(&body, proc_macro2::Span::call_site()).is_err());
+        }
+    }
 }

@@ -8147,6 +8147,7 @@ fn generate_graphql_operations_unfiltered(
 
     let (graphql_update_input_definition, update_graphql_method, update_many_graphql_method) =
         mutations::update::update(mutations::update::UpdateInput {
+            dependent_deletes: entity_meta.dependent_deletes,
             update_input_str: &update_input_str,
             field_case_rule,
             graphql_update_input: &graphql_update_input,
@@ -8231,6 +8232,7 @@ fn generate_graphql_operations_unfiltered(
         }
     });
     let delete_graphql_method = mutations::delete::single(mutations::delete::SingleInput {
+        dependent_deletes: entity_meta.dependent_deletes,
         delete_operation_description: &delete_operation_description,
         delete_mutation_name: &delete_mutation_name,
         delete_requires_scopes: &delete_requires_scopes,

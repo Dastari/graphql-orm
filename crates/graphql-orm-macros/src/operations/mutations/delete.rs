@@ -1,3 +1,5 @@
+use crate::dependent_deletes::Boundary;
+
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -16,6 +18,7 @@ pub(in crate::operations) struct SingleInput<'a> {
     pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
     pub(in crate::operations) rls_request_guard: &'a TokenStream,
     pub(in crate::operations) delete_scope_enforcement: &'a TokenStream,
+    pub(in crate::operations) dependent_deletes: bool,
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
@@ -43,6 +46,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
         resolver_auth_mode,
         rls_request_guard,
         delete_scope_enforcement,
+        dependent_deletes,
         backend_marker,
         entity_name_lit,
         struct_name,
@@ -53,6 +57,11 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
         sql_table_name,
         notify_on_deleted,
     } = input;
+    let transaction_start = Boundary::TransactionStart.emit(dependent_deletes);
+    let transaction_end = Boundary::TransactionEnd.emit(dependent_deletes);
+    let authority_boundary = Boundary::Authority.emit(dependent_deletes);
+    let write_boundary = Boundary::BeforeWrite.emit(dependent_deletes);
+
     quote! {
             #[doc = #delete_operation_description]
             #[graphql(name = #delete_mutation_name, #delete_requires_scopes #authenticated_directive)]
@@ -89,11 +98,13 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
+                #transaction_start
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                #transaction_end
 
                 // Fetch entity before deletion for notification purposes
                 let entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
@@ -133,6 +144,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                         ::graphql_orm::graphql::errors::OrmErrorCode::Conflict,
                     ).into_graphql_error());
                 }
+                #authority_boundary
                 let before_state = #struct_name::__gom_capture_entity_state(&entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.run_mutation_hook(
@@ -150,6 +162,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
+                #write_boundary
                 let sql = #struct_name::__gom_rebind_sql(
                     &::std::format!(
                         "DELETE FROM {} WHERE {} = ?{}",
