@@ -71,7 +71,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         mutation_output_release,
         generates_public_upsert,
     } = input;
-    let upsert_graphql_method = if generates_public_upsert {
+    if generates_public_upsert {
         quote! {
             #[doc = #upsert_operation_description]
             #[graphql(name = #upsert_mutation_name, #upsert_requires_scopes #authenticated_directive)]
@@ -249,6 +249,5 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         }
     } else {
         quote! {}
-    };
-    upsert_graphql_method
+    }
 }
