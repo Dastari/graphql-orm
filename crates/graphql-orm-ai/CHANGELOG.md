@@ -20,8 +20,10 @@ supersedes: []
   resolved `turn/start` write with a freshness bound of up to 60 seconds.
   Stale or oversized resolutions fall back to markers. An incomplete resolved
   write poisons the process writer and triggers a forced tree kill.
-- Tool-free turns accept entity-reference blocks. The protocol actor exposes
-  only metadata from user-message echoes. No data migration is needed.
+- Tool-free turns accept entity-reference blocks. The protocol actor
+  allowlists lifecycle metadata in thread and turn snapshots and user-message
+  echoes. This excludes retained thread previews and display names. No data
+  migration is needed.
 
 ## Unreleased - 0.152.0
 

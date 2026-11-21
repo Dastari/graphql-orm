@@ -320,9 +320,12 @@ See also [What the crate cannot recall](#what-the-crate-cannot-recall).
 `AiCodexAppServerProtocolActor::write_turn` and await it inline. Use the same
 `AiCodexAppServerWriter` for every outbound operation on that process.
 `AiCodexAppServerTurnInput` is cloneable and contains the unavailable markers.
-The actor projects echoed `userMessage` items to metadata before returning
-them. Both tool-free and dynamic-tool turns accept entity-reference blocks
-under their existing admission and lifecycle checks.
+The actor returns metadata for echoed `userMessage` items and for thread and
+turn snapshots. Thread previews, display names, and historical message
+content stay inside the protocol boundary on resume. Live assistant text
+continues through the message lifecycle and delta events. Both tool-free and
+dynamic-tool turns accept entity-reference blocks under their existing
+admission and lifecycle checks.
 
 ### Dispatch paths that send the marker
 

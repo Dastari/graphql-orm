@@ -3801,7 +3801,7 @@ pub enum AiCodexAppServerInbound {
         id: u64,
         /// Closed client method name associated with the response ID.
         method: &'static str,
-        /// Bounded object result after envelope validation.
+        /// Allowlisted response fields after envelope validation.
         result: Value,
     },
     /// One bounded state-index page was validated and discarded; the actor is
@@ -3825,7 +3825,7 @@ pub enum AiCodexAppServerInbound {
     Notification {
         /// Allowlisted notification method.
         method: String,
-        /// Bounded object parameters after notification validation.
+        /// Allowlisted parameters after notification validation.
         params: Value,
     },
     /// Content-free notice that app-server reported remote control disabled
@@ -5026,11 +5026,24 @@ impl AiCodexAppServerProtocolActor {
             return Err(ProviderError::Rejected);
         }
         input.authorize_tool_source_delivery().await?;
+        let resolved = match resolved {
+            Some(resolved) => {
+                let mut scope = scope.ok_or(ProviderError::Rejected)?;
+                let process = scope.process.upgrade().ok_or(ProviderError::Rejected)?;
+                if !matches!(
+                    scope.ended.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ) || process.kill_requested.load(Ordering::Acquire)
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                Some((resolved, scope, process))
+            }
+            None => None,
+        };
         let id = self.next_id;
         let marker = self.start_turn(thread_id, &input)?;
-        if let Some(resolved) = resolved {
-            let mut scope = scope.ok_or(ProviderError::Rejected)?;
-            let process = scope.process.upgrade().ok_or(ProviderError::Rejected)?;
+        if let Some((resolved, mut scope, process)) = resolved {
             let mut text = input.input().to_vec();
             for (index, replacement) in resolved.replacements {
                 text[index] = replacement;
@@ -5043,13 +5056,6 @@ impl AiCodexAppServerProtocolActor {
                     self.encode(json!({"id": id, "method": "turn/start", "params": params}))
                         .ok()
                 });
-            if !matches!(
-                scope.ended.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ) || process.kill_requested.load(Ordering::Acquire)
-            {
-                return Err(ProviderError::Rejected);
-            }
             if let Some(frame) = frame {
                 match writer
                     .write_resolved_frame(&process, resolved.deadline, &mut scope.ended, &frame)
@@ -5254,28 +5260,28 @@ impl AiCodexAppServerProtocolActor {
             if object.contains_key("error") {
                 return Err(ProviderError::Rejected);
             }
-            let mut result = object
+            let result = object
                 .get("result")
                 .filter(|result| result.is_object())
-                .cloned()
                 .ok_or(ProviderError::Rejected)?;
-            if let Some(inbound) = self.accept_correlated_response(method, &result)? {
+            if let Some(inbound) = self.accept_correlated_response(method, result)? {
                 return Ok(inbound);
             }
+            let result = match method {
+                ClientMethod::ThreadStart | ClientMethod::ThreadResume => {
+                    project_thread_snapshot(result)
+                }
+                ClientMethod::TurnStart => json!({"turn": project_turn_snapshot(&result["turn"])}),
+                ClientMethod::Initialize
+                | ClientMethod::ThreadDelete
+                | ClientMethod::TurnInterrupt => json!({}),
+                // The state-index response always takes the typed path above.
+                ClientMethod::ThreadList => return Err(ProviderError::Rejected),
+            };
             return Ok(AiCodexAppServerInbound::Response {
                 id,
                 method: client_method_name(method),
-                result: {
-                    if matches!(
-                        method,
-                        ClientMethod::ThreadStart
-                            | ClientMethod::ThreadResume
-                            | ClientMethod::TurnStart
-                    ) {
-                        project_user_messages(&mut result);
-                    }
-                    result
-                },
+                result,
             });
         }
         let notification: CodexAppServerNotificationEnvelope =
@@ -5297,7 +5303,7 @@ impl AiCodexAppServerProtocolActor {
         let method = Some(notification.method.as_str())
             .filter(|method| allowed_notification(method))
             .ok_or(ProviderError::Rejected)?;
-        let mut params = notification.params;
+        let params = notification.params;
         if method == THREAD_TOKEN_USAGE_UPDATED && self.active_turn_id.is_none() {
             return self.accept_retained_usage_snapshot(&params);
         }
@@ -5372,24 +5378,23 @@ impl AiCodexAppServerProtocolActor {
             self.completed_items.clear();
             self.accepted_item_lifecycle_starts = 0;
         }
-        if matches!(method, "item/started" | "item/completed")
-            && params.pointer("/item/type").and_then(Value::as_str) == Some("userMessage")
-        {
-            let timestamp = if method == "item/started" {
-                "startedAtMs"
-            } else {
-                "completedAtMs"
-            };
-            params = json!({
+        let params = match method {
+            "thread/started" => project_thread_snapshot(&params),
+            "turn/started" | "turn/completed" => json!({
+                "threadId": params["threadId"],
+                "turn": project_turn_snapshot(&params["turn"]),
+            }),
+            "item/started" | "item/completed" => project_message_lifecycle(method, &params),
+            "item/agentMessage/delta" => json!({
                 "threadId": params["threadId"],
                 "turnId": params["turnId"],
-                (timestamp): params[timestamp],
-                "item": {"type": "userMessage", "id": params["item"]["id"]},
-            });
-        }
-        if matches!(method, "thread/started" | "turn/started" | "turn/completed") {
-            project_user_messages(&mut params);
-        }
+                "itemId": params["itemId"],
+                "delta": params["delta"],
+            }),
+            // Correlation already checked the closed numeric usage shape.
+            THREAD_TOKEN_USAGE_UPDATED => params,
+            _ => return Err(ProviderError::Rejected),
+        };
         Ok(AiCodexAppServerInbound::Notification {
             method: method.to_owned(),
             params,
@@ -6925,28 +6930,79 @@ fn validate_item_timing(
     }
 }
 
-// Turn and thread snapshots can also contain protocol userMessage items.
-fn project_user_messages(params: &mut Value) {
-    fn project_turn(turn: &mut Value) {
-        if let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) {
-            for item in items {
-                if item.get("type").and_then(Value::as_str) == Some("userMessage") {
-                    *item = json!({"type": "userMessage", "id": item["id"].as_str()});
-                }
-            }
-        }
+// Snapshots can replay older turns. Carry only identifiers and closed lifecycle
+// metadata, including for nested items. Live assistant output has its own path.
+fn project_thread_snapshot(payload: &Value) -> Value {
+    let thread = &payload["thread"];
+    let mut projected = json!({"thread": {"id": thread["id"]}});
+    if let Some(turns) = thread.get("turns").and_then(Value::as_array) {
+        projected["thread"]["turns"] = Value::Array(
+            turns
+                .iter()
+                .filter(|turn| direct_reference(turn, "id").is_ok())
+                .map(project_turn_snapshot)
+                .collect(),
+        );
     }
-    if let Some(turn) = params.get_mut("turn") {
-        project_turn(turn);
-    }
-    if let Some(turns) = params
-        .pointer_mut("/thread/turns")
-        .and_then(Value::as_array_mut)
+    projected
+}
+
+fn project_turn_snapshot(turn: &Value) -> Value {
+    let mut projected = json!({"id": turn["id"]});
+    if let Some(status @ ("inProgress" | "completed" | "interrupted" | "failed")) =
+        turn.get("status").and_then(Value::as_str)
     {
-        for turn in turns {
-            project_turn(turn);
+        projected["status"] = json!(status);
+    }
+    for key in ["startedAtMs", "completedAtMs", "durationMs"] {
+        if let Some(value) = turn.get(key).and_then(Value::as_i64) {
+            projected[key] = json!(value);
         }
     }
+    if let Some(items) = turn.get("items").and_then(Value::as_array) {
+        projected["items"] = Value::Array(items.iter().filter_map(project_snapshot_item).collect());
+    }
+    projected
+}
+
+fn project_snapshot_item(item: &Value) -> Option<Value> {
+    let id = direct_reference(item, "id").ok()?;
+    let kind = item.get("type")?.as_str()?;
+    matches!(
+        kind,
+        "userMessage" | "agentMessage" | "reasoning" | "dynamicToolCall" | "webSearch" | "sleep"
+    )
+    .then(|| json!({"id": id, "type": kind}))
+}
+
+fn project_message_lifecycle(method: &str, params: &Value) -> Value {
+    let timestamp = if method == "item/started" {
+        "startedAtMs"
+    } else {
+        "completedAtMs"
+    };
+    let item = &params["item"];
+    let mut projected_item = json!({"id": item["id"], "type": item["type"]});
+    if item["type"] == "agentMessage" {
+        if let Some(text) = item
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| text.len() <= MAXIMUM_TEXT_BYTES)
+        {
+            projected_item["text"] = json!(text);
+        }
+        if let Some(phase @ ("commentary" | "final_answer")) =
+            item.get("phase").and_then(Value::as_str)
+        {
+            projected_item["phase"] = json!(phase);
+        }
+    }
+    json!({
+        "threadId": params["threadId"],
+        "turnId": params["turnId"],
+        (timestamp): params[timestamp],
+        "item": projected_item,
+    })
 }
 
 fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), ProviderError> {
@@ -16861,24 +16917,16 @@ pub(crate) mod tests {
             })
             .await;
         assert!(matches!(result, Err(ProviderError::Rejected)));
-        let mut marker_actor = initialized_protocol_actor();
-        marker_actor.start_fresh_thread(&marker).unwrap();
-        marker_actor
-            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
-            .unwrap();
-        marker_actor
-            .accept(&thread_started_notification("thread-1"))
-            .unwrap();
-        let frame = marker_actor.start_turn("thread-1", &marker).unwrap();
-        let encoded = std::str::from_utf8(&frame).unwrap();
-        assert!(encoded.contains("unavailable-marker"));
-        assert!(!encoded.contains("test resolved value"));
-
         let writer = AiCodexAppServerWriter::new(tokio::io::sink());
         assert!(matches!(
             actor.write_turn("thread-1", saved.unwrap(), &writer).await,
             Err(ProviderError::Rejected)
         ));
+        let frame = actor.start_turn("thread-1", &marker).unwrap();
+        let encoded = std::str::from_utf8(&frame).unwrap();
+        assert!(encoded.contains("unavailable-marker"));
+        assert!(!encoded.contains("test resolved value"));
+        assert_eq!(serde_json::from_slice::<Value>(&frame).unwrap()["id"], 3);
         assert!(!writer.state.lock().await.poisoned);
         assert_eq!(counters.kills.load(Ordering::SeqCst), 0);
     }
@@ -16903,6 +16951,42 @@ pub(crate) mod tests {
         ));
         assert!(!writer.state.lock().await.poisoned);
         assert_eq!(counters.kills.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn codex_projects_control_responses_and_preserves_live_assistant_output() {
+        let mut initializing = AiCodexAppServerProtocolActor::new(64 * 1024).unwrap();
+        initializing.initialize("test", "Test", "1.0.0").unwrap();
+        let initialized = initializing
+            .accept(br#"{"id":1,"result":{"userAgent":"test","extra":"prompt echo"}}"#)
+            .unwrap();
+        assert!(
+            matches!(initialized, AiCodexAppServerInbound::Response { result, .. }
+            if result == json!({}))
+        );
+
+        let mut actor = active_protocol_actor();
+        let started = lifecycle_notification(
+            "item/started",
+            json!({"threadId": "thread-1", "turnId": "turn-1", "startedAtMs": 1,
+                "item": {"id": "assistant-1", "type": "agentMessage", "text": "",
+                         "extra": "prompt echo"}, "extra": "prompt echo"}),
+        );
+        assert!(
+            matches!(actor.accept(&started).unwrap(), AiCodexAppServerInbound::Notification { params, .. }
+            if params == json!({"threadId": "thread-1", "turnId": "turn-1", "startedAtMs": 1,
+                "item": {"id": "assistant-1", "type": "agentMessage", "text": ""}}))
+        );
+        let delta = lifecycle_notification(
+            "item/agentMessage/delta",
+            json!({"threadId": "thread-1", "turnId": "turn-1", "itemId": "assistant-1",
+                "delta": "assistant answer", "extra": "prompt echo"}),
+        );
+        assert!(
+            matches!(actor.accept(&delta).unwrap(), AiCodexAppServerInbound::Notification { params, .. }
+            if params == json!({"threadId": "thread-1", "turnId": "turn-1", "itemId": "assistant-1",
+                "delta": "assistant answer"}))
+        );
     }
 
     #[test]

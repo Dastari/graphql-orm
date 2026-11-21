@@ -56,6 +56,12 @@ must discard bytes left buffered by a cancelled or failed write. A clone
 of `dispatch.turn_input()` carries markers and can still be used with
 `start_turn` for host-owned readiness probes.
 
+Read retained thread and turn snapshots as lifecycle metadata. Thread
+snapshots expose the thread ID and projected turns. Turn snapshots expose
+IDs, status, timing, and item identities. Thread previews, display names,
+historical message content, and raw turn errors are discarded. Use the
+live assistant message lifecycle and delta events for assistant text.
+
 Tool-free turns accept entity-reference blocks. Resolved delivery requires
 `AiCodexAppServerRegistration::with_resolved_entity_reference_delivery`.
 Review the thread's retention before enabling it. A later revocation

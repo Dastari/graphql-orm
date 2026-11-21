@@ -123,13 +123,37 @@ impl Process {
         actor: &mut AiCodexAppServerProtocolActor,
         frame: Vec<u8>,
     ) -> Result<(), ProviderError> {
-        let id = serde_json::from_slice::<Value>(&frame).unwrap()["id"].clone();
+        let request: Value = serde_json::from_slice(&frame).unwrap();
         self.writer.write_frame(&frame).await?;
+        let mut thread = json!({"id": THREAD});
+        let mut projected = thread.clone();
+        if request["method"] == "thread/resume" {
+            let first_input = self.log.turns().into_iter().next().unwrap();
+            assert_resolved(&first_input);
+            thread["preview"] = json!(first_input);
+            thread["name"] = json!(first_input);
+            thread["futureContentField"] = json!(first_input);
+            thread["turns"] = json!([{
+                "id": TURN, "status": "completed", "error": {"message": first_input},
+                "items": [{"id": "user-1", "type": "userMessage", "content": first_input}],
+            }]);
+            projected["turns"] = json!([{
+                "id": TURN, "status": "completed",
+                "items": [{"id": "user-1", "type": "userMessage"}],
+            }]);
+        }
         for frame in [
-            json!({"id": id, "result": {"thread": {"id": THREAD}}}),
-            json!({"method": "thread/started", "params": {"thread": {"id": THREAD}}}),
+            json!({"id": request["id"], "result": {"thread": thread}}),
+            json!({"method": "thread/started", "params": {"thread": thread}}),
         ] {
-            actor.accept(frame.to_string().as_bytes())?;
+            let inbound = actor.accept(frame.to_string().as_bytes())?;
+            let payload = match inbound {
+                crate::providers::AiCodexAppServerInbound::Response { result, .. } => result,
+                crate::providers::AiCodexAppServerInbound::Notification { params, .. } => params,
+                _ => panic!("expected a thread lifecycle frame"),
+            };
+            assert_handles_only("host-facing thread snapshot", &payload.to_string());
+            assert_eq!(payload, json!({"thread": projected}));
         }
         Ok(())
     }
@@ -413,6 +437,16 @@ async fn codex_continues_a_loaded_thread_with_fresh_resolution() {
     assert_resolved(&turns[0]);
     assert_resolved(&turns[1]);
     assert_unavailable(&turns[2]);
+    {
+        let frames = codex.log.frames.lock().unwrap();
+        assert_eq!(format!("{frames:?}").matches("owner_note").count(), 2);
+        for (_, frame) in frames
+            .iter()
+            .filter(|(_, frame)| frame["method"] != "turn/start")
+        {
+            assert_handles_only("non-turn frame", &frame.to_string());
+        }
+    }
     assert_handles_only("the continuation result", &format!("{result:?}"));
     assert_handles_only(
         "persisted state",
