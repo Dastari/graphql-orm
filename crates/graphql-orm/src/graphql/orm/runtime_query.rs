@@ -228,6 +228,8 @@ pub struct RuntimeSearchRequest {
     remove_diacritics: bool,
     min_token_len: usize,
     key_column: String,
+    helper_key: String,
+    helper_score: String,
     /// Order results by relevance before the read's order terms.
     rank: bool,
 }
@@ -913,6 +915,19 @@ impl ValidatedRuntimeSchema {
             .iter()
             .find(|field| Some(&field.id) == definition.primary_key.first())
             .ok_or_else(invalid)?;
+        let helper_column = |base: &str| {
+            let mut name = base.to_owned();
+            let mut suffix = 0;
+            while definition
+                .fields
+                .iter()
+                .any(|field| field.physical_column == name)
+            {
+                suffix += 1;
+                name = format!("{base}_{suffix}");
+            }
+            name
+        };
         Ok(RuntimeSearchRequest {
             schema: self.fingerprint(),
             collection: collection.id().clone(),
@@ -921,6 +936,8 @@ impl ValidatedRuntimeSchema {
             remove_diacritics: search.remove_diacritics,
             min_token_len,
             key_column: key.physical_column.clone(),
+            helper_key: helper_column("__gom_search_key"),
+            helper_score: helper_column("__gom_search_score"),
             rank,
         })
     }
@@ -1697,8 +1714,24 @@ pub(crate) fn placeholder(
     }
 }
 
-pub(crate) fn ordered_column(backend: DatabaseBackend, field: &RuntimeFieldHandle) -> String {
+fn runtime_column(
+    backend: DatabaseBackend,
+    field: &RuntimeFieldHandle,
+    row: Option<&str>,
+) -> String {
     let column = backend.quote_identifier(field.physical_column());
+    match row {
+        Some(row) => format!("{row}.{column}"),
+        None => column,
+    }
+}
+
+fn ordered_column(
+    backend: DatabaseBackend,
+    field: &RuntimeFieldHandle,
+    row: Option<&str>,
+) -> String {
+    let column = runtime_column(backend, field, row);
     if field.value_kind() == RuntimeValueKind::String {
         match backend {
             DatabaseBackend::Postgres => format!("{column} COLLATE \"C\""),
@@ -1718,28 +1751,28 @@ fn render_expr(
     render_scoped(backend, expr, values, None, 0)
 }
 
-/// `outer` qualifies the enclosing row inside a relation subquery; the top level
-/// uses the source table name. Unqualified columns resolve to the innermost FROM.
+/// `row` names the current FROM item when it has an alias. At the root of an
+/// unaliased read, relation predicates correlate with the source table name.
 fn render_scoped(
     backend: DatabaseBackend,
     expr: &PredicateExpr,
     values: &mut Vec<SqlValue>,
-    outer: Option<&str>,
+    row: Option<&str>,
     level: usize,
 ) -> String {
     let render_expr =
         |backend: DatabaseBackend, expr: &PredicateExpr, values: &mut Vec<SqlValue>| {
-            render_scoped(backend, expr, values, outer, level)
+            render_scoped(backend, expr, values, row, level)
         };
     match expr {
         PredicateExpr::Constant(value) => if *value { "1 = 1" } else { "1 = 0" }.to_string(),
         PredicateExpr::IsNull { field, is_null } => format!(
             "{} IS {}NULL",
-            backend.quote_identifier(field.physical_column()),
+            runtime_column(backend, field, row),
             if *is_null { "" } else { "NOT " }
         ),
         PredicateExpr::Compare { field, op, value } => {
-            let column = ordered_column(backend, field);
+            let column = ordered_column(backend, field, row);
             let bind = placeholder(backend, values.len() + 1, field.value_kind());
             values.push(value_bind(backend, value).expect("validated non-null literal"));
             use RuntimeScalarOperator as O;
@@ -1783,7 +1816,7 @@ fn render_scoped(
             op,
             values: operands,
         } => {
-            let column = ordered_column(backend, field);
+            let column = ordered_column(backend, field, row);
             let mut binds = Vec::new();
             for value in operands {
                 binds.push(placeholder(backend, values.len() + 1, field.value_kind()));
@@ -1800,7 +1833,7 @@ fn render_scoped(
             )
         }
         PredicateExpr::Between { field, low, high } => {
-            let column = ordered_column(backend, field);
+            let column = ordered_column(backend, field, row);
             let low_bind = placeholder(backend, values.len() + 1, field.value_kind());
             values.push(value_bind(backend, low).expect("validated"));
             let high_bind = placeholder(backend, values.len() + 1, field.value_kind());
@@ -1830,7 +1863,7 @@ fn render_scoped(
             grant,
             filter,
         } => {
-            let outer = outer.map_or_else(
+            let outer = row.map_or_else(
                 || backend.quote_identifier(relation.source().physical_table()),
                 str::to_owned,
             );
@@ -1873,18 +1906,26 @@ pub(crate) fn cursor_after_sql(
     order: &[RuntimeEffectiveOrderTerm],
     cursor: &[RuntimeValue],
     values: &mut Vec<SqlValue>,
+    row: Option<&str>,
 ) -> String {
     let mut branches = Vec::new();
     for index in 0..order.len() {
         let mut terms = Vec::new();
         for prior in 0..index {
-            terms.push(cursor_equal(backend, &order[prior], &cursor[prior], values));
+            terms.push(cursor_equal(
+                backend,
+                &order[prior],
+                &cursor[prior],
+                values,
+                row,
+            ));
         }
         terms.push(cursor_compare(
             backend,
             &order[index],
             &cursor[index],
             values,
+            row,
         ));
         branches.push(format!("({})", terms.join(" AND ")));
     }
@@ -1919,11 +1960,12 @@ pub(crate) fn effective_terms(
 pub(crate) fn render_order_terms(
     backend: DatabaseBackend,
     terms: &[RuntimeEffectiveOrderTerm],
+    row: Option<&str>,
 ) -> String {
     terms
         .iter()
         .flat_map(|term| {
-            let column = ordered_column(backend, &term.field);
+            let column = ordered_column(backend, &term.field, row);
             let null_rank = if term.nulls == RuntimeNullPlacement::First {
                 0
             } else {
@@ -1951,8 +1993,9 @@ fn cursor_equal(
     term: &RuntimeEffectiveOrderTerm,
     value: &RuntimeValue,
     values: &mut Vec<SqlValue>,
+    row: Option<&str>,
 ) -> String {
-    let column = ordered_column(backend, &term.field);
+    let column = ordered_column(backend, &term.field, row);
     if matches!(value, RuntimeValue::Null) {
         format!("{column} IS NULL")
     } else {
@@ -1967,8 +2010,9 @@ fn cursor_compare(
     term: &RuntimeEffectiveOrderTerm,
     value: &RuntimeValue,
     values: &mut Vec<SqlValue>,
+    row: Option<&str>,
 ) -> String {
-    let column = ordered_column(backend, &term.field);
+    let column = ordered_column(backend, &term.field, row);
     match value {
         RuntimeValue::Null => match term.nulls {
             RuntimeNullPlacement::First => format!("{column} IS NOT NULL"),
@@ -1992,8 +2036,7 @@ fn cursor_compare(
 }
 
 const SEARCH_ALIAS: &str = "__gom_search";
-const SEARCH_KEY: &str = "__gom_search_key";
-pub(crate) const SEARCH_SCORE: &str = "__gom_search_score";
+const SEARCH_ROW: &str = "__gom_search_row";
 
 /// `JOIN (matching documents) AS __gom_search ON <key>` and its binds, for a
 /// read's table. The documents expose only their key and score, so no column
@@ -2004,6 +2047,8 @@ fn render_search_join(
     search: &RuntimeSearchRequest,
     values: &mut Vec<SqlValue>,
 ) -> String {
+    let key = &search.helper_key;
+    let score = &search.helper_score;
     let query = search.query_text();
     let input = crate::graphql::filters::SearchInput {
         query,
@@ -2022,7 +2067,7 @@ fn render_search_join(
             let bind = placeholder(backend, values.len() + 1, RuntimeValueKind::String);
             values.push(SqlValue::String(text));
             format!(
-                "SELECT entity_pk AS {SEARCH_KEY}, CAST(ts_rank_cd(document_vector, __gom_q) AS DOUBLE PRECISION) AS {SEARCH_SCORE} \
+                "SELECT entity_pk AS {key}, CAST(ts_rank_cd(document_vector, __gom_q) AS DOUBLE PRECISION) AS {score} \
                  FROM {docs}, {}('{}', {bind}) AS __gom_q WHERE document_vector @@ __gom_q",
                 super::search::postgres_tsquery_function(mode),
                 search.language.replace('\'', "''"),
@@ -2036,15 +2081,14 @@ fn render_search_join(
                 search.min_token_len,
             )));
             format!(
-                "SELECT entity_pk AS {SEARCH_KEY}, {} AS {SEARCH_SCORE} \
+                "SELECT entity_pk AS {key}, {} AS {score} \
                  FROM {fts} WHERE {fts} MATCH {bind}",
                 sqlite_isolated_score(&fts),
             )
         }
     };
     format!(
-        " JOIN ({documents}) AS {SEARCH_ALIAS} ON CAST({}.{} AS TEXT) = {SEARCH_ALIAS}.{SEARCH_KEY}",
-        backend.quote_identifier(table),
+        " JOIN ({documents}) AS {SEARCH_ALIAS} ON CAST({SEARCH_ROW}.{} AS TEXT) = {SEARCH_ALIAS}.{key}",
         backend.quote_identifier(&search.key_column),
     )
 }
@@ -2085,7 +2129,7 @@ fn render_min_score(
     let min_score = search.input.min_score?;
     let bind = placeholder(backend, values.len() + 1, RuntimeValueKind::Float);
     values.push(SqlValue::Float(min_score));
-    Some(format!("{SEARCH_ALIAS}.{SEARCH_SCORE} >= {bind}"))
+    Some(format!("{SEARCH_ALIAS}.{} >= {bind}", search.helper_score))
 }
 
 fn render_request(
@@ -2101,6 +2145,13 @@ fn render_request(
     let mut values = Vec::new();
     let mut predicates = Vec::new();
     let table = request.collection.physical_table();
+    let row = request.search.as_ref().map(|_| SEARCH_ROW);
+    let source = backend.quote_identifier(table);
+    let source = if let Some(row) = row {
+        format!("{source} AS {row}")
+    } else {
+        source
+    };
     // The join precedes the WHERE clause, so its binds come first.
     let join = request
         .search
@@ -2108,7 +2159,7 @@ fn render_request(
         .map(|search| render_search_join(backend, table, search, &mut values))
         .unwrap_or_default();
     if let Some(predicate) = &request.predicate {
-        predicates.push(render_expr(backend, &predicate.expr, &mut values));
+        predicates.push(render_scoped(backend, &predicate.expr, &mut values, row, 0));
     }
     if let Some(min_score) = request
         .search
@@ -2117,11 +2168,11 @@ fn render_request(
     {
         predicates.push(min_score);
     }
-    let rank = request.search.as_ref().is_some_and(|search| search.rank);
     let (size, cursor, backward) = match &request.page {
         RuntimePageRequest::First { size, after } => (*size, after, false),
         RuntimePageRequest::Last { size, before } => (*size, before, true),
     };
+    let effective = effective_terms(&request.order, backward);
     if let Some(cursor) = cursor {
         let (cursor_values, cursor_score) = decode_cursor(request, cursor)?;
         let filter_binds = request
@@ -2134,44 +2185,23 @@ fn render_request(
         {
             return Err(limit_error(request.collection.id()));
         }
-        let effective = if backward {
-            request
-                .order
-                .terms
-                .iter()
-                .map(|term| RuntimeEffectiveOrderTerm {
-                    field: term.field.clone(),
-                    direction: if term.direction == RuntimeOrderDirection::Asc {
-                        RuntimeOrderDirection::Desc
-                    } else {
-                        RuntimeOrderDirection::Asc
-                    },
-                    nulls: match term.nulls {
-                        RuntimeNullPlacement::First => RuntimeNullPlacement::Last,
-                        RuntimeNullPlacement::Last => RuntimeNullPlacement::First,
-                    },
-                })
-                .collect::<Vec<_>>()
-        } else {
-            request.order.terms.clone()
-        };
-        predicates.push(match (rank, cursor_score) {
+        predicates.push(match (request.search.as_ref(), cursor_score) {
             // Relevance leads the keyset: a strictly lower score (higher when
             // paging backwards), or the same score and the remaining order.
             // Binds follow their placeholders' order in the SQL text.
-            (true, Some(score)) => {
-                let score_column = format!("{SEARCH_ALIAS}.{SEARCH_SCORE}");
+            (Some(search), Some(score)) if search.rank => {
+                let score_column = format!("{SEARCH_ALIAS}.{}", search.helper_score);
                 let first = placeholder(backend, values.len() + 1, RuntimeValueKind::Float);
                 values.push(SqlValue::Float(score));
                 let second = placeholder(backend, values.len() + 1, RuntimeValueKind::Float);
                 values.push(SqlValue::Float(score));
-                let after = cursor_after_sql(backend, &effective, &cursor_values, &mut values);
+                let after = cursor_after_sql(backend, &effective, &cursor_values, &mut values, row);
                 let operator = if backward { ">" } else { "<" };
                 format!(
                     "({score_column} {operator} {first} OR ({score_column} = {second} AND {after}))"
                 )
             }
-            _ => cursor_after_sql(backend, &effective, &cursor_values, &mut values),
+            _ => cursor_after_sql(backend, &effective, &cursor_values, &mut values, row),
         });
     }
     if values.len() > request.limits.max_bind_parameters {
@@ -2181,71 +2211,30 @@ fn render_request(
         .decode_projection
         .fields()
         .iter()
-        .map(|field| backend.quote_identifier(field.physical_column()))
+        .map(|field| {
+            let column = backend.quote_identifier(field.physical_column());
+            match row {
+                Some(row) => format!("{row}.{column} AS {column}"),
+                None => column,
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
-    let score_column = if request.search.is_some() {
-        format!(", {SEARCH_ALIAS}.{SEARCH_SCORE} AS {SEARCH_SCORE}")
-    } else {
-        String::new()
-    };
-    let mut sql = format!(
-        "SELECT {columns}{score_column} FROM {}{join}",
-        backend.quote_identifier(table)
-    );
+    let score_column = request.search.as_ref().map_or_else(String::new, |search| {
+        let score = &search.helper_score;
+        format!(", {SEARCH_ALIAS}.{score} AS {score}")
+    });
+    let mut sql = format!("SELECT {columns}{score_column} FROM {source}{join}");
     if !predicates.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&predicates.join(" AND "));
     }
-    let effective = if backward {
-        request
-            .order
-            .terms
-            .iter()
-            .map(|term| RuntimeEffectiveOrderTerm {
-                field: term.field.clone(),
-                direction: if term.direction == RuntimeOrderDirection::Asc {
-                    RuntimeOrderDirection::Desc
-                } else {
-                    RuntimeOrderDirection::Asc
-                },
-                nulls: match term.nulls {
-                    RuntimeNullPlacement::First => RuntimeNullPlacement::Last,
-                    RuntimeNullPlacement::Last => RuntimeNullPlacement::First,
-                },
-            })
-            .collect::<Vec<_>>()
-    } else {
-        request.order.terms.clone()
-    };
-    let order_sql = effective
-        .iter()
-        .flat_map(|term| {
-            let column = ordered_column(backend, &term.field);
-            let null_rank = if term.nulls == RuntimeNullPlacement::First {
-                0
-            } else {
-                1
-            };
-            let direction = if term.direction == RuntimeOrderDirection::Asc {
-                "ASC"
-            } else {
-                "DESC"
-            };
-            vec![
-                format!(
-                    "CASE WHEN {column} IS NULL THEN {null_rank} ELSE {} END ASC",
-                    1 - null_rank
-                ),
-                format!("{column} {direction}"),
-            ]
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let order_sql = render_order_terms(backend, &effective, row);
     sql.push_str(" ORDER BY ");
-    if rank {
+    if let Some(search) = request.search.as_ref().filter(|search| search.rank) {
         sql.push_str(&format!(
-            "{SEARCH_ALIAS}.{SEARCH_SCORE} {}, ",
+            "{SEARCH_ALIAS}.{} {}, ",
+            search.helper_score,
             if backward { "ASC" } else { "DESC" }
         ));
     }
@@ -2259,13 +2248,18 @@ fn render_request(
             .map(|search| render_search_join(backend, table, search, &mut count_values))
             .unwrap_or_default();
         let mut count_sql = format!(
-            "SELECT COUNT(*) AS {} FROM {}{count_join}",
-            backend.quote_identifier("__graphql_orm_runtime_count"),
-            backend.quote_identifier(table)
+            "SELECT COUNT(*) AS {} FROM {source}{count_join}",
+            backend.quote_identifier("__graphql_orm_runtime_count")
         );
         let mut count_predicates = Vec::new();
         if let Some(predicate) = &request.predicate {
-            count_predicates.push(render_expr(backend, &predicate.expr, &mut count_values));
+            count_predicates.push(render_scoped(
+                backend,
+                &predicate.expr,
+                &mut count_values,
+                row,
+                0,
+            ));
         }
         if let Some(min_score) = request
             .search
@@ -2390,7 +2384,7 @@ where
                 let score = request
                     .search
                     .as_ref()
-                    .map(|_| B::try_get_f64(&row, SEARCH_SCORE))
+                    .map(|search| B::try_get_f64(&row, &search.helper_score))
                     .transpose()
                     .map_err(|error| {
                         RuntimeQueryError::new(RuntimeQueryErrorCode::Decode).source(error)
@@ -2585,6 +2579,8 @@ mod tests {
             remove_diacritics: false,
             min_token_len: 2,
             key_column: "id".into(),
+            helper_key: "__gom_search_key".into(),
+            helper_score: "__gom_search_score".into(),
             rank,
         };
         let legacy = |rank: bool| {

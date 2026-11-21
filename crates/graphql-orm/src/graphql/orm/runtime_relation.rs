@@ -1310,6 +1310,7 @@ fn render_relation_rows(
                 &terms,
                 &cursor_values,
                 &mut values,
+                None,
             ));
         }
         if values.len() > request.limits.max_bind_parameters {
@@ -1318,7 +1319,7 @@ fn render_relation_rows(
                     .for_relation(&request.relation),
             );
         }
-        let order = render_order_terms(backend, &terms);
+        let order = render_order_terms(backend, &terms, None);
         let branch_alias = backend.quote_identifier(&format!("__gorm_relation_{}", group.id));
         branches.push(format!(
             "SELECT * FROM (SELECT {columns}, CAST({} AS BIGINT) AS {group_alias}, \

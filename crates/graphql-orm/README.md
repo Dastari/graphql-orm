@@ -13,6 +13,8 @@ supersedes: []
 Version 0.193.0 preserves SQL Server driver diagnostics when decoding rows
 and centralizes the decision for a missing authorization policy provider.
 For handwritten SQL, bind a typed NULL that matches the destination column.
+Runtime search supports collection columns named like its internal search
+key and score.
 See the [migration guide](../../MIGRATION.md#01920-to-01930-database-binding-and-decoding).
 
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.

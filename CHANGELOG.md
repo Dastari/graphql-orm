@@ -21,6 +21,9 @@ for historical context.
   an error for out-of-range column indexes. Missing-policy decisions share
   one mode table. The documentation describes the typed NULL, legacy JSON
   and SQL Server identifier contracts.
+- **Fixed (#821):** runtime search qualifies collection columns and chooses
+  distinct helper names, so colliding physical column names work in search
+  projections, filters, ordering and cursor pagination.
 
 ## Unreleased - ORM/macros 0.192.0
 

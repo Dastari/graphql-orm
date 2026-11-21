@@ -17,6 +17,10 @@ supersedes: []
 as text. Legacy text-backed array fields still decode incompatible JSON
 as an empty list. Use explicit JSON storage for fallible decoding.
 
+**No action.** Runtime search accepts collection columns named
+`__gom_search_key` or `__gom_search_score`. Existing search cursors and
+indexes remain compatible.
+
 ## 0.191.0 to 0.192.0: propagated parent actions
 
 **No action.** Relations continue to use the source mutation's action by
