@@ -68,7 +68,7 @@ mod codex_app_server;
 #[cfg(all(test, feature = "provider-codex-app-server", feature = "sqlite"))]
 pub(crate) use codex_app_server::tests::canonical_dynamic_tool_catalog;
 
-#[cfg(all(test, feature = "provider-openai-core"))]
+#[cfg(all(test, feature = "sqlite", feature = "provider-openai-core"))]
 pub(crate) use mock::MockBackgroundRetrievalFailure;
 pub use mock::MockProvider;
 

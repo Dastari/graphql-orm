@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.151.0 to 0.152.0: opt-in entity references on local-process adapters
+## 0.151.1 to 0.152.0: opt-in entity references on local-process adapters
 
 The version is a placeholder for the next minor after the breaking release.
 No public signature changed, and there is no GraphQL SDL, persistent schema,
@@ -90,6 +90,13 @@ Not available:
   `stream_provider`, their dynamic-tool variants,
   `submit_provider_background`) are unchanged and send the marker
   permanently.
+## 0.151.0 to 0.151.1: lint and documentation lanes
+
+AI 0.151.0 to 0.151.1. **No action.** A test-only re-export and its dead-code
+allowances are compiled only with the `sqlite` feature, and one intra-doc link
+that did not resolve in SQL Server builds is plain text. No Rust API, GraphQL
+SDL, configuration, authorization, persistence or runtime change, and no data
+migration is needed.
 
 ## 0.150.2 to 0.151.0: breaking release
 

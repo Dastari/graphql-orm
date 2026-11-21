@@ -14,7 +14,7 @@ supersedes: []
 
 Opt-in entity references on the local-harness and Grok ACP adapters (#721).
 No GraphQL SDL, persistent schema or data migration change, and no AI schema
-module change. See the [migration guide](MIGRATION.md#01510-to-01520-opt-in-entity-references-on-local-process-adapters)
+module change. See the [migration guide](MIGRATION.md#01511-to-01520-opt-in-entity-references-on-local-process-adapters)
 and [entity references](docs/entity-references.md#adapters-for-a-local-process).
 
 - **Added (off by default):** `AiLocalHarnessRegistration::with_resolved_entity_reference_delivery` and `AiGrokAcpRegistration::with_resolved_entity_reference_delivery` opt one local provider registration in to receiving what an entity reference resolved to. Without the call nothing changes: the adapter sends the unavailable marker for every reference, including in a deployment that already has an `AiEntityReferenceRegistry`. The executor already resolved on these paths for the run's rehydrated principal at every dispatch; the adapter discarded the result, and still does unless opted in.
@@ -24,6 +24,9 @@ and [entity references](docs/entity-references.md#adapters-for-a-local-process).
 - **Behaviour:** a request is admitted on its all-marker form. If the resolved form would exceed a bound the adapter enforces (harness `maximum_request_bytes` and frame limit; Grok `maximum_input_bytes`, or 16 MiB for the complete escaped JSON-RPC frame), every reference of that request is sent as the marker, and the request is refused only if the all-marker form does not fit. `AiJsonLinesLocalHarnessDriver::stream`, called directly with a plain request, writes an entity-reference handle block as the marker.
 - **Unchanged:** the Codex app-server adapter sends the marker for every reference and has no opt-in. Its turn input is `Clone` and its protocol actor returns encoded frames to the host, so resolved delivery needs a consuming dispatch signature, a breaking change tracked in #828.
 - **Decision:** `AiRuntime::dispatch_provider`, `stream_provider`, their dynamic-tool variants and `submit_provider_background` keep their signatures and keep sending the marker, permanently. They take no principal, and references are resolved only for a principal the executor or the background-submission service has just rehydrated for the run.
+## Unreleased - 0.151.1
+
+- **Fixed (lint and documentation lanes, #814):** warnings-denied Clippy with `--no-default-features --features postgres,provider-openai` no longer fails on an unused test-only `MockBackgroundRetrievalFailure` re-export, which is now compiled only where its SQLite-only consumer exists, and Rustdoc with `--no-default-features --features mssql` no longer fails on an intra-doc link to `AiProviderCallExecutor`, which the SQL Server build does not provide. No runtime, API or persistence change.
 
 ## Unreleased - 0.151.0 (breaking release)
 
