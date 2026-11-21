@@ -15,8 +15,8 @@ use super::{
     AiCodexAppServerVersionReadiness,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use agql_auth::Clock;
@@ -26,16 +26,21 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 
+use crate::entity_references::{
+    ResolvedWrite, is_envelope, unavailable_reference_json, write_resolved_before,
+};
 use crate::{
     AiProvider, AiProviderCapabilitySessionBinding, AiProviderDispatchOutcome,
     AiProviderFailureCategory, AiProviderRunBinding, AiProviderRunCloseOutcome,
     AiProviderRunCloseReason, AiProviderRunInterruptOutcome, ModelBuiltinTool,
-    ModelContinuationMode, ModelInputBlock, ModelReasoningEffort, ModelReasoningEffortProfile,
-    ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition, ModelWebSearchDomainPolicy,
-    ProviderCapabilities, ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext,
+    ModelContinuationMode, ModelDispatchReferences, ModelInputBlock, ModelReasoningEffort,
+    ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition,
+    ModelWebSearchDomainPolicy, ProviderCapabilities, ProviderDynamicToolCall,
+    ProviderDynamicToolResponder, ProviderError, ProviderEventStream, ProviderKind,
+    ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -434,6 +439,7 @@ pub struct AiCodexAppServerRegistration {
     bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
     reasoning_effort_profile: Option<ModelReasoningEffortProfile>,
     guarded_tool_result_source_delivery: bool,
+    resolved_entity_reference_delivery: Option<Duration>,
     capability_session_bindings: BTreeMap<String, AiProviderCapabilitySessionBinding>,
     identity: String,
 }
@@ -484,11 +490,42 @@ impl AiCodexAppServerRegistration {
             bootstrap_instructions,
             reasoning_effort_profile: None,
             guarded_tool_result_source_delivery: false,
+            resolved_entity_reference_delivery: None,
             capability_session_bindings: BTreeMap::new(),
             identity: String::new(),
         };
         registration.refresh_identity();
         Ok(registration)
+    }
+
+    /// Enables resolved entity references in the consuming turn write.
+    ///
+    /// A retained thread keeps data already written until it is deleted. A later
+    /// revocation prevents fresh disclosure and does not remove earlier data
+    /// from that thread. The bound starts when the executor begins resolution
+    /// and limits when the write may start. Expired or oversized data falls
+    /// back to markers. This setting does not change registration identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error unless the age is positive and
+    /// at most [`crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`].
+    pub fn with_resolved_entity_reference_delivery(
+        mut self,
+        maximum_age: Duration,
+    ) -> Result<Self, ProviderError> {
+        if maximum_age.is_zero() || maximum_age > crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid entity-reference delivery age".to_owned(),
+            ));
+        }
+        self.resolved_entity_reference_delivery = Some(maximum_age);
+        Ok(self)
+    }
+
+    /// Freshness bound for resolved delivery, which is disabled by default.
+    pub const fn resolved_entity_reference_delivery(&self) -> Option<Duration> {
+        self.resolved_entity_reference_delivery
     }
 
     /// Installs an exact compatibility declaration and invalidates capability bindings.
@@ -883,7 +920,14 @@ impl AiCodexAppServerTurnInput {
         {
             self.source_delivery = context.tool_source_delivery_check();
         }
-        self.protocol_input()?;
+        if !self.tool_images.is_empty()
+            && serde_json::to_vec(&self.protocol_input(self.input())?)
+                .map_err(|_| ProviderError::ToolSourceUnavailable)?
+                .len()
+                > MAXIMUM_FRAME_BYTES
+        {
+            return Err(ProviderError::ToolSourceUnavailable);
+        }
         self.validate()?;
         Ok(self)
     }
@@ -900,23 +944,17 @@ impl AiCodexAppServerTurnInput {
         }
         Ok(())
     }
-    fn protocol_input(&self) -> Result<Vec<Value>, ProviderError> {
-        let mut input = self
-            .input
+    fn protocol_input(&self, text: &[String]) -> Result<Vec<Value>, ProviderError> {
+        if self.tool_images.len() > 4 {
+            return Err(ProviderError::ToolSourceUnavailable);
+        }
+        let mut input = text
             .iter()
             .map(|text| json!({"type":"text","text":text}))
             .collect::<Vec<_>>();
         for image in &self.tool_images {
             input.push(json!({"type":"text","text":serde_json::to_string(&json!({"capturedObservation":true,"capturedAtMs":image.reference().captured_at_ms(),"actionExpiresAtMs":image.reference().action_expires_at_ms(),"retainedUntilMs":image.reference().retained_until_ms(),"actionEvidenceRenewed":false,"currentFieldDescribesOriginalCaptureOnly":true})).map_err(|_|ProviderError::ToolSourceUnavailable)?}));
             input.push(json!({"type":"image","url":format!("data:{};base64,{}",image.reference().mime(),base64::engine::general_purpose::STANDARD.encode(image.bytes()))}));
-        }
-        if self.tool_images.len() > 4
-            || serde_json::to_vec(&input)
-                .map_err(|_| ProviderError::ToolSourceUnavailable)?
-                .len()
-                > MAXIMUM_FRAME_BYTES.saturating_sub(4096)
-        {
-            return Err(ProviderError::ToolSourceUnavailable);
         }
         Ok(input)
     }
@@ -967,23 +1005,12 @@ impl AiCodexAppServerTurnInput {
     }
 
     fn validate(&self) -> Result<(), ProviderError> {
-        let text_bytes = self
-            .instructions
-            .iter()
-            .chain(&self.input)
-            .try_fold(0_usize, |total, value| total.checked_add(value.len()))
-            .ok_or(ProviderError::InvalidRequest)?;
         if !valid_identifier(&self.model)
             || self.instructions.len() > 32
             || self.input.is_empty()
             || self.input.len() > MAXIMUM_TEXT_BLOCKS
             || self.tools.len() > 128
-            || text_bytes > MAXIMUM_TEXT_BYTES
-            || self
-                .instructions
-                .iter()
-                .chain(&self.input)
-                .any(|value| value.contains('\0'))
+            || !self.text_fits(self.input())
             || self.maximum_output_tokens == 0
             || self.maximum_output_tokens > u64::from(u32::MAX)
             || self.web_search.as_ref().is_some_and(|search| {
@@ -1018,6 +1045,19 @@ impl AiCodexAppServerTurnInput {
         Ok(())
     }
 
+    fn text_fits(&self, input: &[String]) -> bool {
+        self.instructions
+            .iter()
+            .chain(input)
+            .try_fold(0_usize, |total, value| {
+                if value.contains('\0') {
+                    return None;
+                }
+                total.checked_add(value.len())
+            })
+            .is_some_and(|bytes| bytes <= MAXIMUM_TEXT_BYTES)
+    }
+
     /// Exact server-selected model.
     pub fn model(&self) -> &str {
         &self.model
@@ -1028,7 +1068,7 @@ impl AiCodexAppServerTurnInput {
         &self.instructions
     }
 
-    /// Bounded text input blocks.
+    /// Bounded text input blocks with unavailable markers for entity references.
     pub fn input(&self) -> &[String] {
         &self.input
     }
@@ -1088,6 +1128,9 @@ impl AiCodexAppServerTurnInput {
             .into_iter()
             .map(|block| match block {
                 ModelInputBlock::Text { text } => Ok(text),
+                ModelInputBlock::Json { value } if is_envelope(&value) => {
+                    Ok(unavailable_reference_json(&value).to_string())
+                }
                 ModelInputBlock::Json { .. }
                 | ModelInputBlock::ToolResult { .. }
                 | ModelInputBlock::Attachment { .. } => Err(ProviderError::Unsupported),
@@ -1123,6 +1166,9 @@ impl AiCodexAppServerTurnInput {
             .iter()
             .map(|block| match block {
                 ModelInputBlock::Text { text } => Ok(text.clone()),
+                ModelInputBlock::Json { value } if is_envelope(value) => {
+                    Ok(unavailable_reference_json(value).to_string())
+                }
                 ModelInputBlock::Json { value } => {
                     serde_json::to_string(value).map_err(|_| ProviderError::InvalidRequest)
                 }
@@ -1163,6 +1209,84 @@ impl AiCodexAppServerTurnInput {
                 .fingerprint()
                 .to_owned(),
         )
+    }
+}
+
+/// One consuming Codex turn dispatch. It implements neither `Clone` nor `Serialize`.
+///
+/// The inspectable turn contains only unavailable markers. Resolved data can
+/// be delivered only by [`AiCodexAppServerProtocolActor::write_turn`] during
+/// the process call that received this dispatch. The value grants no tool,
+/// session, or disclosure authority.
+pub struct AiCodexAppServerTurnDispatch {
+    input: AiCodexAppServerTurnInput,
+    resolved: Option<ResolvedTurnInput>,
+    scope: Option<TurnWriteScope>,
+}
+
+struct ResolvedTurnInput {
+    deadline: std::time::Instant,
+    replacements: Vec<(usize, String)>,
+}
+
+struct TurnWriteScope {
+    ended: oneshot::Receiver<()>,
+    process: Weak<AiCodexAppServerLaunchedProcess>,
+}
+
+impl std::fmt::Debug for AiCodexAppServerTurnDispatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiCodexAppServerTurnDispatch")
+            .field("input", &self.input)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<AiCodexAppServerTurnInput> for AiCodexAppServerTurnDispatch {
+    /// Creates a dispatch from marker-only input, such as a readiness probe.
+    fn from(input: AiCodexAppServerTurnInput) -> Self {
+        Self {
+            input,
+            resolved: None,
+            scope: None,
+        }
+    }
+}
+
+impl AiCodexAppServerTurnDispatch {
+    /// The cloneable turn input for thread preparation and policy checks.
+    pub const fn turn_input(&self) -> &AiCodexAppServerTurnInput {
+        &self.input
+    }
+
+    fn resolve_input(
+        registration: &AiCodexAppServerRegistration,
+        request: &ModelRequest,
+        references: ModelDispatchReferences,
+    ) -> Option<ResolvedTurnInput> {
+        let deadline =
+            references.write_deadline(registration.resolved_entity_reference_delivery()?)?;
+        let replacements = request
+            .input
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                let ModelInputBlock::Json { value } = block else {
+                    return None;
+                };
+                if !is_envelope(value) {
+                    return None;
+                }
+                let wire = references.wire_json(value);
+                (wire.get("status").and_then(Value::as_str) == Some("resolved"))
+                    .then(|| (index, wire.to_string()))
+            })
+            .collect::<Vec<_>>();
+        (!replacements.is_empty()).then_some(ResolvedTurnInput {
+            deadline,
+            replacements,
+        })
     }
 }
 
@@ -1514,10 +1638,7 @@ impl AiProvider for AiCodexAppServerProvider {
         dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // This adapter turns a request into a cloneable, queued turn for a
-        // local agent process, so it never takes resolved reference data:
-        // every entity reference is sent as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
+        let (request, references) = dispatch.into_unavailable_parts();
         self.capabilities()
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         context.validate_request(&ProviderKind::LocalHarness, &request)?;
@@ -1534,6 +1655,8 @@ impl AiProvider for AiCodexAppServerProvider {
         }) {
             return Err(ProviderError::Rejected);
         }
+        let resolved =
+            AiCodexAppServerTurnDispatch::resolve_input(&self.registration, &request, references);
         let input = if retained.is_some() {
             AiCodexAppServerTurnInput::try_from_retained_model_request(
                 request,
@@ -1544,6 +1667,11 @@ impl AiProvider for AiCodexAppServerProvider {
         }
         .with_tool_result_context(&context)?;
         context.authorize_tool_source_delivery().await?;
+        let input = AiCodexAppServerTurnDispatch {
+            input,
+            resolved,
+            scope: None,
+        };
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -1581,10 +1709,7 @@ impl AiProvider for AiCodexAppServerProvider {
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // This adapter turns a request into a cloneable, queued turn for a
-        // local agent process, so it never takes resolved reference data:
-        // every entity reference is sent as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
+        let (request, references) = dispatch.into_unavailable_parts();
         if !self.registration.experimental_dynamic_tools()
             || !self
                 .pool
@@ -1616,6 +1741,8 @@ impl AiProvider for AiCodexAppServerProvider {
         }) {
             return Err(ProviderError::Rejected);
         }
+        let resolved =
+            AiCodexAppServerTurnDispatch::resolve_input(&self.registration, &request, references);
         let input = if retained.is_some() {
             AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
                 request,
@@ -1626,6 +1753,11 @@ impl AiProvider for AiCodexAppServerProvider {
         }
         .with_tool_result_context(&context)?;
         context.authorize_tool_source_delivery().await?;
+        let input = AiCodexAppServerTurnDispatch {
+            input,
+            resolved,
+            scope: None,
+        };
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -1807,6 +1939,13 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
 
     /// Starts one fresh, text-only thread/turn on the retained process.
     ///
+    /// All six turn methods must await
+    /// [`AiCodexAppServerProtocolActor::write_turn`] inline to deliver the
+    /// dispatch, once the actor has admitted the thread lifecycle. Use the
+    /// same [`AiCodexAppServerWriter`] for every outbound frame on that
+    /// process. A cancelled or failed write must discard bytes buffered by
+    /// the transport. A process must never log raw protocol traffic.
+    ///
     /// The implementation must enforce the supplied output-token ceiling or
     /// reject the request before starting it. It must normalize only visible
     /// assistant text and authoritative usage/completion events, and abort the
@@ -1820,19 +1959,19 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     /// or normalized-event failure.
     async fn start_fresh_turn(
         &self,
-        input: AiCodexAppServerTurnInput,
+        dispatch: AiCodexAppServerTurnDispatch,
     ) -> Result<ProviderEventStream, ProviderError>;
 
     /// Starts one fresh thread/turn with experimental native dynamic tools.
     ///
-    /// The process must advertise only `input.tools()`, forward each exact
+    /// The process must advertise only `dispatch.turn_input().tools()`, forward each exact
     /// `item/tool/call` request to `responder`, and write only the returned
     /// response to app-server. It must not execute, route, or discover tools
     /// itself. Implementations that have not reviewed this protocol remain
     /// fail-closed.
     async fn start_dynamic_turn(
         &self,
-        _input: AiCodexAppServerTurnInput,
+        _dispatch: AiCodexAppServerTurnDispatch,
         _responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::Unsupported)
@@ -1853,7 +1992,7 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     async fn start_bound_turn(
         &self,
         _session: crate::AiOpenedProviderSession,
-        _input: AiCodexAppServerTurnInput,
+        _dispatch: AiCodexAppServerTurnDispatch,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::Unsupported)
     }
@@ -1871,7 +2010,7 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     async fn start_bound_dynamic_turn(
         &self,
         _session: crate::AiOpenedProviderSession,
-        _input: AiCodexAppServerTurnInput,
+        _dispatch: AiCodexAppServerTurnDispatch,
         _responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::Unsupported)
@@ -1882,7 +2021,7 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     async fn start_retained_turn(
         &self,
         _session: crate::AiOpenedProviderSession,
-        _input: AiCodexAppServerTurnInput,
+        _dispatch: AiCodexAppServerTurnDispatch,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::Unsupported)
     }
@@ -1892,7 +2031,7 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     async fn start_retained_dynamic_turn(
         &self,
         _session: crate::AiOpenedProviderSession,
-        _input: AiCodexAppServerTurnInput,
+        _dispatch: AiCodexAppServerTurnDispatch,
         _responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::Unsupported)
@@ -2029,57 +2168,92 @@ impl AiCodexAppServerLaunchedProcess {
             .await
     }
 
+    async fn with_turn_dispatch<F>(
+        self: &Arc<Self>,
+        mut dispatch: AiCodexAppServerTurnDispatch,
+        start: impl FnOnce(AiCodexAppServerTurnDispatch) -> F,
+    ) -> Result<ProviderEventStream, ProviderError>
+    where
+        F: Future<Output = Result<ProviderEventStream, ProviderError>>,
+    {
+        if dispatch.resolved.is_none() {
+            return start(dispatch).await;
+        }
+        let (active, ended) = oneshot::channel();
+        dispatch.scope = Some(TurnWriteScope {
+            ended,
+            process: Arc::downgrade(self),
+        });
+        let result = start(dispatch).await;
+        drop(active);
+        result
+    }
+
     async fn start_fresh_turn(
-        &self,
-        input: AiCodexAppServerTurnInput,
+        self: &Arc<Self>,
+        dispatch: AiCodexAppServerTurnDispatch,
     ) -> Result<ProviderEventStream, ProviderError> {
-        self.process.start_fresh_turn(input).await
+        self.with_turn_dispatch(dispatch, |dispatch| self.process.start_fresh_turn(dispatch))
+            .await
     }
 
     async fn start_dynamic_turn(
-        &self,
-        input: AiCodexAppServerTurnInput,
+        self: &Arc<Self>,
+        dispatch: AiCodexAppServerTurnDispatch,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        self.process.start_dynamic_turn(input, responder).await
+        self.with_turn_dispatch(dispatch, |dispatch| {
+            self.process.start_dynamic_turn(dispatch, responder)
+        })
+        .await
     }
 
     async fn start_bound_turn(
-        &self,
+        self: &Arc<Self>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: AiCodexAppServerTurnDispatch,
     ) -> Result<ProviderEventStream, ProviderError> {
-        self.process.start_bound_turn(session, input).await
+        self.with_turn_dispatch(dispatch, |dispatch| {
+            self.process.start_bound_turn(session, dispatch)
+        })
+        .await
     }
 
     async fn start_bound_dynamic_turn(
-        &self,
+        self: &Arc<Self>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: AiCodexAppServerTurnDispatch,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        self.process
-            .start_bound_dynamic_turn(session, input, responder)
-            .await
+        self.with_turn_dispatch(dispatch, |dispatch| {
+            self.process
+                .start_bound_dynamic_turn(session, dispatch, responder)
+        })
+        .await
     }
 
     async fn start_retained_turn(
-        &self,
+        self: &Arc<Self>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: AiCodexAppServerTurnDispatch,
     ) -> Result<ProviderEventStream, ProviderError> {
-        self.process.start_retained_turn(session, input).await
+        self.with_turn_dispatch(dispatch, |dispatch| {
+            self.process.start_retained_turn(session, dispatch)
+        })
+        .await
     }
 
     async fn start_retained_dynamic_turn(
-        &self,
+        self: &Arc<Self>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: AiCodexAppServerTurnDispatch,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        self.process
-            .start_retained_dynamic_turn(session, input, responder)
-            .await
+        self.with_turn_dispatch(dispatch, |dispatch| {
+            self.process
+                .start_retained_dynamic_turn(session, dispatch, responder)
+        })
+        .await
     }
 
     async fn delete_thread(
@@ -2101,6 +2275,9 @@ impl AiCodexAppServerLaunchedProcess {
     }
 
     async fn shutdown(&self, reason: AiProviderRunCloseReason) -> Result<(), ProviderError> {
+        if self.kill_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.process.shutdown(reason).await
     }
 }
@@ -2217,6 +2394,12 @@ struct RunEntry {
     /// evidence even if the responder finishes before the acknowledgement.
     dynamic_tool_call_after_interrupt: AtomicBool,
     empty_thread: Mutex<EmptyThreadActivation>,
+}
+
+impl RunEntry {
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire) || self.process.kill_requested.load(Ordering::Acquire)
+    }
 }
 
 /// Counts coordinator-owned dynamic tool calls for one exact run process.
@@ -2633,8 +2816,10 @@ impl AiCodexAppServerRunPool {
         &self,
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
-        input: AiCodexAppServerTurnInput,
+        dispatch: impl Into<AiCodexAppServerTurnDispatch>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let dispatch = dispatch.into();
+        let input = dispatch.turn_input();
         input.validate()?;
         registration
             .reasoning_effort_capabilities()
@@ -2658,7 +2843,7 @@ impl AiCodexAppServerRunPool {
         }
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream =
-            match tokio::time::timeout_at(turn_deadline, entry.process.start_fresh_turn(input))
+            match tokio::time::timeout_at(turn_deadline, entry.process.start_fresh_turn(dispatch))
                 .await
             {
                 Ok(Ok(stream)) => stream,
@@ -2728,8 +2913,10 @@ impl AiCodexAppServerRunPool {
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: impl Into<AiCodexAppServerTurnDispatch>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let dispatch = dispatch.into();
+        let input = dispatch.turn_input();
         input.validate()?;
         registration
             .reasoning_effort_capabilities()
@@ -2738,12 +2925,12 @@ impl AiCodexAppServerRunPool {
             return Err(ProviderError::Rejected);
         }
         let entry = self
-            .begin_bound_turn(binding, &registration, &session, &input)
+            .begin_bound_turn(binding, &registration, &session, input)
             .await?;
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream = match tokio::time::timeout_at(
             turn_deadline,
-            entry.process.start_bound_turn(session, input),
+            entry.process.start_bound_turn(session, dispatch),
         )
         .await
         {
@@ -2771,9 +2958,11 @@ impl AiCodexAppServerRunPool {
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: impl Into<AiCodexAppServerTurnDispatch>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let dispatch = dispatch.into();
+        let input = dispatch.turn_input();
         input.validate()?;
         registration
             .reasoning_effort_capabilities()
@@ -2782,7 +2971,7 @@ impl AiCodexAppServerRunPool {
             return Err(ProviderError::Unsupported);
         }
         let entry = self
-            .begin_bound_turn(binding, &registration, &session, &input)
+            .begin_bound_turn(binding, &registration, &session, input)
             .await?;
         let responder = DynamicToolCallCounter::wrap(&entry, responder);
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
@@ -2790,7 +2979,7 @@ impl AiCodexAppServerRunPool {
             turn_deadline,
             entry
                 .process
-                .start_bound_dynamic_turn(session, input, responder),
+                .start_bound_dynamic_turn(session, dispatch, responder),
         )
         .await
         {
@@ -2844,7 +3033,7 @@ impl AiCodexAppServerRunPool {
                 crate::AiCodexBoundTurnRejection::ProcessBindingMissing,
             ));
         };
-        if entry.poisoned.load(Ordering::Acquire) {
+        if entry.is_poisoned() {
             return Err(bound_turn_rejected(
                 crate::AiCodexBoundTurnRejection::ProcessPoisoned,
             ));
@@ -2970,8 +3159,10 @@ impl AiCodexAppServerRunPool {
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: impl Into<AiCodexAppServerTurnDispatch>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let dispatch = dispatch.into();
+        let input = dispatch.turn_input();
         input.validate()?;
         registration
             .reasoning_effort_capabilities()
@@ -3000,7 +3191,7 @@ impl AiCodexAppServerRunPool {
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream = match tokio::time::timeout_at(
             turn_deadline,
-            entry.process.start_retained_turn(session, input),
+            entry.process.start_retained_turn(session, dispatch),
         )
         .await
         {
@@ -3074,9 +3265,11 @@ impl AiCodexAppServerRunPool {
         &self,
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
-        input: AiCodexAppServerTurnInput,
+        dispatch: impl Into<AiCodexAppServerTurnDispatch>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let dispatch = dispatch.into();
+        let input = dispatch.turn_input();
         input.validate()?;
         registration
             .reasoning_effort_capabilities()
@@ -3105,7 +3298,7 @@ impl AiCodexAppServerRunPool {
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream = match tokio::time::timeout_at(
             turn_deadline,
-            entry.process.start_dynamic_turn(input, responder),
+            entry.process.start_dynamic_turn(dispatch, responder),
         )
         .await
         {
@@ -3174,9 +3367,11 @@ impl AiCodexAppServerRunPool {
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
         session: crate::AiOpenedProviderSession,
-        input: AiCodexAppServerTurnInput,
+        dispatch: impl Into<AiCodexAppServerTurnDispatch>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let dispatch = dispatch.into();
+        let input = dispatch.turn_input();
         input.validate()?;
         registration
             .reasoning_effort_capabilities()
@@ -3210,7 +3405,7 @@ impl AiCodexAppServerRunPool {
             turn_deadline,
             entry
                 .process
-                .start_retained_dynamic_turn(session, input, responder),
+                .start_retained_dynamic_turn(session, dispatch, responder),
         )
         .await
         {
@@ -3294,7 +3489,7 @@ impl AiCodexAppServerRunPool {
         let mut entries = self.inner.entries.lock().await;
         if entries
             .get(&binding)
-            .is_some_and(|entry| entry.poisoned.load(Ordering::Acquire))
+            .is_some_and(|entry| entry.is_poisoned())
         {
             entries.remove(&binding);
         }
@@ -3832,6 +4027,104 @@ enum ThreadLifecyclePhase {
 enum ThreadLifecycleOperation {
     Start,
     Resume,
+}
+
+/// Exclusive outbound writer for one launched Codex app-server process.
+///
+/// Use it for all frames, including initialization, interruption and
+/// shutdown. The transport must discard buffered bytes on drop and on forced
+/// process termination. The writer never returns a resolved frame to the
+/// host, and refuses every write after an incomplete resolved write.
+pub struct AiCodexAppServerWriter<W> {
+    state: Mutex<CodexWriterState<W>>,
+}
+
+struct CodexWriterState<W> {
+    writer: W,
+    poisoned: bool,
+}
+
+struct ResolvedWriteGuard<'a> {
+    poisoned: &'a mut bool,
+    process: &'a AiCodexAppServerLaunchedProcess,
+    armed: bool,
+}
+
+impl Drop for ResolvedWriteGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.poisoned = true;
+            self.process.force_kill();
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin + Send> AiCodexAppServerWriter<W> {
+    /// Takes exclusive ownership of the process transport.
+    pub fn new(writer: W) -> Self {
+        Self {
+            state: Mutex::new(CodexWriterState {
+                writer,
+                poisoned: false,
+            }),
+        }
+    }
+
+    /// Writes and flushes one content-free or marker-only actor frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive error if the writer is poisoned or I/O fails.
+    pub async fn write_frame(&self, frame: &[u8]) -> Result<(), ProviderError> {
+        self.state.lock().await.write_frame(frame).await
+    }
+}
+
+impl<W: AsyncWrite + Unpin> CodexWriterState<W> {
+    async fn write_frame(&mut self, frame: &[u8]) -> Result<(), ProviderError> {
+        if self.poisoned {
+            return Err(ProviderError::Rejected);
+        }
+        write_codex_frame(&mut self.writer, frame).await
+    }
+
+    async fn write_resolved_frame(
+        &mut self,
+        process: &AiCodexAppServerLaunchedProcess,
+        deadline: std::time::Instant,
+        ended: &mut oneshot::Receiver<()>,
+        frame: &[u8],
+    ) -> ResolvedWrite<Result<(), ProviderError>> {
+        let mut guard = ResolvedWriteGuard {
+            poisoned: &mut self.poisoned,
+            process,
+            armed: false,
+        };
+        write_resolved_before(deadline, async {
+            tokio::select! {
+                biased;
+                _ = ended => Err(ProviderError::Rejected),
+                result = async {
+                    guard.armed = true;
+                    let result = write_codex_frame(&mut self.writer, frame).await;
+                    guard.armed = result.is_err();
+                    result
+                } => result,
+            }
+        })
+        .await
+    }
+}
+
+async fn write_codex_frame(
+    writer: &mut (impl AsyncWrite + Unpin),
+    frame: &[u8],
+) -> Result<(), ProviderError> {
+    writer
+        .write_all(frame)
+        .await
+        .map_err(|_| ProviderError::Rejected)?;
+    writer.flush().await.map_err(|_| ProviderError::Rejected)
 }
 
 /// Closed app-server JSON-RPC encoder/guard.
@@ -4632,7 +4925,9 @@ impl AiCodexAppServerProtocolActor {
             && !self.turn_started_observed
     }
 
-    /// Encodes text and SDK-verified original image input for an exact lifecycle-complete thread.
+    /// Encodes marker-only text and SDK-verified image input for a lifecycle-complete thread.
+    ///
+    /// Use [`Self::write_turn`] to deliver a consuming dispatch.
     ///
     /// Trusted instructions are deliberately not copied into the user input
     /// list. No arbitrary tool, path, source URL, skill, audio, environment, approval,
@@ -4690,9 +4985,93 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::InvalidRequest);
         }
+        let params = Self::turn_params(thread_id, input, input.input())?;
+        let frame = self.request(ClientMethod::TurnStart, "turn/start", params)?;
+        self.thread_lifecycle_operation = None;
+        self.pending_turn_thread_id = Some(thread_id.to_owned());
+        self.readiness_probe_tool_id = input.readiness_probe_tool_id.clone();
+        self.runtime_warning_count = 0;
+        self.runtime_warning_bytes = 0;
+        self.active_web_search_maximum_calls =
+            input.web_search().map(|search| search.maximum_calls());
+        self.started_web_search_calls = 0;
+        Ok(frame)
+    }
+
+    /// Consumes a dispatch and writes one `turn/start` frame.
+    ///
+    /// The marker frame is checked against this actor's full frame ceiling.
+    /// Resolved data is written only once, inside the writer lock and within
+    /// the dispatch's freshness bound. Otherwise the marker frame is written.
+    /// A resolved write abandoned after it begins poisons the writer and
+    /// synchronously requests process-tree termination.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive error for invalid lifecycle, input or source
+    /// authorization, a closed dispatch, frame overflow, or failed transport.
+    pub async fn write_turn<W: AsyncWrite + Unpin + Send>(
+        &mut self,
+        thread_id: &str,
+        dispatch: AiCodexAppServerTurnDispatch,
+        writer: &AiCodexAppServerWriter<W>,
+    ) -> Result<(), ProviderError> {
+        let AiCodexAppServerTurnDispatch {
+            input,
+            resolved,
+            scope,
+        } = dispatch;
+        let mut writer = writer.state.lock().await;
+        if writer.poisoned {
+            return Err(ProviderError::Rejected);
+        }
+        input.authorize_tool_source_delivery().await?;
+        let id = self.next_id;
+        let marker = self.start_turn(thread_id, &input)?;
+        if let Some(resolved) = resolved {
+            let mut scope = scope.ok_or(ProviderError::Rejected)?;
+            let process = scope.process.upgrade().ok_or(ProviderError::Rejected)?;
+            let mut text = input.input().to_vec();
+            for (index, replacement) in resolved.replacements {
+                text[index] = replacement;
+            }
+            let frame = input
+                .text_fits(&text)
+                .then(|| Self::turn_params(thread_id, &input, &text))
+                .and_then(Result::ok)
+                .and_then(|params| {
+                    self.encode(json!({"id": id, "method": "turn/start", "params": params}))
+                        .ok()
+                });
+            if !matches!(
+                scope.ended.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ) || process.kill_requested.load(Ordering::Acquire)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if let Some(frame) = frame {
+                match writer
+                    .write_resolved_frame(&process, resolved.deadline, &mut scope.ended, &frame)
+                    .await
+                {
+                    ResolvedWrite::Completed(result) => return result,
+                    ResolvedWrite::Abandoned => return Err(provider_timeout_error()),
+                    ResolvedWrite::NotStarted => {}
+                }
+            }
+        }
+        writer.write_frame(&marker).await
+    }
+
+    fn turn_params(
+        thread_id: &str,
+        input: &AiCodexAppServerTurnInput,
+        text: &[String],
+    ) -> Result<Value, ProviderError> {
         let mut params = json!({
             "threadId": thread_id,
-            "input": input.protocol_input()?,
+            "input": input.protocol_input(text)?,
             "summary": "none",
         });
         if let Some(effort) = input.reasoning_effort().wire_value() {
@@ -4707,16 +5086,7 @@ impl AiCodexAppServerProtocolActor {
                 .ok_or(ProviderError::Rejected)?
                 .insert("environments".to_owned(), Value::Array(Vec::new()));
         }
-        let frame = self.request(ClientMethod::TurnStart, "turn/start", params)?;
-        self.thread_lifecycle_operation = None;
-        self.pending_turn_thread_id = Some(thread_id.to_owned());
-        self.readiness_probe_tool_id = input.readiness_probe_tool_id.clone();
-        self.runtime_warning_count = 0;
-        self.runtime_warning_bytes = 0;
-        self.active_web_search_maximum_calls =
-            input.web_search().map(|search| search.maximum_calls());
-        self.started_web_search_calls = 0;
-        Ok(frame)
+        Ok(params)
     }
 
     /// Encodes interruption for one exact active thread and turn.
@@ -4884,7 +5254,7 @@ impl AiCodexAppServerProtocolActor {
             if object.contains_key("error") {
                 return Err(ProviderError::Rejected);
             }
-            let result = object
+            let mut result = object
                 .get("result")
                 .filter(|result| result.is_object())
                 .cloned()
@@ -4895,7 +5265,17 @@ impl AiCodexAppServerProtocolActor {
             return Ok(AiCodexAppServerInbound::Response {
                 id,
                 method: client_method_name(method),
-                result,
+                result: {
+                    if matches!(
+                        method,
+                        ClientMethod::ThreadStart
+                            | ClientMethod::ThreadResume
+                            | ClientMethod::TurnStart
+                    ) {
+                        project_user_messages(&mut result);
+                    }
+                    result
+                },
             });
         }
         let notification: CodexAppServerNotificationEnvelope =
@@ -4917,7 +5297,7 @@ impl AiCodexAppServerProtocolActor {
         let method = Some(notification.method.as_str())
             .filter(|method| allowed_notification(method))
             .ok_or(ProviderError::Rejected)?;
-        let params = notification.params;
+        let mut params = notification.params;
         if method == THREAD_TOKEN_USAGE_UPDATED && self.active_turn_id.is_none() {
             return self.accept_retained_usage_snapshot(&params);
         }
@@ -4991,6 +5371,24 @@ impl AiCodexAppServerProtocolActor {
             self.started_item_timings.clear();
             self.completed_items.clear();
             self.accepted_item_lifecycle_starts = 0;
+        }
+        if matches!(method, "item/started" | "item/completed")
+            && params.pointer("/item/type").and_then(Value::as_str) == Some("userMessage")
+        {
+            let timestamp = if method == "item/started" {
+                "startedAtMs"
+            } else {
+                "completedAtMs"
+            };
+            params = json!({
+                "threadId": params["threadId"],
+                "turnId": params["turnId"],
+                (timestamp): params[timestamp],
+                "item": {"type": "userMessage", "id": params["item"]["id"]},
+            });
+        }
+        if matches!(method, "thread/started" | "turn/started" | "turn/completed") {
+            project_user_messages(&mut params);
         }
         Ok(AiCodexAppServerInbound::Notification {
             method: method.to_owned(),
@@ -6527,6 +6925,30 @@ fn validate_item_timing(
     }
 }
 
+// Turn and thread snapshots can also contain protocol userMessage items.
+fn project_user_messages(params: &mut Value) {
+    fn project_turn(turn: &mut Value) {
+        if let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) == Some("userMessage") {
+                    *item = json!({"type": "userMessage", "id": item["id"].as_str()});
+                }
+            }
+        }
+    }
+    if let Some(turn) = params.get_mut("turn") {
+        project_turn(turn);
+    }
+    if let Some(turns) = params
+        .pointer_mut("/thread/turns")
+        .and_then(Value::as_array_mut)
+    {
+        for turn in turns {
+            project_turn(turn);
+        }
+    }
+}
+
 fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), ProviderError> {
     let object = params.as_object().ok_or(ProviderError::Rejected)?;
     if matches!(method, "item/started" | "item/completed") {
@@ -7855,8 +8277,9 @@ pub(crate) mod tests {
 
         async fn start_fresh_turn(
             &self,
-            input: AiCodexAppServerTurnInput,
+            dispatch: AiCodexAppServerTurnDispatch,
         ) -> Result<ProviderEventStream, ProviderError> {
+            let input = dispatch.turn_input();
             self.counters.turns.fetch_add(1, Ordering::SeqCst);
             self.counters
                 .reasoning_efforts
@@ -7885,9 +8308,10 @@ pub(crate) mod tests {
 
         async fn start_dynamic_turn(
             &self,
-            input: AiCodexAppServerTurnInput,
+            dispatch: AiCodexAppServerTurnDispatch,
             responder: Arc<dyn ProviderDynamicToolResponder>,
         ) -> Result<ProviderEventStream, ProviderError> {
+            let input = dispatch.turn_input();
             self.counters.turns.fetch_add(1, Ordering::SeqCst);
             self.counters
                 .reasoning_efforts
@@ -7980,39 +8404,39 @@ pub(crate) mod tests {
         async fn start_retained_turn(
             &self,
             _session: crate::AiOpenedProviderSession,
-            input: AiCodexAppServerTurnInput,
+            dispatch: AiCodexAppServerTurnDispatch,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.retained_turns.fetch_add(1, Ordering::SeqCst);
-            self.start_fresh_turn(input).await
+            self.start_fresh_turn(dispatch).await
         }
 
         async fn start_bound_turn(
             &self,
             _session: crate::AiOpenedProviderSession,
-            input: AiCodexAppServerTurnInput,
+            dispatch: AiCodexAppServerTurnDispatch,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.bound_turns.fetch_add(1, Ordering::SeqCst);
-            self.start_fresh_turn(input).await
+            self.start_fresh_turn(dispatch).await
         }
 
         async fn start_bound_dynamic_turn(
             &self,
             _session: crate::AiOpenedProviderSession,
-            input: AiCodexAppServerTurnInput,
+            dispatch: AiCodexAppServerTurnDispatch,
             responder: Arc<dyn ProviderDynamicToolResponder>,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.bound_turns.fetch_add(1, Ordering::SeqCst);
-            self.start_dynamic_turn(input, responder).await
+            self.start_dynamic_turn(dispatch, responder).await
         }
 
         async fn start_retained_dynamic_turn(
             &self,
             _session: crate::AiOpenedProviderSession,
-            input: AiCodexAppServerTurnInput,
+            dispatch: AiCodexAppServerTurnDispatch,
             responder: Arc<dyn ProviderDynamicToolResponder>,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.retained_turns.fetch_add(1, Ordering::SeqCst);
-            self.start_dynamic_turn(input, responder).await
+            self.start_dynamic_turn(dispatch, responder).await
         }
 
         async fn delete_thread(
@@ -16325,6 +16749,194 @@ pub(crate) mod tests {
             bounded.accept(&started(10_000, "agentMessage")),
             Err(ProviderError::Rejected)
         ));
+    }
+
+    async fn reference_dispatch_fixture() -> (
+        Arc<Counters>,
+        Arc<AiCodexAppServerLaunchedProcess>,
+        AiCodexAppServerProtocolActor,
+        AiCodexAppServerTurnDispatch,
+    ) {
+        let counters = Arc::new(Counters::new());
+        let process = Arc::new(
+            FakeFactory {
+                counters: counters.clone(),
+            }
+            .launch(registration("0.148.0"))
+            .await
+            .unwrap(),
+        );
+        let mut input = turn();
+        input.input[0] = "unavailable-marker".to_owned();
+        let mut actor = initialized_protocol_actor();
+        actor.start_fresh_thread(&input).unwrap();
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .unwrap();
+        actor
+            .accept(&thread_started_notification("thread-1"))
+            .unwrap();
+        let dispatch = AiCodexAppServerTurnDispatch {
+            input,
+            resolved: Some(ResolvedTurnInput {
+                deadline: std::time::Instant::now() + Duration::from_secs(30),
+                replacements: vec![(0, "test resolved value".to_owned())],
+            }),
+            scope: None,
+        };
+        (counters, process, actor, dispatch)
+    }
+
+    #[tokio::test]
+    async fn codex_resolution_expires_while_waiting_for_the_writer_lock() {
+        use tokio::io::AsyncReadExt;
+
+        let (counters, process, mut actor, mut dispatch) = reference_dispatch_fixture().await;
+        dispatch.resolved.as_mut().unwrap().deadline =
+            std::time::Instant::now() + Duration::from_millis(30);
+        let (transport, mut reader) = tokio::io::duplex(4096);
+        let writer = AiCodexAppServerWriter::new(transport);
+        let lock = writer.state.lock().await;
+        let (result, ()) = tokio::join!(
+            process.with_turn_dispatch(dispatch, |dispatch| async {
+                actor.write_turn("thread-1", dispatch, &writer).await?;
+                Ok(Box::pin(stream::empty()) as ProviderEventStream)
+            }),
+            async {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                drop(lock);
+            },
+        );
+        drop(result.unwrap());
+        let mut bytes = vec![0; 4096];
+        let count = reader.read(&mut bytes).await.unwrap();
+        let sent = std::str::from_utf8(&bytes[..count]).unwrap();
+        assert!(sent.contains("unavailable-marker"));
+        assert!(!sent.contains("test resolved value"));
+        assert!(!writer.state.lock().await.poisoned);
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_codex_write_poisons_and_kills_before_another_write() {
+        use tokio::io::AsyncReadExt;
+
+        let (counters, process, mut actor, dispatch) = reference_dispatch_fixture().await;
+        let (transport, mut reader) = tokio::io::duplex(1);
+        let writer = AiCodexAppServerWriter::new(transport);
+        {
+            let turn = process.with_turn_dispatch(dispatch, |dispatch| async {
+                actor.write_turn("thread-1", dispatch, &writer).await?;
+                Ok(Box::pin(stream::empty()) as ProviderEventStream)
+            });
+            let mut turn = std::pin::pin!(turn);
+            let mut byte = [0];
+            tokio::select! {
+                biased;
+                _ = &mut turn => panic!("the full resolved frame cannot fit in the pipe"),
+                result = reader.read_exact(&mut byte) => assert_eq!(result.unwrap(), 1),
+            }
+        }
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            writer.write_frame(b"do not flush").await,
+            Err(ProviderError::Rejected)
+        ));
+        process
+            .shutdown(AiProviderRunCloseReason::ProtocolViolation)
+            .await
+            .unwrap();
+        assert_eq!(counters.shutdowns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_codex_start_cannot_reuse_dispatch_but_can_encode_marker_clone() {
+        let (counters, process, mut actor, dispatch) = reference_dispatch_fixture().await;
+        let marker = dispatch.turn_input().clone();
+        let mut saved = None;
+        let result = process
+            .with_turn_dispatch(dispatch, |dispatch| {
+                saved = Some(dispatch);
+                std::future::ready(Err(ProviderError::Rejected))
+            })
+            .await;
+        assert!(matches!(result, Err(ProviderError::Rejected)));
+        let mut marker_actor = initialized_protocol_actor();
+        marker_actor.start_fresh_thread(&marker).unwrap();
+        marker_actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .unwrap();
+        marker_actor
+            .accept(&thread_started_notification("thread-1"))
+            .unwrap();
+        let frame = marker_actor.start_turn("thread-1", &marker).unwrap();
+        let encoded = std::str::from_utf8(&frame).unwrap();
+        assert!(encoded.contains("unavailable-marker"));
+        assert!(!encoded.contains("test resolved value"));
+
+        let writer = AiCodexAppServerWriter::new(tokio::io::sink());
+        assert!(matches!(
+            actor.write_turn("thread-1", saved.unwrap(), &writer).await,
+            Err(ProviderError::Rejected)
+        ));
+        assert!(!writer.state.lock().await.poisoned);
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn timed_out_codex_start_cannot_write_its_dispatch_later() {
+        let (counters, process, mut actor, dispatch) = reference_dispatch_fixture().await;
+        let mut saved = None;
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            process.with_turn_dispatch(dispatch, |dispatch| {
+                saved = Some(dispatch);
+                std::future::pending()
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let writer = AiCodexAppServerWriter::new(tokio::io::sink());
+        assert!(matches!(
+            actor.write_turn("thread-1", saved.unwrap(), &writer).await,
+            Err(ProviderError::Rejected)
+        ));
+        assert!(!writer.state.lock().await.poisoned);
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn user_message_lifecycle_projects_only_metadata() {
+        let mut actor = active_protocol_actor();
+        for (method, timestamp_key) in [
+            ("item/started", "startedAtMs"),
+            ("item/completed", "completedAtMs"),
+        ] {
+            let frame = lifecycle_notification(
+                method,
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    (timestamp_key): 1,
+                    "item": {"id": "user-1", "type": "userMessage",
+                             "content": [{"type": "text", "text": "private reference data"}]},
+                    "extra": "private reference data",
+                }),
+            );
+            let inbound = actor.accept(&frame).unwrap();
+            let AiCodexAppServerInbound::Notification { params, .. } = inbound else {
+                panic!("expected a projected lifecycle notification");
+            };
+            assert_eq!(
+                params,
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    (timestamp_key): 1,
+                    "item": {"id": "user-1", "type": "userMessage"},
+                })
+            );
+        }
     }
 
     #[test]

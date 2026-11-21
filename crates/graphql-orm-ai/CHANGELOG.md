@@ -10,6 +10,19 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - next breaking graphql-orm-ai release
+
+- **Breaking (#828).** All six Codex app-server process turn methods take
+  `AiCodexAppServerTurnDispatch` by value. Hosts use the protocol actor and
+  `AiCodexAppServerWriter` to deliver it. The cloneable turn input contains
+  unavailable markers for entity references.
+- **Added (off by default).** Codex registrations can opt in to a single
+  resolved `turn/start` write with a freshness bound of up to 60 seconds.
+  Stale or oversized resolutions fall back to markers. An incomplete resolved
+  write poisons the process writer and triggers a forced tree kill.
+- Tool-free turns accept entity-reference blocks. The protocol actor exposes
+  only metadata from user-message echoes. No data migration is needed.
+
 ## Unreleased - 0.152.0
 
 Opt-in entity references on the local-harness and Grok ACP adapters (#721).
