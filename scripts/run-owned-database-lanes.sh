@@ -72,6 +72,8 @@ run_sqlite() {
 }
 
 run_postgres() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test search_filter_binding -- --test-threads=1
   run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test authorized_pagination_postgres --test bounded_mutation_sentinels \
@@ -179,6 +181,8 @@ run_migration_journal() {
 }
 
 run_mssql() {
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --test search_filter_binding -- --test-threads=1
   run_identifier_quoting mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1
