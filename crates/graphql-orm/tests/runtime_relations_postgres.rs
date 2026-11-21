@@ -1,7 +1,5 @@
 #![cfg(feature = "postgres")]
 
-use std::process::Command;
-
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     CollectionId, DbAuthContext, FieldId, PostgresBackend, RelationCardinality, RelationId,
@@ -10,6 +8,11 @@ use graphql_orm::graphql::orm::{
     RuntimeRelationLimits, RuntimeRelationSelection, RuntimeRelationValue, RuntimeSchema,
     RuntimeValueKind,
 };
+
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
+use owned_postgres::OwnedPostgres;
 
 fn cid(value: &str) -> CollectionId {
     CollectionId::new(value).unwrap()
@@ -175,110 +178,11 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     .unwrap()
 }
 
-struct OwnedPostgres {
-    name: String,
-    token: String,
-    url: String,
-    app_url: String,
-    app_password: String,
-}
-
-impl Drop for OwnedPostgres {
-    fn drop(&mut self) {
-        let identity = Command::new("docker")
-            .args([
-                "inspect",
-                "--format",
-                "{{ index .Config.Labels \"graphql-orm.test-owner\" }}",
-                &self.name,
-            ])
-            .output();
-        if identity
-            .ok()
-            .filter(|output| output.status.success())
-            .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == self.token)
-        {
-            let _ = Command::new("docker")
-                .args(["rm", "--force", &self.name])
-                .output();
-        }
-    }
-}
-
-impl OwnedPostgres {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let token = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
-        let name = format!("graphql-orm-runtime-relation-{token}");
-        let password = format!("relation_{token}");
-        let app_password = format!("reader_{token}");
-        let database = format!("relation_{token}");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--name",
-                &name,
-                "--label",
-                &format!("graphql-orm.test-owner={token}"),
-                "--memory",
-                "4g",
-                "--memory-swap",
-                "4g",
-                "--publish",
-                "127.0.0.1::5432",
-                "--env",
-                "POSTGRES_USER=relation_owner",
-                "--env",
-                &format!("POSTGRES_PASSWORD={password}"),
-                "--env",
-                &format!("POSTGRES_DB={database}"),
-                "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).into());
-        }
-        let mut owned = Self {
-            name,
-            token,
-            url: String::new(),
-            app_url: String::new(),
-            app_password,
-        };
-        for _ in 0..120 {
-            let ready = Command::new("docker")
-                .args(["exec", &owned.name, "pg_isready", "-U", "relation_owner"])
-                .output()?;
-            if ready.status.success() {
-                let output = Command::new("docker")
-                    .args(["port", &owned.name, "5432/tcp"])
-                    .output()?;
-                let published = String::from_utf8(output.stdout)?;
-                let port = published
-                    .lines()
-                    .find_map(|line| line.strip_prefix("127.0.0.1:"))
-                    .ok_or("owned PostgreSQL was not loopback-published")?;
-                owned.url =
-                    format!("postgres://relation_owner:{password}@127.0.0.1:{port}/{database}");
-                owned.app_url = format!(
-                    "postgres://relation_reader:{}@127.0.0.1:{port}/{database}",
-                    owned.app_password
-                );
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                return Ok(owned);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        Err("owned PostgreSQL 17 did not become ready".into())
-    }
-}
-
 #[tokio::test]
 #[ignore = "creates and owns a disposable loopback-only PostgreSQL 17 container"]
 async fn composite_relation_batches_match_portable_sqlite_semantics()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
+    let owned = OwnedPostgres::start("runtime-relation")?;
     let database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_relation_pg_customers (
@@ -357,9 +261,9 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     )
     .execute(database.pool())
     .await?;
+    let app_password = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
     graphql_orm::sqlx::query(&format!(
-        "CREATE ROLE relation_reader LOGIN PASSWORD '{}'",
-        owned.app_password
+        "CREATE ROLE relation_reader LOGIN PASSWORD '{app_password}'"
     ))
     .execute(database.pool())
     .await?;
@@ -370,7 +274,17 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     )
     .execute(database.pool())
     .await?;
-    let app_database = Database::<PostgresBackend>::connect_postgres(&owned.app_url).await?;
+    let app_options = database
+        .pool()
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("relation_reader")
+        .password(&app_password);
+    let app_pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .connect_with(app_options)
+        .await?;
+    let app_database = Database::<PostgresBackend>::new(app_pool);
 
     let tenant_a = DbAuthContext {
         tenant_id: Some("tenant-a".to_string()),

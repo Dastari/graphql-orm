@@ -19,7 +19,7 @@ adds the opt-in `refusalOutcome` setting
 (`RouterConfig::with_refusal_outcome`): each error of an operation the router
 refused before any subgraph request carries `extensions.outcome: "refused"`,
 in the vocabulary generated ORM services use. See
-[MIGRATION.md](MIGRATION.md#breaking-release-unreleased),
+[MIGRATION.md](MIGRATION.md#0168-to-0170-breaking-release),
 [nested directive authorization](docs/configuration.md#nested-directive-authorization)
 and [refusal outcome](docs/configuration.md#refusal-outcome).
 

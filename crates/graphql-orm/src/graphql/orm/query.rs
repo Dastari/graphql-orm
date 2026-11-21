@@ -309,6 +309,20 @@ pub trait DatabaseFilter {
         }
     }
 
+    /// Render generated search conditions bound to the entity table.
+    #[doc(hidden)]
+    fn to_sql_search_conditions(
+        &self,
+        backend: DatabaseBackend,
+        _table: &str,
+    ) -> (Vec<String>, Vec<SqlValue>) {
+        if self.requires_in_memory_filtering(backend) {
+            self.to_sql_prefilter_conditions(backend)
+        } else {
+            self.to_sql_conditions()
+        }
+    }
+
     fn matches_entity(&self, _entity: &(dyn Any + Send + Sync)) -> crate::Result<bool> {
         Ok(true)
     }
@@ -323,9 +337,19 @@ pub trait DatabaseFilter {
         self.matches_entity(entity)
     }
 
+    /// This filter's conditions as one expression, each condition with as
+    /// many of the filter's bind values as it has placeholders.
+    ///
+    /// [`Self::to_sql_conditions`] is called once. Where the ORM composes
+    /// the filter with a read policy (`ReadPredicate::from_filter`,
+    /// related-row filters, aggregates under a row policy) it makes this
+    /// call for the executing dialect and refuses a filter whose
+    /// placeholders in total differ from its values with
+    /// `AUTHORIZATION_MISCONFIGURED`: no value is dropped or moved.
+    /// Called directly, the conditions are divided as written.
     fn to_filter_expression(&self) -> Option<FilterExpression> {
         let (conditions, values) = self.to_sql_conditions();
-        filter_expression_from_raw_parts(current_backend(), &conditions, &values)
+        default_filter_expression(&conditions, &values)
     }
 
     /// Validate and convert this filter to the backend-neutral query IR.
@@ -2956,7 +2980,28 @@ pub fn generate_candidate_pattern(value: &str) -> String {
     contains_like_pattern(value)
 }
 
-fn filter_expression_from_raw_parts(
+/// The refusal of SQL whose placeholders and bind values differ in number.
+pub(crate) fn bind_count_mismatch() -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+        )
+        .with_internal("a filter's SQL placeholders and bind values differ in number"),
+    )
+}
+
+/// Whether `conditions`, read with the shared lexer, hold exactly `binds`
+/// placeholders in total.
+pub(crate) fn binds_pair_up(dialect: DatabaseBackend, conditions: &[String], binds: usize) -> bool {
+    conditions
+        .iter()
+        .map(|clause| count_placeholders_for(dialect, clause))
+        .sum::<usize>()
+        == binds
+}
+
+/// Each condition with as many of `values` as it has placeholders, in order.
+fn divide_binds(
     dialect: DatabaseBackend,
     conditions: &[String],
     values: &[SqlValue],
@@ -2985,6 +3030,214 @@ fn filter_expression_from_raw_parts(
         filters.into_iter().next()
     } else {
         Some(FilterExpression::And(filters))
+    }
+}
+
+/// The checked splitter: the one place a flat list of bind values is
+/// divided among SQL conditions that are composed with a read policy. Each
+/// condition takes as many values as it has placeholders, counted with the
+/// shared lexer of `dialect`. It fails closed: unless the placeholders in
+/// total equal the values, nothing is divided and the mismatch is refused
+/// with `AUTHORIZATION_MISCONFIGURED`. No value is ever dropped or handed
+/// to another condition.
+pub(crate) fn split_filter_binds(
+    dialect: DatabaseBackend,
+    conditions: &[String],
+    values: &[SqlValue],
+) -> crate::Result<Option<FilterExpression>> {
+    if !binds_pair_up(dialect, conditions, values.len()) {
+        return Err(bind_count_mismatch());
+    }
+    Ok(divide_binds(dialect, conditions, values))
+}
+
+/// Caller SQL that no read policy is composed with, passed through as
+/// written: its values are handed out by placeholder count with no check.
+/// A statement of the caller's own may reuse a numbered placeholder
+/// (`?1 OR ?1` on SQLite), which a count would refuse. Any mismatch is the
+/// caller's own and reaches the database.
+pub(crate) fn filter_expression_from_raw_parts(
+    dialect: DatabaseBackend,
+    conditions: &[String],
+    values: &[SqlValue],
+) -> Option<FilterExpression> {
+    divide_binds(dialect, conditions, values)
+}
+
+/// The refusal of caller SQL whose placeholders cannot be composed with a
+/// read policy.
+fn uncomposable_placeholder() -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+        )
+        .with_internal(
+            "SQL composed with a read policy holds a numbered or named placeholder; use the anonymous ?",
+        ),
+    )
+}
+
+/// `Err` when `clause`, SQL that is composed with a read policy, holds a
+/// placeholder the statement does not number itself.
+///
+/// On PostgreSQL and SQL Server every `?`, `$N` and `@pN` is renumbered in
+/// order when the statement is rendered, so none can name another clause's
+/// argument; the ORM's own generated filters and keyset predicates use
+/// those forms. SQLite statements are sent as written: `?NNN`, `:name`,
+/// `@name` and `$name` name an argument by position or name, and SQLite
+/// does not advance its anonymous counter past them, so a policy's `?`
+/// after one would read the caller's argument. Those are refused, as are
+/// SQL Server `@name` variables and PostgreSQL `$name`.
+pub(crate) fn ensure_composable_sql(dialect: DatabaseBackend, clause: &str) -> crate::Result<()> {
+    let mut composable = true;
+    let _ = super::dialect::scan_sql(dialect, clause, |token| {
+        let text = &clause[token.start..token.end];
+        composable &= match token.kind {
+            super::dialect::SqlTokenKind::Placeholder => {
+                dialect != DatabaseBackend::Sqlite || text == "?"
+            }
+            super::dialect::SqlTokenKind::Word => {
+                !matches!(text.as_bytes()[0], b'@' | b':' | b'$')
+                    // A SQL Server `@@name` is a system function, never a
+                    // parameter.
+                    || (dialect == DatabaseBackend::Mssql && text.starts_with("@@"))
+            }
+            _ => true,
+        };
+    });
+    if composable {
+        Ok(())
+    } else {
+        Err(uncomposable_placeholder())
+    }
+}
+
+/// [`ensure_composable_sql`] for every clause of `expression`, and each
+/// clause paired with exactly the bind values its placeholders take.
+pub(crate) fn ensure_composable_expression(
+    dialect: DatabaseBackend,
+    expression: &FilterExpression,
+) -> crate::Result<()> {
+    match expression {
+        FilterExpression::Raw { clause, values }
+        | FilterExpression::TrustedFragment { clause, values } => {
+            // A filter may return an expression of its own: each leaf must
+            // still hold exactly the bind values its placeholders take.
+            if count_placeholders_for(dialect, clause) != values.len() {
+                return Err(bind_count_mismatch());
+            }
+            ensure_composable_sql(dialect, clause)
+        }
+        FilterExpression::And(children) | FilterExpression::Or(children) => children
+            .iter()
+            .try_for_each(|child| ensure_composable_expression(dialect, child)),
+    }
+}
+
+/// `filter`'s expression for a statement of backend `B`. Where a read
+/// policy is composed with it (`policed`), the filter's bind list is
+/// divided by the checked splitter for `B`'s dialect and its SQL must hold
+/// only placeholders the statement numbers itself; otherwise it is passed
+/// through as written.
+pub(crate) fn composed_filter_expression<F: DatabaseFilter, B: OrmBackend>(
+    filter: &F,
+    policed: bool,
+) -> crate::Result<Option<FilterExpression>> {
+    if !policed {
+        return Ok(filter.to_filter_expression());
+    }
+    let expression = checked_filter_expression(B::DIALECT, || filter.to_filter_expression())?;
+    if let Some(expression) = &expression {
+        ensure_composable_expression(B::DIALECT, expression)?;
+    }
+    Ok(expression)
+}
+
+/// `Err` unless an ordering term that is composed with a read policy holds
+/// exactly the bind values its placeholders take, and only placeholders the
+/// statement numbers itself. A relation-count ordering carries its target's
+/// read policy in the term.
+fn ensure_composable_sort(
+    dialect: DatabaseBackend,
+    clause: &str,
+    binds: usize,
+) -> crate::Result<()> {
+    if count_placeholders_for(dialect, clause) != binds {
+        return Err(bind_count_mismatch());
+    }
+    ensure_composable_sql(dialect, clause)
+}
+
+/// How many bind values `expression` renders.
+fn expression_bind_count(expression: &FilterExpression) -> usize {
+    match expression {
+        FilterExpression::Raw { values, .. } | FilterExpression::TrustedFragment { values, .. } => {
+            values.len()
+        }
+        FilterExpression::And(children) | FilterExpression::Or(children) => {
+            children.iter().map(expression_bind_count).sum()
+        }
+    }
+}
+
+thread_local! {
+    /// The dialect a checked call into [`DatabaseFilter::to_filter_expression`]
+    /// runs for, and whether its bind list failed to pair up.
+    static CHECKED_ADAPTER: std::cell::Cell<Option<(DatabaseBackend, bool)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `adapt`, one call into a filter's expression adapter, as a checked
+/// call for `dialect`: the default [`DatabaseFilter::to_filter_expression`]
+/// then counts placeholders with that dialect's lexer, rather than the
+/// build's default backend, and divides the filter's flat bind list with
+/// the checked splitter. A list that does not pair up is refused with
+/// `AUTHORIZATION_MISCONFIGURED`. A filter that overrides the adapter with
+/// an expression of its own is returned as it is.
+pub(crate) fn checked_filter_expression(
+    dialect: DatabaseBackend,
+    adapt: impl FnOnce() -> Option<FilterExpression>,
+) -> crate::Result<Option<FilterExpression>> {
+    /// Restores the enclosing call's state when this one ends, also when
+    /// the filter panics: a worker thread never keeps a stale dialect.
+    struct Restore(Option<(DatabaseBackend, bool)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CHECKED_ADAPTER.set(self.0);
+        }
+    }
+    let restore = Restore(CHECKED_ADAPTER.replace(Some((dialect, false))));
+    let expression = adapt();
+    let mismatch = CHECKED_ADAPTER.get().is_some_and(|(_, mismatch)| mismatch);
+    drop(restore);
+    if mismatch {
+        return Err(bind_count_mismatch());
+    }
+    Ok(expression)
+}
+
+/// Whether no checked adapter call is in progress on this thread.
+#[cfg(test)]
+pub(crate) fn checked_adapter_is_idle() -> bool {
+    CHECKED_ADAPTER.get().is_none()
+}
+
+/// The default [`DatabaseFilter::to_filter_expression`]: inside a checked
+/// call, the checked splitter for that call's dialect; otherwise the
+/// conditions as written, for the build's default backend.
+fn default_filter_expression(
+    conditions: &[String],
+    values: &[SqlValue],
+) -> Option<FilterExpression> {
+    match CHECKED_ADAPTER.get() {
+        Some((dialect, _)) => match split_filter_binds(dialect, conditions, values) {
+            Ok(expression) => expression,
+            Err(_) => {
+                CHECKED_ADAPTER.set(Some((dialect, true)));
+                None
+            }
+        },
+        None => filter_expression_from_raw_parts(current_backend(), conditions, values),
     }
 }
 
@@ -3903,14 +4156,20 @@ where
                 "aggregate group pages require complete SQL row authorization",
             ));
         }
-        let mut filters: Vec<FilterExpression> = self
-            .filter
-            .as_ref()
-            .and_then(DatabaseFilter::to_filter_expression)
-            .into_iter()
-            .collect();
+        // A related-row filter carries its target's policy in its own SQL.
+        let policed = visibility.predicate_expression().is_some()
+            || self
+                .filter
+                .as_ref()
+                .is_some_and(DatabaseFilter::has_request_authorized_predicates);
+        let mut filters: Vec<FilterExpression> = match self.filter.as_ref() {
+            Some(filter) => composed_filter_expression::<_, B>(filter, policed)?,
+            None => None,
+        }
+        .into_iter()
+        .collect();
         if let Some(predicate) = visibility.predicate_expression() {
-            filters.push(predicate.clone());
+            filters.push(predicate);
         }
         if options.exclude_blank {
             filters.push(FilterExpression::trusted_fragment(
@@ -4036,13 +4295,19 @@ where
                 "aggregate queries require complete SQL row authorization",
             ));
         }
-        let filters: Vec<_> = self
-            .filter
-            .as_ref()
-            .and_then(DatabaseFilter::to_filter_expression)
-            .into_iter()
-            .chain(visibility.predicate_expression().cloned())
-            .collect();
+        // A related-row filter carries its target's policy in its own SQL.
+        let policed = visibility.predicate_expression().is_some()
+            || self
+                .filter
+                .as_ref()
+                .is_some_and(DatabaseFilter::has_request_authorized_predicates);
+        let filters: Vec<_> = match self.filter.as_ref() {
+            Some(filter) => composed_filter_expression::<_, B>(filter, policed)?,
+            None => None,
+        }
+        .into_iter()
+        .chain(visibility.predicate_expression())
+        .collect();
         let filter = if filters.is_empty() {
             None
         } else {
@@ -4568,6 +4833,12 @@ where
     max_limit: Option<i64>,
     requires_in_memory_filtering: bool,
     filter_is_valid: bool,
+    /// Whether every clause was added with exactly the bind values its
+    /// placeholders take.
+    binds_paired: bool,
+    /// Whether a filter or ordering carries a read policy inside its own
+    /// SQL: a related-row filter or relation-count ordering.
+    carries_policy: bool,
     _marker: PhantomData<(P, B)>,
 }
 
@@ -4593,24 +4864,53 @@ where
             max_limit: None,
             requires_in_memory_filtering: false,
             filter_is_valid: true,
+            binds_paired: true,
+            carries_policy: false,
             _marker: PhantomData,
         }
     }
 
     fn filter(mut self, filter: P::Filter) -> Self {
         self.filter_is_valid &= filter.validate().is_ok();
+        self.carries_policy |= filter.has_request_authorized_predicates();
         if filter.requires_in_memory_filtering(B::DIALECT) {
             self.requires_in_memory_filtering = true;
         } else {
             let (conditions, values) = filter.to_sql_conditions();
+            self.binds_paired &= binds_pair_up(B::DIALECT, &conditions, values.len());
             self.where_clauses.extend(conditions);
             self.values.extend(values);
         }
         self
     }
 
+    /// The accumulated filter. Where a read policy is composed with it
+    /// (`policed`), each clause takes exactly its own bind values, or the
+    /// statement is refused with `AUTHORIZATION_MISCONFIGURED`; otherwise
+    /// the clauses are passed through as written.
+    fn checked_filter(&self, policed: bool) -> crate::Result<Option<FilterExpression>> {
+        if !policed && !self.carries_policy {
+            return Ok(filter_expression_from_raw_parts(
+                B::DIALECT,
+                &self.where_clauses,
+                &self.values,
+            ));
+        }
+        if !self.binds_paired {
+            return Err(bind_count_mismatch());
+        }
+        for clause in &self.where_clauses {
+            ensure_composable_sql(B::DIALECT, clause)?;
+        }
+        for sort in &self.order_sorts {
+            ensure_composable_sort(B::DIALECT, &sort.clause, sort.values.len())?;
+        }
+        split_filter_binds(B::DIALECT, &self.where_clauses, &self.values)
+    }
+
     fn order_by(mut self, order: P::Order) -> Self {
         self.filter_is_valid &= order.validate_order().is_ok();
+        self.carries_policy |= order.requires_context();
         if let Some(sort) = order.to_sort_expression() {
             self.order_sorts.push(sort);
         }
@@ -4661,6 +4961,7 @@ where
     fn render(
         &self,
         bound: RepositoryBound,
+        filter: Option<FilterExpression>,
         visibility: Option<&FilterExpression>,
     ) -> RenderedQuery {
         let entity_default = <P::Entity as DatabaseEntity>::DEFAULT_SORT;
@@ -4695,10 +4996,7 @@ where
                     .iter()
                     .map(|column| (*column).to_string())
                     .collect(),
-                filter: match (
-                    filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
-                    visibility,
-                ) {
+                filter: match (filter, visibility) {
                     (Some(filter), Some(policy)) => {
                         Some(FilterExpression::And(vec![filter, policy.clone()]))
                     }
@@ -4885,7 +5183,12 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::All)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self.state.render(
+            bound,
+            self.state
+                .checked_filter(visibility.predicate_expression().is_some())?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -4904,7 +5207,12 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::First)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self.state.render(
+            bound,
+            self.state
+                .checked_filter(visibility.predicate_expression().is_some())?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -4924,7 +5232,12 @@ where
         let bound = self
             .state
             .bound(self.db.pagination_config(), ProjectionRead::OptionalOne)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self.state.render(
+            bound,
+            self.state
+                .checked_filter(visibility.predicate_expression().is_some())?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -5043,7 +5356,12 @@ where
         let bound = self
             .state
             .bound(self.context.database().pagination_config(), read)?;
-        let rendered = self.state.render(bound, visibility.predicate_expression());
+        let rendered = self.state.render(
+            bound,
+            self.state
+                .checked_filter(visibility.predicate_expression().is_some())?,
+            visibility.predicate_expression().as_ref(),
+        );
         let rows = self
             .context
             .fetch_rows(&rendered.sql, &rendered.values)
@@ -5113,6 +5431,21 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
+    /// Whether every clause was added with exactly the bind values its
+    /// placeholders take. If one was not, the flat lists no longer pair up
+    /// clause by clause, even where their totals happen to agree.
+    binds_paired: bool,
+    /// The read policies attached to this query, each expression with its
+    /// own bind values. They are kept apart from the caller's
+    /// `where_clauses` and `values`, which are public and flat, and are
+    /// composed with them only when a statement is rendered: nothing the
+    /// caller does to its own lists can move a policy's binds.
+    policies: Vec<FilterExpression>,
+    /// Whether a filter or ordering added to this query carries a read
+    /// policy inside its own SQL: a generated related-row filter or
+    /// relation-count ordering embeds its target's policy and binds in the
+    /// clause. Such a query is checked as one with a policy attached.
+    carries_policy: bool,
     pub(crate) keyset_filter_identities: Vec<String>,
     /// Per-read maximum of this query's keyset and scan pages.
     pub(crate) max_limit: Option<i64>,
@@ -5129,6 +5462,9 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             page: self.page.clone(),
             entity_matchers: self.entity_matchers.clone(),
             filter_is_valid: self.filter_is_valid,
+            binds_paired: self.binds_paired,
+            policies: self.policies.clone(),
+            carries_policy: self.carries_policy,
             keyset_filter_identities: self.keyset_filter_identities.clone(),
             max_limit: self.max_limit,
             _marker: PhantomData,
@@ -5150,21 +5486,92 @@ where
             page: None,
             entity_matchers: Vec::new(),
             filter_is_valid: true,
+            binds_paired: true,
+            policies: Vec::new(),
+            carries_policy: false,
             keyset_filter_identities: Vec::new(),
             max_limit: None,
             _marker: PhantomData,
         }
     }
 
+    /// Add `conditions` with the bind `values` their placeholders take,
+    /// noting whether they pair up where they are added.
+    fn pair(&mut self, conditions: Vec<String>, values: Vec<SqlValue>) {
+        self.binds_paired &= binds_pair_up(B::DIALECT, &conditions, values.len());
+        self.where_clauses.extend(conditions);
+        self.values.extend(values);
+    }
+
+    /// Attach a read policy's expression, with its own bind values. It is
+    /// composed with the caller's clauses when a statement is rendered.
+    pub(crate) fn attach_policy(&mut self, policy: FilterExpression) {
+        self.policies.push(policy);
+    }
+
+    /// The filter of every statement built from this query.
+    ///
+    /// With no read policy attached, and none carried inside a related-row
+    /// filter or relation-count ordering, the caller's clauses and values
+    /// are passed through as written. Otherwise the caller's state is validated
+    /// on its own first: every clause was added with exactly its values,
+    /// the placeholders in total equal the values, and no clause holds a
+    /// placeholder the statement does not number itself. Otherwise the
+    /// statement is refused with `AUTHORIZATION_MISCONFIGURED`. The
+    /// policies follow, each with the bind values it was built with.
+    pub(crate) fn checked_filter(&self) -> crate::Result<Option<FilterExpression>> {
+        if self.policies.is_empty() && !self.carries_policy {
+            return Ok(filter_expression_from_raw_parts(
+                B::DIALECT,
+                &self.where_clauses,
+                &self.values,
+            ));
+        }
+        if !self.binds_paired {
+            return Err(bind_count_mismatch());
+        }
+        for clause in &self.where_clauses {
+            ensure_composable_sql(B::DIALECT, clause)?;
+        }
+        // Ordering terms are numbered in the same statement, and a
+        // relation-count term carries a policy of its own.
+        for (index, clause) in self.order_clauses.iter().enumerate() {
+            let binds = self.order_values.get(index).map_or(0, Vec::len);
+            ensure_composable_sort(B::DIALECT, clause, binds)?;
+        }
+        let caller = split_filter_binds(B::DIALECT, &self.where_clauses, &self.values)?;
+        let mut filters = match caller {
+            Some(FilterExpression::And(clauses)) => clauses,
+            Some(clause) => vec![clause],
+            None => Vec::new(),
+        };
+        filters.extend(self.policies.iter().cloned());
+        Ok(if filters.len() == 1 {
+            filters.pop()
+        } else {
+            Some(FilterExpression::And(filters))
+        })
+    }
+
+    /// Add a clause with one placeholder and its bind value. Where a read
+    /// policy is attached to the query, a clause whose placeholders and
+    /// values differ in number, or that holds a placeholder the statement
+    /// does not number itself, makes the query fail with
+    /// `AUTHORIZATION_MISCONFIGURED` when it is rendered.
     pub fn where_clause(mut self, clause: &str, value: SqlValue) -> Self {
-        self.where_clauses.push(clause.to_string());
-        self.values.push(value);
+        self.pair(vec![clause.to_string()], vec![value]);
         self
     }
 
+    /// Add a clause with the bind values its placeholders take, in order.
+    /// Where a read policy is attached to the query, a clause whose
+    /// placeholders and values differ in number, or that holds a
+    /// placeholder the statement does not number itself (on SQLite `?NNN`,
+    /// `:name`, `@name` or `$name`), makes the query fail with
+    /// `AUTHORIZATION_MISCONFIGURED` when it is rendered. Write the
+    /// anonymous `?`.
     pub fn where_values(mut self, clause: &str, values: Vec<SqlValue>) -> Self {
-        self.where_clauses.push(clause.to_string());
-        self.values.extend(values);
+        self.pair(vec![clause.to_string()], values);
         self
     }
 
@@ -5176,13 +5583,27 @@ where
         if let Some(identity) = filter.keyset_filter_identity() {
             self.keyset_filter_identities.push(identity);
         }
+        self.carries_policy |= filter.has_request_authorized_predicates();
         let (conds, values) = filter.to_sql_conditions();
-        self.where_clauses.extend(conds);
-        self.values.extend(values);
+        self.pair(conds, values);
         self
     }
 
-    pub fn filter_with_entity_matching<F>(mut self, filter: &F) -> Self
+    pub fn filter_with_entity_matching<F>(self, filter: &F) -> Self
+    where
+        F: DatabaseFilter + Clone + Send + Sync + 'static,
+    {
+        self.add_entity_filter(filter, false)
+    }
+
+    pub(crate) fn filter_for_search<F>(self, filter: &F) -> Self
+    where
+        F: DatabaseFilter + Clone + Send + Sync + 'static,
+    {
+        self.add_entity_filter(filter, true)
+    }
+
+    fn add_entity_filter<F>(mut self, filter: &F, for_search: bool) -> Self
     where
         F: DatabaseFilter + Clone + Send + Sync + 'static,
     {
@@ -5190,19 +5611,23 @@ where
         if let Some(identity) = filter.keyset_filter_identity() {
             self.keyset_filter_identities.push(identity);
         }
-        if filter.requires_in_memory_filtering(B::DIALECT) {
-            let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
-            self.where_clauses.extend(conds);
-            self.values.extend(values);
+        self.carries_policy |= filter.has_request_authorized_predicates();
+        let in_memory = filter.requires_in_memory_filtering(B::DIALECT);
+        let (conditions, values) = if for_search {
+            let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
+            filter.to_sql_search_conditions(B::DIALECT, &table)
+        } else if in_memory {
+            filter.to_sql_prefilter_conditions(B::DIALECT)
+        } else {
+            filter.to_sql_conditions()
+        };
+        self.pair(conditions, values);
+        if in_memory {
             let filter = filter.clone();
             self.entity_matchers
                 .push(Arc::new(move |entity, calendar_today| {
                     filter.matches_entity_at(entity, calendar_today)
                 }));
-        } else {
-            let (conds, values) = filter.to_sql_conditions();
-            self.where_clauses.extend(conds);
-            self.values.extend(values);
         }
         self
     }
@@ -5212,6 +5637,7 @@ where
         O: DatabaseOrderBy,
     {
         self.filter_is_valid &= order.validate_order().is_ok();
+        self.carries_policy |= order.requires_context();
         if let Some(sort) = order.to_sort_expression() {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);
@@ -5254,6 +5680,9 @@ where
         order
             .validate_order()
             .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+        // A relation-count ordering carries its target's read policy and
+        // binds in the term: the query is checked as a policed one.
+        self.carries_policy |= order.requires_context();
         if let Some(sort) = order.to_sort_expression_with_context(ctx)? {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);
@@ -5337,7 +5766,7 @@ where
                 .iter()
                 .map(|column| (*column).to_string())
                 .collect(),
-            filter: filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
+            filter: self.checked_filter()?,
             sorts,
             pagination: if self.requires_in_memory_filtering() {
                 None
@@ -5355,11 +5784,13 @@ where
     }
 
     pub(crate) fn ensure_filter_valid(&self) -> crate::Result<()> {
-        if self.filter_is_valid {
-            Ok(())
-        } else {
-            Err(invalid_filter_input())
+        if !self.filter_is_valid {
+            return Err(invalid_filter_input());
         }
+        // A statement that composes a read policy numbers its placeholders
+        // across the caller's clauses and the policy's: refuse it unless
+        // the caller's clauses and values pair up.
+        self.checked_filter().map(|_| ())
     }
 
     fn aggregate_column_sql(column: &str) -> crate::Result<String>
@@ -5392,7 +5823,7 @@ where
             table: T::TABLE_NAME,
             function,
             column,
-            filter: filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
+            filter: self.checked_filter()?,
         })
     }
 
@@ -5901,8 +6332,9 @@ where
         let seek = format!("XLOCK, FORCESEEK({key_index}({key_column}))");
         // The re-check's column must not collide with a column of the table.
         let still_matches = unused_column_alias::<T>("__gom_still_matches");
-        let filter = filter_expression_from_raw_parts(dialect, &self.where_clauses, &self.values);
-        let filter_binds = self.values.len();
+        let filter = self.checked_filter()?;
+        // The caller's binds and those of any attached policy.
+        let filter_binds = filter.as_ref().map_or(0, expression_bind_count);
         let chunk = MAX_BINDS.saturating_sub(filter_binds).clamp(1, 500);
         let placeholders = |first: usize, count: usize| {
             (first..first + count)
@@ -6033,6 +6465,9 @@ where
                 .collect::<Vec<_>>()
                 .join(", "),
         ];
+        // The replaced ordering binds nothing: drop the values of the
+        // ordering it replaces.
+        query.order_values = Vec::new();
         query.page = Some(PageInput {
             limit: Some(sentinel_limit),
             offset: Some(0),
@@ -6347,13 +6782,14 @@ where
             query.page = None;
             return Ok(query.fetch_all_in_transaction(context).await?.len() as i64);
         }
-        let mut query = self.build_select_query()?;
+        // The policy is attached before the statement is built, so the
+        // caller's clauses are validated beside it rather than passed
+        // through and joined to it afterwards.
+        let mut policed = self.clone();
         if let Some(predicate) = visibility {
-            query.filter = Some(match query.filter {
-                Some(filter) => FilterExpression::And(vec![filter, predicate.clone()]),
-                None => predicate.clone(),
-            });
+            policed.attach_policy(predicate.clone());
         }
+        let mut query = policed.build_select_query()?;
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
@@ -6385,11 +6821,7 @@ where
             B::DIALECT,
             &DeleteQuery {
                 table: T::TABLE_NAME,
-                filter: filter_expression_from_raw_parts(
-                    B::DIALECT,
-                    &self.where_clauses,
-                    &self.values,
-                ),
+                filter: self.checked_filter()?,
             },
         );
         Ok((rendered.sql, rendered.values))

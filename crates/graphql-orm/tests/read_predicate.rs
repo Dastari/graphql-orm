@@ -467,7 +467,12 @@ fn nested_negation_renders_parenthesized_trees_in_bind_order() {
         .unwrap()
         .build_delete_sql();
     assert_eq!(binds, vec![SqlValue::Int(7)]);
-    assert!(sql.contains(&format!("{} = ", q("rank"))), "{sql}");
+    // The column is bound to its own table (#796), and a double negation
+    // is the predicate itself.
+    assert!(
+        sql.contains(&format!("{}.{} = ", q("predicate_records"), q("rank"))),
+        "{sql}"
+    );
     assert!(!sql.contains("NOT ("), "{sql}");
 }
 
@@ -1054,10 +1059,14 @@ fn relation_renderings_are_single_correlated_subqueries() {
         .unwrap()
     };
     let rendered = |predicate: ReadPredicate| {
-        let query = EntityQuery::<PredicateRecord>::new()
+        // An attached policy is kept apart from the caller's clauses and
+        // composed when a statement is rendered (#796).
+        let (sql, values) = EntityQuery::<PredicateRecord>::new()
             .with_read_visibility(&ReadVisibility::Complete(predicate))
+            .unwrap()
+            .try_build_delete_sql()
             .unwrap();
-        (query.where_clauses.join(" AND "), query.values.len())
+        (sql, values.len())
     };
     let (positive, binds) = rendered(related());
     assert_eq!(positive.matches("EXISTS (").count(), 1, "{positive}");

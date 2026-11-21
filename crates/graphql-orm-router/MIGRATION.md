@@ -10,10 +10,10 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
-## Breaking release (unreleased)
+## 0.16.8 to 0.17.0: breaking release
 
 Router 0.16.8 to 0.17.0. It ships in the workspace's single breaking release;
-see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+see the root [migration guide](../../MIGRATION.md#01860-to-01870-breaking-release).
 
 ### Nested `@authenticated` and `@requiresScopes` are enforced (#729)
 

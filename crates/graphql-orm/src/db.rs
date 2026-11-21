@@ -1495,6 +1495,10 @@ impl<B: OrmBackend> Database<B> {
                 crate::graphql::orm::EntityAccessSurface::Repository,
             )
             .await?;
+        visibility.validate_table(
+            B::DIALECT,
+            <P::Entity as crate::graphql::orm::DatabaseEntity>::TABLE_NAME,
+        )?;
         visibility.validate_identity(P::entity_type_id(), B::DIALECT)?;
         Ok(visibility)
     }
@@ -1515,6 +1519,7 @@ impl<B: OrmBackend> Database<B> {
         let visibility = self
             .read_visibility_for(T::metadata(), ctx, surface)
             .await?;
+        visibility.validate_table(B::DIALECT, T::TABLE_NAME)?;
         visibility.validate_identity(A::entity_type_id(), B::DIALECT)?;
         Ok(visibility)
     }
