@@ -374,3 +374,35 @@ mod tests {
         );
     }
 }
+
+/// Compile-time selection between a composed root and async-graphql's empty root.
+#[doc(hidden)]
+pub struct GeneratedRootSelection<const PRESENT: bool>;
+
+/// The GraphQL root type selected for a generated schema.
+#[doc(hidden)]
+pub trait SelectGeneratedRoot<Present, Empty> {
+    /// The selected root type.
+    type Root;
+}
+
+impl<Present, Empty> SelectGeneratedRoot<Present, Empty> for GeneratedRootSelection<true> {
+    type Root = Present;
+}
+
+impl<Present, Empty> SelectGeneratedRoot<Present, Empty> for GeneratedRootSelection<false> {
+    type Root = Empty;
+}
+
+/// Whether any selected entity contributes a field to the root.
+#[doc(hidden)]
+pub const fn has_generated_root_fields(sources: &[RootFieldSource]) -> bool {
+    let mut index = 0;
+    while index < sources.len() {
+        if !sources[index].fields.is_empty() {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}

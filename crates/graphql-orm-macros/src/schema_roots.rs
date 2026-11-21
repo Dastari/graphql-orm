@@ -482,6 +482,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         query_custom_chunk,
         &query_types,
         async_graphql_merged_object_derive(),
+        None,
     );
 
     if !backend_writable || schema_policy_read_only {
@@ -546,7 +547,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )
         } else {
             (
-                emit_chunked_merged_subscription("Subscription", None, &subscription_types),
+                emit_chunked_merged(
+                    "Subscription",
+                    None,
+                    &subscription_types,
+                    quote! { ::graphql_orm::async_graphql::MergedSubscription },
+                    Some((
+                        &generated_subscriptions,
+                        quote! { ::graphql_orm::async_graphql::EmptySubscription },
+                    )),
+                ),
                 quote! { SubscriptionRoot::default() },
             )
         };
@@ -639,7 +649,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ))
             .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
-                vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
+                ::std::iter::IntoIterator::into_iter(
+                    &[#(#entities::__GOM_SUBSCRIPTION_ROOT_FIELDS),*] as &[&[&str]],
+                ).flat_map(|fields| fields.iter().copied()).collect()
             ));
                 let builder = limits.apply(builder);
                 #federation_enable
@@ -702,6 +714,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 mutation_custom_ops,
                 &mutation_types,
                 async_graphql_merged_object_derive(),
+                Some((
+                    &generated_mutations,
+                    quote! { ::graphql_orm::async_graphql::EmptyMutation },
+                )),
             ),
             quote! {
                 MutationRoot::default()
@@ -721,10 +737,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         )
     } else {
         (
-            emit_chunked_merged_subscription(
+            emit_chunked_merged(
                 "Subscription",
                 subscription_custom_ops,
                 &subscription_types,
+                quote! { ::graphql_orm::async_graphql::MergedSubscription },
+                Some((
+                    &generated_subscriptions,
+                    quote! { ::graphql_orm::async_graphql::EmptySubscription },
+                )),
             ),
             quote! {
                 SubscriptionRoot::default()
@@ -859,7 +880,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ))
             .extension(::graphql_orm::graphql::input_validation::GeneratedInputValidation)
             .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
-                vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
+                ::std::iter::IntoIterator::into_iter(
+                    &[#(#entities::__GOM_SUBSCRIPTION_ROOT_FIELDS),*] as &[&[&str]],
+                ).flat_map(|fields| fields.iter().copied()).collect()
             ));
             let builder = limits.apply(builder);
             #federation_enable
@@ -914,6 +937,7 @@ fn emit_chunked_merged(
     custom_ops: Option<&[proc_macro2::TokenStream]>,
     types: &[proc_macro2::TokenStream],
     derive_macro: proc_macro2::TokenStream,
+    optional_root: Option<(&[proc_macro2::TokenStream], proc_macro2::TokenStream)>,
 ) -> proc_macro2::TokenStream {
     let chunk_size = 12usize;
     let mut chunk_defs = Vec::new();
@@ -954,28 +978,33 @@ fn emit_chunked_merged(
     }
 
     let root_name = syn::Ident::new(&format!("{}Root", name), proc_macro2::Span::mixed_site());
-    let graphql_name = name;
-    let root_def = quote! {
-        #[derive(#derive_macro, Default)]
-        #[graphql(name = #graphql_name)]
-        pub struct #root_name(
-            #(#root_chunk_idents),*
-        );
+    // A generated root can be empty when every included entity opts out.
+    // Type selection lets async-graphql omit the root from the schema entirely.
+    let (implementation, selection) = match optional_root {
+        Some((sources, empty)) if custom_ops.is_none() => {
+            let implementation = syn::Ident::new(
+                &format!("__Gom{root_name}"),
+                proc_macro2::Span::mixed_site(),
+            );
+            let selection = quote! {
+                pub type #root_name = <::graphql_orm::graphql::orm::GeneratedRootSelection<
+                    { ::graphql_orm::graphql::orm::has_generated_root_fields(&[#(#sources),*]) },
+                > as ::graphql_orm::graphql::orm::SelectGeneratedRoot<#implementation, #empty>>::Root;
+            };
+            (implementation, selection)
+        }
+        _ => (root_name, quote! {}),
     };
-
+    let graphql_name = name;
     quote! {
         #(#chunk_defs)*
-        #root_def
+        #[derive(#derive_macro, Default)]
+        #[graphql(name = #graphql_name)]
+        pub struct #implementation(
+            #(#root_chunk_idents),*
+        );
+        #selection
     }
-}
-
-fn emit_chunked_merged_subscription(
-    name: &str,
-    custom_ops: Option<&[proc_macro2::TokenStream]>,
-    types: &[proc_macro2::TokenStream],
-) -> proc_macro2::TokenStream {
-    let derive_macro = quote! { ::graphql_orm::async_graphql::MergedSubscription };
-    emit_chunked_merged(name, custom_ops, types, derive_macro)
 }
 
 struct SchemaRootsArgs {

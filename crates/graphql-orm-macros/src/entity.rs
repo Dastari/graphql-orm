@@ -35,6 +35,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) query_shapes: Option<Vec<String>>,
     /// Selected generated mutation categories; `None` keeps every mutation.
     pub(crate) mutation_shapes: Option<Vec<String>>,
+    pub(crate) mutations: Option<syn::LitBool>,
+    pub(crate) subscriptions: Option<syn::LitBool>,
     pub(crate) mutation_shapes_span: Option<proc_macro2::Span>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
@@ -393,6 +395,19 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     }
                     shapes.sort();
                     metadata.query_shapes = Some(shapes);
+                } else if meta.path.is_ident("mutations") || meta.path.is_ident("subscriptions") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("generated root options require a GraphQL entity"));
+                    }
+                    let setting = if meta.path.is_ident("mutations") {
+                        &mut metadata.mutations
+                    } else {
+                        &mut metadata.subscriptions
+                    };
+                    if setting.is_some() {
+                        return Err(meta.error("generated root option may only be declared once"));
+                    }
+                    *setting = Some(meta.value()?.parse()?);
                 } else if meta.path.is_ident("mutation_shapes") {
                     if attribute_name == "repository_entity" {
                         return Err(meta.error("mutation_shapes requires a GraphQL entity"));

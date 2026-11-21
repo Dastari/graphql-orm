@@ -1349,6 +1349,20 @@ fn generated_resolver_schema_signature(
     if let Some(shapes) = &entity_meta.mutation_shapes {
         signature.push_str(&format!("mutation_shapes={shapes:?}\n"));
     }
+    if entity_meta
+        .mutations
+        .as_ref()
+        .is_some_and(|setting| !setting.value)
+    {
+        signature.push_str("mutations=false\n");
+    }
+    if entity_meta
+        .subscriptions
+        .as_ref()
+        .is_some_and(|setting| !setting.value)
+    {
+        signature.push_str("subscriptions=false\n");
+    }
     for field in field_signatures {
         signature.push_str(&field);
         signature.push('\n');
@@ -1513,6 +1527,43 @@ fn generate_graphql_operations_unfiltered(
     let struct_name_str = struct_name.to_string();
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let operation_authorizations = parse_operation_authorizations(&input.attrs)?;
+    let mutations_disabled = entity_meta
+        .mutations
+        .as_ref()
+        .filter(|setting| !setting.value);
+    let subscriptions_disabled = entity_meta
+        .subscriptions
+        .as_ref()
+        .filter(|setting| !setting.value);
+    if let Some(setting) = mutations_disabled
+        && (entity_meta.mutation_shapes.is_some()
+            || entity_meta.dependent_deletes
+            || !entity_meta.ai_mutations.is_empty()
+            || [
+                "create",
+                "upsert",
+                "update",
+                "update_many",
+                "delete",
+                "delete_many",
+            ]
+            .into_iter()
+            .any(|category| operation_authorizations.contains_key(category)))
+    {
+        return Err(syn::Error::new(
+            setting.span(),
+            "mutations = false conflicts with mutation_shapes, dependent_deletes, AI mutation policies, or mutation operation authorization",
+        ));
+    }
+    if let Some(setting) = subscriptions_disabled
+        && (entity_meta.changed_started || operation_authorizations.contains_key("subscription"))
+    {
+        return Err(syn::Error::new(
+            setting.span(),
+            "subscriptions = false conflicts with changed_started or subscription operation authorization",
+        ));
+    }
+
     let query_shape_enabled = |shape: &str| {
         entity_meta
             .query_shapes
@@ -4609,6 +4660,12 @@ fn generate_graphql_operations_unfiltered(
     // so it carries one hidden placeholder field. The field is described in the
     // operation catalogue like any root field: its authorization requirement is
     // unsatisfiable and its resolver refuses every request.
+    let omitted_mutation_root = quote! {
+        pub type #mutations_struct = ::graphql_orm::async_graphql::EmptyMutation;
+    };
+    let omitted_subscription_root = quote! {
+        pub type #subscriptions_struct = ::graphql_orm::graphql::subscriptions::OmittedSubscription;
+    };
     let emits_write_placeholder = (has_composite_primary_key || schema_policy_read_only)
         && backend != BackendKind::Mssql
         && !entity_meta.append_only;
@@ -4621,7 +4678,9 @@ fn generate_graphql_operations_unfiltered(
     let emits_append_only_write_placeholder = entity_meta.append_only && !generates_public_create;
     let write_placeholder_field = format!("gom{struct_name}WritesUnavailable");
     let write_placeholder_description = "Unavailable placeholder: this entity serves no generated writes, and every request is refused";
-    let composite_write_stubs = if emits_write_placeholder {
+    let composite_write_stubs = if mutations_disabled.is_some() && !entity_meta.append_only {
+        omitted_mutation_root.clone()
+    } else if emits_write_placeholder {
         quote! {
             #[derive(Default)]
             pub struct #mutations_struct;
@@ -4670,7 +4729,7 @@ fn generate_graphql_operations_unfiltered(
         }
     };
 
-    let upsert_result_definition = if upsert_config.is_some() {
+    let upsert_result_definition = if mutations_disabled.is_none() && upsert_config.is_some() {
         quote! {
             #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
             #[graphql(name = #upsert_result_type_str, rename_fields = #field_case_rule)]
@@ -4963,7 +5022,7 @@ fn generate_graphql_operations_unfiltered(
         notify_on_created: &notify_on_created,
         notify_on_updated: &notify_on_updated,
         mutation_output_release: &mutation_output_release,
-        generates_public_upsert,
+        generates_public_upsert: mutations_disabled.is_none() && generates_public_upsert,
     });
 
     let upsert_repository_method = if upsert_config.is_some() {
@@ -5709,7 +5768,7 @@ fn generate_graphql_operations_unfiltered(
             create_output_authorization: &create_output_authorization,
             result_error_code_none: &result_error_code_none,
             notify_on_created: &notify_on_created,
-            generates_public_create,
+            generates_public_create: mutations_disabled.is_none() && generates_public_create,
         });
 
     let append_only_surface = if entity_meta.append_only {
@@ -5741,7 +5800,10 @@ fn generate_graphql_operations_unfiltered(
         } else {
             quote! {}
         };
-        let result_object = crate::wrapper_object::wrapper_object(quote! {
+        let result_object = if mutations_disabled.is_some() {
+            quote! {}
+        } else {
+            crate::wrapper_object::wrapper_object(quote! {
             #[derive(Debug, Clone)]
             #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
             pub struct #result_type {
@@ -5751,37 +5813,12 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #entity_result_field_name)]
                 pub entity: ::std::option::Option<#struct_name>,
             }
-        });
-        let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
-            #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
-            #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
-            pub struct #changed_event {
-                pub action: ::graphql_orm::graphql::orm::ChangeAction,
-                #[graphql(name = #change_kind_field_name)]
-                pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
-                pub id: #subscription_identity_type,
-                #subscription_extra_key_field
-                #[graphql(name = #source_entity_field_name)]
-                pub source_entity: ::std::option::Option<::std::string::String>,
-                #[graphql(name = #source_id_field_name)]
-                pub source_id: ::std::option::Option<::std::string::String>,
-                pub path: ::std::vec::Vec<::std::string::String>,
-                #[graphql(name = #entity_result_field_name)]
-                pub entity: ::std::option::Option<#struct_name>,
-            }
-        });
-        quote! {
-            #[derive(Clone, Debug)]
-            pub struct #create_input { #(#create_input_fields)* }
-
-            #graphql_create_input_definition
-
-            #result_object
-
-            #changed_event_object
-
-            #changed_frame_object
-
+            })
+        };
+        let append_mutation_root = if mutations_disabled.is_some() {
+            omitted_mutation_root.clone()
+        } else {
+            quote! {
             #[derive(Default)]
             pub struct #mutations_struct;
 
@@ -5790,7 +5827,12 @@ fn generate_graphql_operations_unfiltered(
                     #create_graphql_method
                     #append_only_mutation_placeholder
             }
-
+            }
+        };
+        let append_subscription_root = if subscriptions_disabled.is_some() {
+            omitted_subscription_root.clone()
+        } else {
+            quote! {
             #[derive(Default)]
             pub struct #subscriptions_struct;
 
@@ -5959,6 +6001,41 @@ fn generate_graphql_operations_unfiltered(
                     ))
                 }
             }
+            }
+        };
+        let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
+            #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
+            #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+            pub struct #changed_event {
+                pub action: ::graphql_orm::graphql::orm::ChangeAction,
+                #[graphql(name = #change_kind_field_name)]
+                pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+                pub id: #subscription_identity_type,
+                #subscription_extra_key_field
+                #[graphql(name = #source_entity_field_name)]
+                pub source_entity: ::std::option::Option<::std::string::String>,
+                #[graphql(name = #source_id_field_name)]
+                pub source_id: ::std::option::Option<::std::string::String>,
+                pub path: ::std::vec::Vec<::std::string::String>,
+                #[graphql(name = #entity_result_field_name)]
+                pub entity: ::std::option::Option<#struct_name>,
+            }
+        });
+        quote! {
+            #[derive(Clone, Debug)]
+            pub struct #create_input { #(#create_input_fields)* }
+
+            #graphql_create_input_definition
+
+            #result_object
+
+            #changed_event_object
+
+            #changed_frame_object
+
+            #append_mutation_root
+
+            #append_subscription_root
 
             impl #struct_name {
                 #[doc(hidden)]
@@ -7451,12 +7528,15 @@ fn generate_graphql_operations_unfiltered(
         )
     };
 
-    if entity_meta.append_only {
+    if mutations_disabled.is_none() && entity_meta.append_only {
         if generates_public_create {
             operation_descriptors.push(create_descriptor());
         }
-        operation_descriptors.push(subscription_descriptor());
-    } else if backend_writable && !schema_policy_read_only && !has_composite_primary_key {
+    } else if mutations_disabled.is_none()
+        && backend_writable
+        && !schema_policy_read_only
+        && !has_composite_primary_key
+    {
         if generates_public_create {
             operation_descriptors.push(create_descriptor());
         }
@@ -7504,11 +7584,13 @@ fn generate_graphql_operations_unfiltered(
             quote! { #delete_many_result_type },
             &delete_many_operation_authorization,
         ));
-        operation_descriptors.push(subscription_descriptor());
-    } else {
+    }
+    if subscriptions_disabled.is_none() {
         operation_descriptors.push(subscription_descriptor());
     }
-    if emits_write_placeholder || emits_append_only_write_placeholder {
+    if mutations_disabled.is_none()
+        && (emits_write_placeholder || emits_append_only_write_placeholder)
+    {
         operation_descriptors.push(mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Unavailable },
             "unavailable",
@@ -7740,7 +7822,10 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
-    let generated_subscription_surface = quote! {
+    let generated_subscription_surface = if subscriptions_disabled.is_some() {
+        omitted_subscription_root
+    } else {
+        quote! {
         /// Generated subscriptions for this entity
         #[derive(Default)]
         pub struct #subscriptions_struct;
@@ -7912,6 +7997,7 @@ fn generate_graphql_operations_unfiltered(
             }
         }
 
+        }
     };
     let generated_propagation_driver = quote! {
             #[doc(hidden)]
@@ -8107,10 +8193,13 @@ fn generate_graphql_operations_unfiltered(
             update_many_result_type: &update_many_result_type,
             update_many_scope_enforcement: &update_many_scope_enforcement,
             notify_bulk_updated: &notify_bulk_updated,
-            generates_public_update,
+            generates_public_update: mutations_disabled.is_none() && generates_public_update,
         });
 
-    let result_object = crate::wrapper_object::wrapper_object(quote! {
+    let result_object = if mutations_disabled.is_some() {
+        quote! {}
+    } else {
+        crate::wrapper_object::wrapper_object(quote! {
         /// Mutation result for this entity.
         #[derive(Debug, Clone)]
         #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
@@ -8121,7 +8210,8 @@ fn generate_graphql_operations_unfiltered(
             #[graphql(name = #entity_result_field_name)]
             pub entity: ::std::option::Option<#struct_name>,
         }
-    });
+        })
+    };
     let changed_event_object = crate::wrapper_object::wrapper_object(quote! {
         /// Subscription change event for this entity.
         #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
@@ -8138,36 +8228,6 @@ fn generate_graphql_operations_unfiltered(
             pub path: ::std::vec::Vec<::std::string::String>,
             #[graphql(name = #entity_result_field_name)]
             pub entity: ::std::option::Option<#struct_name>,
-        }
-    });
-    let delete_many_result_object = crate::wrapper_object::wrapper_object(quote! {
-        /// Result of bulk delete by Where filter
-        #[derive(Debug, Clone)]
-        #[graphql(name = #delete_many_result_type_str, rename_fields = #field_case_rule)]
-        pub struct #delete_many_result_type {
-            pub success: bool,
-            /// Failures after commit; success and count still describe the committed write.
-            pub notification_errors: ::std::option::Option<::std::vec::Vec<::graphql_orm::graphql::orm::NotificationError>>,
-            pub error: ::std::option::Option<::std::string::String>,
-            /// Application refusal code, or the safe database error category.
-            pub error_code: ::std::option::Option<::std::string::String>,
-            #[graphql(name = #deleted_count_field_name)]
-            pub deleted_count: i64,
-        }
-    });
-    let update_many_result_object = crate::wrapper_object::wrapper_object(quote! {
-        /// Result of bulk update by Where filter
-        #[derive(Debug, Clone)]
-        #[graphql(name = #update_many_result_type_str, rename_fields = #field_case_rule)]
-        pub struct #update_many_result_type {
-            pub success: bool,
-            /// Failures after commit; success and count still describe the committed write.
-            pub notification_errors: ::std::option::Option<::std::vec::Vec<::graphql_orm::graphql::orm::NotificationError>>,
-            pub error: ::std::option::Option<::std::string::String>,
-            /// Application refusal code, or the safe database error category.
-            pub error_code: ::std::option::Option<::std::string::String>,
-            #[graphql(name = #affected_count_field_name)]
-            pub affected_count: i64,
         }
     });
     let delete_graphql_method = mutations::delete::single(mutations::delete::SingleInput {
@@ -8213,43 +8273,10 @@ fn generate_graphql_operations_unfiltered(
         struct_name,
         notify_bulk_deleted: &notify_bulk_deleted,
     });
-    Ok(quote! {
-        #operation_metadata_impl
-
-        // ============================================================================
-        // Connection/Edge Types (for pagination)
-        // ============================================================================
-
-        #key_type_definition
-
-        #query_connection
-
-        #search_connection_definitions
-
-        // ============================================================================
-        // Create/Update Input Types
-        // ============================================================================
-
-        /// Input for creating an entity.
-        #[derive(Clone, Debug)]
-        pub struct #create_input {
-            #(#create_input_fields)*
-        }
-
-        /// Input for updating an entity.
-        #[derive(Clone, Debug, Default)]
-        pub struct #update_input {
-            #(#update_input_fields)*
-        }
-
-        #update_assignment_helpers
-
-        #graphql_create_input_definition
-
-        #graphql_update_input_definition
-
-        #result_object
-
+    let mutation_result_impl = if mutations_disabled.is_some() {
+        quote! {}
+    } else {
+        quote! {
         impl #result_type {
             /// Create a successful result with the entity
             pub fn ok(entity: #struct_name) -> Self {
@@ -8295,13 +8322,42 @@ fn generate_graphql_operations_unfiltered(
                 Self { success: true, error: ::std::option::Option::None, #result_error_code_none entity: ::std::option::Option::None }
             }
         }
-
-        #upsert_result_definition
-
-        #changed_event_object
-
-        #changed_frame_object
-
+        }
+    };
+    let bulk_results = if mutations_disabled.is_some() {
+        quote! {}
+    } else {
+        let delete_many_result_object = crate::wrapper_object::wrapper_object(quote! {
+            /// Result of bulk delete by Where filter
+            #[derive(Debug, Clone)]
+            #[graphql(name = #delete_many_result_type_str, rename_fields = #field_case_rule)]
+            pub struct #delete_many_result_type {
+                pub success: bool,
+                /// Failures after commit; success and count still describe the committed write.
+                pub notification_errors: ::std::option::Option<::std::vec::Vec<::graphql_orm::graphql::orm::NotificationError>>,
+                pub error: ::std::option::Option<::std::string::String>,
+                /// Application refusal code, or the safe database error category.
+                pub error_code: ::std::option::Option<::std::string::String>,
+                #[graphql(name = #deleted_count_field_name)]
+                pub deleted_count: i64,
+            }
+        });
+        let update_many_result_object = crate::wrapper_object::wrapper_object(quote! {
+            /// Result of bulk update by Where filter
+            #[derive(Debug, Clone)]
+            #[graphql(name = #update_many_result_type_str, rename_fields = #field_case_rule)]
+            pub struct #update_many_result_type {
+                pub success: bool,
+                /// Failures after commit; success and count still describe the committed write.
+                pub notification_errors: ::std::option::Option<::std::vec::Vec<::graphql_orm::graphql::orm::NotificationError>>,
+                pub error: ::std::option::Option<::std::string::String>,
+                /// Application refusal code, or the safe database error category.
+                pub error_code: ::std::option::Option<::std::string::String>,
+                #[graphql(name = #affected_count_field_name)]
+                pub affected_count: i64,
+            }
+        });
+        quote! {
         #delete_many_result_object
 
         impl #delete_many_result_type {
@@ -8357,20 +8413,12 @@ fn generate_graphql_operations_unfiltered(
             }
 
         }
-
-        // ============================================================================
-        // Query Struct
-        // ============================================================================
-
-        #aggregate_definitions
-            #authorized_keyset_definitions
-
-        #query_root
-
-        // ============================================================================
-        // Mutation Struct
-        // ============================================================================
-
+        }
+    };
+    let mutation_root = if mutations_disabled.is_some() {
+        omitted_mutation_root
+    } else {
+        quote! {
         /// Generated mutations for this entity
         #[derive(Default)]
         pub struct #mutations_struct;
@@ -8389,6 +8437,70 @@ fn generate_graphql_operations_unfiltered(
             #delete_many_graphql_method
 
         }
+        }
+    };
+
+    Ok(quote! {
+        #operation_metadata_impl
+
+        // ============================================================================
+        // Connection/Edge Types (for pagination)
+        // ============================================================================
+
+        #key_type_definition
+
+        #query_connection
+
+        #search_connection_definitions
+
+        // ============================================================================
+        // Create/Update Input Types
+        // ============================================================================
+
+        /// Input for creating an entity.
+        #[derive(Clone, Debug)]
+        pub struct #create_input {
+            #(#create_input_fields)*
+        }
+
+        /// Input for updating an entity.
+        #[derive(Clone, Debug, Default)]
+        pub struct #update_input {
+            #(#update_input_fields)*
+        }
+
+        #update_assignment_helpers
+
+        #graphql_create_input_definition
+
+        #graphql_update_input_definition
+
+        #result_object
+
+        #mutation_result_impl
+
+        #upsert_result_definition
+
+        #changed_event_object
+
+        #changed_frame_object
+
+        #bulk_results
+
+        // ============================================================================
+        // Query Struct
+        // ============================================================================
+
+        #aggregate_definitions
+            #authorized_keyset_definitions
+
+        #query_root
+
+        // ============================================================================
+        // Mutation Struct
+        // ============================================================================
+
+        #mutation_root
 
         // ============================================================================
         // Subscription Struct

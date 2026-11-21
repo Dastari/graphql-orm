@@ -1530,3 +1530,32 @@ mod authority_timer_tests {
         }
     }
 }
+
+/// An omitted entity subscription is neutral when merged with other roots.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct OmittedSubscription;
+
+impl async_graphql::SubscriptionType for OmittedSubscription {
+    fn type_name() -> std::borrow::Cow<'static, str> {
+        <async_graphql::EmptySubscription as async_graphql::SubscriptionType>::type_name()
+    }
+
+    fn create_type_info(registry: &mut async_graphql::registry::Registry) -> String {
+        <async_graphql::EmptySubscription as async_graphql::SubscriptionType>::create_type_info(
+            registry,
+        )
+    }
+
+    fn is_empty() -> bool {
+        true
+    }
+
+    fn create_field_stream<'a>(
+        &'a self,
+        _ctx: &'a async_graphql::Context<'_>,
+    ) -> Option<std::pin::Pin<Box<dyn futures::Stream<Item = async_graphql::Response> + Send + 'a>>>
+    {
+        None
+    }
+}
