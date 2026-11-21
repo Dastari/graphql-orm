@@ -748,19 +748,19 @@ async fn a_recovered_run_resumed_after_revocation_sends_the_marker() {
         .expect("replacement claim should succeed")
         .expect("the recovered run should be eligible");
     assert_eq!(replacement.lease_generation(), 2);
+    fixture.lease = fixture
+        .run_service
+        .start(&replacement)
+        .await
+        .expect("the recovered attempt should start");
     let restored = checkpoint_service
-        .adopt_tool_batch(&replacement)
+        .adopt_tool_batch(&fixture.lease)
         .await
         .expect("the new fence should revalidate the history")
         .expect("the restored checkpoint should be adoptable");
     let continuation = restored.continuation().clone();
     assert_handles_only("a recovered continuation", &format!("{continuation:?}"));
 
-    fixture.lease = fixture
-        .run_service
-        .start(&replacement)
-        .await
-        .expect("the recovered attempt should start");
     executor(&fixture)
         .execute(&fixture.lease, continuation_plan(&fixture, continuation, 1))
         .await

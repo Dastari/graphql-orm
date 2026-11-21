@@ -70,9 +70,23 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.192.0, `graphql-orm-macros` 0.192.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.192.0, `graphql-orm-macros` 0.192.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.1**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **No action** — ORM/macros 0.192.0: set `propagate_change_action = "updated"` on an upward relation to report child creates and deletes as parent updates (#812). [Migration](../../MIGRATION.md#01910-to-01920-propagated-parent-actions)
+- **Action needed** — AI 0.152.1: use the session's pinned provider and model
+  for compaction. Legacy sessions need a verified pin (#532).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-to-01521)
+- **Action needed** — AI 0.152.1: direct callers must start a replacement
+  lease before adopting its completed tool batch (#532).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-to-01521)
+- **No action** — AI 0.152.1: restore collection reads bounded pages, batches
+  attachment parent lookups, and fails closed when its aggregate row-data
+  budget is exceeded (#532).
+  [Restore collection](../../crates/graphql-orm-ai/docs/recovery-and-restore.md)
+- **No action** — AI 0.152.1: bounded debug codes identify content-protection
+  failures, and provider tool validation reuses validators for exact offers
+  (#818, #819).
+  [AI changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01521)
 - **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
 
 ### workspace-2026.11.21.3

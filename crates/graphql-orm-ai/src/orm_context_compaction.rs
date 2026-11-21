@@ -395,8 +395,9 @@ impl OrmAiContextCompactionService {
     ///
     /// Fails closed for stale fencing or principal authority, deleted/nonowned
     /// sessions, malformed or over-bound checkpoints/messages/blocks, gaps,
-    /// purged/incomplete content, unready protection, or invalid provider and
-    /// requested-boundary values.
+    /// purged/incomplete content, unready protection, missing session execution
+    /// selection, a provider or model different from that selection, or an
+    /// invalid requested boundary.
     pub async fn prepare(
         &self,
         lease: &AiRunLease,
@@ -416,7 +417,6 @@ impl OrmAiContextCompactionService {
                 "invalid context-compaction request".to_owned(),
             ));
         }
-        let lease = self.run_service.heartbeat(lease).await?;
         if lease.state() != AiRunState::Running {
             return Err(AiError::Conflict);
         }
@@ -426,8 +426,10 @@ impl OrmAiContextCompactionService {
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
         let scope = record_scope(&session);
-        validate_session_binding(&session, &lease, &scope)?;
-        let (principal, policy) = self.authorize(&lease, &scope).await?;
+        validate_session_binding(&session, lease, &scope)?;
+        let (principal, policy) = self.authorize(lease, &scope).await?;
+        validate_compaction_route(&session, &provider_kind, &provider_model)?;
+        let lease = self.run_service.heartbeat(lease).await?;
 
         let recent = i64::try_from(self.limits.minimum_recent_messages)
             .map_err(|_| AiError::InvalidConfiguration("invalid compaction limits".to_owned()))?;
@@ -544,7 +546,13 @@ impl OrmAiContextCompactionService {
                 egress_sources.push(AiDataSourceRef {
                     kind: "message_block".to_owned(),
                     reference: format!("{}:{}:{}", message.id, block.id, message.sequence),
-                    classification: DataClassification::Restricted,
+                    // Only a validated handle is exported for reference blocks.
+                    // Unlabelled plaintext can contain arbitrary sensitive data.
+                    classification: if crate::is_entity_reference_block_kind(&block.block_kind) {
+                        DataClassification::Confidential
+                    } else {
+                        DataClassification::Restricted
+                    },
                     trust: if message.message_role == "user" {
                         AiSourceTrust::UserProvided
                     } else {
@@ -698,7 +706,7 @@ impl OrmAiContextCompactionService {
                     through_sequence,
                     source_hash: source_hash.clone(),
                     token_estimate,
-                    provider_kind: result.provider_kind().as_str().to_owned(),
+                    provider_kind: result.provider_kind().clone(),
                     provider_model: result.provider_model().to_owned(),
                     protected_summary,
                     expected_parent: prepared.parent,
@@ -1250,6 +1258,23 @@ fn valid_provenance(
         .is_some_and(|message| message.sequence == through_sequence)
 }
 
+pub(crate) fn validate_compaction_route(
+    session: &AiSessionRecord,
+    provider_kind: &ProviderKind,
+    model: &str,
+) -> Result<(), AiError> {
+    let selection = crate::AiSessionExecutionSelection::decode(
+        session
+            .execution_selection
+            .as_deref()
+            .ok_or(AiError::SessionExecutionUnbound)?,
+    )?;
+    if selection.provider_kind() != *provider_kind || selection.model() != model {
+        return Err(AiError::Conflict);
+    }
+    Ok(())
+}
+
 fn validate_session_binding(
     session: &AiSessionRecord,
     lease: &AiRunLease,
@@ -1421,10 +1446,19 @@ mod tests {
         });
         let scope = AiScope::new("tenant", "context-tenant").with_tenant_id("context-tenant");
         let session_id = Uuid::new_v4();
+        let execution_selection = crate::AiSessionExecutionSelection::new(
+            ProviderKind::OpenAi,
+            "compaction-test",
+            "test-model",
+            crate::ModelReasoningEffort::Low,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
         AiSessionRecord::insert(
             &database,
             CreateAiSessionRecordInput {
-                execution_selection: None,
+                execution_selection: Some(execution_selection.clone()),
                 id: session_id,
                 owner_principal_kind: "user".to_owned(),
                 owner_subject: principal.subject().to_owned(),
@@ -1508,7 +1542,7 @@ mod tests {
             &database,
             CreateAiRunRecordInput {
                 recovery_epoch_id: None,
-                execution_selection: None,
+                execution_selection: Some(execution_selection),
                 id: Uuid::new_v4(),
                 session_id,
                 input_message_id: message_ids[5],
@@ -1735,6 +1769,22 @@ mod tests {
             .prepare(&fixture.lease, ProviderKind::OpenAi, "test-model", 2, 128)
             .await
             .expect("compaction should prepare");
+        let sources = prepared.egress_sources();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.classification == DataClassification::Confidential)
+                .count(),
+            1,
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.classification == DataClassification::Restricted)
+                .count(),
+            2,
+        );
         let summarizer_prompt =
             serde_json::to_string(prepared.model_request()).expect("request serializes");
         assert!(
@@ -1805,6 +1855,28 @@ mod tests {
         assert!(!next_prompt.contains(PAYLOAD));
         assert!(next_prompt.contains(r#""status":"unavailable""#));
         assert!(next_prompt.contains("r-compacted"));
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_a_provider_or_model_other_than_the_session_pin() {
+        let fixture = fixture().await;
+        for (provider, model) in [
+            (ProviderKind::Anthropic, "test-model"),
+            (ProviderKind::OpenAi, "other-model"),
+        ] {
+            assert!(matches!(
+                fixture
+                    .service
+                    .prepare(&fixture.lease, provider, model, 2, 128)
+                    .await,
+                Err(AiError::Conflict)
+            ));
+        }
+        fixture
+            .service
+            .prepare(&fixture.lease, ProviderKind::OpenAi, "test-model", 2, 128)
+            .await
+            .expect("a mismatched request must not consume the lease");
     }
 
     #[tokio::test]

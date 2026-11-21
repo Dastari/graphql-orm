@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.152.1
+
+- Emit fixed, content-free debug codes for the approval, attachment, and
+  context-compaction content-protection mappings (#818).
+- Reuse argument validators bound to the exact provider offer or native
+  tool admission, including cached refusals for malformed schemas (#819).
+- Require context compaction to match the session's pinned provider and
+  model. Classify validated handle-only sources as `Confidential` and
+  keep unlabelled blocks and inherited summaries `Restricted` (#532).
+- Require a running lease and a positive checkpoint generation no newer
+  than the lease when adopting completed tool batches (#532).
+- Page restore scans under an aggregate row-data budget and batch attachment
+  parent lookups in the same restore transaction (#532).
+
 ## Unreleased - 0.152.0
 
 Opt-in entity references on the local-harness and Grok ACP adapters (#721).

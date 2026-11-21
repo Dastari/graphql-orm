@@ -17241,6 +17241,11 @@ mod tests {
             .expect("replacement claim should succeed")
             .expect("stateless checkpoint should be immediately eligible");
         assert_eq!(replacement.lease_generation(), 2);
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(&replacement).await,
+            Err(AiError::Conflict)
+        ));
+        let replacement = fixture.run_service.start(&replacement).await.unwrap();
         let restored = checkpoint_service
             .adopt_tool_batch(&replacement)
             .await

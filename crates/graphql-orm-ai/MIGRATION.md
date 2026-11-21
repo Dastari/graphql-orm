@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.152.0 to 0.152.1
+
+**No action** for hosts already compacting with the session's pinned
+provider and model and starting replacement leases before adopting their
+checkpoints.
+
+**Action needed** for direct adoption callers that previously passed a
+newly claimed lease. Call `start` before adopting the completed tool batch.
+Legacy sessions must pin a verified execution selection before compaction.
+Copy the prepared source list verbatim into the egress manifest.
+
+Restore collection keeps its configured row ceilings and now aborts if the
+aggregate row-data budget is exceeded. Content-protection public error
+mappings and provider schema refusals are unchanged. No persistent schema,
+GraphQL SDL, or data migration is needed.
+
 ## 0.151.2 to 0.152.0: opt-in entity references on local-process adapters
 
 No public signature changed, and there is no GraphQL SDL, persistent schema,
