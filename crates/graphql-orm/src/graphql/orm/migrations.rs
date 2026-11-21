@@ -21,7 +21,8 @@ use super::dialect::{DatabaseBackend, SqlDialect};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
 use super::owned_schema::{
-    IndexRef, OwnedMigrationPlan, OwnedMigrationStep, SchemaRef, StepRef, TableRef,
+    IndexPredicateRef, IndexRef, OwnedMigrationPlan, OwnedMigrationStep, SchemaRef, StepRef,
+    TableRef,
 };
 use super::query::PoolProvider;
 #[cfg(feature = "postgres")]
@@ -2184,7 +2185,12 @@ pub(super) fn diff_schema_views_with(
 
         for (index_name, index) in &target_indexes {
             if let Some(current_index) = current_indexes.get(index_name) {
-                if *current_index != *index {
+                let predicates_match = index_predicates_match(
+                    backend,
+                    current_index.predicate.as_ref(),
+                    index.predicate.as_ref(),
+                );
+                if !current_index.same_definition(index, predicates_match) {
                     steps.push(OwnedMigrationStep::DropIndex {
                         table_name: table_name.clone(),
                         index_name: index_name.clone(),
@@ -2860,13 +2866,31 @@ fn mssql_closed_opaque_filter(filter: &str) -> bool {
     depth == 0
 }
 
+fn index_predicates_match(
+    backend: DatabaseBackend,
+    current: Option<&IndexPredicateRef<'_>>,
+    target: Option<&IndexPredicateRef<'_>>,
+) -> bool {
+    if current == target {
+        return true;
+    }
+    if !matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Postgres) {
+        return false;
+    }
+    let (Some(current), Some(target)) = (current, target) else {
+        return false;
+    };
+    // Both columns are now in declared form. A catalogue name that itself
+    // looks delimited is escaped before it can be decoded as SQL syntax.
+    current.values == target.values
+        && backend.identifier_part_name(current.column)
+            == backend.identifier_part_name(target.column)
+}
+
 /// The filter of a partial index, as `CREATE INDEX ... WHERE` takes it. The
 /// unique-index duplicate preflight probes with the same text, so it examines
 /// exactly the rows the index will cover.
-fn render_index_predicate(
-    backend: DatabaseBackend,
-    predicate: &super::owned_schema::IndexPredicateRef<'_>,
-) -> String {
+fn render_index_predicate(backend: DatabaseBackend, predicate: &IndexPredicateRef<'_>) -> String {
     if backend == DatabaseBackend::Mssql
         && predicate.column.is_empty()
         && let [filter] = predicate.values.as_slice()
@@ -4752,12 +4776,13 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
         let column_rows = sqlx::query(&pragma_table_info)
             .fetch_all(&mut *connection)
             .await?;
+        let column_name = |name: String| DatabaseBackend::Sqlite.raw_name_in_declared_form(&name);
         let mut ordered_keys = column_rows
             .iter()
             .map(|row| {
                 Ok((
                     row.try_get::<i64, _>("pk")?,
-                    row.try_get::<String, _>("name")?,
+                    column_name(row.try_get("name")?),
                 ))
             })
             .collect::<crate::Result<Vec<_>>>()?;
@@ -4770,7 +4795,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
         let mut columns = column_rows
             .into_iter()
             .map(|row| {
-                let name: String = row.try_get("name")?;
+                let name = column_name(row.try_get("name")?);
                 let sql_type: String = row.try_get("type")?;
                 let nullable = row.try_get::<i64, _>("notnull")? == 0;
                 let default = row
@@ -4839,7 +4864,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 } else {
                     super::core::IndexDirection::Asc
                 };
-                index_columns.push((seqno, name, direction));
+                index_columns.push((seqno, column_name(name), direction));
             }
             index_columns.sort_by_key(|(seqno, ..)| *seqno);
             let column_names = index_columns
@@ -4888,6 +4913,12 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 upper
                     .find(" WHERE ")
                     .and_then(|offset| parse_closed_set_index_predicate(&sql[offset + 7..]))
+            });
+
+            // Use the same declared-name form as the generated predicate.
+            let predicate = predicate.map(|mut predicate| {
+                predicate.column = column_name(predicate.column);
+                predicate
             });
 
             indexes.push(IndexModel {
@@ -4951,8 +4982,8 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 .iter()
                 .map(
                     |(_, source_column, _, target_column, _)| ForeignKeyColumnPairModel {
-                        source_column: source_column.clone(),
-                        target_column: target_column.clone(),
+                        source_column: column_name(source_column.clone()),
+                        target_column: column_name(target_column.clone()),
                     },
                 )
                 .collect();
@@ -5324,9 +5355,10 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
+        let column_name = |name: String| DatabaseBackend::Postgres.raw_name_in_declared_form(&name);
         let primary_key_columns = primary_key_rows
             .into_iter()
-            .map(|row| row.try_get::<String, _>("column_name"))
+            .map(|row| row.try_get("column_name").map(column_name))
             .collect::<Result<Vec<_>, _>>()?;
 
         let unique_rows = sqlx::query(
@@ -5355,7 +5387,7 @@ pub(super) async fn introspect_owned_postgres_connection_including(
             .map(|row| {
                 Ok((
                     row.try_get::<String, _>("constraint_name")?,
-                    row.try_get::<String, _>("column_name")?,
+                    column_name(row.try_get("column_name")?),
                     row.try_get::<i64, _>("key_ordinal")?,
                 ))
             })
@@ -5366,7 +5398,7 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         let columns = column_rows
             .into_iter()
             .map(|row| {
-                let name: String = row.try_get("column_name")?;
+                let name = column_name(row.try_get("column_name")?);
                 let sql_type: String = row.try_get("data_type")?;
                 let spatial = parse_postgres_geometry_type(&sql_type);
                 Ok(ColumnModel {
@@ -5449,13 +5481,18 @@ pub(super) async fn introspect_owned_postgres_connection_including(
             let predicate = predicate_expression
                 .as_deref()
                 .filter(|_| predicate_catalog_only)
-                .and_then(parse_closed_set_index_predicate);
+                .and_then(parse_closed_set_index_predicate)
+                .map(|mut predicate| {
+                    predicate.column = column_name(predicate.column);
+                    predicate
+                });
             let method_name: String = row.try_get("method")?;
             let method = match method_name.to_ascii_lowercase().as_str() {
                 "gist" => IndexMethod::Gist,
                 _ => IndexMethod::Default,
             };
-            let column_names: Vec<String> = row.try_get("columns")?;
+            let names: Vec<String> = row.try_get("columns")?;
+            let column_names: Vec<String> = names.into_iter().map(column_name).collect();
             let descending: Vec<bool> = row.try_get("descending")?;
             if column_names.len() != descending.len() {
                 return Err(sqlx::Error::Protocol(format!(
@@ -5542,8 +5579,8 @@ pub(super) async fn introspect_owned_postgres_connection_including(
                         .into_iter()
                         .zip(target_columns)
                         .map(|(source_column, target_column)| ForeignKeyColumnPairModel {
-                            source_column,
-                            target_column,
+                            source_column: column_name(source_column),
+                            target_column: column_name(target_column),
                         })
                         .collect(),
                     target_table: {

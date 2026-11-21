@@ -1635,11 +1635,9 @@ impl DatabaseBackend {
     /// `a.b`) is delimited, so re-rendering it names the catalogue object
     /// rather than `ix` or `b`. Every ordinary name keeps its text, so
     /// introspected models and migration plans are unchanged for them.
-    #[cfg(feature = "mssql")]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub(crate) fn raw_name_in_declared_form(self, name: &str) -> String {
-        if self.is_one_delimited_identifier(name)
-            || identifier_path_parts(self, name).nth(1).is_some()
-        {
+        if self.is_one_delimited_identifier(name) || name.contains('.') {
             self.delimit_raw_identifier(name)
         } else {
             name.to_owned()
@@ -1698,7 +1696,12 @@ impl DatabaseBackend {
 
     /// The name one path part denotes: the inside of a well-formed delimited
     /// identifier, or the part itself.
-    fn identifier_part_name(self, part: &str) -> String {
+    pub(super) fn delimited_column_name(self, part: &str) -> Option<String> {
+        self.is_one_delimited_identifier(part)
+            .then(|| self.identifier_part_name(part))
+    }
+
+    pub(super) fn identifier_part_name(self, part: &str) -> String {
         if !self.is_one_delimited_identifier(part) {
             return part.to_owned();
         }
@@ -1723,10 +1726,10 @@ impl DatabaseBackend {
     /// to follow a table or alias prefix (`alias.<column>`) or to stand
     /// unqualified in a predicate.
     ///
-    /// A declared physical column may be table-qualified, such as
-    /// `"t"."c"`. Its last path part, split with the dialect's own delimited
-    /// forms, is the column; it is delimited with
-    /// [`SqlDialect::quote_identifier`]. A plain column is quoted as before.
+    /// A column reference can be table-qualified, such as `"t"."c"`.
+    /// The dialect splits the path and delimits its last part with
+    /// [`SqlDialect::quote_identifier`]. In a derived entity, `db_column`
+    /// declares a single physical column.
     /// Use this wherever the column is referenced through an alias or inside
     /// a subquery: the whole path would read as `schema.table.column` after a
     /// prefix, and a literal-quoted path can read as a string constant on

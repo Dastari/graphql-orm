@@ -5421,6 +5421,19 @@ impl SchemaModel {
     }
 }
 
+/// Retain the physical name used by backup descriptors for a literal dotted
+/// column. The backup engine quotes raw names itself.
+fn backup_column_name(name: &str) -> String {
+    if name.contains('.') {
+        for backend in [DatabaseBackend::Postgres, DatabaseBackend::Mssql] {
+            if let Some(raw) = backend.delimited_column_name(name) {
+                return raw;
+            }
+        }
+    }
+    name.to_owned()
+}
+
 pub fn backup_descriptors_from_entities(
     entities: &[&EntityMetadata],
 ) -> Vec<EntityBackupDescriptor> {
@@ -5446,7 +5459,7 @@ pub fn backup_descriptors_from_entities(
                 .fields
                 .iter()
                 .map(|field| ColumnBackupDescriptor {
-                    column_name: field.name.to_string(),
+                    column_name: backup_column_name(field.name),
                     rust_field_name: field.rust_name.to_string(),
                     logical_type: field.logical_type,
                     decimal: field.decimal,
@@ -5478,8 +5491,8 @@ pub fn backup_descriptors_from_entities(
                     Some(EntityDependencyDescriptor {
                         entity_name: target_entity.to_string(),
                         table_name: target_table.to_string(),
-                        source_column: relation.source_column.to_string(),
-                        target_column: relation.target_column.to_string(),
+                        source_column: backup_column_name(relation.source_column),
+                        target_column: backup_column_name(relation.target_column),
                         nullable,
                         on_delete: relation.on_delete.clone(),
                     })
@@ -5489,12 +5502,12 @@ pub fn backup_descriptors_from_entities(
             EntityBackupDescriptor {
                 entity_name: entity.entity_name.to_string(),
                 table_name: entity.table_name.to_string(),
-                primary_key_column: entity.primary_key.to_string(),
+                primary_key_column: backup_column_name(entity.primary_key),
                 primary_key_columns: if entity.primary_keys.len() > 1 {
                     entity
                         .primary_keys
                         .iter()
-                        .map(ToString::to_string)
+                        .map(|name| backup_column_name(name))
                         .collect()
                 } else {
                     Vec::new()

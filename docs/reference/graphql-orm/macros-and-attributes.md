@@ -115,7 +115,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[primary_key]` | marks a key field; generated single-record operations require a complete key |
 | `#[filterable]` / `#[filterable(type = "…")]` | enables a filter; bare form selects `"string"` metadata; only `type` is accepted |
 | `#[sortable]`, `#[unique]` | enables ordering / declares a unique field |
-| `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses the physical column name |
+| `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses one physical column name |
 | `#[graphql(name = "…")]` | chooses GraphQL field name; `#[serde(rename = "…")]` records the serialization name |
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated GraphQL inputs (Rust repository inputs keep it); `graphql(skip)` also supports relation implementation fields. See [read-only and zero-input entities](#read-only-and-zero-input-entities) |
 | `#[skip_db]` | excludes a field from persisted row decoding |
@@ -136,6 +136,13 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
 | `#[transform(read = "…")]` | synchronous read transform; see [write transforms](#write-transforms) for rejected `write` declarations |
 | `#[backup(include \| exclude \| redact)]` | per-field backup treatment; exactly one policy |
+
+A literal dot in `db_column` requires one delimited identifier. Use
+`#[graphql_orm(db_column = "\"event.code\"")]` on SQLite and PostgreSQL and
+`#[graphql_orm(db_column = "[event.code]")]` on SQL Server. Double a closing
+delimiter that is part of the physical name. Use the unqualified name for
+an ordinary column and put any schema qualifier in the entity's `table`
+attribute.
 
 On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must
 also remove the object getter: add `#[graphql(skip)]`, or place

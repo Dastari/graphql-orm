@@ -49,6 +49,19 @@ custom order column subject to the same validation.
 PostgreSQL runtime GraphQL date-times and backup restores bind typed
 `TIMESTAMPTZ` values with the same UTC instants.
 
+### 3. Declare dotted database columns explicitly (#793)
+
+**Action needed.** Inspect each dotted `db_column` in the existing database
+before upgrading. If the declaration was intended to refer to a column on
+the entity's table, remove the qualifier and use the physical column name.
+If an earlier migration created a column whose name contains a dot, delimit
+the entire physical name as one identifier. For example, use
+`#[graphql_orm(db_column = "\"a.b\"")]` on SQLite and PostgreSQL, or
+`#[graphql_orm(db_column = "[a.b]")]` on SQL Server. Double each closing
+delimiter that belongs to the name. The derive reports an error at an
+ambiguous declaration so an upgrade cannot silently retarget a deployed column. A declaration that
+matches the existing physical name needs no data migration.
+
 ## 0.191.0 to 0.192.0: propagated parent actions
 
 **No action.** Relations continue to use the source mutation's action by

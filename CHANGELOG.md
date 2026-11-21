@@ -27,6 +27,11 @@ for historical context.
   Opted-in projection lookups bind annotated temporal strings natively.
   PostgreSQL runtime queries and backup restores bind typed timestamps.
 
+- **Breaking (#793):** `db_column` declares one physical column. A name
+  with a literal dot must be explicitly delimited as a single identifier.
+  Generated DDL, reads, writes and row decoding use that column. Conditional
+  indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
+
 ## Unreleased - ORM/macros 0.192.0
 
 - **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation

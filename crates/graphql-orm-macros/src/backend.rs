@@ -266,50 +266,34 @@ pub(crate) fn validate_declared_identifier_path(
     Ok(())
 }
 
-/// Refuse a table-qualified `db_column` whose qualifier does not name the
-/// entity's own `table` path (#782). Generated SQL renders the declared
-/// column path as written, in filters, sorts and projections, so a qualifier
-/// naming another table would reference that table instead, including from
-/// inside a correlated subquery. The qualifier must equal the trailing parts
-/// of `table`, compared as the runtime `DatabaseBackend` compares them:
-/// PostgreSQL by resolved name, SQLite without ASCII case, SQL Server
-/// exactly. An unqualified column is always accepted.
-pub(crate) fn validate_declared_column_qualifier(
+/// Require one physical column. An explicit SQL delimiter distinguishes a
+/// literal dot from a table qualification.
+pub(crate) fn validate_declared_column(
     backend: BackendKind,
-    table: &str,
     column: &str,
     span: proc_macro2::Span,
 ) -> syn::Result<()> {
-    let parts = identifier_path_parts(backend, column)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    let Some((_, qualifier)) = parts.split_last() else {
-        return Ok(());
+    let (open, delimiters) = if backend == BackendKind::Mssql {
+        ('[', "square brackets")
+    } else {
+        ('"', "double quotes")
     };
-    let table_parts = identifier_path_parts(backend, table)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if qualifier.len() <= table_parts.len()
-        && qualifier
-            .iter()
-            .rev()
-            .zip(table_parts.iter().rev())
-            .all(|(left, right)| same_identifier_part(backend, left, right))
+    if column.contains('.')
+        && !(column.starts_with(open) && backend_is_one_delimited_identifier(backend, column))
     {
-        return Ok(());
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "db_column must name one physical column; remove the table qualifier or enclose the entire literal dotted name in {delimiters}"
+            ),
+        ));
     }
-    Err(syn::Error::new(
-        span,
-        format!(
-            "db_column `{column}` is qualified by a table other than this entity's table \
-             `{table}`; qualify it with this entity's table or leave it unqualified"
-        ),
-    ))
+    validate_declared_identifier_path(backend, column, span, "db_column")
 }
 
 /// The name one path part denotes: the inside of a well-formed delimited
 /// identifier, or the part itself.
-fn identifier_part_name(backend: BackendKind, part: &str) -> String {
+pub(crate) fn identifier_part_name(backend: BackendKind, part: &str) -> String {
     if !backend_is_one_delimited_identifier(backend, part) {
         return part.to_owned();
     }
@@ -326,31 +310,6 @@ fn identifier_part_name(backend: BackendKind, part: &str) -> String {
         inner.replace(&format!("{close}{close}"), &close.to_string())
     } else {
         inner.to_owned()
-    }
-}
-
-fn same_identifier_part(backend: BackendKind, left: &str, right: &str) -> bool {
-    match backend {
-        BackendKind::Postgres => {
-            // A bare part PostgreSQL folds; a delimited or quoted part keeps
-            // its case, as the runtime's `postgres_resolved_identifier`.
-            let resolved = |part: &str| {
-                if backend_is_one_delimited_identifier(backend, part) {
-                    identifier_part_name(backend, part)
-                } else if part.starts_with('"') || backend_render_identifier(backend, part) != part
-                {
-                    part.to_owned()
-                } else {
-                    part.to_ascii_lowercase()
-                }
-            };
-            resolved(left) == resolved(right)
-        }
-        BackendKind::Sqlite => identifier_part_name(backend, left)
-            .eq_ignore_ascii_case(&identifier_part_name(backend, right)),
-        BackendKind::Mssql => {
-            identifier_part_name(backend, left) == identifier_part_name(backend, right)
-        }
     }
 }
 
@@ -728,92 +687,25 @@ mod identifier_path_tests {
     }
 
     #[test]
-    fn declared_column_qualifiers_must_name_the_entitys_table() {
+    fn dotted_columns_need_a_single_canonical_delimiter() {
         let span = proc_macro2::Span::call_site();
-        for (backend, table, column, accepted) in [
-            (BackendKind::Sqlite, "main.parents", "owner", true),
-            (
-                BackendKind::Sqlite,
-                "main.parents",
-                "\"parents\".\"owner\"",
-                true,
-            ),
-            (BackendKind::Sqlite, "main.parents", "PARENTS.owner", true),
-            (
-                BackendKind::Sqlite,
-                "main.parents",
-                "main.parents.owner",
-                true,
-            ),
-            (
-                BackendKind::Sqlite,
-                "main.parents",
-                "\"children\".\"owner\"",
-                false,
-            ),
-            (
-                BackendKind::Sqlite,
-                "main.parents",
-                "other.parents.owner",
-                false,
-            ),
-            (BackendKind::Sqlite, "parents", "main.parents.owner", false),
-            (
-                BackendKind::Postgres,
-                "public.parents",
-                "\"parents\".owner",
-                true,
-            ),
-            (
-                BackendKind::Postgres,
-                "public.parents",
-                "PARENTS.owner",
-                true,
-            ),
-            (
-                BackendKind::Postgres,
-                "public.parents",
-                "\"PARENTS\".owner",
-                false,
-            ),
-            (
-                BackendKind::Postgres,
-                "\"Parents\"",
-                "\"Parents\".owner",
-                true,
-            ),
-            (BackendKind::Postgres, "\"Parents\"", "parents.owner", false),
-            (
-                BackendKind::Postgres,
-                "public.parents",
-                "\"children\".owner",
-                false,
-            ),
-            (BackendKind::Mssql, "dbo.parents", "[parents].[owner]", true),
-            (
-                BackendKind::Mssql,
-                "[dbo].[parents]",
-                "\"parents\".owner",
-                true,
-            ),
-            (
-                BackendKind::Mssql,
-                "dbo.parents",
-                "[Parents].[owner]",
-                false,
-            ),
-            (
-                BackendKind::Mssql,
-                "dbo.parents",
-                "[children].[owner]",
-                false,
-            ),
+        for backend in [
+            BackendKind::Sqlite,
+            BackendKind::Postgres,
+            BackendKind::Mssql,
         ] {
-            assert_eq!(
-                validate_declared_column_qualifier(backend, table, column, span).is_ok(),
-                accepted,
-                "{backend:?} {table} {column}"
-            );
+            for column in ["a.b", r#""a"."b""#, "[a].[b]", "a.", ".b", r#""a.b"#] {
+                assert!(
+                    validate_declared_column(backend, column, span).is_err(),
+                    "{backend:?}: {column}"
+                );
+            }
+            let literal = if backend == BackendKind::Mssql {
+                "[a.b]]c]"
+            } else {
+                r#""a.b""c""#
+            };
+            validate_declared_column(backend, literal, span).unwrap();
         }
     }
 

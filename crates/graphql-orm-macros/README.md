@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+In the next breaking ORM/macros release, `db_column` must designate one
+physical column. A literal dot requires one delimited identifier, such as
+`db_column = "\"event.code\""` on SQLite and PostgreSQL or
+`db_column = "[event.code]"` on SQL Server. See the
+[migration guide](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793).
+
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 

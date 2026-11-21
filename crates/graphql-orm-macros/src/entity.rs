@@ -1765,6 +1765,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) graphql_name: Option<String>,
     pub(crate) serde_name: Option<String>,
     pub(crate) db_column: Option<String>,
+    db_column_span: Option<proc_macro2::Span>,
     pub(crate) decimal: Option<(u8, u8)>,
     pub(crate) mssql_money: bool,
     pub(crate) description: Option<String>,
@@ -1950,6 +1951,7 @@ impl Default for FieldMetadata {
             graphql_name: None,
             serde_name: None,
             db_column: None,
+            db_column_span: None,
             decimal: None,
             mssql_money: false,
             description: None,
@@ -2585,6 +2587,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
+                            meta.db_column_span = Some(lit.span());
                         } else if nested.path.is_ident("mssql_money") {
                             if meta.mssql_money {
                                 return Err(syn::Error::new(nested.path.span(), "mssql_money may only be declared once per field"));
@@ -2882,6 +2885,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                         }) = &nv.value
                         {
                             meta.db_column = Some(lit.value());
+                            meta.db_column_span = Some(lit.span());
                         }
                     }
                 }
@@ -4332,17 +4336,13 @@ fn generate_entity_tokens(
     }
     for parsed in &parsed_fields {
         if let Some(column) = parsed.meta.db_column.as_deref() {
-            crate::backend::validate_declared_identifier_path(
+            crate::backend::validate_declared_column(
                 backend,
                 column,
-                syn::spanned::Spanned::span(&parsed.field),
-                "db_column",
-            )?;
-            crate::backend::validate_declared_column_qualifier(
-                backend,
-                entity_meta.table_name.as_deref().unwrap_or("unknown"),
-                column,
-                syn::spanned::Spanned::span(&parsed.field),
+                parsed
+                    .meta
+                    .db_column_span
+                    .unwrap_or_else(|| parsed.field.span()),
             )?;
         }
     }
@@ -8481,6 +8481,8 @@ fn generate_row_field_assignment(
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let db_col = crate::backend::identifier_part_name(backend, db_col);
+    let db_col = db_col.as_str();
     let inner = option_inner_type(field_type).unwrap_or(field_type);
     if backend == BackendKind::Mssql
         && (chrono_temporal_type(inner).is_some() || (meta.is_date_field && is_string_type(inner)))
@@ -9994,4 +9996,32 @@ fn lifetime_tokens(
             ::graphql_orm::graphql::orm::GraphqlLifetimeEncoding::#encoding,
         ))
     })
+}
+
+#[cfg(test)]
+mod declared_column_tests {
+    use super::generate_graphql_entity;
+
+    #[test]
+    fn refuses_ambiguous_dotted_db_columns() {
+        for column in ["records.value", r#""records"."value""#, ".value", "value."] {
+            let input = syn::parse_quote! {
+                #[graphql_entity(table = "records")]
+                struct Record {
+                    #[primary_key]
+                    #[sortable]
+                    id: i64,
+                    #[graphql_orm(db_column = #column)]
+                    value: String,
+                }
+            };
+            let Err(error) = generate_graphql_entity(&input) else {
+                panic!("accepted ambiguous column {column}");
+            };
+            assert!(
+                error.to_string().contains("one physical column"),
+                "{column}: {error}"
+            );
+        }
+    }
 }
