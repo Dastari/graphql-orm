@@ -5933,7 +5933,7 @@ fn generate_entity_tokens(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                 ) -> ::graphql_orm::async_graphql::Result<#return_type> {
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                     #subscribe_check
                     #policy_check
                     #return_expr
@@ -5950,7 +5950,7 @@ fn generate_entity_tokens(
                         &self,
                         ctx: &::graphql_orm::async_graphql::Context<'_>,
                     ) -> ::graphql_orm::async_graphql::Result<#return_type> {
-                        let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                        let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                         #subscribe_check
                         #policy_check
                         #return_expr

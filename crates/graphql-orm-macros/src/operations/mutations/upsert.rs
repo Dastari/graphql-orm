@@ -90,7 +90,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let pool = db.pool();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()

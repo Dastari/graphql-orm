@@ -84,7 +84,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let pool = db.pool();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -273,7 +273,7 @@ pub(in crate::operations) fn bulk(input: BulkInput<'_>) -> TokenStream {
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
                 )?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
