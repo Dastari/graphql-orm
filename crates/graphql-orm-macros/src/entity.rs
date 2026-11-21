@@ -35,6 +35,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) query_shapes: Option<Vec<String>>,
     /// Selected generated mutation categories; `None` keeps every mutation.
     pub(crate) mutation_shapes: Option<Vec<String>>,
+    pub(crate) mutation_shapes_span: Option<proc_macro2::Span>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
     pub(crate) backup_restore_order: Option<i32>,
@@ -427,6 +428,7 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         shapes.push(shape.to_owned());
                     }
                     shapes.sort();
+                    metadata.mutation_shapes_span = Some(lit.span());
                     metadata.mutation_shapes = Some(shapes);
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;

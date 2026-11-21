@@ -4511,6 +4511,7 @@ fn generate_graphql_operations_unfiltered(
         ));
     }
     if let Some(shapes) = &entity_meta.mutation_shapes {
+        let shape_span = entity_meta.mutation_shapes_span.unwrap_or_else(|| struct_name.span());
         for shape in shapes {
             let available = match shape.as_str() {
                 "create" => generates_public_create,
@@ -4528,8 +4529,8 @@ fn generate_graphql_operations_unfiltered(
                 } else {
                     "this entity does not generate standard GraphQL mutations"
                 };
-                return Err(syn::Error::new_spanned(
-                    struct_name,
+                return Err(syn::Error::new(
+                    shape_span,
                     format!("mutation_shapes selects unavailable {shape} mutation: {reason}"),
                 ));
             }
@@ -4546,8 +4547,8 @@ fn generate_graphql_operations_unfiltered(
                 "create" | "upsert" | "update" | "update_many" | "delete" | "delete_many"
             );
             if is_mutation && !shapes.iter().any(|selected| selected == category) {
-                return Err(syn::Error::new_spanned(
-                    struct_name,
+                return Err(syn::Error::new(
+                    shape_span,
                     format!(
                         "`{category}` is declared for operation authorization or AI mutation policy but mutation_shapes does not select it"
                     ),
