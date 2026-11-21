@@ -253,7 +253,7 @@ pub(crate) fn generate(
             }
             fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
                 // Dependent field denials refuse, never silently discard nulls.
-                if matches!(expr,syn::Expr::Assign(a) if matches!(a.left.as_ref(),syn::Expr::Field(f) if matches!(f.base.as_ref(),syn::Expr::Path(p) if p.path.is_ident("input"))) && matches!(a.right.as_ref(),syn::Expr::Path(p) if p.path.is_ident("None")))
+                if matches!(expr,syn::Expr::Assign(a) if matches!(a.left.as_ref(),syn::Expr::Field(f) if matches!(f.base.as_ref(),syn::Expr::Path(p) if p.path.is_ident("input"))) && matches!(a.right.as_ref(),syn::Expr::Path(p) if p.path.segments.last().is_some_and(|segment| segment.ident == "None")))
                 {
                     *expr = syn::parse_quote! { return Err(::graphql_orm::async_graphql::Error::new("Dependent delete refused")) };
                 } else {
@@ -298,7 +298,10 @@ pub(crate) fn generate(
             fn visit_expr_return_mut(&mut self, r: &mut syn::ExprReturn) {
                 if r.expr
                     .as_ref()
-                    .is_some_and(|e| e.to_token_stream().to_string().starts_with("Ok"))
+                    .is_some_and(|expression| {
+                        matches!(expression.as_ref(), syn::Expr::Call(call)
+                            if matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Ok")))
+                    })
                 {
                     let result = r.expr.take().unwrap();
                     let result_return = &self.0;
@@ -348,7 +351,7 @@ pub(crate) fn generate(
         let (extra_params, extra_fields, extra_init, extra_bind) = if action == "update" {
             (
                 quote! {,mut input:#update_input},
-                quote! {set_clauses:Vec<String>,values:Vec<::graphql_orm::graphql::orm::SqlValue>,input:#update_input},
+                quote! {set_clauses: ::std::vec::Vec<::std::string::String>,values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue>,input:#update_input},
                 quote! {set_clauses,values,input:__gom_authorized_input,},
                 quote! {set_clauses,mut values,input,},
             )
@@ -357,7 +360,7 @@ pub(crate) fn generate(
         };
         let statements = &body.stmts;
         let delete_changes = if action == "delete" {
-            quote! {let mutation_changes=Vec::new();}
+            quote! {let mutation_changes=::std::vec::Vec::new();}
         } else {
             quote! {}
         };
@@ -367,17 +370,17 @@ pub(crate) fn generate(
                 ctx:&::graphql_orm::async_graphql::Context<'_>,
                 mut hook_ctx:&mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,
                 id:#pkty,
-                __gom_expected_version:Option<i64>
+                __gom_expected_version: ::std::option::Option<i64>
                 #extra_params
-            )->::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>> {
+            )->::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<::std::boxed::Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>> {
                 #(#statements)*
                 #delete_changes
-                Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(Box::new(#prepared {id,__gom_expected_version,before_state,mutation_changes,#extra_init})))
+                ::std::result::Result::Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(::std::boxed::Box::new(#prepared {id,__gom_expected_version,before_state,mutation_changes,#extra_init})))
             }
         });
         let completed = format_ident!("__Gom{}Committed{}", name, action);
         let completion = if notifications.is_empty() {
-            quote! {Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(None))}
+            quote! {::std::result::Result::Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(::std::option::Option::None))}
         } else {
             let image = if action == "delete" {
                 quote! {entity}
@@ -388,31 +391,31 @@ pub(crate) fn generate(
                 #[allow(non_camel_case_types)]
                 struct #completed {entity:#name}
                 impl ::graphql_orm::graphql::orm::StaticCommittedNotification<#marker> for #completed {
-                    fn notify<'a>(self:Box<Self>,ctx:&'a ::graphql_orm::async_graphql::Context<'_>,db:&'a ::graphql_orm::db::Database<#marker>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<()>> {
-                        Box::pin(async move {
+                    fn notify<'a>(self: ::std::boxed::Box<Self>,ctx:&'a ::graphql_orm::async_graphql::Context<'_>,db:&'a ::graphql_orm::db::Database<#marker>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<()>> {
+                        ::std::boxed::Box::pin(async move {
                             let pool=db.pool();
                             let entity=self.entity;
                             #(#notifications)*
-                            Ok(())
+                            ::std::result::Result::Ok(())
                         })
                     }
                 }
             });
-            quote! {Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(Some(Box::new(#completed{entity:#image}) as Box<dyn ::graphql_orm::graphql::orm::StaticCommittedNotification<#marker>>)))}
+            quote! {::std::result::Result::Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(::std::option::Option::Some(::std::boxed::Box::new(#completed{entity:#image}) as ::std::boxed::Box<dyn ::graphql_orm::graphql::orm::StaticCommittedNotification<#marker>>)))}
         };
         structs.push(quote!{
             #[allow(non_camel_case_types)]
-            struct #prepared {id:#pkty,__gom_expected_version:Option<i64>,before_state: ::graphql_orm::graphql::orm::EntityState,mutation_changes:Vec<::graphql_orm::graphql::orm::MutationFieldValue>,#extra_fields}
+            struct #prepared {id:#pkty,__gom_expected_version: ::std::option::Option<i64>,before_state: ::graphql_orm::graphql::orm::EntityState,mutation_changes: ::std::vec::Vec<::graphql_orm::graphql::orm::MutationFieldValue>,#extra_fields}
             #[allow(unused_variables, unused_mut)]
             impl ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker> for #prepared {
-                fn apply<'a>(self:Box<Self>,ctx:&'a ::graphql_orm::async_graphql::Context<'_>,mut hook_ctx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<::graphql_orm::graphql::orm::StaticWriteCompletion<#marker>>>> {
-                    Box::pin(async move {
+                fn apply<'a>(self: ::std::boxed::Box<Self>,ctx:&'a ::graphql_orm::async_graphql::Context<'_>,mut hook_ctx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<::graphql_orm::graphql::orm::StaticWriteCompletion<#marker>>>> {
+                    ::std::boxed::Box::pin(async move {
                         let Self{id,__gom_expected_version,before_state,mutation_changes,#extra_bind}=*self;
                         #(#reauthorize)*
                         #(#reauthorize_fields)*
                         let result: #result_return = async {#(#suffix)*}.await;
                         let result=result?;
-                        if !result.success {let code=result.__gom_error_code();return Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(::graphql_orm::graphql::orm::StaticRejection::new(result.error.unwrap_or_default(),code)));}
+                        if !result.success {let code=result.__gom_error_code();return ::std::result::Result::Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(::graphql_orm::graphql::orm::StaticRejection::new(result.error.unwrap_or_default(),code)));}
                         #completion
                     })
                 }
@@ -501,7 +504,7 @@ pub(crate) fn generate(
         // Physical metadata owns column naming. Input members remain Rust names.
         let rust = ident.to_string();
         null_fields.push(quote!{
-            if <Self as ::graphql_orm::graphql::orm::Entity>::metadata().fields.iter().any(|f|f.rust_name==#rust && f.name==column) { input.#ident=Some(None);matched=true; }
+            if <Self as ::graphql_orm::graphql::orm::Entity>::metadata().fields.iter().any(|f|f.rust_name==#rust && f.name==column) { input.#ident=::std::option::Option::Some(::std::option::Option::None);matched=true; }
         });
     }
     let delete_prep = &prep_names[0];
@@ -512,17 +515,17 @@ pub(crate) fn generate(
         #(#structs)*
         impl #name {#(#methods)*}
         impl ::graphql_orm::graphql::orm::StaticDeleteEntity<#marker> for #name {
-            fn select<'a>(tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,column_sql:&'a str,value: ::graphql_orm::graphql::orm::SqlValue,limit:usize)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::StaticDeleteRow>>> {
-                Box::pin(async move {
+            fn select<'a>(tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,column_sql:&'a str,value: ::graphql_orm::graphql::orm::SqlValue,limit:usize)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::std::vec::Vec<::graphql_orm::graphql::orm::StaticDeleteRow>>> {
+                ::std::boxed::Box::pin(async move {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity,EntityQuery};
                     // The caller renders the column: a declared key or a catalogue name.
-                    let clause=format!("{} = {}",column_sql,Self::__gom_placeholder(1));
-                    let rows=EntityQuery::<Self,#marker>::new().where_values(&clause,vec![value]).fetch_bounded_mutation_sentinel_in_transaction(tx,::graphql_orm::graphql::orm::MutationLimit::new(limit as u32).map_err(|_|::graphql_orm::async_graphql::Error::new("Dependent delete refused"))?).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                    Ok(rows.into_iter().map(|entity|::graphql_orm::graphql::orm::StaticDeleteRow{key:Self::__gom_key_values(&entity.#pk).remove(0),entity: ::std::sync::Arc::new(entity)}).collect())
+                    let clause=::std::format!("{} = {}",column_sql,Self::__gom_placeholder(1));
+                    let rows=EntityQuery::<Self,#marker>::new().where_values(&clause,::std::vec![value]).fetch_bounded_mutation_sentinel_in_transaction(tx,::graphql_orm::graphql::orm::MutationLimit::new(limit as u32).map_err(|_|::graphql_orm::async_graphql::Error::new("Dependent delete refused"))?).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                    ::std::result::Result::Ok(rows.into_iter().map(|entity|::graphql_orm::graphql::orm::StaticDeleteRow{key:Self::__gom_key_values(&entity.#pk).remove(0),entity: ::std::sync::Arc::new(entity)}).collect())
                 })
             }
-            fn prepare<'a>(ctx:&'a ::graphql_orm::async_graphql::Context<'_>,tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,row: ::graphql_orm::graphql::orm::StaticDeleteRow,nulls:Vec<String>,expected:Option<i64>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>>> {
-                Box::pin(async move {
+            fn prepare<'a>(ctx:&'a ::graphql_orm::async_graphql::Context<'_>,tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,row: ::graphql_orm::graphql::orm::StaticDeleteRow,nulls: ::std::vec::Vec<::std::string::String>,expected: ::std::option::Option<i64>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<::std::boxed::Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>>> {
+                ::std::boxed::Box::pin(async move {
                     let entity=row.entity.downcast_ref::<Self>().ok_or_else(||::graphql_orm::async_graphql::Error::new("Dependent delete refused"))?;
                     if nulls.is_empty() {Self::#delete_prep(ctx,tx,entity.#pk.clone(),expected).await}
                     else {
@@ -530,7 +533,7 @@ pub(crate) fn generate(
                         for column in nulls {
                             let mut matched=false;
                             #(#null_fields)*
-                            if !matched {return Err(::graphql_orm::async_graphql::Error::new("Dependent delete refused"));}
+                            if !matched {return ::std::result::Result::Err(::graphql_orm::async_graphql::Error::new("Dependent delete refused"));}
                         }
                         Self::#update_prep(ctx,tx,entity.#pk.clone(),expected,input).await
                     }

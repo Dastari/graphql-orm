@@ -96,7 +96,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -121,26 +121,26 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     );
                     db.run_before_upsert_with_context(
                         &mut write_ctx,
-                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                        &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
 
                 let current_entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                if let Some(current_entity) = current_entity.as_ref() {
+                if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                     db.ensure_writable_row(
-                        Some(ctx),
+                        ::std::option::Option::Some(ctx),
                         #entity_name_lit,
                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                        current_entity as &(dyn ::std::any::Any + Send + Sync),
+                        current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
                 // Update candidates whose write the policy denied and the host
                 // chose to ignore: they stay out of the conflict update.
                 #[allow(unused_mut)]
-                let mut __gom_denied_upsert_columns: Vec<&'static str> = Vec::new();
+                let mut __gom_denied_upsert_columns: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
                 #(#upsert_policy_checks_graphql)*
 
                 #created_pk_init
@@ -161,12 +161,12 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 let lookup_input = input.clone();
                 let change_input = input.clone();
                 let sql = #struct_name::__gom_rebind_sql(&#upsert_graphql_sql_expression, 1);
-                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
                 #prepend_pk_bind
                 #(#insert_binds_graphql)*
                 let mutation_changes = if action == ::graphql_orm::graphql::orm::ChangeAction::Updated {
                     let input = change_input;
-                    let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
                     #(#upsert_change_binds_graphql)*
                     let mut changes = ::graphql_orm::graphql::orm::mutation_changes(&[#(#upsert_change_field_literals),*], &bind_values);
                     changes.retain(|change| !__gom_denied_upsert_columns.contains(&change.field.as_str()));
@@ -176,7 +176,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 };
 
                 hook_ctx.run_mutation_hook(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action,
@@ -186,11 +186,11 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                         id: event_id,
                         changes: mutation_changes.clone(),
                         before_state: before_state.clone(),
-                        after_state: None,
+                        after_state: ::std::option::Option::None,
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
-                if let Some(current_entity) = current_entity.as_ref() {
+                if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                     #struct_name::__gom_require_managed_version_headroom(current_entity)
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 }
@@ -205,13 +205,13 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 #graphql_post_image_check
                 #struct_name::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                let after_state = Some(
+                let after_state = ::std::option::Option::Some(
                     #struct_name::__gom_capture_entity_state(&entity)
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                 );
 
                 hook_ctx.run_mutation_hook(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action,
@@ -225,11 +225,11 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
-                #struct_name::__gom_queue_changed_event(&mut hook_ctx, action, Some(&entity))
+                #struct_name::__gom_queue_changed_event(&mut hook_ctx, action, ::std::option::Option::Some(&entity))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx
-                    .commit_and_emit_tracked(Some(&__gom_outcome))
+                    .commit_and_emit_tracked(::std::option::Option::Some(&__gom_outcome))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
@@ -245,7 +245,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
 
                 let mut result = #upsert_result_type::ok(action, entity);
                 #mutation_output_release
-                Ok(result)
+                ::std::result::Result::Ok(result)
             }.await;
                 __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }

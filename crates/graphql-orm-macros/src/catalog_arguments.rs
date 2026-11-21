@@ -233,7 +233,7 @@ impl Fill {
         })?;
         let arguments = &resolver.arguments;
         self.used.insert(key);
-        Ok(syn::parse_quote! { vec![#(#arguments),*] })
+        Ok(syn::parse_quote! { ::std::vec![#(#arguments),*] })
     }
 }
 

@@ -66,7 +66,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
                 let __gom_result: ::graphql_orm::async_graphql::Result<#result_type> = async {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
-                let __gom_expected_version: Option<i64> = #expected_version_binding;
+                let __gom_expected_version: ::std::option::Option<i64> = #expected_version_binding;
 
                 #reject_unplanned_delete_effects
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
@@ -81,7 +81,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -98,10 +98,10 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 // Fetch entity before deletion for notification purposes
                 let entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
                     db,
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     EntityQuery::<#struct_name, #backend_marker>::new()
                         .where_clause(
-                            &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
+                            &::std::format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
                             #pk_bind_value
                         ),
                 ))
@@ -112,31 +112,31 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 if entity.is_none() {
-                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
+                    return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
                 }
                 let entity = entity.unwrap();
                 if !db.authorize_write_target(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                    &entity as &(dyn ::std::any::Any + Send + Sync),
+                    &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
                     // Neither readable nor writable: indistinguishable from a missing row.
-                    return Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
+                    return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
                 }
                 if __gom_expected_version.is_some()
                     && #struct_name::__gom_managed_version_of(&entity) != __gom_expected_version
                 {
-                    return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                    return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(
                         ::graphql_orm::graphql::errors::OrmErrorCode::Conflict,
                     ).into_graphql_error());
                 }
                 let before_state = #struct_name::__gom_capture_entity_state(&entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.run_mutation_hook(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -144,14 +144,14 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                         table_name: #table_name,
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #pk_id_for_entity,
-                        changes: Vec::new(),
-                        before_state: Some(before_state.clone()),
-                        after_state: None,
+                        changes: ::std::vec::Vec::new(),
+                        before_state: ::std::option::Option::Some(before_state.clone()),
+                        after_state: ::std::option::Option::None,
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 let sql = #struct_name::__gom_rebind_sql(
-                    &format!(
+                    &::std::format!(
                         "DELETE FROM {} WHERE {} = ?{}",
                         #sql_table_name,
                         #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY),
@@ -164,9 +164,9 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 let result = hook_ctx.execute(&sql, &values).await;
 
                 match result {
-                    Ok(r) if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&r) == 1 => {
+                    ::std::result::Result::Ok(r) if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&r) == 1 => {
                         hook_ctx.run_mutation_hook(
-                            Some(ctx),
+                            ::std::option::Option::Some(ctx),
                             &::graphql_orm::graphql::orm::MutationEvent {
                                 phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                                 action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
@@ -174,25 +174,25 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                                 table_name: #table_name,
                                 metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
                                 id: #pk_id_for_entity,
-                                changes: Vec::new(),
-                                before_state: Some(before_state),
-                                after_state: None,
+                                changes: ::std::vec::Vec::new(),
+                                before_state: ::std::option::Option::Some(before_state),
+                                after_state: ::std::option::Option::None,
                             },
                         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                         #struct_name::__gom_queue_changed_event(
                             &mut hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                            Some(&entity),
+                            ::std::option::Option::Some(&entity),
                         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                        hook_ctx.commit_and_emit_tracked(Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                        hook_ctx.commit_and_emit_tracked(::std::option::Option::Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         // Invoke optional post-mutation hook.
                         #notify_on_deleted
 
-                        Ok(#result_type::__gom_deleted())
+                        ::std::result::Result::Ok(#result_type::__gom_deleted())
                     },
-                    Ok(_) => Err(::graphql_orm::async_graphql::Error::new("authorized delete did not affect the exact locked row")),
-                    Err(e) => Ok(#result_type::__gom_from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e))),
+                    ::std::result::Result::Ok(_) => ::std::result::Result::Err(::graphql_orm::async_graphql::Error::new("authorized delete did not affect the exact locked row")),
+                    ::std::result::Result::Err(e) => ::std::result::Result::Ok(#result_type::__gom_from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e))),
                 }
             }.await;
                 __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
@@ -244,7 +244,8 @@ pub(in crate::operations) fn bulk(input: BulkInput<'_>) -> TokenStream {
             async fn delete_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                #[__gom_catalogue_type(Option<#where_input>)]
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: ::std::option::Option<#where_input>,
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
                 // The root's error reports what its write did (opt-in).
                 let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
@@ -263,51 +264,51 @@ pub(in crate::operations) fn bulk(input: BulkInput<'_>) -> TokenStream {
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
-                if let Err(error) = db.ensure_entity_access(
-                    Some(ctx),
+                if let ::std::result::Result::Err(error) = db.ensure_entity_access(
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await {
-                    return Ok(#delete_many_result_type::from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_callback(error)));
+                    return ::std::result::Result::Ok(#delete_many_result_type::from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_callback(error)));
                 }
-                if let Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
-                    return Ok(#delete_many_result_type::from_graphql_error(error));
+                if let ::std::result::Result::Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
+                    return ::std::result::Result::Ok(#delete_many_result_type::from_graphql_error(error));
                 }
 
                 let filter = match where_input {
-                    Some(ref f) if !f.is_empty() => f,
-                    _ => return Ok(#delete_many_result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "Where filter is required for bulk delete and must not be empty")),
+                    ::std::option::Option::Some(ref f) if !f.is_empty() => f,
+                    _ => return ::std::result::Result::Ok(#delete_many_result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "Where filter is required for bulk delete and must not be empty")),
                 };
 
-                if let Err(error) = filter.__gom_require_scalar_write_filter() {
-                    return Ok(#delete_many_result_type::from_graphql_error(error.into_graphql_error()));
+                if let ::std::result::Result::Err(error) = filter.__gom_require_scalar_write_filter() {
+                    return ::std::result::Result::Ok(#delete_many_result_type::from_graphql_error(error.into_graphql_error()));
                 }
                 // A bulk-write filter reveals the fields it names through the
                 // affected count: it needs the same read authority as a query.
-                if let Err(error) = ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
+                if let ::std::result::Result::Err(error) = ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
                     db, ctx, ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter),
                 ).await {
-                    return Ok(#delete_many_result_type::from_graphql_error(error));
+                    return ::std::result::Result::Ok(#delete_many_result_type::from_graphql_error(error));
                 }
-                let mut notification_rows = Vec::new();
-                match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), Some(ctx), Some(&mut notification_rows), Some(&__gom_outcome)).await {
-                    Ok(deleted_count) => {
+                let mut notification_rows = ::std::vec::Vec::new();
+                match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), ::std::option::Option::Some(ctx), ::std::option::Option::Some(&mut notification_rows), ::std::option::Option::Some(&__gom_outcome)).await {
+                    ::std::result::Result::Ok(deleted_count) => {
                         #[allow(unused_mut)]
                         let mut result = #delete_many_result_type::ok(deleted_count);
                         #notify_bulk_deleted
-                        Ok(result)
+                        ::std::result::Result::Ok(result)
                     },
-                    Err(e) => {
+                    ::std::result::Result::Err(e) => {
                         let error = ::graphql_orm::graphql::errors::graphql_error_from_sqlx(e);
                         // As for updateMany: a failed commit is a top-level `unknown` error.
                         if __gom_outcome.outcome() == ::graphql_orm::graphql::errors::MutationOutcome::Unknown
                             && ::graphql_orm::graphql::errors::MutationOutcomeTracker::enabled::<#backend_marker>(ctx)
                         {
-                            return Err(error);
+                            return ::std::result::Result::Err(error);
                         }
-                        Ok(#delete_many_result_type::from_graphql_error(error))
+                        ::std::result::Result::Ok(#delete_many_result_type::from_graphql_error(error))
                     },
                 }
             }.await;

@@ -89,7 +89,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                 #(#graphql_create_input_fields)*
             }
 
-            impl From<#graphql_create_input> for #create_input {
+            impl ::std::convert::From<#graphql_create_input> for #create_input {
                 fn from(input: #graphql_create_input) -> Self {
                     Self {
                         #(#create_input_from_graphql_fields)*
@@ -126,7 +126,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
                 db.ensure_entity_access(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
@@ -139,16 +139,16 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                     ::std::collections::HashSet::new();
                 #(#create_client_supplied)*
                 db.run_before_create(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     #entity_name_lit,
-                    &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 #created_key_init
                 let sql = #struct_name::__gom_rebind_sql(#insert_sql, 1);
 
                 // Collect all values first
-                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
                 #(#create_policy_checks)*
                 #prepend_pk_bind
                 #(#insert_binds_graphql)*
@@ -160,7 +160,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.run_mutation_hook(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
@@ -169,8 +169,8 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #created_key_id,
                         changes: mutation_changes.clone(),
-                        before_state: None,
-                        after_state: None,
+                        before_state: ::std::option::Option::None,
+                        after_state: ::std::option::Option::None,
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
@@ -184,13 +184,13 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after creation"))?;
                 #graphql_post_image_check
-                let after_state = Some(
+                let after_state = ::std::option::Option::Some(
                     ::graphql_orm::graphql::orm::entity_state(&entity)
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                 );
 
                 hook_ctx.run_mutation_hook(
-                    Some(ctx),
+                    ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
                         action: ::graphql_orm::graphql::orm::ChangeAction::Created,
@@ -199,7 +199,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
                         id: #create_graphql_entity_id,
                         changes: mutation_changes.clone(),
-                        before_state: None,
+                        before_state: ::std::option::Option::None,
                         after_state,
                     },
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
@@ -209,14 +209,14 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                     ::graphql_orm::graphql::orm::ChangeAction::Created,
                     #create_graphql_event_entity,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                hook_ctx.commit_and_emit_tracked(Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                hook_ctx.commit_and_emit_tracked(::std::option::Option::Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let result = {
                     #create_output_binding
                     #create_output_authorization
-                    #result_type { success: true, error: None, #result_error_code_none entity }
+                    #result_type { success: true, error: ::std::option::Option::None, #result_error_code_none entity }
                 };
                 #notify_on_created
-                Ok(result)
+                ::std::result::Result::Ok(result)
             }.await;
                 __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }

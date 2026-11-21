@@ -1278,15 +1278,15 @@ pub(crate) fn resolver_auth_mode_tokens(
 ) -> syn::Result<proc_macro2::TokenStream> {
     match auth {
         Some("required") => Ok(quote! {
-            Some(::graphql_orm::graphql::auth::ResolverAuthMode::Required)
+            ::std::option::Option::Some(::graphql_orm::graphql::auth::ResolverAuthMode::Required)
         }),
         Some("optional") => Ok(quote! {
-            Some(::graphql_orm::graphql::auth::ResolverAuthMode::Optional)
+            ::std::option::Option::Some(::graphql_orm::graphql::auth::ResolverAuthMode::Optional)
         }),
         Some("none") => Ok(quote! {
-            Some(::graphql_orm::graphql::auth::ResolverAuthMode::None)
+            ::std::option::Option::Some(::graphql_orm::graphql::auth::ResolverAuthMode::None)
         }),
-        None => Ok(quote! { None }),
+        None => Ok(quote! { ::std::option::Option::None }),
         Some(value) => Err(syn::Error::new(
             span,
             format!(
