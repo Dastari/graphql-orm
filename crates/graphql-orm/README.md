@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.189.0 qualifies generated root search filters with the entity table
+(#799). See the [migration guide](../../MIGRATION.md#01880-to-01890-root-search-filter-binding).
+
 Version 0.188.0 binds every column a read predicate renders to its own row: through the entity's
 table path at the root of a statement, and through an alias no other scope uses inside a relation,
 `not_related`, closure or count subquery. A column missing from a target table then fails the read
