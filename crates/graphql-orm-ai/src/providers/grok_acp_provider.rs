@@ -262,11 +262,14 @@ impl AiGrokAcpRegistration {
     /// deployment's [`crate::AiEntityReferenceRegistry`] resolves.
     ///
     /// `maximum_age` bounds the time from the start of resolution to the
-    /// completion of the one `session/prompt` write that carries the data.
-    /// It covers the host hook, launch admission, process launch, session
-    /// resume and the write. A prompt whose resolution is older than that
-    /// when it is written is sent with markers, and a write still in
-    /// progress at the bound is abandoned and fails the turn.
+    /// moment the one `session/prompt` write that carries the data may
+    /// begin. It covers the host hook, launch admission, process launch,
+    /// session resume and frame encoding. A prompt whose resolution is older
+    /// than that when its write would start is sent with markers instead. A
+    /// write that has started may complete; one still in progress when the
+    /// bound passes is stopped, the turn fails, the process's writer is
+    /// disabled for good and the process tree is killed, so no remainder of
+    /// the frame is delivered.
     ///
     /// Opting in is a disclosure decision the crate cannot check. Grok
     /// keeps the session, including reference data a prompt sent, in its
@@ -536,10 +539,18 @@ impl AiGrokAcpPromptInput {
     /// Call this immediately before the write, when the process and session
     /// are ready. The text carries what each entity reference resolved to
     /// only if the freshness bound has not passed at the time of the call and
-    /// `fits` accepts it; the second value is then `Some`, and the caller
-    /// must abandon the write if it has not completed by that instant.
-    /// Otherwise every reference is the unavailable marker, which is the text
-    /// the request was admitted with, and the second value is `None`.
+    /// `fits` accepts it; the second value is then `Some`. Otherwise every
+    /// reference is the unavailable marker, which is the text the request was
+    /// admitted with, and the second value is `None`.
+    ///
+    /// The returned instant bounds when the write may begin. The caller must
+    /// compare it with the clock again after encoding the frame and
+    /// immediately before the write starts, and send
+    /// [`Self::unavailable_text`] (taken before this call) if it has passed.
+    /// A write that has started may complete. If it is still in progress at
+    /// that instant the caller must stop it, fail the turn, never write to
+    /// that transport again (not even `session/cancel`), and have the process
+    /// tree killed, so that no remainder of the frame is delivered.
     ///
     /// `fits` is asked at most once whether the resolved text is within the
     /// bounds the process enforces on a prompt and on its frame. It must not
@@ -612,7 +623,7 @@ pub trait AiGrokAcpRunProcess: Send + Sync {
     ///
     /// A process that overrides it must call
     /// [`AiGrokAcpPromptInput::into_wire_text`] immediately before its one
-    /// `session/prompt` write, abandon the write at the returned deadline,
+    /// `session/prompt` write, follow the deadline rules documented there,
     /// and must not copy that text into anything that is cloned, stored,
     /// logged, queued or retried.
     ///

@@ -847,11 +847,14 @@ impl ModelDispatchReferences {
     /// itself. `None` means the value holds no resolved data: every reference
     /// is already the unavailable marker and no deadline applies.
     ///
-    /// An adapter that does not write at once (one that launches, resumes or
-    /// queues for a local process first) must compare this instant with the
-    /// current time immediately before its write, send the marker form if it
-    /// has passed, and abandon a write that is still in progress when it
-    /// passes.
+    /// The instant bounds when the write may begin. An adapter that does not
+    /// write at once (one that launches, resumes or queues for a local
+    /// process first) must compare it with the current time after encoding
+    /// and immediately before its write starts, and send the marker form if
+    /// it has passed. A write that has started may complete. If it is still
+    /// in progress at this instant the adapter must stop it, fail the turn,
+    /// and never write through that writer again, so that no remainder of
+    /// the frame can be flushed later.
     pub fn write_deadline(&self, maximum_age: std::time::Duration) -> Option<std::time::Instant> {
         self.holds_resolved_data
             .then(|| self.resolved_at.checked_add(maximum_age))
@@ -1108,6 +1111,79 @@ impl ModelDispatchRequest {
     }
 }
 
+/// How an attempt to write a frame that carries resolved data ended.
+#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+pub(crate) enum ResolvedWrite<T> {
+    /// The freshness deadline had passed before the write was first polled.
+    /// Nothing was written; the caller sends the all-marker frame instead.
+    NotStarted,
+    /// The write ran to completion and returned this.
+    Completed(T),
+    /// The deadline passed while the write was in progress. The write future
+    /// has been dropped. The caller must fail the turn and make sure nothing
+    /// is ever written through that writer again.
+    Abandoned,
+}
+
+#[cfg(all(test, any(feature = "local-harness", feature = "provider-grok-acp")))]
+thread_local! {
+    /// Test seam: time that passes between the encoding of a resolved frame
+    /// and the start check of its write, on the current thread.
+    pub(crate) static DELAY_BEFORE_RESOLVED_WRITE: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// Runs the one write of an already encoded frame that carries resolved
+/// data, under the freshness `deadline` of its dispatch.
+///
+/// The deadline bounds when the write may **begin**. It is compared with the
+/// clock here, after encoding, on the first poll of `write` and before `write`
+/// itself is polled; if it has passed, `write` is never polled and
+/// [`ResolvedWrite::NotStarted`] is returned. Once the write has begun, the
+/// deadline is polled before every further poll of `write` (a deadline-first,
+/// biased select), so expiry wins over more writing. A write that completes
+/// within a poll that began before expiry is allowed to finish.
+#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+pub(crate) async fn write_resolved_before<T>(
+    deadline: std::time::Instant,
+    write: impl std::future::Future<Output = T>,
+) -> ResolvedWrite<T> {
+    #[cfg(test)]
+    {
+        let delay = DELAY_BEFORE_RESOLVED_WRITE.get();
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+    }
+    let started = std::sync::atomic::AtomicBool::new(false);
+    let has_started = || started.load(std::sync::atomic::Ordering::SeqCst);
+    let mut write = std::pin::pin!(write);
+    let tracked = std::future::poll_fn(|context| {
+        if !has_started() {
+            if std::time::Instant::now() >= deadline {
+                return std::task::Poll::Ready(None);
+            }
+            started.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        write.as_mut().poll(context).map(Some)
+    });
+    let expiry = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+    tokio::select! {
+        biased;
+        () = expiry => {
+            if has_started() {
+                ResolvedWrite::Abandoned
+            } else {
+                ResolvedWrite::NotStarted
+            }
+        }
+        output = tracked => match output {
+            Some(output) => ResolvedWrite::Completed(output),
+            None => ResolvedWrite::NotStarted,
+        },
+    }
+}
+
 /// Model input for the entity references of one message.
 ///
 /// The blocks are handles. They carry no data and are safe to clone, store
@@ -1162,6 +1238,60 @@ pub fn is_entity_reference_block_kind(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn a_resolved_write_starts_only_before_its_deadline_and_expiry_wins_over_more_writing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let polls = AtomicUsize::new(0);
+        let counted = |ready: bool| {
+            let polls = &polls;
+            std::future::poll_fn(move |_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+                if ready {
+                    std::task::Poll::Ready(7)
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+        };
+
+        // Fresh: the write is polled and completes.
+        let fresh = Instant::now() + Duration::from_secs(30);
+        assert!(matches!(
+            write_resolved_before(fresh, counted(true)).await,
+            ResolvedWrite::Completed(7)
+        ));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 1);
+
+        // Already expired: the write is never polled.
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            write_resolved_before(expired, counted(true)).await,
+            ResolvedWrite::NotStarted
+        ));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 0);
+
+        // Expires between encoding and the start check: never polled.
+        DELAY_BEFORE_RESOLVED_WRITE.set(Duration::from_millis(80));
+        let soon = Instant::now() + Duration::from_millis(20);
+        let outcome = write_resolved_before(soon, counted(true)).await;
+        DELAY_BEFORE_RESOLVED_WRITE.set(Duration::ZERO);
+        assert!(matches!(outcome, ResolvedWrite::NotStarted));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 0);
+
+        // Started, then the deadline passes while the writer stays pending:
+        // abandoned, and not polled again after expiry.
+        let soon = Instant::now() + Duration::from_millis(60);
+        assert!(matches!(
+            write_resolved_before(soon, counted(false)).await,
+            ResolvedWrite::Abandoned
+        ));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 1);
+    }
 
     struct Fixed;
 

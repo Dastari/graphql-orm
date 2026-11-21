@@ -269,11 +269,13 @@ impl AiLocalHarnessRegistration {
     /// deployment's [`crate::AiEntityReferenceRegistry`] resolves.
     ///
     /// `maximum_age` bounds the time from the start of resolution to the
-    /// completion of the one stdin write that carries the data. It covers
-    /// the host hook, process launch and the write. A request whose
-    /// resolution is older than that when the process is ready is written
-    /// with markers, and a write still in progress at the bound is abandoned
-    /// and the process terminated.
+    /// moment the one stdin write that carries the data may begin. It covers
+    /// the host hook, process launch and frame encoding. A request whose
+    /// resolution is older than that when its write would start is written
+    /// with markers instead. A write that has started may complete; one
+    /// still in progress when the bound passes is stopped, the turn fails
+    /// and the process is killed without a graceful close, so no remainder
+    /// of the frame is delivered.
     ///
     /// Opting in is a disclosure decision the crate cannot check. Reference
     /// data written to the process is outside the crate from then on: the
@@ -500,6 +502,16 @@ pub enum AiLocalHarnessProcessOutput {
 pub trait AiLocalHarnessProcess: Send {
     /// Writes the one bounded JSON-lines request frame exactly.
     ///
+    /// The returned future may be dropped before it completes. That happens
+    /// when the frame carries resolved entity-reference data and the
+    /// registration's freshness bound passes during the write. The driver
+    /// then drops the process without calling [`Self::terminate`] or
+    /// [`Self::close_stdin`]. From the moment the future is dropped, no byte
+    /// of the frame that the harness has not yet received may reach it: the
+    /// implementation must discard anything it buffered, must not flush it
+    /// from `Drop` or from any later call, and its `Drop` must kill the
+    /// process tree without a graceful close.
+    ///
     /// # Errors
     ///
     /// Returns a non-sensitive transport error when the complete frame was not
@@ -525,7 +537,9 @@ pub trait AiLocalHarnessProcess: Send {
 
     /// Terminates the complete process tree. Implementations should first use
     /// a supported protocol close only when it stays within the supplied host
-    /// sandbox policy, then force termination.
+    /// sandbox policy, then force termination. Termination must never deliver
+    /// input the harness has not yet received: bytes buffered from an
+    /// incomplete [`Self::write_stdin`] are discarded, not flushed.
     ///
     /// # Errors
     ///
@@ -598,9 +612,11 @@ pub trait AiLocalHarnessDriver: Send + Sync {
     /// It must also honour the registration's freshness bound: take
     /// [`crate::ModelDispatchReferences::write_deadline`] for
     /// [`AiLocalHarnessRegistration::resolved_entity_reference_delivery`],
-    /// compare it with the current time once the process is ready, send
-    /// markers if it has passed, and abandon a write that is still in
-    /// progress when it passes.
+    /// compare it with the current time after encoding and immediately
+    /// before the write starts, and send markers if it has passed. A write
+    /// that has started may complete; if it is still in progress when the
+    /// bound passes, stop it, fail the request and kill the process without
+    /// a graceful close, so that no remainder of the frame is delivered.
     ///
     /// # Errors
     ///
@@ -704,31 +720,57 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             timeout_until(startup_deadline, self.launcher.launch(registration.clone()))
                 .await
                 .map_err(map_process_error)?;
-        // The process is ready. Decide now, against the current time, whether
-        // the resolution is still fresh. A resolved frame over the request
-        // ceiling is not sent either; the marker frame is.
+        // The process is ready. Encode the resolved frame; a frame over the
+        // request ceiling is not sent, the marker frame is.
         let mut resolved_frame = None;
         if let Some(deadline) = resolved_deadline
-            && std::time::Instant::now() < deadline
             && let Ok(frame) = encode_request_frame(&request, &references)
             && fits(&frame)
         {
             resolved_frame = Some((frame, deadline));
         }
         drop(references);
-        let (frame, write_deadline) = match resolved_frame {
-            // The write itself must finish inside the freshness bound.
-            Some((frame, deadline)) => (
-                frame,
-                startup_deadline.min(tokio::time::Instant::from_std(deadline)),
-            ),
-            None => (marker_frame, startup_deadline),
-        };
-        if let Err(error) = timeout_until(write_deadline, process.write_stdin(&frame)).await {
+        let mut written = false;
+        if let Some((frame, deadline)) = resolved_frame {
+            // The freshness deadline bounds when this write may begin. It is
+            // checked after encoding, on the first poll and before the
+            // process is given a byte, and it is polled before every later
+            // poll of the write.
+            let outcome = crate::entity_references::write_resolved_before(
+                deadline,
+                timeout_until(startup_deadline, process.write_stdin(&frame)),
+            )
+            .await;
+            drop(frame);
+            match outcome {
+                crate::entity_references::ResolvedWrite::Completed(Ok(())) => written = true,
+                // Stale before the write began: nothing was written, and the
+                // turn continues with the marker frame.
+                crate::entity_references::ResolvedWrite::NotStarted => {}
+                // The resolved write began and did not complete: the deadline
+                // or the startup timeout passed, or the pipe failed. The
+                // process may hold part of the frame. It is dropped, which
+                // the process contract defines as a forced tree kill that
+                // discards unwritten input. `terminate` is deliberately not
+                // called: its graceful protocol close could flush.
+                crate::entity_references::ResolvedWrite::Abandoned => {
+                    drop(process);
+                    return Err(map_process_error(AiLocalHarnessProcessError::Cancelled));
+                }
+                crate::entity_references::ResolvedWrite::Completed(Err(error)) => {
+                    drop(process);
+                    return Err(map_process_error(error));
+                }
+            }
+        }
+        if !written
+            && let Err(error) =
+                timeout_until(startup_deadline, process.write_stdin(&marker_frame)).await
+        {
             stop_process(process.as_mut(), limits.shutdown_timeout()).await;
             return Err(map_process_error(error));
         }
-        drop(frame);
+        drop(marker_frame);
         if let Err(error) = timeout_until(startup_deadline, process.close_stdin()).await {
             stop_process(process.as_mut(), limits.shutdown_timeout()).await;
             return Err(map_process_error(error));

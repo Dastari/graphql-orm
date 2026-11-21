@@ -232,8 +232,8 @@ an upgrade changes nothing for a deployment that already has one. The Codex
 app-server adapter has no opt-in and always sends the marker; see below.
 
 The argument is the **freshness bound**: the longest time allowed between the
-start of resolution in the executor and the completion of the one write that
-carries the data. It must be greater than zero and at most
+start of resolution in the executor and the moment the one write that carries
+the data may begin. It must be greater than zero and at most
 `AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE` (60 seconds). The opt-in is not
 part of any registration identity or session fingerprint, so changing it does
 not rebind sessions.
@@ -253,15 +253,28 @@ The rules that hold on both:
   this dispatch. A retry, a later turn and a resumed session are new
   dispatches and resolve again.
 - **Freshness.** The executor resolves before the adapter launches, resumes
-  or queues for its process. The bound covers everything from the first host
-  hook call to the end of the write: for the harness the hook, process launch
-  and the stdin write; for Grok the hook, launch admission, process launch,
-  session resume and the prompt write. The adapter compares the bound with
-  the clock immediately before the write. If it has passed, the turn is sent
-  with markers. If it passes while the write is in progress, the write is
-  abandoned and the turn fails; the process is terminated. So access revoked
-  after resolution can still reach the process for at most the configured
-  bound, and never later.
+  or queues for its process. The bound limits when the resolved write may
+  **begin**. It covers everything from the first host hook call to the start
+  of the write: for the harness the hook, process launch and frame encoding;
+  for Grok the hook, launch admission, process launch, session resume and
+  frame encoding.
+  - The adapter compares the bound with the clock after the frame is encoded
+    and immediately before the write starts. If it has passed, the turn is
+    sent with markers; it does not fail.
+  - A write that has started may complete, so a write in progress when the
+    bound passes can still deliver its frame.
+  - If a started write has not completed when the bound passes, the adapter
+    stops it and the turn fails. The crate then never writes to that process
+    again and has it killed without a graceful close, so the remainder of the
+    frame is not delivered later. On Grok the process's writer is disabled:
+    `session/cancel`, session deletion and any other write are refused. On
+    the harness the process is dropped, which its contract defines as a
+    forced kill, and `close_stdin` and `terminate` are not called.
+
+  So the revocation window is: up to `maximum_age` (at most 60 seconds)
+  before a resolved write begins; a write already in progress may complete.
+  Discarding bytes that the host's own transport or pipe has buffered is part
+  of the `AiGrokAcpWireTransport` and `AiLocalHarnessProcess` contracts.
 - **Size.** The request is admitted on its all-marker form. If the resolved
   form would exceed a bound (the harness `maximum_request_bytes` and frame
   limit; the Grok registration's `maximum_input_bytes`, or 16 MiB for the

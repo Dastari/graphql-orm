@@ -40,6 +40,14 @@ fn rejected() -> ProviderError {
 /// Deployment-owned bounded newline transport. No protocol logic or tool
 /// execution belongs here. Never log frames or stderr. Both methods must be
 /// cancellation-safe; writes must serialize concurrent cancellation frames.
+///
+/// A `write_frame` future may be dropped before it completes. When the frame
+/// carried resolved entity-reference data and its freshness bound passed
+/// during the write, the wire process never calls this transport's
+/// `write_frame` again and the provider kills the process tree. From the
+/// moment the future is dropped, no byte of that frame that the process has
+/// not yet received may reach it: the implementation must discard what it
+/// buffered and must not flush it later, from `Drop` or otherwise.
 #[async_trait]
 pub trait AiGrokAcpWireTransport: Send + Sync {
     /// Writes one complete newline-terminated frame with a bounded deadline.
@@ -74,12 +82,88 @@ struct State {
     broker: AiGrokAcpSdkBroker,
 }
 
+/// The process's transport behind a one-way write fence.
+///
+/// Every frame the wire process writes passes through here, one at a time.
+/// When a write that carries resolved entity-reference data is stopped
+/// before it completes, the fence is poisoned and every later write is
+/// refused, including `session/cancel` and session deletion: the transport
+/// may hold part of that frame, and another write could push the remainder
+/// through. A poisoned process can only be killed.
+struct FencedTransport {
+    inner: Arc<dyn AiGrokAcpWireTransport>,
+    writer: Mutex<()>,
+    poisoned: std::sync::atomic::AtomicBool,
+}
+
+/// Poisons the fence unless the write it guards ran to completion.
+struct PoisonUnlessComplete<'a> {
+    fence: &'a FencedTransport,
+    complete: bool,
+}
+
+impl Drop for PoisonUnlessComplete<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.fence.poison();
+        }
+    }
+}
+
+impl FencedTransport {
+    fn poison(&self) {
+        self.poisoned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Writes a frame that carries resolved data. If the returned future is
+    /// dropped after the transport was given the frame and before it
+    /// reported completion, the fence is poisoned before the writer lock is
+    /// released, so no queued write can follow the partial frame.
+    async fn write_resolved_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+        let _writer = self.writer.lock().await;
+        if self.is_poisoned() {
+            return Err(rejected());
+        }
+        // Declared after the lock guard, so it is dropped, and poisons,
+        // first.
+        let mut guard = PoisonUnlessComplete {
+            fence: self,
+            complete: false,
+        };
+        let result = self.inner.write_frame(frame).await;
+        // A write the transport reported as failed may be partial too.
+        guard.complete = result.is_ok();
+        result
+    }
+}
+
+#[async_trait]
+impl AiGrokAcpWireTransport for FencedTransport {
+    async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+        let _writer = self.writer.lock().await;
+        if self.is_poisoned() {
+            return Err(rejected());
+        }
+        self.inner.write_frame(frame).await
+    }
+    async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+        self.inner.read_frame().await
+    }
+}
+
 /// Upstream-owned ACP state machine using only a trusted bounded wire transport.
 /// This performs protocol normalization, never launches a process or executes
 /// application tools. Construction does not authorize provider admission.
 pub struct AiGrokAcpWireProcess {
     registration: Arc<AiGrokAcpRegistration>,
+    /// The fence, as the transport every protocol path writes through.
     transport: Arc<dyn AiGrokAcpWireTransport>,
+    fence: Arc<FencedTransport>,
     cwd: String,
     state: Arc<Mutex<State>>,
     session: Arc<SyncMutex<Option<String>>>,
@@ -111,9 +195,15 @@ impl AiGrokAcpWireProcess {
             FRAME,
             TOTAL,
         )?;
+        let fence = Arc::new(FencedTransport {
+            inner: transport,
+            writer: Mutex::new(()),
+            poisoned: std::sync::atomic::AtomicBool::new(false),
+        });
         Ok(Self {
             registration,
-            transport,
+            transport: fence.clone(),
+            fence,
             cwd,
             state: Arc::new(Mutex::new(State {
                 serial: 0,
@@ -575,37 +665,53 @@ impl AiGrokAcpWireProcess {
             }
             Ok(bytes)
         };
-        let (bytes, write_deadline) = match input {
+        let (bytes, resolved) = match input {
             PromptText::Plain(text) => (frame(text)?, None),
             PromptText::Dispatch(input) => {
                 // The one read of resolved reference text. It happens here,
-                // with the session ready and the prompt slot taken, so the
-                // freshness bound is compared with the time of the write.
-                // Resolved text that is stale, over the input ceiling or
-                // whose frame is over the wire ceiling is replaced by the
-                // all-marker text before anything is rejected.
-                let markers = input.unavailable_text();
+                // with the session ready and the prompt slot taken. Resolved
+                // text that is stale, over the input ceiling or whose frame
+                // is over the wire ceiling is replaced by the all-marker text
+                // before anything is rejected.
+                let markers = frame(input.unavailable_text())?;
                 let (text, deadline) =
                     input.into_wire_text(|candidate| frame(candidate.to_vec()).is_ok());
-                match deadline {
-                    Some(deadline) => match frame(text) {
-                        Ok(bytes) => (bytes, Some(deadline)),
-                        Err(_) => (frame(markers)?, None),
-                    },
-                    None => (frame(text)?, None),
-                }
+                let resolved = deadline.and_then(|deadline| Some((frame(text).ok()?, deadline)));
+                (markers, resolved)
             }
         };
-        match write_deadline {
-            // A frame that carries resolved data must be written inside the
-            // freshness bound, or not at all.
-            Some(deadline) => tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
-                self.transport.write_frame(bytes),
+        let mut written = false;
+        if let Some((resolved, deadline)) = resolved {
+            // The freshness deadline bounds when this write may begin. It is
+            // checked again here, after encoding, on the first poll and
+            // before the transport is given a byte, and it is polled before
+            // every later poll of the write.
+            match crate::entity_references::write_resolved_before(
+                deadline,
+                self.fence.write_resolved_frame(resolved),
             )
             .await
-            .map_err(|_| classified(Failure::Timeout))??,
-            None => self.transport.write_frame(bytes).await?,
+            {
+                crate::entity_references::ResolvedWrite::Completed(result) => {
+                    result?;
+                    written = true;
+                }
+                // Stale before the write began: nothing was written, and the
+                // turn continues with the all-marker frame.
+                crate::entity_references::ResolvedWrite::NotStarted => {}
+                // The write began and the deadline passed before it
+                // completed. The transport may hold part of the frame, so
+                // this writer is disabled for good: `session/cancel`,
+                // deletion and every other write now refuse, and the
+                // provider kills the process tree when the turn fails.
+                crate::entity_references::ResolvedWrite::Abandoned => {
+                    self.fence.poison();
+                    return Err(classified(Failure::Timeout));
+                }
+            }
+        }
+        if !written {
+            self.transport.write_frame(bytes).await?;
         }
         let transport = self.transport.clone();
         let registration = self.registration.clone();
@@ -1139,6 +1245,121 @@ pub(crate) mod tests {
         .await;
         assert_eq!(text, "question\nMARKER");
     }
+    /// The freshness bound passes after the resolved frame was encoded and
+    /// before its write starts: the all-marker frame goes out and the turn
+    /// completes.
+    #[tokio::test]
+    async fn a_deadline_that_expires_between_encoding_and_writing_sends_the_marker_frame() {
+        let registration = super::super::grok_acp_provider::tests::registration();
+        // Fresh when the text is taken and the frame is encoded; the seam
+        // then lets more than the bound pass before the write's start check.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        crate::entity_references::DELAY_BEFORE_RESOLVED_WRITE
+            .set(std::time::Duration::from_millis(700));
+        let (text, frames) = dispatch_prompt_text(
+            registration,
+            dispatch_input("RESOLVED".into(), Some(deadline)),
+        )
+        .await;
+        crate::entity_references::DELAY_BEFORE_RESOLVED_WRITE.set(std::time::Duration::ZERO);
+        assert_eq!((text.as_str(), frames), ("question\nMARKER", 1));
+    }
+
+    /// A transport whose write of a frame containing `RESOLVED` accepts part
+    /// of the frame and then never completes.
+    struct StallingWire {
+        wire: Wire,
+        /// Every call to `write_frame`, complete or not, as text.
+        attempts: SyncMutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl AiGrokAcpWireTransport for StallingWire {
+        async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+            let text = String::from_utf8(frame.clone()).unwrap();
+            let stall = text.contains("RESOLVED");
+            self.attempts.lock().unwrap().push(text);
+            if stall {
+                std::future::pending::<()>().await;
+            }
+            self.wire.write_frame(frame).await
+        }
+        async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+            self.wire.read_frame().await
+        }
+    }
+
+    /// The freshness bound passes while the resolved write is in progress and
+    /// the writer stays pending: the turn fails, and the writer is disabled
+    /// for good. `session/cancel`, session deletion and a second prompt are
+    /// all refused without reaching the transport, so nothing can push the
+    /// remainder of the frame through.
+    #[tokio::test]
+    async fn a_resolved_write_still_pending_at_the_deadline_fails_the_turn_and_disables_the_writer()
+    {
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let transport = Arc::new(StallingWire {
+            wire: Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            },
+            attempts: SyncMutex::new(vec![]),
+        });
+        let process = AiGrokAcpWireProcess::new(
+            Arc::new(super::super::grok_acp_provider::tests::registration()),
+            transport.clone(),
+            "/private/empty".into(),
+        )
+        .unwrap();
+        let cursor = process.create_empty_session().await.unwrap();
+        let before = transport.attempts.lock().unwrap().len();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let error = process
+            .prompt_dispatch(
+                dispatch_input("RESOLVED".into(), Some(deadline)),
+                Arc::new(NoTools),
+            )
+            .await
+            .err()
+            .expect("the abandoned write should fail the turn");
+        assert!(matches!(error, ProviderError::Classified(Failure::Timeout)));
+        assert!(
+            std::time::Instant::now() >= deadline,
+            "the write was in progress until the deadline"
+        );
+        // The transport saw the resolved frame once, and no marker frame was
+        // written after it.
+        let attempts = transport.attempts.lock().unwrap().clone();
+        assert_eq!(attempts.len(), before + 1);
+        assert!(attempts[before].contains("RESOLVED"));
+
+        // No later call reaches the writer.
+        assert!(process.cancel().await.is_err());
+        assert!(process.delete_session(&cursor).await.is_err());
+        assert!(
+            process
+                .prompt(vec!["again".into()], Arc::new(NoTools))
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.attempts.lock().unwrap().len(), before + 1);
+        assert!(
+            !transport
+                .wire
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|frame| frame["method"] == "session/cancel"
+                    || frame["method"] == "session/prompt"),
+            "nothing completed on the writer after the abandoned frame"
+        );
+    }
+
     #[tokio::test]
     async fn a_resolved_frame_over_the_wire_ceiling_is_replaced_by_the_marker_frame() {
         // The largest input ceiling a registration may declare. Quotes double

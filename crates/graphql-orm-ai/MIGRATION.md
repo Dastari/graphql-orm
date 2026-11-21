@@ -44,14 +44,23 @@ Decide these before opting in:
      executable logs or writes in its sandbox holds the data until the host
      removes it. Check the harness's logging and the sandbox's lifetime.
 2. **The freshness bound.** The argument is the longest time allowed from the
-   start of resolution to the completion of the one write that carries the
-   data, at most 60 seconds
-   (`AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`). It covers the host hook,
-   launch admission, process launch, Grok session resume and the write. Set
-   it a little above the provider's normal start-up time. Access revoked
-   after resolution can still reach the process for at most this long. A
-   resolution older than the bound is sent as markers, so a bound that is
-   too small shows up as markers, not as errors.
+   start of resolution to the moment the one write that carries the data may
+   begin, at most 60 seconds (`AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`). It
+   covers the host hook, launch admission, process launch, Grok session
+   resume and frame encoding. Set it a little above the provider's normal
+   start-up time.
+   - The revocation window is therefore: up to `maximum_age` before a
+     resolved write begins; a write already in progress may complete.
+   - A resolution older than the bound when its write would start is sent as
+     markers, so a bound that is too small shows up as markers, not as
+     errors.
+   - A resolved write that started and has not completed when the bound
+     passes is stopped and fails the turn. The crate never writes to that
+     process again and has it killed without a graceful close.
+   - Hosts that implement `AiLocalHarnessProcess` or `AiGrokAcpWireTransport`
+     must meet the added contract: after a write future is dropped, bytes the
+     process has not yet received are discarded, never flushed later, and
+     `Drop` kills without a graceful close.
 3. **Egress.** Resolved reference data is one more data source of the
    request. The sealed egress estimate and budget of a plan already reserve
    the bytes a handle may resolve to; the disclosure decision for the local

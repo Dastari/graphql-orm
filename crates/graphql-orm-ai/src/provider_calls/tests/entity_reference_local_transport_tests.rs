@@ -91,11 +91,33 @@ mod local_harness {
         frames: Frames,
         /// How long the process takes to become ready.
         launch_delay: std::time::Duration,
+        /// What each process did, in order: `write` (a `write_stdin` call),
+        /// `close`, `terminate` and `drop`.
+        events: Events,
+        /// Whether a write of a frame holding the resolved value accepts
+        /// part of it and then never completes.
+        stall_resolved_write: bool,
     }
+
+    type Events = Arc<std::sync::Mutex<Vec<&'static str>>>;
 
     struct Process {
         outputs: VecDeque<AiLocalHarnessProcessOutput>,
         frames: Frames,
+        events: Events,
+        stall_resolved_write: bool,
+    }
+
+    impl Process {
+        fn record(&self, event: &'static str) {
+            self.events.lock().expect("events should lock").push(event);
+        }
+    }
+
+    impl Drop for Process {
+        fn drop(&mut self) {
+            self.record("drop");
+        }
     }
 
     #[async_trait]
@@ -123,6 +145,8 @@ mod local_harness {
                 ]
                 .into(),
                 frames: self.frames.clone(),
+                events: self.events.clone(),
+                stall_resolved_write: self.stall_resolved_write,
             }))
         }
     }
@@ -130,6 +154,11 @@ mod local_harness {
     #[async_trait]
     impl AiLocalHarnessProcess for Process {
         async fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), AiLocalHarnessProcessError> {
+            self.record("write");
+            if self.stall_resolved_write && String::from_utf8_lossy(bytes).contains(FIELD) {
+                // Part of the frame is in the pipe; the rest never drains.
+                std::future::pending::<()>().await;
+            }
             self.frames
                 .lock()
                 .expect("frames should lock")
@@ -138,6 +167,7 @@ mod local_harness {
         }
 
         async fn close_stdin(&mut self) -> Result<(), AiLocalHarnessProcessError> {
+            self.record("close");
             Ok(())
         }
 
@@ -150,6 +180,7 @@ mod local_harness {
         }
 
         async fn terminate(&mut self) -> Result<(), AiLocalHarnessProcessError> {
+            self.record("terminate");
             Ok(())
         }
     }
@@ -208,6 +239,7 @@ mod local_harness {
     struct Harness {
         references: References,
         frames: Frames,
+        events: Events,
     }
 
     /// The real provider and JSON-lines driver over a fake process launcher,
@@ -229,16 +261,29 @@ mod local_harness {
         registration: AiLocalHarnessRegistration,
         launch_delay: std::time::Duration,
     ) -> Harness {
+        harness_stalling(turns, registration, launch_delay, false).await
+    }
+
+    async fn harness_stalling(
+        turns: impl IntoIterator<Item = Vec<ProviderEvent>>,
+        registration: AiLocalHarnessRegistration,
+        launch_delay: std::time::Duration,
+        stall_resolved_write: bool,
+    ) -> Harness {
         let frames = Frames::default();
+        let events = Events::default();
         let driver = AiJsonLinesLocalHarnessDriver::new(Arc::new(Launcher {
             turns: std::sync::Mutex::new(turns.into_iter().collect()),
             frames: frames.clone(),
             launch_delay,
+            events: events.clone(),
+            stall_resolved_write,
         }));
         let provider = harness_provider(Arc::new(driver), registration);
         Harness {
             references: references_for(MockProvider::new(Vec::new()), Some(provider)).await,
             frames,
+            events,
         }
     }
 
@@ -264,7 +309,9 @@ mod local_harness {
     /// Each process receives exactly one write.
     #[tokio::test]
     async fn the_harness_frame_is_resolved_once_and_a_retry_after_revocation_sends_the_marker() {
-        let Harness { references, frames } = harness([text_turn(), text_turn()], 1024 * 1024).await;
+        let Harness {
+            references, frames, ..
+        } = harness([text_turn(), text_turn()], 1024 * 1024).await;
         let References {
             fixture,
             access,
@@ -307,8 +354,9 @@ mod local_harness {
     /// writes the marker. The frames are the only place the value appears.
     #[tokio::test]
     async fn a_harness_continuation_after_revocation_sends_the_marker() {
-        let Harness { references, frames } =
-            harness([tool_turn(), text_turn(), text_turn()], 1024 * 1024).await;
+        let Harness {
+            references, frames, ..
+        } = harness([tool_turn(), text_turn(), text_turn()], 1024 * 1024).await;
         let ToolLoop {
             references,
             continuation,
@@ -372,7 +420,9 @@ mod local_harness {
         let marker_bytes = self::frames(&probe.frames)[0].len();
 
         // Room for the marker frame, not for the resolved one.
-        let Harness { references, frames } = harness([text_turn()], marker_bytes + 8).await;
+        let Harness {
+            references, frames, ..
+        } = harness([text_turn()], marker_bytes + 8).await;
         let fixture = &references.fixture;
         let plan = for_local_process(with_reference(plan(fixture), &references.registry));
         executor(fixture)
@@ -390,7 +440,9 @@ mod local_harness {
     /// the executor resolved the reference.
     #[tokio::test]
     async fn a_registration_that_has_not_opted_in_receives_the_marker() {
-        let Harness { references, frames } = harness_with(
+        let Harness {
+            references, frames, ..
+        } = harness_with(
             [text_turn()],
             registration(1024 * 1024, None),
             std::time::Duration::ZERO,
@@ -413,7 +465,9 @@ mod local_harness {
     /// the resolution is not written late.
     #[tokio::test]
     async fn a_resolution_older_than_the_freshness_bound_is_sent_as_the_marker() {
-        let Harness { references, frames } = harness_with(
+        let Harness {
+            references, frames, ..
+        } = harness_with(
             [text_turn()],
             registration(1024 * 1024, Some(std::time::Duration::from_millis(40))),
             std::time::Duration::from_millis(400),
@@ -429,6 +483,77 @@ mod local_harness {
         let written = self::frames(&frames);
         assert_eq!(written.len(), 1);
         assert_unavailable(&written[0]);
+    }
+
+    /// The freshness bound passes after the resolved frame was encoded and
+    /// before its write starts. The marker frame is written and the turn
+    /// completes; the resolved frame never reaches the process.
+    #[tokio::test]
+    async fn a_deadline_that_expires_between_encoding_and_writing_sends_the_marker() {
+        let Harness {
+            references,
+            frames,
+            events,
+        } = harness_with(
+            [text_turn()],
+            registration(1024 * 1024, Some(std::time::Duration::from_millis(1_000))),
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let fixture = &references.fixture;
+        let plan = for_local_process(with_reference(plan(fixture), &references.registry));
+        // The seam lets more than the bound pass between the encoding of the
+        // resolved frame and the start check of its write.
+        crate::entity_references::DELAY_BEFORE_RESOLVED_WRITE
+            .set(std::time::Duration::from_millis(1_500));
+        let result = executor(fixture).execute(&fixture.lease, plan).await;
+        crate::entity_references::DELAY_BEFORE_RESOLVED_WRITE.set(std::time::Duration::ZERO);
+        result.expect("the call should complete with the marker");
+        assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+        let written = self::frames(&frames);
+        assert_eq!(written.len(), 1);
+        assert_unavailable(&written[0]);
+        assert_eq!(
+            events.lock().expect("events should lock")[..2],
+            ["write", "close"],
+            "one write, of the marker frame"
+        );
+    }
+
+    /// The freshness bound passes while the resolved write is in progress and
+    /// the pipe stays full. The turn fails. The process is dropped, which is
+    /// its forced kill: it is never asked to close stdin or to terminate
+    /// gracefully, either of which could flush the remainder of the frame,
+    /// and no second write is made.
+    #[tokio::test]
+    async fn a_resolved_write_still_pending_at_the_deadline_fails_the_turn_and_kills_the_process() {
+        let Harness {
+            references,
+            frames,
+            events,
+        } = harness_stalling(
+            [text_turn()],
+            registration(1024 * 1024, Some(std::time::Duration::from_millis(800))),
+            std::time::Duration::ZERO,
+            true,
+        )
+        .await;
+        let fixture = &references.fixture;
+        let plan = for_local_process(with_reference(plan(fixture), &references.registry));
+        executor(fixture)
+            .execute(&fixture.lease, plan)
+            .await
+            .expect_err("the abandoned write should fail the turn");
+        assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            self::frames(&frames).is_empty(),
+            "no frame was written completely"
+        );
+        assert_eq!(
+            *events.lock().expect("events should lock"),
+            ["write", "drop"],
+            "one write began; the process was then dropped without close or terminate"
+        );
     }
 
     /// The opt-in rejects a zero bound and one above the crate ceiling.
