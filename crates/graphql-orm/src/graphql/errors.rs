@@ -215,8 +215,15 @@ pub struct OrmPublicError {
     // An authored refusal's own message and extensions, rendered only at the
     // GraphQL boundary. Not the whole `async_graphql::Error`, whose type-erased
     // source would make this public type lose its auto traits.
-    application_refusal: Option<Box<ApplicationRefusal>>,
+    detail: Option<Box<ErrorDetail>>,
     pub(crate) runtime_mutation_code: Option<&'static str>,
+}
+
+#[derive(Clone)]
+enum ErrorDetail {
+    Application(ApplicationRefusal),
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    ReadSnapshot(super::orm::ReadSnapshotError),
 }
 
 #[derive(Clone)]
@@ -262,7 +269,7 @@ impl OrmPublicError {
             retryable: false,
             runtime_mutation_code: None,
             denied_write_field: None,
-            application_refusal: None,
+            detail: None,
         }
     }
 
@@ -276,7 +283,21 @@ impl OrmPublicError {
             retryable: false,
             runtime_mutation_code: None,
             denied_write_field: None,
-            application_refusal: None,
+            detail: None,
+        }
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn with_read_snapshot_error(mut self, error: super::orm::ReadSnapshotError) -> Self {
+        self.detail = Some(Box::new(ErrorDetail::ReadSnapshot(error)));
+        self
+    }
+
+    pub(crate) fn read_snapshot_error(&self) -> Option<&super::orm::ReadSnapshotError> {
+        match self.detail.as_deref() {
+            #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+            Some(ErrorDetail::ReadSnapshot(error)) => Some(error),
+            _ => None,
         }
     }
 
@@ -396,11 +417,13 @@ impl OrmPublicError {
     /// kept as a server-side diagnostic only.
     pub(crate) fn from_callback(error: async_graphql::Error) -> Self {
         let mut public = Self::from(sqlx_error_from_graphql(error));
-        if public.code == OrmErrorCode::InternalError {
+        if public.code == OrmErrorCode::InternalError
+            && matches!(public.detail.as_deref(), Some(ErrorDetail::Application(_)))
+        {
             // The general classifier lets the GraphQL boundary render an
             // uncoded authored message as written. These callbacks get no
             // such allowance: only a known public code marks text as safe.
-            public.application_refusal = None;
+            public.detail = None;
         }
         public
     }
@@ -408,7 +431,7 @@ impl OrmPublicError {
     /// Convert into a GraphQL error, preserving explicit application callback extensions.
     /// Infrastructure failures expose only safe ORM extensions.
     pub fn into_graphql_error(self) -> async_graphql::Error {
-        if let Some(refusal) = self.application_refusal {
+        if let Some(ErrorDetail::Application(refusal)) = self.detail.map(|detail| *detail) {
             if let Some(internal) = &self.internal {
                 tracing_log_internal(&self.code, internal);
             }
@@ -708,10 +731,10 @@ fn classify_callback_error(error: async_graphql::Error, expose_uncoded: bool) ->
         public.message = error.message.clone();
     }
     // The GraphQL boundary renders a coded refusal as written.
-    public.application_refusal = Some(Box::new(ApplicationRefusal {
+    public.detail = Some(Box::new(ErrorDetail::Application(ApplicationRefusal {
         message: error.message,
         extensions: error.extensions,
-    }));
+    })));
     sqlx_error_from_public(public)
 }
 

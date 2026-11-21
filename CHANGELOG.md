@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - next breaking ORM/macros release
+
+- **Breaking (#833):** `TransactionMode` is non-exhaustive. Its new
+  `ReadSnapshot` variant runs the same policy-aware, read-only transaction
+  as the dedicated snapshot methods. The general callback supports generated
+  transaction keysets and refuses access to the underlying pool.
+  See the [migration guide](MIGRATION.md#breaking-release-unreleased).
+
 ## Unreleased - ORM/macros 0.192.0
 
 - **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation

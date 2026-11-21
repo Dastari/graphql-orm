@@ -620,12 +620,13 @@ impl WriteBackend for SqliteBackend {
         mode: super::core::TransactionMode,
     ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
-            super::ensure_sql_write_allowed()?;
+            mode.require_write()?;
             match mode {
                 super::core::TransactionMode::Default => pool.begin().await,
                 super::core::TransactionMode::StateMachine => {
                     pool.begin_with("BEGIN IMMEDIATE").await
                 }
+                super::core::TransactionMode::ReadSnapshot => unreachable!("write mode checked"),
             }
         })
     }
@@ -1000,7 +1001,7 @@ impl WriteBackend for PostgresBackend {
         mode: super::core::TransactionMode,
     ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
-            super::ensure_sql_write_allowed()?;
+            mode.require_write()?;
             let mut transaction = pool.begin().await?;
             if mode == super::core::TransactionMode::StateMachine {
                 sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")

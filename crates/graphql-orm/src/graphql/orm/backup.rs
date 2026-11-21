@@ -822,7 +822,7 @@ where
     B: super::WriteBackend,
 {
     if !cfg!(feature = "change-journal")
-        || !hook_ctx.database().change_journal_enabled()
+        || !hook_ctx.policy_database().change_journal_enabled()
         || event.phase != MutationPhase::After
     {
         return Ok(());

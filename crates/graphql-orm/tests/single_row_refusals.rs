@@ -203,7 +203,7 @@ impl MutationHook for Callback {
                         .await?;
                     Ok(())
                 } else {
-                    fail(ctx.database(), self.mode).await
+                    fail(ctx.database().unwrap(), self.mode).await
                 }
             } else {
                 Ok(())

@@ -165,7 +165,7 @@ async fn disposable_postgres_retention_runtime_and_rls_parity()
         .transaction_with_auth(TransactionMode::StateMachine, Some(&auth), |context| {
             Box::pin(async move {
                 graphql_orm::sqlx::query("DELETE FROM retained_pg_events")
-                    .execute(context.executor())
+                    .execute(context.executor()?)
                     .await
                     .map(|result| result.rows_affected())
                     .map_err(|_| OrmPublicError::new(OrmErrorCode::ConstraintViolation))
@@ -177,7 +177,7 @@ async fn disposable_postgres_retention_runtime_and_rls_parity()
         .transaction_with_auth(TransactionMode::StateMachine, Some(&auth), |context| {
             Box::pin(async move {
                 graphql_orm::sqlx::query("UPDATE retained_pg_events SET payload = 'tampered'")
-                    .execute(context.executor())
+                    .execute(context.executor()?)
                     .await
                     .map(|result| result.rows_affected())
                     .map_err(|_| OrmPublicError::new(OrmErrorCode::ConstraintViolation))

@@ -757,11 +757,15 @@ impl MssqlPool {
         &self,
         mode: crate::graphql::orm::TransactionMode,
     ) -> crate::Result<MssqlTransaction> {
+        mode.require_write()?;
         self.require_external_writable()?;
         let lease = self.acquire().await?;
         let isolation = match mode {
             crate::graphql::orm::TransactionMode::Default => "READ COMMITTED",
             crate::graphql::orm::TransactionMode::StateMachine => "SERIALIZABLE",
+            crate::graphql::orm::TransactionMode::ReadSnapshot => {
+                unreachable!("write mode checked")
+            }
         };
         self.begin_transaction_on_lease(lease, isolation).await
     }

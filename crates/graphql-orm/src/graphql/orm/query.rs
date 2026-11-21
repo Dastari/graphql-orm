@@ -5351,11 +5351,11 @@ where
     }
 
     async fn fetch(self, read: ProjectionRead) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.context.database()).await?;
+        let visibility = ensure_projection_access::<P, B>(self.context.policy_database()).await?;
         self.state.validate()?;
         let bound = self
             .state
-            .bound(self.context.database().pagination_config(), read)?;
+            .bound(self.context.policy_database().pagination_config(), read)?;
         let rendered = self.state.render(
             bound,
             self.state
@@ -5364,10 +5364,10 @@ where
         );
         let rows = self
             .context
-            .fetch_rows(&rendered.sql, &rendered.values)
+            .fetch_read_rows(&rendered.sql, &rendered.values)
             .await?;
         self.context
-            .database()
+            .policy_database()
             .observe_read(&rendered.sql, rows.len());
         bound.check_overflow(rows.len())?;
         ProjectionQueryState::<P, B>::decode(rows)
@@ -6005,7 +6005,7 @@ where
         B: WriteBackend,
     {
         let rendered = render_select_query(B::DIALECT, &self.candidate_select(offset, limit)?);
-        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        let rows = context.fetch_read_rows(&rendered.sql, &rendered.values).await?;
         self.decode_candidates(&rows)
     }
 
@@ -6060,9 +6060,80 @@ where
         self.apply_in_memory_filtering(rows, pagination, false)
     }
 
+    /// Execute a generated keyset window using the entity's configured order.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    #[doc(hidden)]
+    pub async fn __fetch_keyset_window_in_transaction(
+        context: &mut MutationContext<'_, B>,
+        filter: &impl DatabaseFilter,
+        cursor: Option<&[crate::graphql::pagination::KeysetValue]>,
+        direction: crate::graphql::pagination::KeysetWindowDirection,
+        fetch: i64,
+        include_total_count: bool,
+    ) -> Result<(Vec<T>, Option<i64>), crate::graphql::errors::OrmPublicError>
+    where
+        B: WriteBackend,
+        T: super::AuthorizedKeysetEntity,
+    {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+        use crate::graphql::pagination::KeysetWindowDirection;
+
+        let order = T::KEYSET_ORDER;
+        if filter.requires_in_memory_filtering(B::DIALECT) {
+            return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+        }
+        let mut query = Self::new().filter(filter);
+        let total_count = if include_total_count {
+            Some(
+                query
+                    .count_with_visibility_in_transaction(context, None)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let backward = direction == KeysetWindowDirection::Backward;
+        if let Some(values) = cursor {
+            let render = if backward {
+                render_keyset_before
+            } else {
+                render_keyset_after
+            };
+            let (predicate, binds) = render(B::DIALECT, order, values, query.values.len() + 1)?;
+            query = query.where_values(&predicate, binds);
+        }
+        query.order_clauses = order
+            .iter()
+            .map(|column| {
+                let column = if backward { column.reversed() } else { *column };
+                column.order_sql()
+            })
+            .collect();
+        let rows = query
+            .paginate(&PageInput {
+                limit: Some(fetch),
+                offset: Some(0),
+            })
+            .fetch_read_query_in_transaction(context)
+            .await?;
+        Ok((rows, total_count))
+    }
+
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     #[doc(hidden)]
     pub async fn fetch_all_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
+        context.transaction_mode().require_write()?;
+        self.fetch_read_query_in_transaction(context).await
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_read_query_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
     ) -> crate::Result<Vec<T>>
@@ -6077,7 +6148,9 @@ where
             B::DIALECT,
             &self.build_select_query_with_config(pagination, false)?,
         );
-        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        let rows = context
+            .fetch_read_rows(&rendered.sql, &rendered.values)
+            .await?;
         self.apply_in_memory_filtering(rows, pagination, false)
     }
 
@@ -6151,7 +6224,9 @@ where
             &query.candidate_select(offset, Some(limit.max(0)))?,
         );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
-        context.database().observe_read(&rendered.sql, rows.len());
+        context
+            .policy_database()
+            .observe_read(&rendered.sql, rows.len());
         query.decode_candidates(&rows)
     }
 
@@ -6270,7 +6345,9 @@ where
             SelectLock::MssqlReadCommitted,
         );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
-        context.database().observe_read(&rendered.sql, rows.len());
+        context
+            .policy_database()
+            .observe_read(&rendered.sql, rows.len());
         let candidates = query.decode_candidates(&rows)?;
         Ok(WriteCandidateKeys {
             read: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
@@ -6350,7 +6427,7 @@ where
                 placeholders(1, keys.len()).join(", ")
             );
             let rows = context.fetch_rows(&lock, keys).await?;
-            context.database().observe_read(&lock, rows.len());
+            context.policy_database().observe_read(&lock, rows.len());
             let held = rows
                 .iter()
                 .map(|row| T::from_row(row).map(|row| key_value(&row)))
@@ -6382,7 +6459,7 @@ where
                  ORDER BY __gom_locked.{key_column}"
             );
             let rows = context.fetch_rows(&check, &values).await?;
-            context.database().observe_read(&check, rows.len());
+            context.policy_database().observe_read(&check, rows.len());
             for (row, (entity, residual)) in rows.iter().zip(self.decode_candidates(&rows)?) {
                 let still_matches = B::try_get_i64(row, &still_matches)? == 1;
                 locked.push((entity, residual && still_matches));
@@ -6759,6 +6836,7 @@ where
     where
         B: WriteBackend,
     {
+        context.transaction_mode().require_write()?;
         self.count_with_visibility_in_transaction(context, None)
             .await
     }
@@ -6780,7 +6858,7 @@ where
             }
             let mut query = self.clone();
             query.page = None;
-            return Ok(query.fetch_all_in_transaction(context).await?.len() as i64);
+            return Ok(query.fetch_read_query_in_transaction(context).await?.len() as i64);
         }
         // The policy is attached before the statement is built, so the
         // caller's clauses are validated beside it rather than passed
@@ -6794,7 +6872,9 @@ where
         query.pagination = None;
         query.sorts.clear();
         let rendered = render_select_query(B::DIALECT, &query);
-        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        let rows = context
+            .fetch_read_rows(&rendered.sql, &rendered.values)
+            .await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "count")
     }

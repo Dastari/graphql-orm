@@ -10,6 +10,29 @@ supersedes: []
 
 # Migration Guide
 
+## Breaking release (unreleased)
+
+Upgrade ORM and macros together to the next breaking ORM/macros release.
+
+### 1. Match transaction modes with a wildcard (#833)
+
+**Action needed.** Add a wildcard arm to exhaustive matches on
+`TransactionMode`. Handle the modes your application supports explicitly and
+return an error from `_ =>` for any other mode. The new `ReadSnapshot` mode
+is available through `Database::transaction` and `transaction_with_auth`.
+Use `TransactionError::read_snapshot_error()` to inspect typed refusals.
+The dedicated snapshot methods still provide the narrower read-only context.
+
+Propagate errors with `?` or handle refusal when calling
+`MutationContext::database()`, `WriteInputContext::database()` or the hidden
+SQLx `MutationContext::executor()`. A snapshot refuses access to the pool
+and to the pinned executor. Typed entity and projection reads, including
+forward and backward keyset pages, use the pinned connection.
+
+Read policies called by a snapshot receive a pool-free database view,
+including when they clone it. Use `Database::try_pool()` if a policy
+can handle a refused pool lookup.
+
 ## 0.191.0 to 0.192.0: propagated parent actions
 
 **No action.** Relations continue to use the source mutation's action by

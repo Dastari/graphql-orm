@@ -2,7 +2,7 @@
 
 use super::{
     DefaultWriteBackend, Entity, FromSqlRow, MutationContext, MutationQuery, ReadProjection,
-    ReadSnapshotError, SqlValue, TransactionProjectionQuery, WriteBackend,
+    ReadSnapshotError, SqlValue, TransactionMode, TransactionProjectionQuery, WriteBackend,
 };
 use crate::db::Database;
 use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -18,13 +18,17 @@ pub(crate) fn ensure_write_allowed() -> Result<(), OrmPublicError> {
         .try_with(|refused| refused.set(true))
         .is_ok()
     {
-        Err(OrmPublicError::with_message(
-            OrmErrorCode::Forbidden,
-            ReadSnapshotError::WriteRefused.to_string(),
-        ))
+        Err(write_refusal())
     } else {
         Ok(())
     }
+}
+
+pub(super) fn write_refusal() -> OrmPublicError {
+    OrmPublicError::with_message(
+        OrmErrorCode::Forbidden,
+        ReadSnapshotError::WriteRefused.to_string(),
+    )
 }
 
 /// Refuse a companion crate's database write on the snapshot callback's task.
@@ -48,8 +52,12 @@ pub struct ReadSnapshotContext<'tx, B: WriteBackend = DefaultWriteBackend> {
 impl<'tx, B: WriteBackend> ReadSnapshotContext<'tx, B> {
     pub(crate) fn new(db: &'tx Database<B>, tx: B::Transaction<'tx>) -> Self {
         Self {
-            reads: MutationContext::new(db, tx),
+            reads: MutationContext::new_with_mode(db, tx, TransactionMode::ReadSnapshot),
         }
+    }
+
+    pub(crate) fn mutation_context(&mut self) -> &mut MutationContext<'tx, B> {
+        &mut self.reads
     }
 
     pub(crate) async fn rollback(self) -> crate::Result<()> {

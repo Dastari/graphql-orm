@@ -296,7 +296,7 @@ async fn commit_failure_discards_queued_side_effects() -> graphql_orm::Result<()
                 graphql_orm::sqlx::query(
                     "INSERT INTO commit_child (id, parent_id) VALUES (1, 999)",
                 )
-                .execute(tx.executor())
+                .execute(tx.executor()?)
                 .await?;
                 tx.queue_event(1_u64);
                 tx.defer(move |_| async move {

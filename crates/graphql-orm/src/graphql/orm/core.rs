@@ -730,6 +730,7 @@ pub enum WriteOrigin {
 
 /// Isolation intent for an ORM-managed transaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransactionMode {
     /// Backend default isolation, suitable when decisions do not race writers.
     #[default]
@@ -740,6 +741,21 @@ pub enum TransactionMode {
     /// eagerly acquires the SQLite write lock before the callback can perform
     /// its first read.
     StateMachine,
+    /// Run policy-aware reads against a pinned, read-only snapshot.
+    ReadSnapshot,
+}
+
+impl TransactionMode {
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn require_write(self) -> crate::Result<()> {
+        super::ensure_sql_write_allowed()?;
+        if self == Self::ReadSnapshot {
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                super::read_snapshot::write_refusal(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Safe classification of an ORM-managed transaction failure.
@@ -771,6 +787,24 @@ pub enum ReadSnapshotError {
     WriteRefused,
     /// A callback, driver, transaction-local authorization, or transaction close failure.
     Transaction(TransactionError),
+}
+
+impl ReadSnapshotError {
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn into_transaction_error(self) -> TransactionError {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+        if let Self::Transaction(error) = self {
+            return error;
+        }
+        let code = if matches!(self, Self::WriteRefused) {
+            OrmErrorCode::Forbidden
+        } else {
+            OrmErrorCode::Conflict
+        };
+        TransactionError::Rejected(
+            OrmPublicError::with_message(code, self.to_string()).with_read_snapshot_error(self),
+        )
+    }
 }
 
 impl std::fmt::Display for ReadSnapshotError {
@@ -908,6 +942,11 @@ impl TransactionError {
             Self::Rejected(_) => TransactionCommitOutcome::RolledBack,
             Self::Retryable(_) | Self::Failed(_) => TransactionCommitOutcome::Unknown,
         }
+    }
+
+    /// The specific prerequisite or write refusal from a read snapshot, if any.
+    pub fn read_snapshot_error(&self) -> Option<&ReadSnapshotError> {
+        self.public_error().read_snapshot_error()
     }
 
     pub fn public_error(&self) -> &crate::graphql::errors::OrmPublicError {
@@ -1384,13 +1423,13 @@ where
             )
         } else {
             let rows = Self::bounded(self.query.clone(), bound, offset)
-                .fetch_all_in_transaction(self.hook_ctx)
+                .fetch_read_query_in_transaction(self.hook_ctx)
                 .await?;
             let read = rows.len();
             (rows, read)
         };
         bound.check_overflow(rows.len())?;
-        let database = self.hook_ctx.database();
+        let database = self.hook_ctx.policy_database();
         let mut visible = Vec::with_capacity(rows.len());
         let mut refused = false;
         for row in rows {
@@ -1414,7 +1453,7 @@ where
         // Resolve the read decision once. Its predicate narrows the base query,
         // so the initial SQL window and the scan both carry it.
         let mode = super::query::repository_read_plan::<T, B>(
-            self.hook_ctx.database(),
+            self.hook_ctx.policy_database(),
             Some(&mut self.query),
         )
         .await?;
@@ -1427,7 +1466,7 @@ where
         // The scan budget applies only once a scan is needed.
         let mut budget = self
             .hook_ctx
-            .database()
+            .policy_database()
             .pagination_config()
             .with_read_scan_budget(self.max_scanned_rows)
             .max_scanned_rows;
@@ -1458,7 +1497,7 @@ where
                 .await?;
             let fetched = rows.len();
             let mut examined = 0;
-            let database = self.hook_ctx.database();
+            let database = self.hook_ctx.policy_database();
             for (row, matches) in rows.into_iter().take(batch.examine) {
                 if !scan.wants_more() {
                     break;
@@ -1485,10 +1524,10 @@ where
     /// row scan budget runs out before the page is complete, plus the usual
     /// safe authorization and backend errors.
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
-        Self::ensure_read_access(self.hook_ctx.database()).await?;
+        Self::ensure_read_access(self.hook_ctx.policy_database()).await?;
         let bound = self
             .hook_ctx
-            .database()
+            .policy_database()
             .pagination_config()
             .with_read_maximum(self.max_limit)
             .repository_bound(self.limit)?;
@@ -1501,10 +1540,10 @@ where
 
     /// Fetch the first visible row after [`Self::offset`].
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
-        Self::ensure_read_access(self.hook_ctx.database()).await?;
+        Self::ensure_read_access(self.hook_ctx.policy_database()).await?;
         let bound = self
             .hook_ctx
-            .database()
+            .policy_database()
             .pagination_config()
             .with_read_maximum(self.max_limit)
             .repository_bound(self.limit)?
@@ -1519,7 +1558,7 @@ where
     pub async fn count(self) -> crate::Result<i64> {
         let metadata = T::metadata();
         self.hook_ctx
-            .database()
+            .policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -1529,7 +1568,7 @@ where
             )
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
-        let database = self.hook_ctx.database();
+        let database = self.hook_ctx.policy_database();
         let visibility = database
             .read_visibility::<T>(None, EntityAccessSurface::Repository)
             .await
@@ -1671,9 +1710,10 @@ where
         self.origin
     }
 
-    pub fn database(&self) -> &crate::db::Database<B> {
+    /// Access the database for this write. A read snapshot refuses access.
+    pub fn database(&self) -> crate::Result<&crate::db::Database<B>> {
         if let Some(db) = self.database {
-            db
+            Ok(db)
         } else {
             self.mutation_ctx
                 .as_deref()
@@ -1808,7 +1848,7 @@ where
         let limit = match self.limit {
             Some(limit) => Some(
                 self.write_ctx
-                    .database()
+                    .database()?
                     .pagination_config()
                     .with_read_maximum(self.max_limit)
                     .checked_explicit_limit(limit)
@@ -1834,7 +1874,7 @@ where
         } else {
             query
                 .fetch_all_with_auth_and_pagination(
-                    self.write_ctx.database(),
+                    self.write_ctx.database()?,
                     None,
                     super::query::PaginationConfig::unbounded(),
                 )
@@ -1849,7 +1889,7 @@ where
         } else {
             Ok(query
                 .fetch_all_with_auth_and_pagination(
-                    self.write_ctx.database(),
+                    self.write_ctx.database()?,
                     None,
                     super::query::PaginationConfig::unbounded(),
                 )
@@ -1864,7 +1904,7 @@ where
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
             query.count_in_transaction(hook_ctx).await
         } else {
-            query.count(self.write_ctx.database()).await
+            query.count(self.write_ctx.database()?).await
         }
     }
 
@@ -1900,7 +1940,8 @@ where
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
             hook_depth: Default::default(),
-            scoped_db: None,
+            scoped_db: (mode == TransactionMode::ReadSnapshot)
+                .then(|| Box::new(db.snapshot_policy_view())),
             extensions: TransactionExtensions::default(),
             change_journal_verified_tables: Vec::new(),
         }
@@ -1912,7 +1953,7 @@ where
         db: &'tx crate::db::Database<B>,
         mode: TransactionMode,
     ) -> crate::Result<Self> {
-        super::ensure_sql_write_allowed()?;
+        mode.require_write()?;
         let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
         super::begin_change_journal_transaction(db, &mut tx).await?;
         Ok(Self::new_with_mode(db, tx, mode))
@@ -1926,7 +1967,7 @@ where
         mode: TransactionMode,
         auth: Option<&DbAuthContext>,
     ) -> crate::Result<Self> {
-        super::ensure_sql_write_allowed()?;
+        mode.require_write()?;
         let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
         B::apply_auth_context_to_write_transaction(&mut tx, auth).await?;
         super::begin_change_journal_transaction(db, &mut tx).await?;
@@ -1943,6 +1984,7 @@ where
     /// portable state-machine isolation contract.
     #[doc(hidden)]
     pub fn require_state_machine(&self, operation: &'static str) -> crate::Result<()> {
+        self.mode.require_write()?;
         if self.mode == TransactionMode::StateMachine {
             return Ok(());
         }
@@ -1956,14 +1998,44 @@ where
         ))
     }
 
-    /// The database handle this transaction runs on. Inside a
-    /// [`Self::with_system_access`] scope it is that handle labelled with the
-    /// scope's [`SystemAccess`](crate::graphql::auth::SystemAccess).
-    pub fn database(&self) -> &crate::db::Database<B> {
+    /// Access the database handle in a write-capable transaction. Inside a
+    /// [`Self::with_system_access`] scope it carries the scope's access label.
+    ///
+    /// A read snapshot refuses access because the pool could run SQL outside
+    /// the pinned transaction. The refusal also causes the snapshot to fail.
+    pub fn database(&self) -> crate::Result<&crate::db::Database<B>> {
+        self.mode.require_write()?;
+        Ok(self.policy_database())
+    }
+
+    pub(crate) fn policy_database(&self) -> &crate::db::Database<B> {
         match &self.scoped_db {
             Some(scoped) => scoped,
             None => self.db,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn __keyset_pagination_config(&self) -> super::query::PaginationConfig {
+        self.policy_database().pagination_config()
+    }
+
+    #[doc(hidden)]
+    pub async fn __can_read_repository_row<T: Entity + Send + Sync + 'static>(
+        &mut self,
+        row: &T,
+    ) -> crate::Result<bool> {
+        let metadata = T::metadata();
+        self.policy_database()
+            .can_read_row(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessSurface::Repository,
+                row,
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)
     }
 
     /// Run `scope` with this transaction's writes and reads presenting a named
@@ -2002,7 +2074,7 @@ where
                 }
             }
         }
-        let scoped = Box::new(self.db.clone().with_system_access(access));
+        let scoped = Box::new(self.policy_database().clone().with_system_access(access));
         let previous = self.scoped_db.replace(scoped);
         let mut abandoned = Abandoned(self.runtime_state.clone(), true);
         let value = scope(self).await;
@@ -2092,9 +2164,20 @@ where
             .auth_subject()
     }
 
-    /// Fetch bound rows on this context's pinned transaction.
+    /// Run parameterized SQL on the pinned write transaction.
+    ///
+    /// Raw SQL is refused in read snapshots. Use the typed query and projection APIs there.
     #[doc(hidden)]
     pub async fn fetch_rows(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<B::Row>> {
+        self.mode.require_write()?;
+        self.fetch_read_rows(sql, values).await
+    }
+
+    pub(crate) async fn fetch_read_rows(
         &mut self,
         sql: &str,
         values: &[SqlValue],
@@ -2109,7 +2192,7 @@ where
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<B::WriteResult> {
-        super::ensure_sql_write_allowed()?;
+        self.mode.require_write()?;
         let result = B::execute_in_transaction(&mut self.tx, sql, values).await?;
         if statement_changed_rows(sql, B::rows_affected(&result)) {
             self.runtime_state.note_write();
@@ -2243,6 +2326,7 @@ where
         // the write: inside a `with_system_access` scope, the scoped handle.
         let result = self
             .database()
+            .map_err(crate::graphql::errors::graphql_error_from_sqlx)?
             .ensure_writable_row(ctx, entity_name, write_policy, surface, row)
             .await;
         if result.is_err() {
@@ -2263,6 +2347,7 @@ where
         self,
         outcome: Option<&crate::graphql::errors::MutationOutcomeTracker>,
     ) -> crate::Result<()> {
+        self.mode.require_write()?;
         if self.runtime_state.write_refused() {
             self.rollback().await?;
             return Err(crate::graphql::errors::sqlx_error_from_public(
@@ -2360,7 +2445,7 @@ where {
     where
         T: MutationContextInsert<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::insert_in_mutation_context(self, input).await
     }
 
@@ -2372,7 +2457,7 @@ where {
         T: MutationContextUpsert<B> + Entity,
     {
         self.require_state_machine("upsert")?;
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::upsert_in_mutation_context(self, input).await
     }
 
@@ -2384,7 +2469,7 @@ where {
     where
         T: MutationContextUpdateById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::update_by_id_in_mutation_context(self, id, input).await
     }
 
@@ -2396,7 +2481,7 @@ where {
     where
         T: MutationContextUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::update_where_in_mutation_context(self, where_input, input).await
     }
 
@@ -2412,7 +2497,7 @@ where {
     where
         T: MutationContextCompareAndSwap<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::compare_and_swap_in_mutation_context(self, id, expected_version, expected, input).await
     }
 
@@ -2423,7 +2508,7 @@ where {
     where
         T: MutationContextDeleteById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::delete_by_id_in_mutation_context(self, id).await
     }
 
@@ -2434,7 +2519,7 @@ where {
     where
         T: MutationContextDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::delete_where_in_mutation_context(self, where_input).await
     }
 
@@ -2462,7 +2547,7 @@ where {
         T: MutationContextFindById<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2476,11 +2561,26 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.database(), &row).await? {
+        if authorize_repository_row::<T, B>(self.policy_database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
         }
+    }
+
+    /// Read a complete key through the normal policy-aware query pipeline.
+    #[doc(hidden)]
+    pub async fn __gom_read_snapshot_key<T>(
+        &mut self,
+        values: &[SqlValue],
+    ) -> crate::Result<Option<T>>
+    where
+        T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    {
+        self.query::<T>()
+            .matching_primary_key(values)?
+            .fetch_one()
+            .await
     }
 
     /// Find one entity by its complete generated primary-key value.
@@ -2492,7 +2592,7 @@ where {
         T: MutationContextFindByKey<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2506,7 +2606,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.database(), &row).await? {
+        if authorize_repository_row::<T, B>(self.policy_database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2522,7 +2622,7 @@ where {
     where
         T: MutationContextUpdateByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::update_by_key_in_mutation_context(self, key, input).await
     }
 
@@ -2534,7 +2634,7 @@ where {
     where
         T: MutationContextDeleteByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::delete_by_key_in_mutation_context(self, key).await
     }
 
@@ -2546,7 +2646,7 @@ where {
     where
         T: MutationContextInsertIfAbsent<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::insert_if_absent_in_mutation_context(self, input).await
     }
 
@@ -2560,7 +2660,7 @@ where {
     where
         T: MutationContextBoundedUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::update_where_bounded_in_mutation_context(self, where_input, input, limit).await
     }
 
@@ -2573,7 +2673,7 @@ where {
     where
         T: MutationContextBoundedDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::delete_where_bounded_in_mutation_context(self, where_input, limit).await
     }
 
@@ -2587,7 +2687,7 @@ where {
     where
         T: MutationContextPredicateUpdate<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()?).await?;
         T::update_if_in_mutation_context(self, key, expected, input).await
     }
 
@@ -2600,7 +2700,7 @@ where {
         T: MutationContextKeysetPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2614,7 +2714,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.database().row_policy().is_some() {
+        if page.include_total_count && self.policy_database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2624,7 +2724,7 @@ where {
         }
         let connection = T::keyset_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
+            if !authorize_repository_row::<T, B>(self.policy_database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -2645,7 +2745,7 @@ where {
         T: MutationContextKeysetConnectionPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2659,7 +2759,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.database().row_policy().is_some() {
+        if page.include_total_count && self.policy_database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2669,7 +2769,7 @@ where {
         }
         let connection = T::keyset_connection_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
+            if !authorize_repository_row::<T, B>(self.policy_database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -2692,8 +2792,10 @@ where
     #[doc(hidden)]
     pub fn executor(
         &mut self,
-    ) -> &mut <<B as super::SqlxBackend>::Database as sqlx::Database>::Connection {
-        &mut self.tx
+    ) -> crate::Result<&mut <<B as super::SqlxBackend>::Database as sqlx::Database>::Connection>
+    {
+        self.mode.require_write()?;
+        Ok(&mut self.tx)
     }
 }
 
@@ -2805,7 +2907,7 @@ where
             ));
         };
         self.mutation
-            .database()
+            .database()?
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2817,7 +2919,7 @@ where
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         // A declared write policy needs its row provider here too, before selection.
         self.mutation
-            .database()
+            .database()?
             .ensure_row_write_provider(metadata.entity_name, metadata.write_policy)
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if filter.is_empty() {
@@ -2841,7 +2943,7 @@ where
         let mut states = Vec::with_capacity(rows.len());
         for entity in &rows {
             self.mutation
-                .database()
+                .database()?
                 .ensure_writable_row(
                     None,
                     metadata.entity_name,
@@ -3005,6 +3107,7 @@ where
 async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     db: &crate::db::Database<B>,
 ) -> crate::Result<()> {
+    super::ensure_sql_write_allowed()?;
     let metadata = T::metadata();
     db.ensure_entity_access(
         None,
@@ -3660,12 +3763,13 @@ pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Syn
         write_ctx: &'a mut WriteInputContext<'_, '_, B>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
-        self.before_create(
-            write_ctx.graphql_ctx(),
-            write_ctx.database(),
-            write_ctx.entity_name(),
-            input,
-        )
+        Box::pin(async move {
+            let db = write_ctx
+                .database()
+                .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+            self.before_create(write_ctx.graphql_ctx(), db, write_ctx.entity_name(), input)
+                .await
+        })
     }
 
     fn before_update_with_context<'a>(
@@ -3674,13 +3778,19 @@ pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Syn
         existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
-        self.before_update(
-            write_ctx.graphql_ctx(),
-            write_ctx.database(),
-            write_ctx.entity_name(),
-            existing_row,
-            input,
-        )
+        Box::pin(async move {
+            let db = write_ctx
+                .database()
+                .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+            self.before_update(
+                write_ctx.graphql_ctx(),
+                db,
+                write_ctx.entity_name(),
+                existing_row,
+                input,
+            )
+            .await
+        })
     }
 
     fn before_upsert_with_context<'a>(
@@ -3688,12 +3798,13 @@ pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Syn
         write_ctx: &'a mut WriteInputContext<'_, '_, B>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
-        self.before_upsert(
-            write_ctx.graphql_ctx(),
-            write_ctx.database(),
-            write_ctx.entity_name(),
-            input,
-        )
+        Box::pin(async move {
+            let db = write_ctx
+                .database()
+                .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+            self.before_upsert(write_ctx.graphql_ctx(), db, write_ctx.entity_name(), input)
+                .await
+        })
     }
 
     fn before_create<'a>(
