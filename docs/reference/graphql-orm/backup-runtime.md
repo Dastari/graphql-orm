@@ -59,8 +59,8 @@ every backend:
   microsecond rounding crosses that boundary), or leap-second text (`SS = 60`, checked before
   rounding can carry it into the next minute);
 - restore accepts only canonical text within that range (other text or another value kind is
-  refused before any write, including in `DryRun`) and binds PostgreSQL values through
-  `CAST(? AS TIMESTAMPTZ)`;
+  refused before any write, including in `DryRun`). PostgreSQL restores bind the
+  parsed instant as a native `TIMESTAMPTZ` parameter;
 - restore writes the stored values; no default, clock or automatic timestamp applies.
 
 PostgreSQL normalizes a leap-second literal when storing it. Export preserves that normalized

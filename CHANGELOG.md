@@ -22,6 +22,11 @@ for historical context.
   transaction keysets and refuses access to the underlying pool.
   See the [migration guide](MIGRATION.md#breaking-release-unreleased).
 
+- **Breaking (#521):** SQL Server pools that opt into native temporal text
+  binding refuse generated keyset orders on String-valued temporal fields.
+  Opted-in projection lookups bind annotated temporal strings natively.
+  PostgreSQL runtime queries and backup restores bind typed timestamps.
+
 ## Unreleased - ORM/macros 0.192.0
 
 - **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation

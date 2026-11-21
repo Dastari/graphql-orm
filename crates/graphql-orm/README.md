@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+In the next breaking ORM/macros release, SQL Server pools with native temporal
+text binding enabled reject generated keyset orders on String-valued temporal
+fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 

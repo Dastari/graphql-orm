@@ -2582,6 +2582,7 @@ pub struct KeysetOrderColumn {
     pub column: &'static str,
     pub direction: KeysetDirection,
     pub nulls: KeysetNulls,
+    temporal_text: bool,
 }
 
 impl KeysetOrderColumn {
@@ -2590,6 +2591,7 @@ impl KeysetOrderColumn {
             column,
             direction: KeysetDirection::Asc,
             nulls: KeysetNulls::Last,
+            temporal_text: false,
         }
     }
 
@@ -2598,12 +2600,24 @@ impl KeysetOrderColumn {
             column,
             direction: KeysetDirection::Desc,
             nulls: KeysetNulls::Last,
+            temporal_text: false,
         }
     }
 
     pub const fn nulls_first(mut self) -> Self {
         self.nulls = KeysetNulls::First;
         self
+    }
+
+    /// Mark a String-valued temporal column for SQL Server keyset validation.
+    pub const fn temporal_text(mut self) -> Self {
+        self.temporal_text = true;
+        self
+    }
+
+    #[cfg(feature = "mssql")]
+    pub(crate) const fn is_temporal_text(self) -> bool {
+        self.temporal_text
     }
 
     /// Reverses direction and null placement for a backward database read.
@@ -6005,7 +6019,9 @@ where
         B: WriteBackend,
     {
         let rendered = render_select_query(B::DIALECT, &self.candidate_select(offset, limit)?);
-        let rows = context.fetch_read_rows(&rendered.sql, &rendered.values).await?;
+        let rows = context
+            .fetch_read_rows(&rendered.sql, &rendered.values)
+            .await?;
         self.decode_candidates(&rows)
     }
 
@@ -6079,6 +6095,7 @@ where
         use crate::graphql::pagination::KeysetWindowDirection;
 
         let order = T::KEYSET_ORDER;
+        context.validate_keyset_order(order)?;
         if filter.requires_in_memory_filtering(B::DIALECT) {
             return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
         }

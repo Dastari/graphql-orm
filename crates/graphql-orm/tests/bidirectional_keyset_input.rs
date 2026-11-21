@@ -1,7 +1,5 @@
 use graphql_orm::graphql::errors::OrmErrorCode;
-use graphql_orm::graphql::orm::{
-    DatabaseBackend, KeysetDirection, KeysetNulls, KeysetOrderColumn, render_keyset_before,
-};
+use graphql_orm::graphql::orm::{DatabaseBackend, KeysetOrderColumn, render_keyset_before};
 use graphql_orm::graphql::pagination::{KeysetConnectionInput, KeysetValue, KeysetWindowDirection};
 
 #[test]
@@ -66,11 +64,7 @@ fn rejects_mixed_direction_and_non_positive_pages() {
 #[test]
 fn before_predicate_reverses_order_and_preserves_null_semantics() {
     let columns = [
-        KeysetOrderColumn {
-            column: "created_at",
-            direction: KeysetDirection::Desc,
-            nulls: KeysetNulls::Last,
-        },
+        KeysetOrderColumn::desc("created_at"),
         KeysetOrderColumn::asc("id"),
     ];
     let (sql, values) = render_keyset_before(

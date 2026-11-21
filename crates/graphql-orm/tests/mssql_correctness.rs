@@ -1758,12 +1758,20 @@ async fn altered_columns_keep_their_collation() -> TestResult {
 #[repository_entity(
     backend = "mssql",
     table = "dbo.TemporalRecords",
+    keyset = "legacy_stamp asc, id asc",
     schema_policy = "external_writable"
 )]
+#[graphql_orm(projection(
+    name = "LegacyTemporalProjection",
+    fields = [id, legacy_stamp],
+    private = true
+))]
 struct TemporalRecord {
     #[primary_key]
     id: String,
+    #[unique]
     #[filterable(type = "date")]
+    #[sortable]
     legacy_stamp: String,
     #[filterable(type = "date")]
     precise_stamp: chrono::NaiveDateTime,
@@ -1774,6 +1782,21 @@ struct TemporalRecord {
     offset_stamp: Option<chrono::DateTime<chrono::FixedOffset>>,
 }
 
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.TemporalTextRecords",
+    keyset = "stamp asc, id asc",
+    schema_policy = "external_writable"
+)]
+struct TemporalTextRecord {
+    #[primary_key]
+    id: String,
+    #[filterable(type = "date")]
+    #[sortable]
+    stamp: String,
+}
+
 #[tokio::test]
 #[ignore = "starts disposable SQL Server"]
 async fn temporal_parameters_are_independent_of_session_dateformat()
@@ -1781,6 +1804,7 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
     use graphql_orm::db::mssql::MssqlPoolOptions;
     use graphql_orm::graphql::filters::DateFilter;
     use graphql_orm::graphql::orm::{DatabaseFilter, OrmBackend};
+    use graphql_orm::graphql::pagination::{KeysetConnectionInput, KeysetPageInput};
 
     let mut server = OwnedSqlServer::start().await?;
     execute_batch(
@@ -1788,15 +1812,20 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
         "ALTER LOGIN [sa] WITH DEFAULT_LANGUAGE = British;
          CREATE TABLE dbo.TemporalRecords (
              id nvarchar(64) NOT NULL PRIMARY KEY,
-             legacy_stamp datetime NOT NULL,
+             legacy_stamp datetime NOT NULL UNIQUE,
              precise_stamp datetime2(7) NOT NULL,
              utc_stamp datetime2(7) NOT NULL,
              calendar_date date NOT NULL,
              offset_stamp datetimeoffset(7) NULL
-         );",
+         );
+         CREATE TABLE dbo.TemporalTextRecords (id nvarchar(64) PRIMARY KEY, stamp nvarchar(64) NOT NULL);
+         INSERT INTO dbo.TemporalTextRecords (id, stamp) VALUES
+             ('earlier-text', '2026-04-09T01:00:00-08:00'),
+             ('later-text', '2026-04-09T02:00:00+02:00');",
     )
     .await?;
     let compatibility = MssqlPool::connect_ado(&server.connection_string).await?;
+    assert!(!compatibility.options().get_typed_temporal_parameters());
     let typed = MssqlPool::connect_ado_external_writable_with(
         &server.connection_string,
         MssqlPoolOptions::new().typed_temporal_parameters(true),
@@ -1879,6 +1908,12 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
         assert_eq!(matched[0].try_get::<String, _>("id")?, row.id);
     }
 
+    let stamp_lookup = "2026-04-09".to_owned();
+    let found = LegacyTemporalProjection::find_by_legacy_stamp(&database, &stamp_lookup)
+        .await?
+        .expect("native date lookup reaches the April row under DATEFORMAT dmy");
+    assert_eq!(found.id, row.id);
+
     let row = TemporalRecord::update_by_id(
         &database,
         &row.id,
@@ -1893,16 +1928,91 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
     assert_eq!(row.legacy_stamp, "2026-05-10T00:00:00Z");
     assert!(row.offset_stamp.is_none());
 
-    let compatibility = MssqlPool::connect_ado_external_writable(&server.connection_string).await?;
+    let error = TemporalRecord::keyset_page(
+        &database,
+        TemporalRecordWhereInput::default(),
+        KeysetPageInput::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("String temporal field"));
+    let error = TemporalTextRecord::keyset_connection_page(
+        &database,
+        TemporalTextRecordWhereInput::default(),
+        KeysetConnectionInput::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("String temporal field"));
+
+    let mut restore = database
+        .begin_restore("temporal-test", std::time::Duration::from_secs(5))
+        .await?;
+    restore
+        .execute(
+            "SET DATEFORMAT dmy; UPDATE dbo.TemporalRecords SET legacy_stamp = @P1",
+            &[SqlValue::temporal_text("2026-04-09".into())],
+        )
+        .await?;
+    restore.finish().await?;
+    let restored = typed
+        .fetch_rows(
+            "SELECT CONVERT(char(10), legacy_stamp, 23) AS value FROM dbo.TemporalRecords",
+            &[],
+        )
+        .await?;
+    assert_eq!(restored[0].try_get::<String, _>("value")?, "2026-04-09");
+
+    let compatibility = MssqlPool::connect_ado_external_writable_with(
+        &server.connection_string,
+        MssqlPoolOptions::new().typed_temporal_parameters(false),
+    )
+    .await?;
     let database = Database::<MssqlBackend>::builder(compatibility)
         .schema_policy(SchemaPolicy::ExternalWritable)
         .build();
+    let first = TemporalTextRecord::keyset_page(
+        &database,
+        TemporalTextRecordWhereInput::default(),
+        KeysetPageInput {
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    assert_eq!(first.edges[0].node.id, "earlier-text");
+    let next = TemporalTextRecord::keyset_page(
+        &database,
+        TemporalTextRecordWhereInput::default(),
+        KeysetPageInput {
+            limit: Some(1),
+            after: first.page_info.end_cursor,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    assert_eq!(next.edges[0].node.id, "later-text");
+    let previous = TemporalTextRecord::keyset_connection_page(
+        &database,
+        TemporalTextRecordWhereInput::default(),
+        KeysetConnectionInput {
+            last: Some(1),
+            before: next.page_info.start_cursor,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
+    assert_eq!(previous.edges[0].node.id, "earlier-text");
+
     let nanos = "2026-04-09T12:34:56.123456789".parse::<chrono::NaiveDateTime>()?;
     let nanos_offset = chrono::DateTime::parse_from_rfc3339("2026-04-09T12:34:56.123456789+05:30")?;
     let row = TemporalRecord::insert(
         &database,
         CreateTemporalRecordInput {
-            legacy_stamp: "2026-04-09T00:00:00".into(),
+            legacy_stamp: "2026-04-10T00:00:00".into(),
             precise_stamp: nanos,
             utc_stamp: nanos.and_utc(),
             calendar_date: date,

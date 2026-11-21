@@ -4,10 +4,15 @@ use quote::quote;
 use super::{PrimaryKeyField, keyset_order_fingerprint, runtime_keyset_value};
 use crate::backend::{BackendKind, backend_render_identifier_path};
 use crate::entity::{
-    EntityMetadata, is_bool_type, is_byte_vec_type, is_string_type, is_uuid_type,
+    EntityMetadata, FieldMetadata, is_bool_type, is_byte_vec_type, is_string_type, is_uuid_type,
     option_inner_type, parse_field_metadata,
 };
 use crate::naming::graphql_field_name;
+
+fn is_temporal_keyset_field(meta: &FieldMetadata, ty: &syn::Type) -> bool {
+    let ty = option_inner_type(ty).unwrap_or(ty);
+    is_string_type(ty) && (meta.is_date_field || meta.filterable.as_deref() == Some("date"))
+}
 
 pub(super) type KeysetPart = (syn::Ident, syn::Type, String, bool, bool);
 
@@ -134,6 +139,7 @@ pub(super) fn keyset(
         let mut runtime_orders = Vec::new();
         let mut runtime_ordered_arms = Vec::new();
         let mut primary_columns = Vec::new();
+        let mut temporal_columns = Vec::new();
         for field in fields {
             let meta = parse_field_metadata(field)?;
             let ident = field.ident.as_ref().expect("named field");
@@ -172,6 +178,9 @@ pub(super) fn keyset(
             } });
             runtime_values
                 .push(quote! { #column => { let value = &self.#ident; ::std::option::Option::Some(#value_tokens) } });
+            if is_temporal_keyset_field(&meta, &field.ty) {
+                temporal_columns.push(column.clone());
+            }
             runtime_orders.push(quote! {
                 if let ::std::option::Option::Some(direction) = item.#ident {
                     selected += 1;
@@ -235,7 +244,11 @@ pub(super) fn keyset(
             } else {
                 direction
             };
-            order_tokens.push(order);
+            order_tokens.push(if is_temporal_keyset_field(&meta, ty) {
+                quote! { (#order).temporal_text() }
+            } else {
+                order
+            });
             let (inner, optional) = option_inner_type(ty)
                 .map(|inner| (inner, true))
                 .unwrap_or((ty, false));
@@ -335,6 +348,7 @@ pub(super) fn keyset(
             quote! {
                         const KEYSET_FIELDS: &'static [::graphql_orm::graphql::orm::KeysetField] = &[#(#runtime_metadata),*];
                         const KEYSET_PRIMARY_COLUMNS: &'static [&'static str] = &[#(#primary_columns),*];
+                        const KEYSET_TEMPORAL_COLUMNS: &'static [&'static str] = &[#(#temporal_columns),*];
                         fn keyset_value_for_column(&self, column: &str) -> ::std::option::Option<::graphql_orm::graphql::pagination::KeysetValue> {
                             match column { #(#runtime_values),*, _ => ::std::option::Option::None }
                         }

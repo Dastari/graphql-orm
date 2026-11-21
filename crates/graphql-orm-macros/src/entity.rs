@@ -7784,7 +7784,10 @@ fn projection_lookup_sql_value(
     argument: &syn::Ident,
 ) -> proc_macro2::TokenStream {
     let ty = option_inner_type(&field.field.ty).unwrap_or(&field.field.ty);
-    if chrono_temporal_type(ty).is_some() || field.meta.is_date_field {
+    if chrono_temporal_type(ty).is_some()
+        || field.meta.is_date_field
+        || (is_string_type(ty) && field.meta.filterable.as_deref() == Some("date"))
+    {
         scalar_text_bind_tokens(ty, &field.meta, quote! { #argument })
     } else if is_byte_vec_type(ty) {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(#argument.clone()) }

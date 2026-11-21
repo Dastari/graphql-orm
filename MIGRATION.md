@@ -33,6 +33,22 @@ Read policies called by a snapshot receive a pool-free database view,
 including when they clone it. Use `Database::try_pool()` if a policy
 can handle a refused pool lookup.
 
+### 2. Review SQL Server keyset orders on opted-in pools (#521)
+
+**Action needed.** On pools configured with
+`MssqlPoolOptions::typed_temporal_parameters(true)`, remove String-valued
+temporal fields from generated keyset orders. The ORM refuses these orders
+because lexical order on text columns can differ from instant order and
+legacy `datetime` cursors can lose precision. Use a different keyset order
+or keep the pool's text binding default. Cursor encoding is unchanged.
+
+If you construct `KeysetOrderColumn` with a struct literal, use `asc()` or
+`desc()` and optionally `nulls_first()`. Use `temporal_text()` to mark a
+custom order column subject to the same validation.
+
+PostgreSQL runtime GraphQL date-times and backup restores bind typed
+`TIMESTAMPTZ` values with the same UTC instants.
+
 ## 0.191.0 to 0.192.0: propagated parent actions
 
 **No action.** Relations continue to use the source mutation's action by

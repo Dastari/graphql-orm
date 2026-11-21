@@ -73,6 +73,7 @@ pub struct TemporalValue {
 enum TemporalText {
     Input(String),
     Chrono(String),
+    NativeTimestamp(String),
 }
 
 /// Parsed type of a temporal parameter.
@@ -98,17 +99,37 @@ impl TemporalValue {
     /// Return the spelling used by text-compatible binders.
     pub fn as_text(&self) -> &str {
         match &self.text {
-            TemporalText::Input(text) | TemporalText::Chrono(text) => text,
+            TemporalText::Input(text)
+            | TemporalText::Chrono(text)
+            | TemporalText::NativeTimestamp(text) => text,
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn native_timestamp(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        match (&self.text, &self.kind) {
+            (TemporalText::NativeTimestamp(_), TemporalKind::DateTimeOffset(value)) => Some(*value),
+            _ => None,
         }
     }
 
     #[cfg(feature = "mssql")]
     pub(crate) fn is_chrono(&self) -> bool {
-        matches!(self.text, TemporalText::Chrono(_))
+        matches!(
+            self.text,
+            TemporalText::Chrono(_) | TemporalText::NativeTimestamp(_)
+        )
     }
 }
 
 impl SqlValue {
+    pub(super) fn native_timestamp(text: String, value: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::Temporal(TemporalValue {
+            kind: TemporalKind::DateTimeOffset(value.fixed_offset()),
+            text: TemporalText::NativeTimestamp(text),
+        })
+    }
+
     /// Construct a parameter from an explicitly temporal text field or filter.
     ///
     /// The original text is retained. SQL Server native binding requires an
@@ -2013,6 +2034,13 @@ where
             Some(scoped) => scoped,
             None => self.db,
         }
+    }
+
+    pub(crate) fn validate_keyset_order(
+        &self,
+        order: &[super::KeysetOrderColumn],
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        B::validate_keyset_order(self.db.pool(), order)
     }
 
     #[doc(hidden)]
