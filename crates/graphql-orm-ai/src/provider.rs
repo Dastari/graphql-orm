@@ -1211,6 +1211,166 @@ impl ModelToolDefinition {
     }
 }
 
+/// An immutable offer or native admission entry. Cache compilation failure as
+/// well as success so a malformed schema remains a refusal on every call.
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "provider-codex-app-server",
+    feature = "provider-grok-acp"
+))]
+pub(crate) struct ModelToolOffer {
+    definition: ModelToolDefinition,
+    validator: std::sync::OnceLock<Option<std::panic::AssertUnwindSafe<jsonschema::Validator>>>,
+}
+
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "provider-codex-app-server",
+    feature = "provider-grok-acp"
+))]
+impl ModelToolOffer {
+    pub(crate) fn new(definition: ModelToolDefinition) -> Self {
+        Self {
+            definition,
+            validator: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn definition(&self) -> &ModelToolDefinition {
+        &self.definition
+    }
+
+    pub(crate) fn validator(&self) -> Result<&jsonschema::Validator, ProviderError> {
+        self.validator
+            .get_or_init(|| {
+                self.definition.validate().ok()?;
+                jsonschema::validator_for(&self.definition.parameters)
+                    .ok()
+                    .map(std::panic::AssertUnwindSafe)
+            })
+            .as_ref()
+            .map(|validator| &validator.0)
+            .ok_or(ProviderError::InvalidRequest)
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tool_offer_tests {
+    use super::*;
+
+    #[test]
+    fn tool_offer_caches_exact_projected_schema_and_refuses_invalid_replacements() {
+        use serde_json::json;
+
+        let mut definition = ModelToolDefinition {
+            tool_id: "records.read".to_owned(),
+            provider_name: "records_read".to_owned(),
+            fingerprint: "registered-fingerprint".to_owned(),
+            description: "Read a record".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+                "required": [],
+                "additionalProperties": false
+            }),
+            strict: true,
+            defer_loading: false,
+        };
+        let canonical = ModelToolOffer::new(definition.clone());
+        let projection = crate::OpenAiStrictToolProjection::compile(&definition.parameters)
+            .expect("strict offer should project");
+        definition.parameters = projection.provider_schema().clone();
+        let projected = ModelToolOffer::new(definition.clone());
+        let original_validator = projected.validator().unwrap();
+        for call_id in ["call-1", "call-2"] {
+            assert!(
+                ProviderDynamicToolCall::from_offer(
+                    "turn-1",
+                    call_id,
+                    &projected,
+                    json!({"limit": null})
+                )
+                .is_ok()
+            );
+            assert!(
+                ProviderInvalidDynamicToolCall::from_offer(
+                    "turn-1",
+                    call_id,
+                    &projected,
+                    json!({})
+                )
+                .is_ok()
+            );
+            assert!(matches!(
+                ProviderDynamicToolCall::from_offer("turn-1", call_id, &projected, json!({})),
+                Err(ProviderError::Rejected)
+            ));
+            assert!(matches!(
+                ProviderInvalidDynamicToolCall::from_offer(
+                    "turn-1",
+                    call_id,
+                    &projected,
+                    json!({"limit": null})
+                ),
+                Err(ProviderError::Rejected)
+            ));
+            assert!(std::ptr::eq(
+                original_validator,
+                projected.validator().unwrap()
+            ));
+        }
+        assert!(canonical.validator().unwrap().is_valid(&json!({})));
+        assert!(
+            !canonical
+                .validator()
+                .unwrap()
+                .is_valid(&json!({"limit": null}))
+        );
+
+        // A replacement can reuse the public ID, provider name and descriptor
+        // fingerprint. Its invalid schema must never acquire the old validator.
+        definition.parameters["properties"] = json!("invalid");
+        let replacement = ModelToolOffer::new(definition);
+        for _ in 0..2 {
+            assert!(matches!(
+                ProviderDynamicToolCall::from_offer(
+                    "turn-2",
+                    "call-1",
+                    &replacement,
+                    json!({"limit": null})
+                ),
+                Err(ProviderError::InvalidRequest)
+            ));
+            assert!(matches!(
+                ProviderInvalidDynamicToolCall::from_offer(
+                    "turn-2",
+                    "call-2",
+                    &replacement,
+                    json!({})
+                ),
+                Err(ProviderError::InvalidRequest)
+            ));
+        }
+        assert!(matches!(replacement.validator.get(), Some(None)));
+    }
+}
+
+#[cfg(feature = "provider-codex-app-server")]
+impl fmt::Debug for ModelToolOffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.definition, formatter)
+    }
+}
+
+#[cfg(feature = "provider-codex-app-server")]
+impl PartialEq for ModelToolOffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.definition == other.definition
+    }
+}
+
 /// Explicit host-selected web-search domain policy.
 ///
 /// An unrestricted public search is represented by [`Self::PublicWeb`], never
@@ -1437,6 +1597,8 @@ struct AuthorizedProviderTransfer {
     proof: AuthorizedEgress,
 }
 
+pub(crate) const CONTEXT_COMPACTION_PURPOSE: &str = "context_compaction";
+
 /// Safe context accompanying a provider call.
 ///
 /// Fields are private so an authorized manifest cannot be swapped after this
@@ -1451,6 +1613,9 @@ pub struct ProviderRequestContext {
     correlation_id: String,
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
+    compaction_admitted: bool,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    compaction_admission: Option<Box<crate::runtime::CompactionDispatchAdmission>>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
     retained_tool_images: Vec<crate::AiResolvedToolImage>,
     static_offering_reset_receipt:
@@ -1482,6 +1647,9 @@ impl ProviderRequestContext {
             correlation_id: correlation_id.into(),
             budget,
             transfers: Vec::new(),
+            compaction_admitted: false,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            compaction_admission: None,
             resolved_attachments: Vec::new(),
             retained_tool_images: Vec::new(),
             static_offering_reset_receipt: None,
@@ -1552,6 +1720,35 @@ impl ProviderRequestContext {
     ) -> Self {
         self.tool_source_delivery = delivery;
         self
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn set_compaction_admission(
+        &mut self,
+        admission: crate::runtime::CompactionDispatchAdmission,
+    ) {
+        self.compaction_admitted = true;
+        self.compaction_admission = Some(Box::new(admission));
+    }
+
+    pub(crate) async fn authorize_runtime_dispatch(
+        &mut self,
+        provider: &Arc<dyn AiProvider>,
+    ) -> Result<(), ProviderError> {
+        self.authorize_tool_source_delivery().await?;
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        if self.compaction_admitted {
+            // Check after all other asynchronous authorization, using the exact adapter
+            // that will receive the request. The proof is never handed to the adapter.
+            self.compaction_admission
+                .take()
+                .ok_or(ProviderError::EgressDenied)?
+                .verify(provider)
+                .await?;
+        }
+        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        let _ = provider;
+        Ok(())
     }
 
     /// Adds a separately authorized built-in or attachment transfer.
@@ -1743,6 +1940,14 @@ impl ProviderRequestContext {
         request: &ModelRequest,
     ) -> Result<(), ProviderError> {
         request.validate()?;
+        if !self.compaction_admitted
+            && self.transfers.iter().any(|transfer| {
+                transfer.manifest.capability == AiEgressCapability::ModelInference
+                    && transfer.manifest.purpose == CONTEXT_COMPACTION_PURPOSE
+            })
+        {
+            return Err(ProviderError::EgressDenied);
+        }
         if !self.budget.matches(
             self.run_id,
             provider_kind,
@@ -2583,13 +2788,13 @@ impl ProviderDynamicToolCall {
         feature = "provider-codex-app-server",
         feature = "provider-grok-acp"
     ))]
-    pub(crate) fn from_definition(
+    pub(crate) fn from_offer(
         response_id: impl Into<String>,
         call_id: impl Into<String>,
-        definition: &ModelToolDefinition,
+        offer: &ModelToolOffer,
         arguments: serde_json::Value,
     ) -> Result<Self, ProviderError> {
-        definition.validate()?;
+        let definition = offer.definition();
         let call = Self {
             response_id: response_id.into(),
             call_id: call_id.into(),
@@ -2606,12 +2811,27 @@ impl ProviderDynamicToolCall {
         {
             return Err(ProviderError::Rejected);
         }
-        let validator = jsonschema::validator_for(&definition.parameters)
-            .map_err(|_| ProviderError::InvalidRequest)?;
+        let validator = offer.validator()?;
         if !validator.is_valid(&call.arguments) {
             return Err(ProviderError::Rejected);
         }
         Ok(call)
+    }
+
+    #[cfg(all(test, any(feature = "sqlite", feature = "provider-codex-app-server")))]
+    pub(crate) fn from_definition(
+        response_id: impl Into<String>,
+        call_id: impl Into<String>,
+        definition: &ModelToolDefinition,
+        arguments: serde_json::Value,
+    ) -> Result<Self, ProviderError> {
+        definition.validate()?;
+        Self::from_offer(
+            response_id,
+            call_id,
+            &ModelToolOffer::new(definition.clone()),
+            arguments,
+        )
     }
 
     /// Opaque provider response or turn identifier containing this call.
@@ -2677,13 +2897,13 @@ impl ProviderInvalidDynamicToolCall {
         feature = "provider-codex-app-server",
         feature = "provider-grok-acp"
     ))]
-    pub(crate) fn from_definition(
+    pub(crate) fn from_offer(
         response_id: impl Into<String>,
         call_id: impl Into<String>,
-        definition: &ModelToolDefinition,
+        offer: &ModelToolOffer,
         arguments: serde_json::Value,
     ) -> Result<Self, ProviderError> {
-        definition.validate()?;
+        let definition = offer.definition();
         let response_id = response_id.into();
         let call_id = call_id.into();
         if !valid_provider_reference(&response_id)
@@ -2692,8 +2912,7 @@ impl ProviderInvalidDynamicToolCall {
         {
             return Err(ProviderError::Rejected);
         }
-        let validator = jsonschema::validator_for(&definition.parameters)
-            .map_err(|_| ProviderError::InvalidRequest)?;
+        let validator = offer.validator()?;
         if arguments.is_object() && validator.is_valid(&arguments) {
             return Err(ProviderError::Rejected);
         }
@@ -2705,6 +2924,22 @@ impl ProviderInvalidDynamicToolCall {
             tool_fingerprint: definition.fingerprint.clone(),
             arguments,
         })
+    }
+
+    #[cfg(all(test, any(feature = "sqlite", feature = "provider-codex-app-server")))]
+    pub(crate) fn from_definition(
+        response_id: impl Into<String>,
+        call_id: impl Into<String>,
+        definition: &ModelToolDefinition,
+        arguments: serde_json::Value,
+    ) -> Result<Self, ProviderError> {
+        definition.validate()?;
+        Self::from_offer(
+            response_id,
+            call_id,
+            &ModelToolOffer::new(definition.clone()),
+            arguments,
+        )
     }
 
     /// Exact active provider response or turn identifier.

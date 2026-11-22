@@ -428,10 +428,12 @@ ASCII bytes without whitespace or control characters.
 The schema signature still records field types, argument types and relation
 targets as spelled in source, so changing such a spelling changes fingerprints.
 
-`GraphqlOperationCatalog::compose` panics if entity groups repeat an identity,
-including declared IDs that collide with default paths, and names both real Rust
-types. Multiple operations belonging to one entity remain valid. Empty groups
-have no operation identity to check. Semantic catalogues and tool/router bindings
+Use `GraphqlOperationCatalog::try_compose` to receive a
+`GraphqlOperationCatalogError` if entity groups repeat an identity, including
+when a declared ID collides with a default path. The error names both real Rust
+types. The infallible `compose` panics with the same diagnostic. Multiple
+operations belonging to one entity remain valid. Empty groups have no
+operation identity to check. Semantic catalogues and tool/router bindings
 consume the resulting operation fingerprints rather than independently producing
 Rust identities.
 

@@ -41,3 +41,9 @@ mssql	`a.b`	[`a].[b`]
 # SQLite accepts an empty delimited name; PostgreSQL and SQL Server do not.
 sqlite	""	""
 sqlite	[]	[]
+# Shared reserved-word and irregular-name cases. SQL Server derive code also
+# delimits regular names, which the runtime dialect can render bare.
+mssql	select	[select]
+mssql	SeLeCt	[SeLeCt]
+mssql	[order].tRaN	[order].[tRaN]
+mssql	[app].x²	[app].[x²]

@@ -811,8 +811,8 @@ async fn policies_over_another_table_use_the_structured_builders() {
         ("listed", listed(), &["n2"][..]),
         ("closure", any(), &["n2", "n3"]),
     ];
-    // SQL Server's relation budget has no room for a relation inside two
-    // nested closures, each of which renders its target four times.
+    // The SQLite and PostgreSQL lane also exercises two nested closures
+    // around the generated relation target.
     if B::DIALECT != DatabaseBackend::Mssql {
         // No node on the way up is listed, inside a second closure: two
         // closures nested inside one another are the most allowed.
@@ -1644,6 +1644,82 @@ async fn columns_named_like_operators_are_read_as_columns() {
             let (list, count) = reads::<WordRow>(&db, &predicate, |row| row.id).await;
             assert_eq!(list.unwrap(), ["w1"], "{}", filter.0);
             assert_eq!(count.unwrap(), 1, "{}", filter.0);
+        }
+    }
+    #[cfg(not(feature = "mssql"))]
+    db.pool().close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handwritten_closure_targets_keep_physical_column_names() {
+    let (db, _owned) = nodes().await;
+    let non_ascii = if B::DIALECT == DatabaseBackend::Mssql {
+        "[ü]"
+    } else {
+        "\"ü\""
+    };
+    execute(
+        &db,
+        &format!("ALTER TABLE named_nodes ADD {non_ascii} BIGINT NULL"),
+    )
+    .await;
+    execute(&db, &format!("UPDATE named_nodes SET {non_ascii} = CASE WHEN id = 'n1' THEN 5 WHEN id = 'n2' THEN 1 END")).await;
+    let mut filters = vec![if B::DIALECT == DatabaseBackend::Mssql {
+        "__gom_self.[ü] = ?"
+    } else {
+        "__gom_self.\"ü\" = ?"
+    }];
+    if B::DIALECT == DatabaseBackend::Postgres {
+        execute(&db, "ALTER TABLE named_nodes ADD \"user\" BIGINT NULL").await;
+        execute(&db, "UPDATE named_nodes SET \"user\" = \"ü\"").await;
+        filters.extend(["__gom_self.USER = ?", "__gom_self.User = ?"]);
+    }
+    if B::DIALECT == DatabaseBackend::Mssql {
+        execute(&db, "ALTER TABLE named_nodes ADD [user] BIGINT NULL").await;
+        execute(&db, "UPDATE named_nodes SET [user] = [ü]").await;
+        filters.push("__gom_self.[user] = ? OR __gom_self.[USER] = ?");
+    }
+    for filter in filters {
+        let operands = filter.matches('?').count();
+        let target = ReadPredicate::from_filter::<B, _>(&written_with::<NamedNode>(
+            filter,
+            vec![SqlValue::Int(5); operands],
+        ))
+        .unwrap();
+        // Also execute PostgreSQL's explicit FALSE fallback. Double negation
+        // restores the same target with a separately checked FALSE test.
+        let explicit = B::DIALECT == DatabaseBackend::Postgres && filter.contains('ü');
+        let target = if explicit {
+            target.not().unwrap().not().unwrap()
+        } else {
+            target
+        };
+        let any = ReadPredicate::related_closure::<B, NamedNode>(UP, target.clone()).unwrap();
+        let all = ReadPredicate::related_closure_all::<B, NamedNode>(UP, target).unwrap();
+        let nested = ReadPredicate::related_closure::<B, NamedNode>(UP, all.clone()).unwrap();
+        let query = EntityQuery::<NamedNode>::new()
+            .with_read_visibility(&ReadVisibility::Complete(any.clone()))
+            .unwrap();
+        let (sql, binds) = query.build_delete_sql();
+        assert!(!sql.contains("_origin"), "{filter}");
+        assert_eq!(
+            binds.len(),
+            operands
+                * if B::DIALECT == DatabaseBackend::Postgres && !explicit {
+                    2
+                } else {
+                    4
+                }
+        );
+        for (policy, expected) in [
+            (any.clone(), &["n1", "n2", "n3"][..]),
+            (all, &["n1"]),
+            (any.not().unwrap(), &[]),
+            (nested, &["n1", "n2", "n3"]),
+        ] {
+            let (list, count) = reads::<NamedNode>(&db, &policy, |row| row.id).await;
+            assert_eq!(list.unwrap(), expected, "{filter}");
+            assert_eq!(count.unwrap(), expected.len() as i64, "{filter}");
         }
     }
     #[cfg(not(feature = "mssql"))]

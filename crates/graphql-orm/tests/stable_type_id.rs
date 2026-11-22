@@ -1,4 +1,6 @@
 #![cfg(feature = "sqlite")]
+use std::error::Error as _;
+
 use graphql_orm::prelude::*;
 mod original {
     use graphql_orm::prelude::*;
@@ -168,6 +170,107 @@ fn tool_binding_survives_move() {
         old.generated_operation().unwrap().operation_fingerprint(),
         operation.fingerprint()
     );
+}
+
+mod duplicate_schema {
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "duplicate_first_records",
+        plural = "DuplicateFirstRecords",
+        stable_type_id = "example::DuplicateRecord"
+    )]
+    pub struct FirstRecord {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+    }
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "duplicate_second_records",
+        plural = "DuplicateSecondRecords",
+        stable_type_id = "example::DuplicateRecord"
+    )]
+    pub struct SecondRecord {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+    }
+
+    schema_roots! {
+        backend: "sqlite",
+        schema_policy: "managed",
+        query_custom_ops: [],
+        entities: [FirstRecord, SecondRecord],
+    }
+
+    pub mod read_only {
+        use super::*;
+
+        schema_roots! {
+            backend: "sqlite",
+            schema_policy: "external_read_only",
+            query_custom_ops: [],
+            entities: [FirstRecord, SecondRecord],
+        }
+    }
+}
+
+const DUPLICATE_SCHEMA_DIAGNOSTIC: &str = concat!(
+    "duplicate entity identity \"example::DuplicateRecord\" for Rust types ",
+    "\"stable_type_id::duplicate_schema::FirstRecord\" and ",
+    "\"stable_type_id::duplicate_schema::SecondRecord\""
+);
+
+const DUPLICATE_SCHEMA_ERROR: GraphqlOperationCatalogError =
+    GraphqlOperationCatalogError::DuplicateEntityIdentity {
+        identity: "example::DuplicateRecord",
+        first_rust_type: "stable_type_id::duplicate_schema::FirstRecord",
+        second_rust_type: "stable_type_id::duplicate_schema::SecondRecord",
+    };
+
+#[test]
+fn resolver_catalogue_returns_repeated_entity_identity_error() {
+    let first = duplicate_schema::graphql_orm_resolver_catalog().unwrap_err();
+    let second = duplicate_schema::graphql_orm_resolver_catalog().unwrap_err();
+    assert!(std::ptr::eq(first, second));
+    assert_eq!(
+        first
+            .source()
+            .unwrap()
+            .downcast_ref::<GraphqlOperationCatalogError>(),
+        Some(&DUPLICATE_SCHEMA_ERROR),
+    );
+}
+
+#[tokio::test]
+async fn schema_builders_return_repeated_entity_identity_error() {
+    let database = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+
+    let errors = [
+        duplicate_schema::try_schema_builder(database.clone()).err(),
+        duplicate_schema::try_schema_builder_with_limits(database.clone(), Default::default())
+            .err(),
+        duplicate_schema::read_only::try_schema_builder(database.clone()).err(),
+        duplicate_schema::read_only::try_schema_builder_with_limits(database, Default::default())
+            .err(),
+    ];
+    for error in errors {
+        let error = error.expect("repeated entity identity");
+        assert_eq!(
+            error.reason(),
+            KeysetReadPolicyReason::OperationCatalog(DUPLICATE_SCHEMA_ERROR)
+        );
+        assert_eq!(error.to_string(), DUPLICATE_SCHEMA_DIAGNOSTIC);
+    }
 }
 
 mod repository {

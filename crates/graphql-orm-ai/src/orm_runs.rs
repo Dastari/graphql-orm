@@ -484,8 +484,7 @@ pub(crate) struct PreparedContextCheckpoint {
     pub through_sequence: i64,
     pub source_hash: String,
     pub token_estimate: i64,
-    pub provider_kind: String,
-    pub provider_model: String,
+    pub selection: crate::AiSessionExecutionSelection,
     pub protected_summary: serde_json::Value,
     pub expected_parent: Option<AiContextCheckpointRecord>,
     pub sources: Vec<PreparedContextCheckpointSource>,
@@ -1073,6 +1072,33 @@ impl OrmAiRunService {
     pub async fn heartbeat(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError> {
         self.update_active_lease(lease, LeaseUpdate::Heartbeat)
             .await
+    }
+
+    pub(crate) async fn verify_adoption_fence(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<(), AiError> {
+        let lease = lease.clone();
+        let clock = self.clock.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, clock.now()).await?;
+                    if persisted_state(&current)? != AiRunState::Running
+                        || current.cancellation_request_id.is_some()
+                        || current.latest_checkpoint_id != Some(checkpoint_id)
+                        || current
+                            .lease_expires_at
+                            .is_none_or(|expires| expires <= clock.now().unix_timestamp())
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(map_transaction)
     }
 
     /// Drives `execution` to completion while renewing `lease` at a third of
@@ -1876,8 +1902,6 @@ impl OrmAiRunService {
                                 .bytes()
                                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
                             || checkpoint.token_estimate <= 0
-                            || checkpoint.provider_kind.trim().is_empty()
-                            || checkpoint.provider_model.trim().is_empty()
                             || checkpoint.sources.is_empty()
                             || !(1..=5_000).contains(&checkpoint.maximum_checkpoints_per_session)
                         {
@@ -1897,6 +1921,18 @@ impl OrmAiRunService {
                             || session.scope_kind != checkpoint.expected_scope_kind
                             || session.scope_id != checkpoint.expected_scope_id
                             || session.tenant_id != checkpoint.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+
+                        let selection = crate::orm_context_compaction::validate_compaction_route(
+                            &session,
+                            &checkpoint.selection.provider_kind(),
+                            checkpoint.selection.model(),
+                        )
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if selection != checkpoint.selection
+                            || current.execution_selection != session.execution_selection
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
@@ -2039,8 +2075,12 @@ impl OrmAiRunService {
                                 through_sequence: checkpoint.through_sequence,
                                 source_hash: checkpoint.source_hash,
                                 token_estimate: checkpoint.token_estimate,
-                                provider_kind: checkpoint.provider_kind,
-                                provider_model: checkpoint.provider_model,
+                                provider_kind: checkpoint
+                                    .selection
+                                    .provider_kind()
+                                    .as_str()
+                                    .to_owned(),
+                                provider_model: checkpoint.selection.model().to_owned(),
                                 protected_summary: checkpoint.protected_summary,
                                 invalidated_at: None,
                             },
@@ -2452,16 +2492,19 @@ impl OrmAiRunService {
         ) {
             return Err(AiError::Conflict);
         }
-        let now = canonical_second(self.clock.now());
+        let clock = self.clock.clone();
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
         retry_transaction(self.limits.maximum_transaction_retries, || {
             let lease = lease.clone();
+            let clock = clock.clone();
             self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
-                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        let current =
+                            load_and_validate_active_lease(tx, &lease, clock.now()).await?;
                         if persisted_state(&current)? != AiRunState::Running
+                            || current.cancellation_request_id.is_some()
                             || current.latest_checkpoint_id != Some(checkpoint_id)
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -2485,6 +2528,13 @@ impl OrmAiRunService {
                             || checkpoint.budget_reservation_id.is_none()
                             || checkpoint.assistant_message_id.is_some()
                             || checkpoint.protected_state.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let now = canonical_second(clock.now());
+                        if current
+                            .lease_expires_at
+                            .is_none_or(|expires| expires <= now.unix_timestamp())
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }

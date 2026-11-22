@@ -12,6 +12,29 @@ supersedes: []
 
 Version 0.202.0 groups additional integration tests and documents the blocking
 migration file writer. See the [test selectors](../../docs/development/testing.md).
+See the [migration guide](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene).
+
+Version 0.201.0 returns duplicate entity identities as errors from the
+generated resolver catalogue and fallible schema builders. See the
+[migration guide](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120).
+
+Version 0.200.0 includes the
+[standalone closure rendering update](../../MIGRATION.md#01990-to-02000-closure-read-predicates).
+
+Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
+subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+Generated mutations, entity getters, and relations return a curated field error
+when the schema lacks the database.
+
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
+Version 0.197.0 preserves SQL Server driver diagnostics when decoding rows
+and centralizes the decision for a missing authorization policy provider.
+For handwritten SQL, bind a typed NULL that matches the destination column.
+Runtime search supports collection columns named like its internal search
+key and score.
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
 
 Version 0.196.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
 when a committed related-state write should prompt an authorized client to

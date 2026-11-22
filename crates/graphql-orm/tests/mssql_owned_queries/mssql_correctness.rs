@@ -329,6 +329,88 @@ async fn decimals_and_dates_decode(pool: &MssqlPool) -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
+async fn nullable_native_binds_and_driver_decode_errors() -> TestResult {
+    let mut server = OwnedSqlServer::start().await?;
+    let connection = &server.connection_string;
+    execute_batch(
+        connection,
+        "CREATE TABLE dbo.TypedNulls (id uniqueidentifier NULL, payload varbinary(16) NULL)",
+    )
+    .await?;
+    let pool = MssqlPool::connect_ado_external_writable(connection).await?;
+    <MssqlBackend as WriteBackend>::execute_with_binds(
+        &pool,
+        "INSERT INTO dbo.TypedNulls VALUES (@P1, @P2)",
+        &[SqlValue::UuidNull, SqlValue::BytesNull],
+    )
+    .await?;
+    let rows = pool
+        .fetch_rows("SELECT id, payload FROM dbo.TypedNulls", &[])
+        .await?;
+    assert_eq!(
+        rows[0].try_get::<Option<graphql_orm::uuid::Uuid>, _>(0)?,
+        None
+    );
+    assert_eq!(rows[0].try_get::<Option<Vec<u8>>, _>(1)?, None);
+
+    for (index, error) in [
+        (
+            "unknown",
+            rows[0].try_get::<Option<String>, _>("unknown").unwrap_err(),
+        ),
+        ("2", rows[0].try_get::<Option<String>, _>(2).unwrap_err()),
+    ] {
+        assert!(
+            matches!(&error, sqlx::Error::ColumnDecode { index: actual, source }
+                if actual == index && source.to_string().contains("Could not find column")),
+            "{error:?}"
+        );
+    }
+
+    let rows = pool
+        .fetch_rows(
+            "SELECT CAST(42 AS tinyint) AS narrow, CAST(1.25 AS real) AS single_value,
+                CAST(2147483648 AS bigint) AS overflow",
+            &[],
+        )
+        .await?;
+    assert_eq!(rows[0].try_get::<i64, _>("narrow")?, 42);
+    assert_eq!(rows[0].try_get::<f64, _>("single_value")?, 1.25);
+    assert!(matches!(
+        rows[0].try_get::<i32, _>("overflow"),
+        Err(sqlx::Error::ColumnDecode { .. })
+    ));
+
+    server.cleanup()?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
+async fn smallint_boolean_reads_preserve_zero_nonzero_and_null() -> TestResult {
+    let mut server = OwnedSqlServer::start().await?;
+    let pool = MssqlPool::connect_ado(&server.connection_string).await?;
+    let rows = pool
+        .fetch_rows(
+            "SELECT flag FROM (VALUES
+                (1, CAST(0 AS smallint)),
+                (2, CAST(-7 AS smallint)),
+                (3, CAST(NULL AS smallint))
+             ) AS flags(id, flag) ORDER BY id",
+            &[],
+        )
+        .await?;
+    let flags = rows
+        .iter()
+        .map(|row| row.try_get::<Option<bool>, _>("flag"))
+        .collect::<graphql_orm::Result<Vec<_>>>()?;
+    assert_eq!(flags, [Some(false), Some(true), None]);
+    server.cleanup()?;
+    Ok(())
+}
+
 /// #456 and #457.
 async fn empty_pages_and_bracket_patterns(connection: &str, pool: &MssqlPool) -> TestResult {
     execute_batch(

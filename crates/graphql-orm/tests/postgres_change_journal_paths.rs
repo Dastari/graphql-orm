@@ -646,3 +646,62 @@ async fn stray_triggers_on_other_owners_tables_are_reported_not_dropped()
     );
     Ok(())
 }
+
+/// Preserve evidence of the legacy key bytes before introducing a new
+/// encoding. An incremental chain uses these exact strings as row identities.
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn legacy_timestamp_and_float_journal_keys_follow_session_settings()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::Entity;
+
+    let owner = owned_postgres::OwnedPostgres::pool("postgres-journal-key-format", 2).await?;
+    // Register the same physical key names on existing native-typed tables.
+    // The recorder derives key text from the live PostgreSQL column type.
+    sqlx::raw_sql(
+        "CREATE TABLE journalmixed (id timestamptz PRIMARY KEY, label text NOT NULL);
+         CREATE TABLE \"JournalUsers\" (id double precision PRIMARY KEY, label text NOT NULL);",
+    )
+    .execute(&owner)
+    .await?;
+    let database = graphql_orm::db::Database::new(owner.clone());
+    database
+        .ensure_change_journal_recorder(&[
+            <JournalMixed as Entity>::metadata(),
+            <JournalQuoted as Entity>::metadata(),
+        ])
+        .await?;
+
+    let mut tx = owner.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL graphql_orm.change_journal = 'on';
+         SET LOCAL DateStyle = 'ISO, MDY';
+         SET LOCAL TimeZone = 'UTC';
+         SET LOCAL extra_float_digits = 1;
+         INSERT INTO journalmixed VALUES (TIMESTAMPTZ '2026-11-09 12:34:56+00', 'first');
+         INSERT INTO \"JournalUsers\" VALUES (1.2345678901234567, 'first');
+         SET LOCAL DateStyle = 'SQL, DMY';
+         SET LOCAL TimeZone = 'Asia/Tokyo';
+         SET LOCAL extra_float_digits = -2;
+         UPDATE journalmixed SET label = 'second';
+         UPDATE \"JournalUsers\" SET label = 'second';",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let changes = database
+        .export_changes(ChangeWindow {
+            after_sequence: None,
+            until: i64::MAX,
+        })
+        .await?;
+    assert_eq!(changes.len(), 4);
+    assert_eq!(changes[0].primary_key, "2026-11-09 12:34:56+00");
+    assert_eq!(changes[1].primary_key, "1.2345678901234567");
+    assert_ne!(changes[0].primary_key, changes[2].primary_key);
+    assert_ne!(changes[1].primary_key, changes[3].primary_key);
+    assert_eq!(changes[2].action, BackupChangeAction::Update);
+    assert_eq!(changes[3].action, BackupChangeAction::Update);
+    Ok(())
+}

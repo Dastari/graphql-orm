@@ -1089,6 +1089,38 @@ impl GraphqlResolverOperationDescriptor {
     }
 }
 
+/// Failure to compose the operation descriptors of a schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum GraphqlOperationCatalogError {
+    /// Two entity groups claim the same declared identity.
+    DuplicateEntityIdentity {
+        /// The repeated explicit or default identity.
+        identity: &'static str,
+        /// The Rust type of the first claimant.
+        first_rust_type: &'static str,
+        /// The Rust type of the second claimant.
+        second_rust_type: &'static str,
+    },
+}
+
+impl std::fmt::Display for GraphqlOperationCatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateEntityIdentity {
+                identity,
+                first_rust_type,
+                second_rust_type,
+            } => write!(
+                f,
+                "duplicate entity identity {identity:?} for Rust types {first_rust_type:?} and {second_rust_type:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphqlOperationCatalogError {}
+
 /// Deterministic catalog of generated operations for one `schema_roots!` use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphqlOperationCatalog {
@@ -1114,40 +1146,56 @@ impl GraphqlOperationCatalog {
     /// Panics when entity groups repeat a declared identity
     /// ([`GeneratedGraphqlOperationDescriptor::entity_rust_type`]). The diagnostic
     /// names both Rust types, including when an explicit identity collides with
-    /// a default module-path identity. Generated `try_schema_builder*` helpers
-    /// compose the catalogue at schema build, so they also panic on a repeated
-    /// identity rather than returning it as a schema-builder error.
+    /// a default module-path identity. For fallible composition, use
+    /// [`Self::try_compose`].
     #[doc(hidden)]
     pub fn compose<I>(groups: I) -> Self
     where
         I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool, bool)>,
     {
+        Self::try_compose(groups).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Composes generated descriptors with per-entity mutation and subscription
+    /// exposure. Queries remain exposed whenever generated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when entity groups repeat a declared identity.
+    pub fn try_compose<I>(groups: I) -> Result<Self, GraphqlOperationCatalogError>
+    where
+        I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool, bool)>,
+    {
         let mut identities = std::collections::BTreeMap::new();
-        let mut operations = groups
-            .into_iter()
-            .inspect(|(generated, _, _)| {
-                let entities = generated.iter().map(|entity| (
-                    entity.entity_rust_type(), entity.diagnostic_rust_type(),
-                )).collect::<std::collections::BTreeSet<_>>();
-                for (identity, diagnostic) in entities {
-                    if let Some(previous) = identities.insert(identity, diagnostic) {
-                        panic!(
-                            "duplicate entity identity {identity:?} for Rust types {previous:?} and {diagnostic:?}",
-                        );
-                    }
-                }
-            })
-            .flat_map(|(generated, mutations_exposed, subscriptions_exposed)| {
-                generated.iter().map(move |operation| {
-                    let exposed = match operation.kind() {
-                        GraphqlOperationKind::Query => true,
-                        GraphqlOperationKind::Mutation => mutations_exposed,
-                        GraphqlOperationKind::Subscription => subscriptions_exposed,
-                    };
-                    GraphqlResolverOperationDescriptor::new(operation, exposed)
+        let mut operations = Vec::new();
+        for (generated, mutations_exposed, subscriptions_exposed) in groups {
+            let entities = generated
+                .iter()
+                .map(|operation| {
+                    (
+                        operation.entity_rust_type(),
+                        operation.diagnostic_rust_type(),
+                    )
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<BTreeSet<_>>();
+            for (identity, diagnostic) in entities {
+                if let Some(previous) = identities.insert(identity, diagnostic) {
+                    return Err(GraphqlOperationCatalogError::DuplicateEntityIdentity {
+                        identity,
+                        first_rust_type: previous,
+                        second_rust_type: diagnostic,
+                    });
+                }
+            }
+            operations.extend(generated.iter().map(|operation| {
+                let exposed = match operation.kind() {
+                    GraphqlOperationKind::Query => true,
+                    GraphqlOperationKind::Mutation => mutations_exposed,
+                    GraphqlOperationKind::Subscription => subscriptions_exposed,
+                };
+                GraphqlResolverOperationDescriptor::new(operation, exposed)
+            }));
+        }
         // The order is a fingerprint input, so it must not depend on where an
         // entity is declared. The resolved fingerprint is the final key: it
         // covers every remaining distinguishing value.
@@ -1197,12 +1245,12 @@ impl GraphqlOperationCatalog {
         export_hash.part("algorithm", GRAPHQL_ROUTER_EXPORT_FINGERPRINT_ALGORITHM);
         export_hash.part("operation_catalog_fingerprint", &fingerprint);
         export_hash.part("authorization_fingerprint", &authorization_fingerprint);
-        Self {
+        Ok(Self {
             operations: operations.into_boxed_slice(),
             fingerprint,
             authorization_fingerprint,
             router_export_fingerprint: export_hash.finish(),
-        }
+        })
     }
 
     /// Returns all generated operations, including mutations omitted at root.
@@ -1509,7 +1557,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate entity identity")]
     fn duplicate_derived_identity_is_rejected() {
         let generated = Box::leak(
             vec![GeneratedGraphqlOperationDescriptor::generated(
@@ -1527,7 +1574,19 @@ mod tests {
             )]
             .into_boxed_slice(),
         );
-        GraphqlOperationCatalog::compose([(&*generated, true, true), (&*generated, true, true)]);
+        let groups = [(&*generated, true, true), (&*generated, true, true)];
+        let error = GraphqlOperationCatalog::try_compose(groups).unwrap_err();
+        assert_eq!(
+            error,
+            GraphqlOperationCatalogError::DuplicateEntityIdentity {
+                identity: "example::Record",
+                first_rust_type: "example::Record",
+                second_rust_type: "example::Record",
+            }
+        );
+        let panic =
+            std::panic::catch_unwind(|| GraphqlOperationCatalog::compose(groups)).unwrap_err();
+        assert_eq!(panic.downcast_ref::<String>(), Some(&error.to_string()));
     }
 
     #[test]
