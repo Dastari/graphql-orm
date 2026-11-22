@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
 Version 0.197.0 keeps SQL Server generated identifiers delimited and extends
 the quoting cases shared with the runtime. The runtime's general SQL Server
 identifier renderer also supports bare temporary table and variable names.

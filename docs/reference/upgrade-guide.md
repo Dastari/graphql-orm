@@ -70,8 +70,25 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.197.0, `graphql-orm-macros` 0.197.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.198.0, `graphql-orm-macros` 0.198.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.153.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.198.0: AI restore pages check payload size before
+  loading on SQLite and PostgreSQL (#532). [Migration](../../MIGRATION.md#01970-to-01980-restore-page-size-checks)
+- **Action needed** — AI 0.153.0: configure provider profile and adapter instance
+  re-admission and use the pinned effort and prepared manifest for compaction. Pin a legacy
+  session with verified evidence or start a new chat (#532).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-to-01530)
+- **Action needed** — AI 0.153.0: direct callers must start a replacement
+  lease before adopting its completed tool batch (#532).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-to-01530)
+- **No action** — AI 0.153.0: restore collection reads bounded pages, batches
+  attachment parent lookups, and fails closed when its aggregate row-data
+  budget is exceeded (#532).
+  [Restore collection](../../crates/graphql-orm-ai/docs/recovery-and-restore.md)
+- **No action** — AI 0.153.0: bounded debug codes identify content-protection
+  failures, and provider tool validation reuses validators for exact offers
+  (#818, #819).
+  [AI changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01530)
 - **No action** — ORM/macros 0.197.0. SQL Server scalar reads preserve driver diagnostics and accept `SMALLINT` for boolean reads (#541). [Migration](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding)
 - **No action** — ORM/macros 0.197.0. The database binding guide describes typed UUID and binary NULLs, fallible JSON decoding, and the legacy text-backed array fallback (#541). [Migration](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding)
 - **No action** — ORM/macros 0.197.0. Runtime search supports collections with columns named `__gom_search_key` or `__gom_search_score` and keeps existing cursors and indexes compatible (#821). [Migration](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding)

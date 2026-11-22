@@ -10,6 +10,25 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.153.0
+
+- Emit fixed, content-free debug codes for the approval, attachment, and
+  context-compaction content-protection mappings (#818).
+- Reuse argument validators bound to the exact provider offer or native
+  tool admission, including cached refusals for malformed schemas (#819).
+- Re-admit context compaction against the session's pinned provider profile,
+  model, and reasoning effort. Bind admission to the approved adapter instance
+  and verify the live run fence at dispatch. Classify validated handle-only
+  sources as `Confidential` and keep unlabelled blocks and inherited
+  summaries `Restricted` (#532).
+- Require a running lease and a positive checkpoint generation no newer
+  than the lease when adopting completed tool batches. Recheck the live fence
+  after reading and reauthorizing the checkpoint. Consumption checks expiry
+  inside each transaction attempt (#532).
+- Check payload lengths before materializing restore pages or batched
+  attachment parent rows in the same transaction. Preflight residual pages
+  before any per-row checks (#532).
+
 ## Unreleased - 0.152.0
 
 Opt-in entity references on the local-harness and Grok ACP adapters (#721).

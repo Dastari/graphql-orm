@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.198.0
+
+- Check payload sizes for bounded SQLite and PostgreSQL restore pages before
+  loading rows. Preflight residual scans before decoding any candidates and
+  measure PostgreSQL spatial fields in their projected form (#532). [Migration](MIGRATION.md#01970-to-01980-restore-page-size-checks)
+
 ## Unreleased - ORM/macros 0.197.0
 
 - **Fixed (#541):** SQL Server's compatibility decoders select conversions

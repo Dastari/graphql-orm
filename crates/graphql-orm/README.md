@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
 Version 0.197.0 preserves SQL Server driver diagnostics when decoding rows
 and centralizes the decision for a missing authorization policy provider.
 For handwritten SQL, bind a typed NULL that matches the destination column.

@@ -1391,14 +1391,27 @@ where
         &mut self,
         bound: super::query::RepositoryBound,
         offset: i64,
+        byte_budget: Option<&mut usize>,
     ) -> crate::Result<(Vec<T>, bool, usize)> {
-        let (rows, read) = if self.query.requires_in_memory_filtering() {
+        let (rows, read) = if let Some(byte_budget) = byte_budget {
+            let rows = self
+                .query
+                .fetch_candidates_in_transaction(
+                    self.hook_ctx,
+                    offset,
+                    bound.sql_limit(),
+                    Some(byte_budget),
+                )
+                .await?;
+            let read = rows.len();
+            (rows.into_iter().map(|(row, _)| row).collect(), read)
+        } else if self.query.requires_in_memory_filtering() {
             // As on the plain path, every candidate is read and the residual
             // in-memory predicates filter them before the page is sliced; the
             // candidate count is kept for a later rescan's budget.
             let candidates = self
                 .query
-                .fetch_candidates_in_transaction(self.hook_ctx, 0, None)
+                .fetch_candidates_in_transaction(self.hook_ctx, 0, None, None)
                 .await?;
             let read = candidates.len();
             (
@@ -1432,6 +1445,7 @@ where
         mut self,
         bound: super::query::RepositoryBound,
         take: Option<i64>,
+        mut byte_budget: Option<&mut usize>,
     ) -> crate::Result<Vec<T>> {
         use super::query::{RowCheckMode, VisibleRowScan};
         // Resolve the read decision once. Its predicate narrows the base query,
@@ -1454,8 +1468,15 @@ where
             .pagination_config()
             .with_read_scan_budget(self.max_scanned_rows)
             .max_scanned_rows;
-        if mode != RowCheckMode::Residual {
-            let (rows, refused, read) = self.fetch_window(bound, self.offset).await?;
+        // A byte-bounded callback may refuse any row, even after a complete
+        // SQL decision. Preflight its entire candidate range before decoding
+        // or calling row policy. Fixed SQL reads keep the exact window.
+        let preflight_scan = byte_budget.is_some()
+            && (mode != RowCheckMode::Fixed || self.query.requires_in_memory_filtering());
+        if mode != RowCheckMode::Residual && !preflight_scan {
+            let (rows, refused, read) = self
+                .fetch_window(bound, self.offset, byte_budget.as_deref_mut())
+                .await?;
             if !(mode == RowCheckMode::Authoritative && refused && take.is_some()) {
                 return Ok(rows);
             }
@@ -1467,6 +1488,11 @@ where
         // One budget covers the whole scan. An unlimited read also keeps its
         // fail-closed maximum, counted before row policy; whichever bound is
         // reached first refuses the read.
+        if let Some(remaining) = byte_budget {
+            self.query
+                .preflight_candidate_scan(self.hook_ctx, budget, remaining)
+                .await?;
+        }
         let overflow = match (take, bound) {
             (None, super::query::RepositoryBound::FailClosed(maximum)) => Some(maximum),
             _ => None,
@@ -1474,10 +1500,19 @@ where
         let mut scan =
             VisibleRowScan::new(self.offset, take, budget).with_overflow_after_skip(overflow);
         let mut visible = Vec::new();
-        while let Some(batch) = scan.next_batch()? {
+        while let Some(batch) = if preflight_scan {
+            scan.next_size_checked_batch()?
+        } else {
+            scan.next_batch()?
+        } {
             let rows = self
                 .query
-                .fetch_candidates_in_transaction(self.hook_ctx, batch.offset, Some(batch.fetch))
+                .fetch_candidates_in_transaction(
+                    self.hook_ctx,
+                    batch.offset,
+                    Some(batch.fetch),
+                    None,
+                )
                 .await?;
             let fetched = rows.len();
             let mut examined = 0;
@@ -1519,7 +1554,47 @@ where
             super::query::RepositoryBound::Exact(limit) => Some(limit),
             _ => None,
         };
-        self.fetch_visible(bound, take).await
+        self.fetch_visible(bound, take, None).await
+    }
+
+    /// Fetch a repository page after checking its candidate payload sizes.
+    ///
+    /// For reads requiring row callbacks or in-memory predicates, preflight all
+    /// candidates through the scan ceiling and its look-ahead row, or until
+    /// exhaustion. No payload is decoded and no per-row or per-field callback runs if
+    /// that range exceeds the byte budget. A row callback can deny any row,
+    /// so the preflight can include candidates beyond the returned page.
+    ///
+    /// The size probes and payload reads share the state-machine snapshot.
+    /// The byte limit charges column representations and inline Rust row size.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the byte budget is exceeded or when the read lacks an
+    /// exact row limit, a state-machine transaction, or a supported backend.
+    #[doc(hidden)]
+    pub async fn fetch_sql_page_with_byte_limit(self, mut maximum: usize) -> crate::Result<Vec<T>> {
+        use super::query::RepositoryBound;
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+
+        let database = self.hook_ctx.database();
+        Self::ensure_read_access(database).await?;
+        let bound = database
+            .pagination_config()
+            .with_read_maximum(self.max_limit)
+            .repository_bound(self.limit)?;
+        let RepositoryBound::Exact(limit) = bound else {
+            return Err(sqlx_error_from_public(OrmPublicError::new(
+                OrmErrorCode::InvalidInput,
+            )));
+        };
+        if self.hook_ctx.transaction_mode() != TransactionMode::StateMachine {
+            return Err(sqlx_error_from_public(OrmPublicError::new(
+                OrmErrorCode::InvalidInput,
+            )));
+        }
+        self.fetch_visible(bound, Some(limit), Some(&mut maximum))
+            .await
     }
 
     /// Fetch the first visible row after [`Self::offset`].
@@ -1536,7 +1611,11 @@ where
             super::query::RepositoryBound::Exact(limit) => Some(limit.min(1)),
             _ => Some(1),
         };
-        Ok(self.fetch_visible(bound, take).await?.into_iter().next())
+        Ok(self
+            .fetch_visible(bound, take, None)
+            .await?
+            .into_iter()
+            .next())
     }
 
     pub async fn count(self) -> crate::Result<i64> {

@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.197.0 to 0.198.0: restore page size checks
+
+**No action.** Upgrade ORM and macros together. The AI restore collector
+uses a size check before loading repository pages on SQLite and PostgreSQL.
+When row policy or predicates require Rust evaluation, the opt-in guard
+checks the whole candidate range through the scan ceiling or exhaustion
+before loading rows. Spatial fields are measured in their normal projected
+form. No data migration is needed.
+
 ## 0.196.0 to 0.197.0: database binding and decoding
 
 **No action.** SQL Server selects compatible scalar conversions by wire type
