@@ -10,7 +10,13 @@ supersedes: []
 
 # Migration Guide
 
-## 0.192.0 to 0.193.0: database binding and decoding
+## 0.195.0 to 0.196.0: database binding and decoding
+
+**No action.** SQL Server selects compatible scalar conversions by wire type
+and preserves the driver error when a read fails. Out-of-range column indexes
+return an error. Boolean reads support `BIT`, `INT`, and `SMALLINT`. For
+integer columns, zero is false, any nonzero value is true, and an optional
+boolean reads SQL NULL as `None`.
 
 **No action.** For handwritten binds, use `SqlValue::UuidNull` and
 `SqlValue::BytesNull` for UUID and binary columns. `SqlValue::Null` binds

@@ -1708,10 +1708,11 @@ impl MssqlScalar for bool {
         decode_column(row, index, |value| match value {
             ColumnData::Bit(value) => Ok(*value),
             ColumnData::I32(value) => Ok(value.map(|value| value != 0)),
+            ColumnData::I16(value) => Ok(value.map(|value| value != 0)),
             // The driver uses U8(None) for some null integer wire types.
             ColumnData::U8(None) => Ok(None),
             _ => Err(incompatible_column(
-                "expected a SQL Server bit or int column",
+                "expected a SQL Server bit, int, or smallint column",
             )),
         })
         .map_err(map_tiberius_error)

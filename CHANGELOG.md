@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.193.0
+## Unreleased - ORM/macros 0.196.0
 
 - **Fixed (#541):** SQL Server's compatibility decoders select conversions
   from the wire type, preserve the source of decode failures, and return

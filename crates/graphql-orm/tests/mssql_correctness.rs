@@ -393,6 +393,30 @@ async fn nullable_native_binds_and_driver_decode_errors() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
+async fn smallint_boolean_reads_preserve_zero_nonzero_and_null() -> TestResult {
+    let mut server = OwnedSqlServer::start().await?;
+    let pool = MssqlPool::connect_ado(&server.connection_string).await?;
+    let rows = pool
+        .fetch_rows(
+            "SELECT flag FROM (VALUES
+                (1, CAST(0 AS smallint)),
+                (2, CAST(-7 AS smallint)),
+                (3, CAST(NULL AS smallint))
+             ) AS flags(id, flag) ORDER BY id",
+            &[],
+        )
+        .await?;
+    let flags = rows
+        .iter()
+        .map(|row| row.try_get::<Option<bool>, _>("flag"))
+        .collect::<graphql_orm::Result<Vec<_>>>()?;
+    assert_eq!(flags, [Some(false), Some(true), None]);
+    server.cleanup()?;
+    Ok(())
+}
+
 /// #456 and #457.
 async fn empty_pages_and_bracket_patterns(connection: &str, pool: &MssqlPool) -> TestResult {
     execute_batch(
