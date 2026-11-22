@@ -19,8 +19,13 @@ for historical context.
 - **Added (#677).** `GraphQLOperations` accepts `mutations = false` and
   `subscriptions = false` on `graphql_entity`. Omitted roots do not appear
   in the schema or catalogues. Repository and transaction writes remain available.
-- **Fixed (#542).** Generated writes and entity scalar getters return a
-  GraphQL field error when a hand-built schema is missing its database.
+- **Action needed (#677).** `schema_roots!` emits Rust type aliases for
+  composed mutation and subscription roots backed only by generated entity
+  fields. Hosts using the former concrete tuple structs should follow the
+  [migration guide](MIGRATION.md#01920-to-01970-generated-mutation-and-subscription-roots).
+- **Fixed (#542).** Generated writes, entity scalar getters, and relation
+  resolvers return a GraphQL field error when a hand-built schema is missing its
+  database.
   Generated writes and Changed subscriptions qualify their Rust paths.
   Mutation-shape conflicts point to the shape declaration, and implicit
   update timestamps use the backend's identifier delimiters. Dependent

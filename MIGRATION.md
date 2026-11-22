@@ -12,9 +12,18 @@ supersedes: []
 
 ## 0.192.0 to 0.197.0: generated mutation and subscription roots
 
-**No action.** Upgrade ORM and macros together. Hand-built schemas missing the
-database now receive field errors from generated mutations and entity getters.
-Existing entities keep their generated roots by default.
+**Action needed for hosts using the generated Rust root structs directly.**
+`schema_roots!` can now select a root type from the entities' generated
+fields. For a composed mutation or subscription root backed only by generated
+entity fields, `MutationRoot` or `SubscriptionRoot` is a Rust type alias,
+including when all entities use default settings. Update code that constructs
+or destructures the former tuple structs to use `Default::default()`, and move
+trait implementations that require a concrete root to a host-owned wrapper.
+The names still work as types in schema signatures, and default SDL is unchanged.
+
+**No action for missing database handling.** Hand-built schemas missing the
+database now receive field errors from generated mutations, entity getters,
+and relation resolvers.
 
 When you opt out with `mutations = false` or `subscriptions = false`, update
 clients and regenerate exported schema and catalogues for the removed fields.

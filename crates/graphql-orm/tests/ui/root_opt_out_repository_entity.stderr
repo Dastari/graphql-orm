@@ -1,0 +1,5 @@
+error: generated root options require a GraphQL entity
+ --> tests/ui/root_opt_out_repository_entity.rs:4:40
+  |
+4 | #[repository_entity(table = "records", mutations = false)]
+  |                                        ^^^^^^^^^

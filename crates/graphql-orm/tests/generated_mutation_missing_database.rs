@@ -2,6 +2,7 @@
 
 use graphql_orm::graphql::input_validation::GeneratedInputValidation;
 use graphql_orm::prelude::*;
+use sqlx::Row;
 
 const DATABASE_ERROR: &str = "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data";
 
@@ -18,10 +19,55 @@ struct Record {
     version: i64,
 }
 
+#[derive(
+    GraphQLEntity,
+    GraphQLRelations,
+    GraphQLOperations,
+    async_graphql::SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql_entity(table = "places", auth = "none")]
+#[graphql(complex)]
+struct Place {
+    #[primary_key]
+    #[sortable]
+    id: String,
+    #[filterable(type = "string")]
+    parent_id: Option<String>,
+    #[graphql(skip)]
+    #[relation(target = "Place", from = "parent_id", to = "id")]
+    parent: Option<Box<Place>>,
+    #[graphql(skip)]
+    #[relation(target = "Place", from = "id", to = "parent_id", multiple)]
+    children: Vec<Box<Place>>,
+}
+
+impl BatchLoadEntity for Place {
+    fn batch_column() -> &'static str {
+        "id"
+    }
+
+    fn batch_key_from_row(row: &graphql_orm::DbRow) -> Result<String, sqlx::Error> {
+        row.try_get("id")
+    }
+}
+
 struct Query;
 
 #[async_graphql::Object]
 impl Query {
+    async fn place(&self) -> Place {
+        Place {
+            id: "child".into(),
+            parent_id: Some("parent".into()),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
     async fn record(&self) -> Record {
         Record {
             id: "a".into(),
@@ -101,4 +147,18 @@ async fn scalar_getter_reports_missing_database() {
 #[tokio::test]
 async fn record_version_getter_reports_missing_database() {
     assert_missing_database("{ record { RecordVersion } }", &["record", "RecordVersion"]).await;
+}
+
+#[tokio::test]
+async fn single_relation_reports_missing_database() {
+    assert_missing_database("{ place { parent { id } } }", &["place", "parent"]).await;
+}
+
+#[tokio::test]
+async fn list_relation_reports_missing_database() {
+    assert_missing_database(
+        "{ place { children { edges { node { id } } } } }",
+        &["place", "children"],
+    )
+    .await;
 }

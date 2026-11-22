@@ -6,6 +6,8 @@ from pathlib import Path
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('output', type=Path)
 p.add_argument('--entities', type=int, default=56)
+p.add_argument('--opt-out', action='store_true',
+               help='disable generated mutation and subscription roots on every entity')
 a = p.parse_args()
 if a.entities < 2 or a.entities % 2:
     p.error('--entities must be positive and even')
@@ -18,12 +20,13 @@ manifest = manifest.replace('full-stack-fixture', 'compile-memory-fixture')
 manifest = manifest.replace('path = "../.."', f'path = "{root}/crates/graphql-orm-macros"')
 manifest = manifest.replace('path = "../../../graphql-orm"', f'path = "{root}/crates/graphql-orm"')
 (a.output / 'Cargo.toml').write_text(manifest)
+root_options = ', mutations = false, subscriptions = false' if a.opt_out else ''
 for i in range(a.entities):
     name, peer = f'Record{i:02}', f'Record{i ^ 1:02}'
     lines = ['use super::*;', '', '#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations,',
              '    SimpleObject, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]',
              '#[graphql(complex)]',
-             f'#[graphql_entity(table = "records_{i:02}", plural = "Records{i:02}", aggregate = true,',
+             f'#[graphql_entity(table = "records_{i:02}", plural = "Records{i:02}", aggregate = true{root_options},',
              '    read_policy = "record.read", write_policy = "record.write")]',
              f'pub struct {name} {{', '    #[primary_key]', '    pub id: String,',
              '    #[filterable(type = "string")]', '    pub peer_id: String,']

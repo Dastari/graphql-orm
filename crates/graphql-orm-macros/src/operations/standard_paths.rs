@@ -99,6 +99,12 @@ impl VisitMut for Imports {
                 .segments
                 .first()
                 .is_none_or(|segment| segment.ident != "std")
+            || path
+                .segments
+                .iter()
+                .rev()
+                .skip(1)
+                .any(|segment| !segment.arguments.is_empty())
         {
             return;
         }
@@ -145,5 +151,26 @@ mod tests {
         };
         let optimized = use_standard_paths(expansion.clone()).unwrap();
         assert_eq!(expansion.to_string(), optimized.to_string());
+    }
+    #[test]
+    fn typed_variant_callbacks_keep_intermediate_arguments() {
+        let expansion = quote! {
+            impl Record {
+                fn example() {
+                    user_callback(
+                        ::std::option::Option::<i64>::Some,
+                        ::std::result::Result::<i64, CallbackError>::Ok,
+                    );
+                    let _ = ::std::option::Option::None::<i64>;
+                }
+            }
+        };
+        let optimized = use_standard_paths(expansion).unwrap().to_string();
+        assert!(optimized.contains(&quote!(::std::option::Option::<i64>::Some).to_string()));
+        assert!(
+            optimized
+                .contains(&quote!(::std::result::Result::<i64, CallbackError>::Ok).to_string())
+        );
+        assert!(optimized.contains(&quote!(_None::<i64>).to_string()));
     }
 }

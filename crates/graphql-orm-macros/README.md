@@ -12,8 +12,8 @@ supersedes: []
 
 Version 0.197.0 adds derive-level opt-outs for generated mutations and Changed
 subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
-Generated mutations and entity getters return a curated field error when the
-schema lacks the database.
+Generated mutations, entity getters, and relations return a curated field error
+when the schema lacks the database.
 
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
