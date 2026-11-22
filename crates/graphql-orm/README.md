@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
+resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put
+`#[graphql_object_fields]` on one impl of it. Entities that do not opt in are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
+
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 

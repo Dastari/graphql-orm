@@ -296,6 +296,11 @@ filter/order/page arguments without a second conflicting trait impl. An entity
 with handwritten computed fields and no relations uses the same two attributes
 without `GraphQLRelations` to receive `NodeId` and `RecordVersion`.
 
+An entity whose object `GraphQLEntity` generates adds handwritten fields
+without changing to `SimpleObject`: declare `#[graphql_orm(object_fields)]` and
+put `#[graphql_object_fields]` on the impl. See
+[handwritten fields on a generated object](macros-and-attributes.md#handwritten-fields-on-a-generated-object).
+
 Single-column relation syntax remains:
 
 ```rust
@@ -582,8 +587,9 @@ retain no row snapshot and denied subscribers do not clone one. Propagation
 examines at most 256
 targets per originating change. Consumers should refresh authorized queries.
 
-Selected entity payloads support persisted scalars only. Subscriptions requesting
-nested relations, computed/custom resolver fields, or fields with arbitrary
+Selected entity payloads support persisted scalars, and handwritten fields of a
+generated object that declare `#[graphql_orm(subscribe)]`. Subscriptions requesting
+nested relations, other computed/custom resolver fields, or fields with arbitrary
 GraphQL `guard`/dynamic `visible` behavior are rejected at admission
 with `INVALID_INPUT`: their
 late resolver decisions cannot prove release of outer metadata. Subscribe to

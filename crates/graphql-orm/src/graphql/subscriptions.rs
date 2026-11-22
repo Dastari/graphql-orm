@@ -819,8 +819,12 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
             if name == "__typename" {
                 continue;
             }
+            // Leaves only: a relation, and anything below one, is refused
+            // here whatever its target hosts.
             if !field.node.selection_set.node.items.is_empty()
-                || if is_node_identity::<T>(name) {
+                || if subscribable_computed_field::<T>(name).is_some() {
+                    false
+                } else if is_node_identity::<T>(name) {
                     !subscription_keys_available::<T, B>()
                 } else {
                     !T::columns().iter().any(|column| column.api_name == name)
@@ -835,9 +839,21 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
     Ok(())
 }
 
-// Only a generated NodeId opts into this path; arbitrary computed fields remain refused.
+// Only a generated NodeId opts into this path. A handwritten object field is
+// admitted separately, and only when it declares `subscribe`.
 fn is_node_identity<T: Entity>(name: &str) -> bool {
     name == "NodeId" && T::subscription_field_policy(name) == Some(("__gom_node_id", true, None))
+}
+
+/// The handwritten object field of this name that declares itself available
+/// in subscriptions. A generated field of the same name cannot exist: the
+/// macro refuses the collision.
+fn subscribable_computed_field<T: Entity>(
+    name: &str,
+) -> Option<&'static crate::graphql::orm::ComputedObjectFieldDef> {
+    T::computed_object_fields()
+        .iter()
+        .find(|field| field.api_name == name && field.subscribe)
 }
 
 fn subscription_keys_available<T: Entity, B: OrmBackend>() -> bool {
@@ -866,7 +882,9 @@ pub(crate) fn changed_stream_carried_fields<T: Entity, B: OrmBackend>() -> (Vec<
                 .filter(|field| field.selectable && field.relationship.is_none())
                 .filter(|field| {
                     let name = persisted_field_name::<T>(&field.field_name);
-                    if is_node_identity::<T>(name) {
+                    if subscribable_computed_field::<T>(name).is_some() {
+                        true
+                    } else if is_node_identity::<T>(name) {
                         identity
                     } else {
                         T::columns().iter().any(|column| column.api_name == name)
@@ -920,6 +938,21 @@ where
                     continue;
                 }
                 let scalar_ctx = field_ctx.with_field(scalar);
+                // A handwritten field is a leaf (the macro refuses `subscribe`
+                // on any other output type), proved by the field decision its
+                // resolver repeats.
+                if let Some(computed) = subscribable_computed_field::<T>(name) {
+                    if !scalar.node.selection_set.node.items.is_empty() {
+                        return Err(OrmPublicError::forbidden().into_graphql_error());
+                    }
+                    crate::graphql::orm::authorize_computed_object_field::<T, B>(
+                        &scalar_ctx,
+                        row,
+                        computed,
+                    )
+                    .await?;
+                    continue;
+                }
                 if is_node_identity::<T>(name) {
                     if !scalar.node.selection_set.node.items.is_empty() {
                         return Err(OrmPublicError::forbidden().into_graphql_error());

@@ -1,0 +1,24 @@
+error: cannot find macro `__gom_object_fields_Record` in this scope
+  --> tests/ui/object_fields_without_opt_in.rs:16:6
+   |
+16 | impl Record {
+   |      ^^^^^^
+
+error[E0277]: `#[graphql_object_fields]` requires `#[graphql_orm(object_fields)]` on `Record`
+  --> tests/ui/object_fields_without_opt_in.rs:16:6
+   |
+16 | impl Record {
+   |      ^^^^^^ this entity's generated object does not accept handwritten fields
+   |
+help: the trait `graphql_orm::prelude::GeneratedObjectFieldsHost` is not implemented for `Record`
+  --> tests/ui/object_fields_without_opt_in.rs:8:1
+   |
+ 8 | struct Record {
+   | ^^^^^^^^^^^^^
+   = note: add `#[graphql_orm(object_fields)]` to the `GraphQLEntity` struct; an entity that owns its object through `SimpleObject` and `#[graphql(complex)]` uses `#[graphql_orm::graphql_complex_object]` instead
+note: required by a bound in `assert_object_fields_host`
+  --> tests/ui/object_fields_without_opt_in.rs:15:1
+   |
+15 | #[graphql_object_fields]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_object_fields_host`
+   = note: this error originates in the attribute macro `graphql_object_fields` (in Nightly builds, run with -Z macro-backtrace for more info)
