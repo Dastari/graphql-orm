@@ -7,6 +7,17 @@ use crate::{BackupError, RestoreContext};
 #[async_trait]
 /// Database integration contract used by backup and restore operations.
 pub trait GraphqlOrmBackupAdapter: Send + Sync {
+    /// Check whether the database permits backup and restore before touching
+    /// it or the repository. The default permits both.
+    ///
+    /// # Errors
+    ///
+    /// Returns a refusal when the adapter is configured to disallow backup
+    /// and restore. Implementations must perform this check without I/O.
+    fn ensure_backup_restore_allowed(&self) -> Result<(), BackupError> {
+        Ok(())
+    }
+
     /// Returns backup-relevant schema metadata.
     ///
     /// # Errors

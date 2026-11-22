@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
+
+- **Added (follow-up to #731).** Opt in per database when another product
+  owns backup and restore. The ORM and its backup adapter refuse backup and
+  restore before I/O. SQL Server queries and writes on opted-in handles
+  run without the restore marker or fencing lock.
+  [Migration](MIGRATION.md#02010-to-02040-externally-managed-backup-and-restore)
+
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
 - **Fixed (#829).** Repeated entity identities return a typed composition

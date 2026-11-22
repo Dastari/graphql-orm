@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.29.0 makes the optional ORM adapter honor
+[externally managed backup and restore](MIGRATION.md#0281-to-0290-externally-managed-backup-and-restore).
+
 Version 0.28.1 guards the optional ORM adapter against writes inside
 [read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
 Use the adapter with ORM 0.191.0 from the same workspace revision.

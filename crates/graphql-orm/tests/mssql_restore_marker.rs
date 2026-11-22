@@ -765,3 +765,82 @@ async fn a_marker_table_needs_its_key_and_check() -> Result<(), Box<dyn std::err
     server.cleanup()?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn externally_managed_backup_restore_allows_writes_without_a_marker()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
+    use graphql_orm::graphql::orm::BackupRestoreExternallyManaged;
+
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "DROP TABLE dbo.__graphql_orm_restore_marker;
+         CREATE TABLE dbo.GraphqlOrmRestoredRecords (id NVARCHAR(32) PRIMARY KEY, value BIGINT NOT NULL);",
+    )
+    .await?;
+    let pool = MssqlPool::connect_ado_external_writable_with(
+        &server.connection_string,
+        MssqlPoolOptions::new()
+            .max_connections(2)
+            .query_timeout(Some(Duration::from_secs(5))),
+    )
+    .await?;
+    let db = Db::builder(pool.clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .externally_managed_backup_restore(true)
+        .build()
+        .clone();
+
+    let wait = Duration::from_millis(100);
+    for error in [
+        db.restore_in_progress().await.unwrap_err(),
+        db.ensure_no_restore_in_progress().await.unwrap_err(),
+        db.pool().install_restore_marker().await.unwrap_err(),
+        db.begin_restore("external", wait)
+            .await
+            .err()
+            .expect("begin"),
+        db.resume_restore("external", wait)
+            .await
+            .err()
+            .expect("resume"),
+    ] {
+        assert!(
+            BackupRestoreExternallyManaged::from_error(&error).is_some(),
+            "{error}"
+        );
+    }
+    db.schema()
+        .validate_against_entities(&[RestoredRecord::metadata()])
+        .await?;
+    assert_eq!(insert(&db, "without-marker").await?, 1);
+    MutationContext::begin(&db, TransactionMode::Default)
+        .await?
+        .rollback()
+        .await?;
+    assert_eq!(count(&db).await?, 1);
+
+    let fenced = Db::builder(pool)
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    assert!(matches!(
+        RestoreStateUnavailable::from_error(&count(&fenced).await.unwrap_err())
+            .map(|error| error.reason),
+        Some(RestoreStateUnavailableReason::MarkerNotInstalled)
+    ));
+    fenced.pool().install_restore_marker().await?;
+    let restore = fenced
+        .begin_restore("fenced", Duration::from_secs(5))
+        .await?;
+    assert_eq!(insert(&db, "under-lock").await?, 1);
+    MutationContext::begin(&db, TransactionMode::StateMachine)
+        .await?
+        .rollback()
+        .await?;
+    assert_eq!(count(&db).await?, 2);
+    restore.finish().await?;
+    server.cleanup()?;
+    Ok(())
+}

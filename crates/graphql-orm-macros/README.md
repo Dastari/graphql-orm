@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.204.0 aligns with the ORM runtime's
+[external backup and restore setting](../../MIGRATION.md#02010-to-02040-externally-managed-backup-and-restore).
+
 Version 0.201.0 makes `schema_roots!` report duplicate entity identities
 through its fallible schema builders and resolver catalogue helper. Upgrade
 ORM and macros together. See the
