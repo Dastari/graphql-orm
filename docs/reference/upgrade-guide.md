@@ -77,7 +77,9 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
   to opt in to policy-aware snapshot reads (#831). The optional ORM backup
   adapter refuses restore writes inside the snapshot callback.
   [ORM migration](../../MIGRATION.md#01900-to-01910-read-snapshot-transactions) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0280-to-0281-read-snapshot-write-refusal)
-- **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
+- **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. Codex app-server delivery in 0.152.0 uses markers (#721). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
+
+- **Action needed** — AI 0.153.0 (breaking-batch placeholder). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release)
 
 ### workspace-2026.11.21.2
 

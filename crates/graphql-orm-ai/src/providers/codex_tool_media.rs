@@ -22,7 +22,7 @@ fn reopened_original_pixels_are_real_image_input_and_keep_original_action_label(
     let image = genuine_image();
     let mut input = turn();
     input.tool_images = vec![image.clone()];
-    let items = input.protocol_input().unwrap();
+    let items = input.protocol_input(input.input()).unwrap();
     assert_eq!(items[0], json!({"type":"text","text":"hello"}));
     let label: Value = serde_json::from_str(items[1]["text"].as_str().unwrap()).unwrap();
     assert_eq!(label["capturedAtMs"], 1000);
@@ -50,12 +50,12 @@ fn json_reference_is_text_only_and_unadmitted_image_batches_are_refused() {
     let input = AiCodexAppServerTurnInput::try_from_model_request(request).unwrap();
     assert!(
         input
-            .protocol_input()
+            .protocol_input(input.input())
             .unwrap()
             .iter()
             .all(|item| item["type"] == "text")
     );
     let mut input = turn();
     input.tool_images = vec![genuine_image(); 5];
-    assert!(input.protocol_input().is_err());
+    assert!(input.protocol_input(input.input()).is_err());
 }

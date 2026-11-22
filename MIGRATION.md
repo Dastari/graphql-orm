@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## Breaking release (unreleased)
+
+**Action needed** for Codex app-server process implementations. The next
+breaking graphql-orm-ai release moves all six turn methods to a consuming
+dispatch. Use the protocol actor's `write_turn` with the shared process writer.
+See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release).
+No data migration is needed.
+
 ## 0.190.0 to 0.191.0: read snapshot transactions
 
 **No action.** The snapshot runner is opt-in and uses the existing generated

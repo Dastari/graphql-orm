@@ -676,8 +676,15 @@ fn anonymous_unavailable_wire_envelope() -> Value {
 }
 
 /// Whether a JSON input value is an entity-reference envelope.
-fn is_envelope(value: &Value) -> bool {
+pub(crate) fn is_envelope(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some(AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE)
+}
+
+/// Replaces a reference envelope with its canonical unavailable form.
+pub(crate) fn unavailable_reference_json(value: &Value) -> Value {
+    stored_handle(value).map_or_else(anonymous_unavailable_wire_envelope, |reference| {
+        unavailable_wire_envelope(&reference)
+    })
 }
 
 /// Bytes an envelope reserves for resolved data, as recorded in the block.
@@ -1090,10 +1097,7 @@ impl ModelDispatchRequest {
                 if let ModelInputBlock::Json { value } = block
                     && is_envelope(value)
                 {
-                    *value = stored_handle(value)
-                        .map_or_else(anonymous_unavailable_wire_envelope, |reference| {
-                            unavailable_wire_envelope(&reference)
-                        });
+                    *value = unavailable_reference_json(value);
                 }
             }
         };
@@ -1112,7 +1116,11 @@ impl ModelDispatchRequest {
 }
 
 /// How an attempt to write a frame that carries resolved data ended.
-#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+#[cfg(any(
+    feature = "local-harness",
+    feature = "provider-grok-acp",
+    feature = "provider-codex-app-server"
+))]
 pub(crate) enum ResolvedWrite<T> {
     /// The freshness deadline had passed before the write was first polled.
     /// Nothing was written; the caller sends the all-marker frame instead.
@@ -1125,7 +1133,14 @@ pub(crate) enum ResolvedWrite<T> {
     Abandoned,
 }
 
-#[cfg(all(test, any(feature = "local-harness", feature = "provider-grok-acp")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "local-harness",
+        feature = "provider-grok-acp",
+        feature = "provider-codex-app-server"
+    )
+))]
 thread_local! {
     /// Test seam: time that passes between the encoding of a resolved frame
     /// and the start check of its write, on the current thread.
@@ -1143,7 +1158,11 @@ thread_local! {
 /// deadline is polled before every further poll of `write` (a deadline-first,
 /// biased select), so expiry wins over more writing. A write that completes
 /// within a poll that began before expiry is allowed to finish.
-#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+#[cfg(any(
+    feature = "local-harness",
+    feature = "provider-grok-acp",
+    feature = "provider-codex-app-server"
+))]
 pub(crate) async fn write_resolved_before<T>(
     deadline: std::time::Instant,
     write: impl std::future::Future<Output = T>,
@@ -1239,7 +1258,11 @@ pub fn is_entity_reference_block_kind(kind: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+    #[cfg(any(
+        feature = "local-harness",
+        feature = "provider-grok-acp",
+        feature = "provider-codex-app-server"
+    ))]
     #[tokio::test]
     async fn a_resolved_write_starts_only_before_its_deadline_and_expiry_wins_over_more_writing() {
         use std::sync::atomic::{AtomicUsize, Ordering};
