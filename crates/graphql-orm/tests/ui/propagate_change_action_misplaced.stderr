@@ -1,0 +1,23 @@
+error: propagate_change_action belongs inside #[relation(...)]
+ --> tests/ui/propagate_change_action_misplaced.rs:4:37
+  |
+4 | #[graphql_entity(table = "parents", propagate_change_action = "updated")]
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: propagate_change_action belongs inside #[relation(...)]
+  --> tests/ui/propagate_change_action_misplaced.rs:14:19
+   |
+14 |     #[graphql_orm(propagate_change_action = "updated")]
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: relation propagate_change_action requires propagate_change = "up"
+  --> tests/ui/propagate_change_action_misplaced.rs:23:41
+   |
+23 |     #[relation(target = "EntityOption", propagate_change_action = "updated", propagate_change = "none")]
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: relation propagate_change_action only supports "updated"
+  --> tests/ui/propagate_change_action_misplaced.rs:32:92
+   |
+32 |     #[relation(target = "EntityOption", propagate_change = "up", propagate_change_action = "created")]
+   |                                                                                            ^^^^^^^^^

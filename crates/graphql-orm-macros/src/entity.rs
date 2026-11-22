@@ -57,6 +57,9 @@ pub(crate) struct EntityMetadata {
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
     pub(crate) compose_complex_object: bool,
+    /// `object_fields`: the generated object also hosts the handwritten
+    /// resolvers of a `#[graphql_object_fields]` impl.
+    pub(crate) object_fields: Option<proc_macro2::Span>,
     /// Declared Apollo Federation v2 entity keys, in declaration order.
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
     /// `node_id`: generate the global `NodeId` field and its resolvable `@key`.
@@ -214,6 +217,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                             "stable_type_id must contain 1–1024 printable ASCII bytes without whitespace or control characters"));
                     }
                     metadata.stable_type_id = Some(value);
+                } else if meta.path.is_ident("propagate_change_action") {
+                    return Err(meta.error("propagate_change_action belongs inside #[relation(...)]"));
                 } else if meta.path.is_ident("table") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -674,6 +679,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("compose_complex_object") {
                     metadata.compose_complex_object = true;
+                } else if meta.path.is_ident("object_fields") {
+                    metadata.object_fields = Some(meta.path.span());
                 } else if meta.path.is_ident("search") {
                     let mut search = SearchEntityMetadata::default();
                     meta.parse_nested_meta(|search_meta| {
@@ -1763,6 +1770,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) graphql_name: Option<String>,
     pub(crate) serde_name: Option<String>,
     pub(crate) db_column: Option<String>,
+    db_column_span: Option<proc_macro2::Span>,
     pub(crate) decimal: Option<(u8, u8)>,
     pub(crate) mssql_money: bool,
     pub(crate) description: Option<String>,
@@ -1797,6 +1805,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
+    pub(crate) relation_propagate_as_updated: bool,
     pub(crate) relation_source_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_filter: bool,
@@ -1947,6 +1956,7 @@ impl Default for FieldMetadata {
             graphql_name: None,
             serde_name: None,
             db_column: None,
+            db_column_span: None,
             decimal: None,
             mssql_money: false,
             description: None,
@@ -1980,6 +1990,7 @@ impl Default for FieldMetadata {
             relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
+            relation_propagate_as_updated: false,
             relation_source_condition: None,
             relation_target_condition: None,
             relation_filter: false,
@@ -2376,6 +2387,7 @@ pub(crate) struct ParsedField {
 
 pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> {
     let mut meta = FieldMetadata::default();
+    let mut propagation_action_span = None;
 
     for attr in &field.attrs {
         if let Some(ident) = attr.path().get_ident() {
@@ -2431,6 +2443,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.order = false;
                             meta.subscribe = false;
                             meta.skip_input = true;
+                        } else if nested.path.is_ident("propagate_change_action") {
+                            return Err(nested.error("propagate_change_action belongs inside #[relation(...)]"));
                         } else if nested.path.is_ident("sensitive") {
                             meta.sensitive = true;
                         } else if nested.path.is_ident("description") {
@@ -2578,6 +2592,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
+                            meta.db_column_span = Some(lit.span());
                         } else if nested.path.is_ident("mssql_money") {
                             if meta.mssql_money {
                                 return Err(syn::Error::new(nested.path.span(), "mssql_money may only be declared once per field"));
@@ -2875,6 +2890,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                         }) = &nv.value
                         {
                             meta.db_column = Some(lit.value());
+                            meta.db_column_span = Some(lit.span());
                         }
                     }
                 }
@@ -2911,6 +2927,19 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.relation_propagate_change = Some(lit.value());
+                        } else if nested.path.is_ident("propagate_change_action") {
+                            if propagation_action_span.is_some() {
+                                return Err(nested.error("duplicate relation propagate_change_action"));
+                            }
+                            let lit: syn::LitStr = nested.value()?.parse()?;
+                            if lit.value() != "updated" {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "relation propagate_change_action only supports \"updated\"",
+                                ));
+                            }
+                            propagation_action_span = Some(nested.path.span());
+                            meta.relation_propagate_as_updated = true;
                         } else if nested.path.is_ident("source_condition") {
                             if meta.relation_source_condition.is_some() {
                                 return Err(nested.error("duplicate relation source condition"));
@@ -3068,6 +3097,15 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
         return Err(syn::Error::new_spanned(
             field,
             "decimal metadata is only valid on rust_decimal::Decimal fields",
+        ));
+    }
+
+    if let Some(span) = propagation_action_span
+        && meta.relation_propagate_change.as_deref() != Some("up")
+    {
+        return Err(syn::Error::new(
+            span,
+            "relation propagate_change_action requires propagate_change = \"up\"",
         ));
     }
 
@@ -4015,6 +4053,35 @@ fn generate_entity_tokens(
     // objects opt into complex or schema_only, so check those ownership modes.
     // Pure GraphQLSchemaEntity metadata does not own a GraphQL read contract.
     let externally_owned_object = legacy_graphql_complex || entity_meta.schema_only;
+    if let Some(span) = entity_meta.object_fields
+        && identity_names.is_none()
+    {
+        // Handwritten fields join the object this derive generates. An entity
+        // whose object is owned elsewhere has no such object to join.
+        let owner = if legacy_graphql_complex {
+            Some(
+                "`#[graphql(complex)]`: a `SimpleObject` entity composes handwritten fields with `#[graphql_orm(compose_complex_object)]` and `#[graphql_orm::graphql_complex_object]`",
+            )
+        } else if schema_only || has_repository_entity_attribute(&input.attrs) {
+            Some("an entity that has no generated GraphQL object")
+        } else {
+            None
+        };
+        if let Some(owner) = owner {
+            return Err(syn::Error::new(
+                span,
+                format!("`#[graphql_orm(object_fields)]` cannot be combined with {owner}"),
+            ));
+        }
+    }
+    let hosts_object_fields = entity_meta.object_fields.is_some();
+    // GraphQL names of the fields of the generated object, for the collision
+    // check of handwritten fields.
+    let mut object_field_names: Vec<String> = Vec::new();
+    // GraphQL names of every declared entity field, served by the object or
+    // not. Generated paths decide these names by the entity field's policy,
+    // so a handwritten field may take none of them.
+    let mut declared_field_names: Vec<String> = Vec::new();
     // A `graphql_policy_object` marker must come with the guard that attribute
     // installs; the attribute also implements this witness trait.
     let mut policy_object_witness = quote! {};
@@ -4303,17 +4370,13 @@ fn generate_entity_tokens(
     }
     for parsed in &parsed_fields {
         if let Some(column) = parsed.meta.db_column.as_deref() {
-            crate::backend::validate_declared_identifier_path(
+            crate::backend::validate_declared_column(
                 backend,
                 column,
-                syn::spanned::Spanned::span(&parsed.field),
-                "db_column",
-            )?;
-            crate::backend::validate_declared_column_qualifier(
-                backend,
-                entity_meta.table_name.as_deref().unwrap_or("unknown"),
-                column,
-                syn::spanned::Spanned::span(&parsed.field),
+                parsed
+                    .meta
+                    .db_column_span
+                    .unwrap_or_else(|| parsed.field.span()),
             )?;
         }
     }
@@ -4374,6 +4437,7 @@ fn generate_entity_tokens(
             graphql_rename_fields,
             serde_rename_all,
         );
+        declared_field_names.push(subscription_api_name.clone());
         let subscription_allowed = !has_repository_entity_attribute(&input.attrs)
             && field_meta.graphql_readable()
             && (!field_meta.graphql_skip || field_meta.is_relation)
@@ -5909,6 +5973,7 @@ fn generate_entity_tokens(
                     quote! { Ok(self.#field_name.clone()) },
                 )
             };
+            object_field_names.push(graphql_name.clone());
             object_field_methods.push(quote! {
                 #[doc = #description]
                 #[graphql(name = #graphql_name)]
@@ -5939,6 +6004,7 @@ fn generate_entity_tokens(
                         #return_expr
                     }
                 };
+                object_field_names.push(RECORD_VERSION_FIELD.to_owned());
                 object_field_methods.push(method.clone());
                 identity_field_methods.push(method);
                 identity_field_names.push(RECORD_VERSION_FIELD);
@@ -6338,6 +6404,7 @@ fn generate_entity_tokens(
             &record,
             &parts,
         );
+        object_field_names.push("NodeId".to_owned());
         object_field_methods.push(method.clone());
         identity_field_methods.push(method);
         identity_field_names.push("NodeId");
@@ -6464,6 +6531,18 @@ fn generate_entity_tokens(
         }
     } else if schema_only || legacy_graphql_complex {
         quote! {}
+    } else if hosts_object_fields {
+        crate::object_fields::host_tokens(
+            struct_name,
+            &entity_description,
+            &entity_name_lit,
+            &backend_marker,
+            graphql_rename_fields,
+            serde_rename_all,
+            &object_field_names,
+            &declared_field_names,
+            &object_field_methods,
+        )
     } else {
         quote! {
             #[doc = #entity_description]
@@ -6474,6 +6553,24 @@ fn generate_entity_tokens(
         }
     };
 
+    // Not opted in, both stay exactly as they were.
+    let (semantic_fields, computed_object_fields_impl) = if hosts_object_fields && !schema_only {
+        (
+            quote! {
+                ::graphql_orm::graphql::orm::__gom_with_computed_fields::<Self>(
+                    vec![#(#semantic_field_defs),*],
+                    #entity_classification_tokens,
+                )
+            },
+            quote! {
+                fn computed_object_fields() -> &'static [::graphql_orm::graphql::orm::ComputedObjectFieldDef] {
+                    <Self as ::graphql_orm::graphql::orm::HandwrittenObjectFields>::FIELDS
+                }
+            },
+        )
+    } else {
+        (quote! { vec![#(#semantic_field_defs),*] }, quote! {})
+    };
     let persisted_field_names_impl = quote! {
         impl #struct_name {
             /// Rust names of the entity's persisted fields, for generated
@@ -7324,7 +7421,7 @@ fn generate_entity_tokens(
                         entity_name: ::std::string::ToString::to_string(#struct_name_str),
                         description: ::std::string::ToString::to_string(#entity_description),
                         default_classification: #entity_classification_tokens,
-                        fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
+                        fields: #semantic_fields.into_boxed_slice(),
                         label_fields: ::std::vec::Vec::new(),
                         record_version: #semantic_record_version,
                     }
@@ -7335,6 +7432,7 @@ fn generate_entity_tokens(
             fn subscription_field_policy(field: &str) -> Option<(&'static str, bool, Option<&'static str>)> {
                 match field { #(#subscription_field_policy_arms)* _ => None }
             }
+            #computed_object_fields_impl
 
             fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
                 static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[
@@ -7755,7 +7853,10 @@ fn projection_lookup_sql_value(
     argument: &syn::Ident,
 ) -> proc_macro2::TokenStream {
     let ty = option_inner_type(&field.field.ty).unwrap_or(&field.field.ty);
-    if chrono_temporal_type(ty).is_some() || field.meta.is_date_field {
+    if chrono_temporal_type(ty).is_some()
+        || field.meta.is_date_field
+        || (is_string_type(ty) && field.meta.filterable.as_deref() == Some("date"))
+    {
         scalar_text_bind_tokens(ty, &field.meta, quote! { #argument })
     } else if is_byte_vec_type(ty) {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(#argument.clone()) }
@@ -8449,6 +8550,8 @@ fn generate_row_field_assignment(
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let db_col = crate::backend::identifier_part_name(backend, db_col);
+    let db_col = db_col.as_str();
     let inner = option_inner_type(field_type).unwrap_or(field_type);
     if backend == BackendKind::Mssql
         && (chrono_temporal_type(inner).is_some() || (meta.is_date_field && is_string_type(inner)))
@@ -9962,4 +10065,32 @@ fn lifetime_tokens(
             ::graphql_orm::graphql::orm::GraphqlLifetimeEncoding::#encoding,
         ))
     })
+}
+
+#[cfg(test)]
+mod declared_column_tests {
+    use super::generate_graphql_entity;
+
+    #[test]
+    fn refuses_ambiguous_dotted_db_columns() {
+        for column in ["records.value", r#""records"."value""#, ".value", "value."] {
+            let input = syn::parse_quote! {
+                #[graphql_entity(table = "records")]
+                struct Record {
+                    #[primary_key]
+                    #[sortable]
+                    id: i64,
+                    #[graphql_orm(db_column = #column)]
+                    value: String,
+                }
+            };
+            let Err(error) = generate_graphql_entity(&input) else {
+                panic!("accepted ambiguous column {column}");
+            };
+            assert!(
+                error.to_string().contains("one physical column"),
+                "{column}: {error}"
+            );
+        }
+    }
 }

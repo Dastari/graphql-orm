@@ -4,10 +4,15 @@ use quote::quote;
 use super::{PrimaryKeyField, keyset_order_fingerprint, runtime_keyset_value};
 use crate::backend::{BackendKind, backend_render_identifier_path};
 use crate::entity::{
-    EntityMetadata, is_bool_type, is_byte_vec_type, is_string_type, is_uuid_type,
+    EntityMetadata, FieldMetadata, is_bool_type, is_byte_vec_type, is_string_type, is_uuid_type,
     option_inner_type, parse_field_metadata,
 };
 use crate::naming::graphql_field_name;
+
+fn is_temporal_keyset_field(meta: &FieldMetadata, ty: &syn::Type) -> bool {
+    let ty = option_inner_type(ty).unwrap_or(ty);
+    is_string_type(ty) && (meta.is_date_field || meta.filterable.as_deref() == Some("date"))
+}
 
 pub(super) type KeysetPart = (syn::Ident, syn::Type, String, bool, bool);
 
@@ -134,6 +139,7 @@ pub(super) fn keyset(
         let mut runtime_orders = Vec::new();
         let mut runtime_ordered_arms = Vec::new();
         let mut primary_columns = Vec::new();
+        let mut temporal_columns = Vec::new();
         for field in fields {
             let meta = parse_field_metadata(field)?;
             let ident = field.ident.as_ref().expect("named field");
@@ -172,6 +178,9 @@ pub(super) fn keyset(
             } });
             runtime_values
                 .push(quote! { #column => { let value = &self.#ident; ::std::option::Option::Some(#value_tokens) } });
+            if is_temporal_keyset_field(&meta, &field.ty) {
+                temporal_columns.push(column.clone());
+            }
             runtime_orders.push(quote! {
                 if let ::std::option::Option::Some(direction) = item.#ident {
                     selected += 1;
@@ -235,7 +244,11 @@ pub(super) fn keyset(
             } else {
                 direction
             };
-            order_tokens.push(order);
+            order_tokens.push(if is_temporal_keyset_field(&meta, ty) {
+                quote! { (#order).temporal_text() }
+            } else {
+                order
+            });
             let (inner, optional) = option_inner_type(ty)
                 .map(|inner| (inner, true))
                 .unwrap_or((ty, false));
@@ -335,6 +348,7 @@ pub(super) fn keyset(
             quote! {
                         const KEYSET_FIELDS: &'static [::graphql_orm::graphql::orm::KeysetField] = &[#(#runtime_metadata),*];
                         const KEYSET_PRIMARY_COLUMNS: &'static [&'static str] = &[#(#primary_columns),*];
+                        const KEYSET_TEMPORAL_COLUMNS: &'static [&'static str] = &[#(#temporal_columns),*];
                         fn keyset_value_for_column(&self, column: &str) -> ::std::option::Option<::graphql_orm::graphql::pagination::KeysetValue> {
                             match column { #(#runtime_values),*, _ => ::std::option::Option::None }
                         }
@@ -452,21 +466,14 @@ pub(super) fn keyset(
                     ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::std::result::Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError>> {
                         ::std::boxed::Box::pin(async move {
                             use ::graphql_orm::graphql::orm::DatabaseFilter;
-                            const ORDER: &[::graphql_orm::graphql::orm::KeysetOrderColumn] = &[
-                                #(#order_tokens),*
-                            ];
+                            let order = <Self as ::graphql_orm::graphql::orm::AuthorizedKeysetEntity>::KEYSET_ORDER;
                             const FINGERPRINT: &str = #fingerprint;
                             let bound_fingerprint = ::graphql_orm::graphql::orm::bind_keyset_fingerprint(
                                 ::std::option::Option::Some(<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()),
                                 FINGERPRINT,
                                 &filter.keyset_filter_identity().into_iter().collect::<::std::vec::Vec<_>>(),
                             );
-                            if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
-                                return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(
-                                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
-                                ));
-                            }
-                            let config = hook_ctx.database().pagination_config();
+                            let config = hook_ctx.__keyset_pagination_config();
                             // A transaction read is trusted Rust code: its limit is exact or refused.
                             if let ::std::option::Option::Some(requested) = page.limit {
                                 config.checked_explicit_limit(requested)?;
@@ -476,28 +483,17 @@ pub(super) fn keyset(
                                 true,
                             );
                             let limit = resolved.limit.unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT).max(0);
-                            let mut query = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new().filter(&filter);
-                            let total_count = if page.include_total_count {
-                                ::std::option::Option::Some(query.clone().count_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?)
-                            } else {
-                                ::std::option::Option::None
-                            };
-                            if let ::std::option::Option::Some(cursor) = page.after.as_deref() {
-                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, ORDER.len())?;
-                                let (predicate, binds) = ::graphql_orm::graphql::orm::render_keyset_after(
-                                    <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
-                                    ORDER,
-                                    &values,
-                                    query.values.len() + 1,
-                                )?;
-                                query = query.where_values(&predicate, binds);
-                            }
-                            query.order_clauses = ORDER.iter().map(|column| column.order_sql()).collect();
-                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
-                                limit: ::std::option::Option::Some(limit.saturating_add(1)),
-                                offset: ::std::option::Option::Some(0),
-                            });
-                            let mut entities = query.fetch_all_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?;
+                            let values = page.after.as_deref()
+                                .map(|cursor| ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, order.len()))
+                                .transpose()?;
+                            let (mut entities, total_count) = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::__fetch_keyset_window_in_transaction(
+                                hook_ctx,
+                                &filter,
+                                values.as_deref(),
+                                ::graphql_orm::graphql::pagination::KeysetWindowDirection::Forward,
+                                limit.saturating_add(1),
+                                page.include_total_count,
+                            ).await?;
                             let has_next_page = entities.len() > limit as usize;
                             if has_next_page { entities.truncate(limit as usize); }
                             let edges = entities
@@ -534,26 +530,19 @@ pub(super) fn keyset(
                     ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::std::result::Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError>> {
                         ::std::boxed::Box::pin(async move {
                             use ::graphql_orm::graphql::orm::DatabaseFilter;
-                            const ORDER: &[::graphql_orm::graphql::orm::KeysetOrderColumn] = &[
-                                #(#order_tokens),*
-                            ];
+                            let order = <Self as ::graphql_orm::graphql::orm::AuthorizedKeysetEntity>::KEYSET_ORDER;
                             const FINGERPRINT: &str = #fingerprint;
                             let bound_fingerprint = ::graphql_orm::graphql::orm::bind_keyset_fingerprint(
                                 ::std::option::Option::Some(<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()),
                                 FINGERPRINT,
                                 &filter.keyset_filter_identity().into_iter().collect::<::std::vec::Vec<_>>(),
                             );
-                            if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
-                                return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(
-                                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
-                                ));
-                            }
                             let requested = page.first.or(page.last);
                             let validated = page.validate(
                                 ::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT,
                                 i64::MAX,
                             )?;
-                            let config = hook_ctx.database().pagination_config();
+                            let config = hook_ctx.__keyset_pagination_config();
                             // A transaction read is trusted Rust code: its limit is exact or refused.
                             if let ::std::option::Option::Some(requested) = requested {
                                 config.checked_explicit_limit(requested)?;
@@ -572,41 +561,17 @@ pub(super) fn keyset(
                             let backward = validated.direction
                                 == ::graphql_orm::graphql::pagination::KeysetWindowDirection::Backward;
                             let had_cursor = validated.cursor.is_some();
-                            let mut query = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new().filter(&filter);
-                            let total_count = if validated.include_total_count {
-                                ::std::option::Option::Some(query.clone().count_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?)
-                            } else {
-                                ::std::option::Option::None
-                            };
-                            if let ::std::option::Option::Some(cursor) = validated.cursor.as_deref() {
-                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, ORDER.len())?;
-                                let (predicate, binds) = if backward {
-                                    ::graphql_orm::graphql::orm::render_keyset_before(
-                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
-                                        ORDER,
-                                        &values,
-                                        query.values.len() + 1,
-                                    )?
-                                } else {
-                                    ::graphql_orm::graphql::orm::render_keyset_after(
-                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
-                                        ORDER,
-                                        &values,
-                                        query.values.len() + 1,
-                                    )?
-                                };
-                                query = query.where_values(&predicate, binds);
-                            }
-                            query.order_clauses = if backward {
-                                ORDER.iter().map(|column| column.reversed().order_sql()).collect()
-                            } else {
-                                ORDER.iter().map(|column| column.order_sql()).collect()
-                            };
-                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
-                                limit: ::std::option::Option::Some(limit.saturating_add(1)),
-                                offset: ::std::option::Option::Some(0),
-                            });
-                            let mut entities = query.fetch_all_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?;
+                            let values = validated.cursor.as_deref()
+                                .map(|cursor| ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, order.len()))
+                                .transpose()?;
+                            let (mut entities, total_count) = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::__fetch_keyset_window_in_transaction(
+                                hook_ctx,
+                                &filter,
+                                values.as_deref(),
+                                validated.direction,
+                                limit.saturating_add(1),
+                                validated.include_total_count,
+                            ).await?;
                             let has_more = entities.len() > limit as usize;
                             if has_more {
                                 entities.truncate(limit as usize);

@@ -3429,6 +3429,10 @@ pub trait AuthorizedKeysetEntity: Entity {
     /// All primary-key components, in declaration order, for a unique suffix.
     const KEYSET_PRIMARY_COLUMNS: &'static [&'static str] = &[];
 
+    /// String-valued columns whose configured values are temporal SQL values.
+    #[doc(hidden)]
+    const KEYSET_TEMPORAL_COLUMNS: &'static [&'static str] = &[];
+
     fn keyset_value_for_column(&self, column: &str) -> Option<KeysetValue> {
         Self::KEYSET_ORDER
             .iter()
@@ -3511,6 +3515,11 @@ fn runtime_keyset_order<T: AuthorizedKeysetEntity>(
         }
         if seen.insert(column) {
             order.push(KeysetOrderColumn::asc(column));
+        }
+    }
+    for part in &mut order {
+        if T::KEYSET_TEMPORAL_COLUMNS.contains(&part.column) {
+            *part = part.temporal_text();
         }
     }
     // Generated identifiers cannot contain separators unescaped: serialize the
@@ -3799,6 +3808,10 @@ where
         runtime: bool,
         row: Option<&T>,
     ) -> async_graphql::Result<()> {
+        if row.is_none() {
+            B::validate_keyset_order(db.pool(), order)
+                .map_err(OrmPublicError::into_graphql_error)?;
+        }
         for part in order {
             let (api_name, policy, graphql_readable) = if runtime {
                 let field = T::KEYSET_FIELDS

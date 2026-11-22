@@ -25,6 +25,7 @@ does not.
 | `RepositoryEntity` | typed repository CRUD, filters, ordering, projections, and Rust write inputs | you need generated `async-graphql` types or resolvers |
 | `GraphQLRelations` | relation resolver/loading implementations | the struct has no relation fields |
 | `graphql_complex_object` | handwritten `ComplexObject` fields composed with generated relation, `NodeId` and `RecordVersion` fields | the entity does not opt into complex-object composition |
+| `graphql_object_fields` | handwritten resolver fields added to the object `GraphQLEntity` generates | the entity does not declare `object_fields`, or owns its object through `SimpleObject` |
 | `GraphQLOperations` | generated query, mutation, and subscription operation types plus discovery descriptors | the entity uses `#[repository_entity(...)]` |
 | `schema_roots!` | `QueryRoot`, `MutationRoot`, `SubscriptionRoot`, `AppSchema`, schema builders, schema metadata helpers, and operation/semantic catalogs | no generated operation types participate in the schema |
 | `graphql_orm_custom_operations` | canonical semantic metadata beside one handwritten `async-graphql` root impl | the impl is not actually composed into the finished schema |
@@ -95,6 +96,7 @@ schema/search metadata.
 | `search` | `(index = bool, language = "…", tokenizer = "…", min_token_len = integer, fallback = "enabled" | "disabled")` | defaults are supplied by the runtime; only these keys are accepted |
 | `order_expression` | `(name = "GraphQLField", expression = "trusted SQL expression", parameters = "server_function_path")` | repeatable; `parameters` is required only when the expression contains `:named` binds; the client supplies only `ASC` or `DESC`; raw placeholders, comments, and statement separators are rejected |
 | `compose_complex_object` | marker | use with `#[graphql(complex)]` and `#[graphql_complex_object]` on the handwritten inherent impl; `GraphQLRelations` is needed only for relation fields |
+| `object_fields` | marker | the generated object also hosts the resolvers of one `#[graphql_object_fields]` impl; not with `#[graphql(complex)]`, `schema_only` or `RepositoryEntity`. See [handwritten fields on a generated object](#handwritten-fields-on-a-generated-object) |
 | `conditional_index` | `(name = "…", columns = ["…"], unique = bool, predicate_field = "…", predicate_values = ["…"])` | `columns`, `predicate_field`, and nonempty `predicate_values` are required |
 | `projection` | `(name = "TypeName", fields = [field, …], private = true)` | all three facts are required; public projections are rejected |
 | `operation_authorization` | described below | consumed by `GraphQLOperations` |
@@ -115,7 +117,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[primary_key]` | marks a key field; generated single-record operations require a complete key |
 | `#[filterable]` / `#[filterable(type = "…")]` | enables a filter; bare form selects `"string"` metadata; only `type` is accepted |
 | `#[sortable]`, `#[unique]` | enables ordering / declares a unique field |
-| `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses the physical column name |
+| `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses one physical column name |
 | `#[graphql(name = "…")]` | chooses GraphQL field name; `#[serde(rename = "…")]` records the serialization name |
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated GraphQL inputs (Rust repository inputs keep it); `graphql(skip)` also supports relation implementation fields. See [read-only and zero-input entities](#read-only-and-zero-input-entities) |
 | `#[skip_db]` | excludes a field from persisted row decoding |
@@ -136,6 +138,13 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
 | `#[transform(read = "…")]` | synchronous read transform; see [write transforms](#write-transforms) for rejected `write` declarations |
 | `#[backup(include \| exclude \| redact)]` | per-field backup treatment; exactly one policy |
+
+A literal dot in `db_column` requires one delimited identifier. Use
+`#[graphql_orm(db_column = "\"event.code\"")]` on SQLite and PostgreSQL and
+`#[graphql_orm(db_column = "[event.code]")]` on SQL Server. Double a closing
+delimiter that is part of the physical name. Use the unqualified name for
+an ordinary column and put any schema qualifier in the entity's `table`
+attribute.
 
 On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must
 also remove the object getter: add `#[graphql(skip)]`, or place
@@ -388,7 +397,13 @@ payload field: `Changed` snapshots serve `NodeId`, `RecordVersion` and persisted
 selection of `Children` is refused before registration.
 A host row policy over a relation target also needs `Database::with_authorized_scan_config`.
 `propagate_change = "up"` on a relation delivers a `PROPAGATED` event to the target's `Changed`
-stream; `"none"` delivers none.
+stream; `"none"` delivers none. Add `propagate_change_action = "updated"` to a
+relation with `propagate_change = "up"` to report a child create or delete as
+`UPDATED` on the surviving target. The subscription's action filter matches
+`UPDATED` for those events. Each relation in a multi-hop path applies its own
+setting. By default each relation uses the original mutation action. The child
+keeps its direct event action, and propagated deletes continue to redact
+`sourceEntity` and `sourceId`.
 Both are available in `Changed` snapshots; relations and arbitrary computed fields
 still require a query refresh. Selecting `NodeId` requires every primary-key field
 to remain subscribable and pass its read policy.
@@ -524,6 +539,125 @@ composed declaration. `compose_complex_object` with `node_id` is also a compile
 error when no `#[graphql_complex_object]` impl mounts the composed object, whether
 `GraphQLEntity` or `GraphQLRelations` emits it. `tests/node_id_complex_object.rs`
 covers the layout.
+
+### Handwritten fields on a generated object
+
+An entity whose GraphQL object `GraphQLEntity` generates (no `SimpleObject`, no
+`#[graphql(complex)]`) can add handwritten resolver fields to that object:
+
+```rust,ignore
+#[derive(GraphQLEntity, GraphQLOperations, Clone)]
+#[graphql_entity(table = "tickets", plural = "Tickets", read_policy = "tickets.read")]
+#[graphql_orm(object_fields)]
+struct Ticket {
+    #[primary_key]
+    #[graphql_orm(description = "Ticket identifier.")]
+    id: String,
+    status: String,
+}
+
+#[graphql_orm::graphql_object_fields]
+impl Ticket {
+    /// Outcome computed from related rows; null only together with a field error.
+    #[graphql_orm(read_policy = "tickets.outcome")]
+    async fn outcome(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Outcome>> {
+        // for example a request-scoped DataLoader
+    }
+}
+```
+
+What stays the same. The generated fields, their descriptions and policies,
+`RecordVersion` and `NodeId` are emitted exactly as without `object_fields`, in
+the same order; the handwritten fields follow them. The type description is
+the entity's. Filter, order, group and aggregate inputs, write inputs and the
+`ColumnDef` list do not change. An entity that does not declare `object_fields`
+generates byte-identical output.
+
+Rules for the impl:
+
+- One inherent, non-generic `impl` per entity carries the attribute, and the
+  entity must declare `object_fields`. The impl is written in the entity's
+  module, before or after the struct, or names the entity by path
+  (`impl models::Ticket`). The attribute takes no arguments.
+- Beside the attribute, the impl may carry only `allow`, `warn`, `deny`,
+  `forbid`, `expect` and a whole-impl `cfg`. Any other attribute, `cfg_attr`
+  included, is a compile error: it would be applied to the generated object
+  after its resolvers were given their field check.
+- A field is an `async fn` taking `&self` and returning
+  `async_graphql::Result<T>` (or `FieldResult<T>`), so that a refused read is a
+  field error. A `Context` parameter and arguments are optional.
+- A field is named by the entity's naming rule (`rename_fields`,
+  `GRAPHQL_ORM_FIELD_CASE`, serde `rename_all`), like a generated field,
+  unless `#[graphql(name = "…")]` names it. A name that a generated field
+  already has, `RecordVersion` and `NodeId` included, is a compile error. So
+  is the name of any other declared entity field, such as a column marked
+  `read = false` or `private`, or a relation field: the object does not serve
+  it, but generated read paths decide that name by the entity field's policy.
+- The doc comment is the field description, in the SDL and in metadata.
+  Without one the description is derived from the method name.
+- `#[graphql(skip)]` keeps a method as a plain helper. `flatten`, `entity` and
+  `derived` are refused, and so is `cfg` on a single method.
+
+Authorization. A handwritten field runs the checks a generated column field
+runs, before its body: whether the field is available in the operation (see
+below), then the field read decision for the row the object holds, with the
+key declared by `#[graphql_orm(read_policy = "…")]` or none. A declared key
+with no field policy provider is refused in the strict authorization modes, and
+a policy callback failure is reported through the callback sanitizer, exactly
+as for a generated field.
+
+As with generated column fields, no entity or row decision is asked at the
+field. Generated queries, relations, mutations, entity resolution and
+subscriptions make both before the object exists, so on those paths a caller
+who cannot read the row never reaches a handwritten field. An entity object
+that a host resolver constructs or loads itself is the host's to authorize, for
+handwritten and generated fields alike. What a handwritten resolver returns is
+also its own: the ORM does not authorize rows it loads or objects it builds.
+
+A refusal is the field's error and the body does not run. A field declared
+`Option<T>` then resolves to an explicit `null`: its key stays in the response
+and the error carries the field's path. Any other field returns the error,
+which async-graphql reports at the field's path. async-graphql 7.2.1 then
+leaves the key out of the parent object when another selected field of that
+object resolves, and resolves the parent object to `null` when none does, as
+it does for a refused non-null generated field. Declare a field that carries a
+read policy as `Option<T>` (spelled so, not through a type alias) when clients
+should see the key.
+
+Trust boundary. The inserted check belongs to the method it is inserted in. An
+attribute macro that the host places on its own handwritten method is host
+code: it receives that method and can rewrite it, including the inserted
+check, with the same trust as writing the method body. Such a macro cannot add
+a field to the object. Attributes on the impl itself are restricted, as listed
+above, because they would apply to the whole generated object.
+
+Through a generated relation the decision is made earlier. The relation's
+preflight asks the field decision for every selected field of the target row,
+handwritten fields included, with the selected field's context. A denial
+refuses the relation, exactly as a denied column of the target does, so no
+part of the target object is released.
+
+Subscriptions. A handwritten field is not available in generated `Changed`
+subscriptions: selecting it refuses the stream at admission, like any computed
+field. `#[graphql_orm(subscribe)]` makes it available, and is accepted only on
+a field whose output type is a scalar, an enum, or an `Option` or list of
+those; any other output type is a compile error, because an event is released
+once its selected fields are proved and nothing proves what an object would
+resolve below the field. The stream asks the field decision for the delivered
+row before the event is released, the resolver asks it again, and the field
+appears in the stream's `carried_fields`. Admission takes leaves of the
+subscribed entity only: a relation is refused with everything below it, so a
+handwritten field of a related entity cannot be selected in an event,
+available or not.
+
+Metadata. `Entity::computed_object_fields()` lists each field with its Rust
+and GraphQL names, description, read policy key, subscription availability and
+GraphQL type. The semantic catalogue lists it after the generated fields as
+selectable, with no filter, ordering, grouping or aggregate, the entity's
+classification and `NeverExport`, so AI query plans do not select it.
+
+`tests/generated_object_fields.rs` and the `object_fields_*` UI fixtures cover
+this shape.
 
 Polymorphic references can add one fixed discriminator condition:
 

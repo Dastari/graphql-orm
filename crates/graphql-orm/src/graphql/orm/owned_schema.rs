@@ -320,8 +320,8 @@ impl IndexRef<'_> {
         }
     }
 }
-impl PartialEq for IndexRef<'_> {
-    fn eq(&self, other: &Self) -> bool {
+impl IndexRef<'_> {
+    pub(super) fn same_definition(&self, other: &Self, predicates_match: bool) -> bool {
         self.name == other.name
             && self.columns == other.columns
             && (self.column_directions.is_empty()
@@ -331,8 +331,13 @@ impl PartialEq for IndexRef<'_> {
             && self.is_unique == other.is_unique
             && self.method == other.method
             && self.is_spatial == other.is_spatial
-            && self.predicate == other.predicate
+            && predicates_match
             && (0..self.columns.len()).all(|i| self.direction_at(i) == other.direction_at(i))
+    }
+}
+impl PartialEq for IndexRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_definition(other, self.predicate == other.predicate)
     }
 }
 impl<'a> From<&'a IndexDef> for IndexRef<'a> {

@@ -10,6 +10,19 @@ supersedes: []
 
 # `graphql-orm`
 
+In the next breaking ORM/macros release, SQL Server pools with native temporal
+text binding enabled reject generated keyset orders on String-valued temporal
+fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
+resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put
+`#[graphql_object_fields]` on one impl of it. Entities that do not opt in are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
+
+Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
+See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
+
 Version 0.191.0 adds [read snapshot transactions](#read-snapshot-transactions)
 for policy-aware reads on SQLite, PostgreSQL, and SQL Server.
 
@@ -917,6 +930,13 @@ operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-he
 
 ## Read snapshot transactions
 
+Pass `TransactionMode::ReadSnapshot` to `Database::transaction` or
+`transaction_with_auth` to select this isolation through the general runner.
+Use `query`, `project`, `find_by_id`, `find_by_key`, `keyset_page` or
+`keyset_connection_page` for policy-aware reads. The runner refuses mutations,
+access to the pool or pinned executor, raw SQL and post-commit actions. Inspect typed refusals through
+`TransactionError::read_snapshot_error()`.
+
 Use `Database::read_snapshot_transaction` for related reads that need one
 consistent database snapshot. The callback receives a `ReadSnapshotContext`
 with entity queries, projections and primary-key lookups. Each
@@ -966,6 +986,12 @@ The context exposes typed reads. The pinned driver connection, raw SQL,
 writes, savepoints and post-commit hooks are private to the ORM. Same-task
 ORM writes through a captured handle return a refusal, and the runner
 returns `ReadSnapshotError::WriteRefused` even if the callback catches it.
+Snapshot read policies receive a database view without a pool. Clones of
+that view retain the restriction. Use `Database::try_pool()` in policies
+that need to handle the refusal explicitly. In unwind builds, a policy
+that calls the infallible `pool()` fails the snapshot with
+`ReadSnapshotError::WriteRefused`. Use the fallible accessor in builds
+configured to abort on panic.
 Nested ORM transactions on that task are refused. Use the context for
 every read that must share the snapshot. Driver handles and spawned tasks
 have their own scope. Decisions that perform a write belong in

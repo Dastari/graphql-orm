@@ -601,8 +601,7 @@ async fn legacy_cleanup_is_not_introduced_into_owned_column_rebuilds()
 }
 
 #[tokio::test]
-async fn delimiter_shaped_catalog_names_refuse_without_copying_wrong_columns()
--> graphql_orm::Result<()> {
+async fn delimiter_shaped_catalog_names_copy_their_own_columns() -> graphql_orm::Result<()> {
     let db=setup(&[r#"CREATE TABLE probe(id TEXT PRIMARY KEY NOT NULL,a TEXT NOT NULL,b TEXT NOT NULL,g TEXT,"""g""" TEXT,UNIQUE(a,b))"#, "INSERT INTO probe VALUES ('one','a','b','normal','literal')"]).await?;
     // Model-only callers may not know about extra live fields. The directive
     // must not conflate raw column name `"g"` with SQL spelling for column g.
@@ -610,24 +609,21 @@ async fn delimiter_shaped_catalog_names_refuse_without_copying_wrong_columns()
     current.tables[0].table_name = "probe".into();
     let mut target = current.clone();
     target.tables[0].composite_unique_indexes.clear();
-    let plan = db
-        .schema()
-        .plan_migration("refuse", "ambiguous identifier", &current, &target)?;
-    let before: Vec<(String, String)> =
-        sqlx::query_as("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
-            .fetch_all(db.pool())
-            .await?;
-    let error = db
-        .schema()
+    let plan = db.schema().plan_migration(
+        "literal-column",
+        "preserve literal names",
+        &current,
+        &target,
+    )?;
+    db.schema()
         .apply_migration(&plan, approved_options())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("UnsupportedCapability"));
-    let after: Vec<(String, String)> =
-        sqlx::query_as("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
-            .fetch_all(db.pool())
-            .await?;
-    assert_eq!(before, after);
+        .await?;
+    let composite_uniques: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_index_list('probe', 'main') WHERE origin = 'u'",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(composite_uniques, 0);
     let values: (String, String) = sqlx::query_as(r#"SELECT g,"""g""" FROM probe"#)
         .fetch_one(db.pool())
         .await?;

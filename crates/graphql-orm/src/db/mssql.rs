@@ -170,10 +170,11 @@ impl MssqlPoolOptions {
 
     /// Bind temporal text values as native SQL Server parameters for this pool.
     ///
-    /// Chrono values always bind natively. The default sends temporal text as
-    /// written. Native date, datetime2 and datetimeoffset parameters avoid
+    /// The default sends temporal text as written. Set this to `true` to use
+    /// native date, datetime2 and datetimeoffset parameters and avoid
     /// session-dependent text conversion. Legacy datetime columns can round
-    /// and compare differently.
+    /// and compare differently. While enabled, generated keysets refuse orders
+    /// containing String-valued temporal fields. Chrono values always bind natively.
     pub fn typed_temporal_parameters(mut self, enabled: bool) -> Self {
         self.typed_temporal_parameters = enabled;
         self
@@ -757,11 +758,15 @@ impl MssqlPool {
         &self,
         mode: crate::graphql::orm::TransactionMode,
     ) -> crate::Result<MssqlTransaction> {
+        mode.require_write()?;
         self.require_external_writable()?;
         let lease = self.acquire().await?;
         let isolation = match mode {
             crate::graphql::orm::TransactionMode::Default => "READ COMMITTED",
             crate::graphql::orm::TransactionMode::StateMachine => "SERIALIZABLE",
+            crate::graphql::orm::TransactionMode::ReadSnapshot => {
+                unreachable!("write mode checked")
+            }
         };
         self.begin_transaction_on_lease(lease, isolation).await
     }

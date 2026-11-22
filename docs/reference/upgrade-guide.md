@@ -70,16 +70,27 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.191.0, `graphql-orm-macros` 0.191.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.1**; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.193.0, `graphql-orm-macros` 0.193.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **Action needed** — next breaking ORM/macros release (#833). Add a wildcard to `TransactionMode` matches and handle fallible transaction database access. [Migration](../../MIGRATION.md#1-match-transaction-modes-with-a-wildcard-833)
+- **Action needed** — next breaking ORM/macros release (#521). Review generated SQL Server keyset orders on pools that opt into native temporal text binding. [Migration](../../MIGRATION.md#2-review-sql-server-keyset-orders-on-opted-in-pools-521)
+- **Action needed** — next breaking ORM/macros release (#793). Check existing dotted columns and delimit each literal name explicitly. [Migration](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793)
+- **Action needed** — AI 0.153.0 (breaking-batch placeholder). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release)
+- **No action** — ORM/macros 0.193.0: a `GraphQLEntity`-generated object can host handwritten resolver fields with `#[graphql_orm(object_fields)]` and `#[graphql_object_fields]`; entities that do not opt in are unchanged (#808). [Migration](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects)
+- **No action** — ORM/macros 0.192.0: set `propagate_change_action = "updated"` on an upward relation to report child creates and deletes as parent updates (#812). [Migration](../../MIGRATION.md#01910-to-01920-propagated-parent-actions)
+- **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. Codex app-server delivery in 0.152.0 uses markers (#721). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
+
+### workspace-2026.11.21.3
+
+Commit `14eff311f18e` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.3)
+
+Packages (changed in bold): **`graphql-orm` 0.191.0, `graphql-orm-macros` 0.191.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.1**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **No action** — ORM/macros 0.191.0 and backup 0.28.1: use
   `Database::read_snapshot_transaction` or its auth-aware counterpart
   to opt in to policy-aware snapshot reads (#831). The optional ORM backup
   adapter refuses restore writes inside the snapshot callback.
   [ORM migration](../../MIGRATION.md#01900-to-01910-read-snapshot-transactions) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0280-to-0281-read-snapshot-write-refusal)
-- **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. Codex app-server delivery in 0.152.0 uses markers (#721). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
-
-- **Action needed** — AI 0.153.0 (breaking-batch placeholder). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release)
 
 ### workspace-2026.11.21.2
 

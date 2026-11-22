@@ -89,7 +89,7 @@ impl graphql_orm::graphql::orm::MutationHook<SqliteBackend> for RetentionHook {
                 let active_markers: i64 = graphql_orm::sqlx::query_scalar(
                     "SELECT COUNT(*) FROM __graphql_orm_retention_context",
                 )
-                .fetch_one(context.executor())
+                .fetch_one(context.executor()?)
                 .await?;
                 assert_eq!(active_markers, 0, "the bypass must end before after-hooks");
                 assert!(event.before::<RetainedEvent>()?.is_some());

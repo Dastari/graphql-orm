@@ -99,8 +99,12 @@ pub fn request_database<'ctx, B: OrmBackend>(
     })
 }
 
+// The infallible pool accessor uses this private marker to return control to
+// the snapshot runner. Other panics keep their ordinary behavior.
+struct SnapshotPolicyPoolRefusal;
+
 pub struct Database<B: OrmBackend = DefaultBackend> {
-    pool: B::Pool,
+    pool: Option<B::Pool>,
     mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
     entity_policy: Option<Arc<dyn crate::graphql::orm::EntityPolicy<B>>>,
     field_policy: Option<Arc<dyn crate::graphql::orm::FieldPolicy<B>>>,
@@ -136,8 +140,14 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
 
 impl<B: OrmBackend> Clone for Database<B> {
     fn clone(&self) -> Self {
+        self.clone_with_pool(self.pool.clone())
+    }
+}
+
+impl<B: OrmBackend> Database<B> {
+    fn clone_with_pool(&self, pool: Option<B::Pool>) -> Self {
         Self {
-            pool: self.pool.clone(),
+            pool,
             mutation_hook: self.mutation_hook.clone(),
             entity_policy: self.entity_policy.clone(),
             field_policy: self.field_policy.clone(),
@@ -220,7 +230,7 @@ impl<B: OrmBackend> Database<B> {
 
     fn base(pool: B::Pool, schema_policy: SchemaPolicy) -> Self {
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
@@ -258,7 +268,7 @@ impl<B: OrmBackend> Database<B> {
     {
         let hook: Arc<dyn crate::graphql::orm::MutationHook<B>> = Arc::new(hook);
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: Some(Arc::new(hook)),
             entity_policy: None,
             field_policy: None,
@@ -293,7 +303,7 @@ impl<B: OrmBackend> Database<B> {
         H: crate::graphql::orm::EntityPolicy<B> + 'static,
     {
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: None,
             entity_policy: Some(Arc::new(policy)),
             field_policy: None,
@@ -328,7 +338,7 @@ impl<B: OrmBackend> Database<B> {
         H: crate::graphql::orm::FieldPolicy<B> + 'static,
     {
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: None,
             entity_policy: None,
             field_policy: Some(Arc::new(policy)),
@@ -363,7 +373,7 @@ impl<B: OrmBackend> Database<B> {
         H: crate::graphql::orm::RowPolicy<B> + 'static,
     {
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
@@ -401,7 +411,7 @@ impl<B: OrmBackend> Database<B> {
     {
         let transform: Arc<dyn crate::graphql::orm::WriteInputTransform<B>> = Arc::new(transform);
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
@@ -446,7 +456,7 @@ impl<B: OrmBackend> Database<B> {
     {
         let mutation_hook: Arc<dyn crate::graphql::orm::MutationHook<B>> = Arc::new(mutation_hook);
         Self {
-            pool,
+            pool: Some(pool),
             mutation_hook: Some(Arc::new(mutation_hook)),
             entity_policy: Some(Arc::new(entity_policy)),
             field_policy: Some(Arc::new(field_policy)),
@@ -477,8 +487,38 @@ impl<B: OrmBackend> Database<B> {
     }
 
     /// Return the backend pool used by generated code.
+    ///
+    /// # Panics
+    ///
+    /// A database view supplied to a snapshot policy has no pool. In an
+    /// unwind build, the snapshot runner translates this refusal to
+    /// `ReadSnapshotError::WriteRefused`. Use [`Self::try_pool`] for fallible
+    /// access, including in builds configured to abort on panic.
     pub fn pool(&self) -> &B::Pool {
-        &self.pool
+        self.try_pool()
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new(SnapshotPolicyPoolRefusal)))
+    }
+
+    /// Return the backend pool when this handle carries one.
+    ///
+    /// Snapshot policy views and their clones refuse access. An attempt
+    /// made on the snapshot task also invalidates that snapshot.
+    pub fn try_pool(&self) -> crate::Result<&B::Pool> {
+        self.pool.as_ref().ok_or_else(|| {
+            #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+            if let Err(error) = crate::graphql::orm::ensure_sql_write_allowed() {
+                return error;
+            }
+            crate::graphql::errors::sqlx_error_from_public(OrmPublicError::with_message(
+                OrmErrorCode::Forbidden,
+                "a read snapshot policy cannot access the database pool",
+            ))
+        })
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn snapshot_policy_view(&self) -> Self {
+        self.clone_with_pool(None)
     }
 
     /// Return the schema ownership policy attached to this database handle.
@@ -2099,8 +2139,9 @@ where
     ///
     /// Generated and repository writes and ORM raw execution on the callback's
     /// task are refused before SQL execution. The read capability exposes no
-    /// savepoints or post-commit actions. As with other ORM transactions,
-    /// driver handles and independently spawned tasks are outside its scope.
+    /// savepoints or post-commit actions. Read policies receive a pool-free
+    /// database view, including when cloned. Independently acquired driver
+    /// handles and independently spawned tasks are outside the snapshot scope.
     pub async fn read_snapshot_transaction_with_auth<T, F>(
         &self,
         auth: Option<&crate::graphql::orm::DbAuthContext>,
@@ -2112,6 +2153,8 @@ where
         ) -> futures::future::BoxFuture<'tx, Result<T, OrmPublicError>>,
     {
         use crate::graphql::orm::{ReadSnapshotContext, ReadSnapshotError, TransactionError};
+        use futures::FutureExt;
+        use std::panic::{AssertUnwindSafe, resume_unwind};
 
         if ORM_TRANSACTION_ACTIVE
             .try_with(|active| *active)
@@ -2122,27 +2165,37 @@ where
 
         ORM_TRANSACTION_ACTIVE
             .scope(true, async move {
-                let mut tx = B::begin_read_snapshot(self.pool()).await?;
+                let pool = self
+                    .try_pool()
+                    .map_err(|_| ReadSnapshotError::WriteRefused)?;
+                let mut tx = B::begin_read_snapshot(pool).await?;
                 B::apply_auth_context_to_write_transaction(&mut tx, auth)
                     .await
                     .map_err(classify_read_snapshot_error::<B>)?;
                 let mut context = ReadSnapshotContext::new(self, tx);
                 let (result, write_refused) = crate::graphql::orm::SNAPSHOT_WRITE_REFUSED
                     .scope(std::cell::Cell::new(false), async {
-                        let result = callback(&mut context).await;
+                        let result = AssertUnwindSafe(async { callback(&mut context).await })
+                            .catch_unwind()
+                            .await;
                         let refused =
                             crate::graphql::orm::SNAPSHOT_WRITE_REFUSED.with(std::cell::Cell::get);
                         (result, refused)
                     })
                     .await;
 
+                let result = match result {
+                    Ok(result) => Some(result),
+                    Err(panic) if panic.is::<SnapshotPolicyPoolRefusal>() => None,
+                    Err(panic) => resume_unwind(panic),
+                };
                 // A read transaction has no work to commit. End it without
                 // running the mutation runner's journal or post-commit machinery.
                 let ended = context.rollback().await;
-                if write_refused {
+                let Some(result) = result.filter(|_| !write_refused) else {
                     log_failed_rollback(ended);
                     return Err(ReadSnapshotError::WriteRefused);
-                }
+                };
                 match result {
                     Ok(value) => {
                         ended.map_err(classify_read_snapshot_error::<B>)?;
@@ -2167,6 +2220,12 @@ where
     /// [`MutationContext`](crate::graphql::orm::MutationContext). On callback error it is rolled back; on cancellation the
     /// transaction guard rolls back when dropped. Deferred events and actions run
     /// only after a successful commit.
+    ///
+    /// With `TransactionMode::ReadSnapshot`, the callback runs on the same
+    /// policy-aware read snapshot as [`Self::read_snapshot_transaction`].
+    /// Mutations, raw SQL, pool and executor access, and post-commit actions
+    /// are refused. Use `TransactionError::read_snapshot_error` to inspect
+    /// typed snapshot refusals.
     pub async fn transaction<T, F>(
         &self,
         mode: crate::graphql::orm::TransactionMode,
@@ -2205,6 +2264,14 @@ where
             Result<T, crate::graphql::errors::OrmPublicError>,
         >,
     {
+        if mode == crate::graphql::orm::TransactionMode::ReadSnapshot {
+            return self
+                .read_snapshot_transaction_with_auth(auth, |context| {
+                    callback(context.mutation_context())
+                })
+                .await
+                .map_err(crate::graphql::orm::ReadSnapshotError::into_transaction_error);
+        }
         crate::graphql::orm::ensure_write_allowed()
             .map_err(crate::graphql::orm::TransactionError::Rejected)?;
         if ORM_TRANSACTION_ACTIVE

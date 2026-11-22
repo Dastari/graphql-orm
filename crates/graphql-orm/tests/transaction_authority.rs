@@ -201,7 +201,10 @@ impl MutationHook for CleanupHook {
                     .with_system_access(SystemAccess::new("line-cleanup"), |tx| {
                         Box::pin(async move {
                             assert_eq!(
-                                tx.database().system_access().map(|a| a.name.as_str()),
+                                tx.database()
+                                    .unwrap()
+                                    .system_access()
+                                    .map(|a| a.name.as_str()),
                                 Some("line-cleanup")
                             );
                             tx.delete_where::<AuthorityLine>(lines_of(&order)).await
@@ -210,7 +213,7 @@ impl MutationHook for CleanupHook {
                     .await
                     .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 // The scope ended: later writes present no authority again.
-                assert!(hook_ctx.database().system_access().is_none());
+                assert!(hook_ctx.database().unwrap().system_access().is_none());
             } else {
                 hook_ctx
                     .delete_where::<AuthorityLine>(lines_of(&order))

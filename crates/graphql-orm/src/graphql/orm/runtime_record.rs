@@ -374,6 +374,22 @@ impl RuntimeDateTime {
         Self(value.to_rfc3339_opts(SecondsFormat::Micros, true))
     }
 
+    pub(super) fn native_timestamp_bind(&self) -> super::SqlValue {
+        // Our canonical form includes extended years for previously stored values.
+        let value = self
+            .0
+            .parse::<chrono::DateTime<Utc>>()
+            .expect("canonical runtime timestamp");
+        // Match PostgreSQL's leap-second input semantics while encoding a
+        // normal instant on the wire.
+        let nanos = value.timestamp_subsec_nanos();
+        let normalized = chrono::DateTime::from_timestamp(
+            value.timestamp() + i64::from(nanos / 1_000_000_000),
+            nanos % 1_000_000_000,
+        );
+        super::SqlValue::native_timestamp(self.0.clone(), normalized.unwrap_or(value))
+    }
+
     /// Return the canonical UTC RFC 3339 representation.
     pub fn as_str(&self) -> &str {
         &self.0

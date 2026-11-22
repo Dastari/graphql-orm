@@ -14,23 +14,26 @@ mod owned_mssql;
 mod owned_postgres;
 
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::pagination::{KeysetConnectionInput, KeysetPageInput};
 use graphql_orm::prelude::*;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
     feature = "sqlite",
-    graphql_entity(backend = "sqlite", table = "snapshot_rows")
+    graphql_entity(backend = "sqlite", table = "snapshot_rows", keyset = "id asc")
 )]
 #[cfg_attr(
     feature = "postgres",
-    graphql_entity(backend = "postgres", table = "snapshot_rows")
+    graphql_entity(backend = "postgres", table = "snapshot_rows", keyset = "id asc")
 )]
 #[cfg_attr(
     feature = "mssql",
     graphql_entity(
         backend = "mssql",
         table = "snapshot_rows",
+        keyset = "id asc",
         schema_policy = "external_writable"
     )
 )]
@@ -69,7 +72,90 @@ async fn setup(db: &Database) {
     .unwrap();
 }
 
+struct PolicyPoolAttempt(Arc<Mutex<Option<Database>>>);
+
+impl RowPolicy for PolicyPoolAttempt {
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async {
+            *self.0.lock().unwrap() = Some(db.clone());
+            let _ = db.pool();
+            panic!("the policy obtained an autocommit pool");
+        })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+async fn check_snapshot_policy_pool_refusal(reader: &Database, auth: Option<&DbAuthContext>) {
+    let escaped_view = Arc::new(Mutex::new(None::<Database>));
+    let mut guarded = reader.clone();
+    guarded.set_row_policy(PolicyPoolAttempt(escaped_view.clone()));
+
+    let captured = reader.clone();
+    let result = guarded
+        .read_snapshot_transaction_with_auth(auth, |tx| {
+            Box::pin(async move {
+                assert!(captured.try_pool().is_ok());
+                tx.query::<SnapshotRow>().fetch_all().await?;
+                Ok(())
+            })
+        })
+        .await;
+    assert!(matches!(result, Err(ReadSnapshotError::WriteRefused)));
+    let view = escaped_view.lock().unwrap().take().expect("row policy ran");
+    assert_eq!(
+        OrmPublicError::from(view.try_pool().err().unwrap()).code,
+        OrmErrorCode::Forbidden
+    );
+
+    let result = guarded
+        .transaction_with_auth(TransactionMode::ReadSnapshot, auth, |tx| {
+            Box::pin(async move {
+                tx.with_system_access(SystemAccess::new("snapshot-policy-test"), |tx| {
+                    Box::pin(async move { tx.query::<SnapshotRow>().fetch_all().await })
+                })
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        result.read_snapshot_error(),
+        Some(ReadSnapshotError::WriteRefused)
+    ));
+    let view = escaped_view
+        .lock()
+        .unwrap()
+        .take()
+        .expect("scoped row policy ran");
+    assert_eq!(view.system_access().unwrap().name, "snapshot-policy-test");
+    assert_eq!(
+        OrmPublicError::from(view.try_pool().err().unwrap()).code,
+        OrmErrorCode::Forbidden
+    );
+}
+
 async fn check_snapshot(reader: &Database, writer: &Database, auth: Option<&DbAuthContext>) {
+    check_snapshot_policy_pool_refusal(reader, auth).await;
     let writer = writer.clone();
     let writer_after = writer.clone();
     let reader = reader.clone().with_change_journal();
@@ -124,6 +210,136 @@ async fn check_snapshot(reader: &Database, writer: &Database, auth: Option<&DbAu
         })
         .await
         .unwrap();
+
+    reader
+        .transaction_with_auth(TransactionMode::ReadSnapshot, auth, |tx| {
+            Box::pin(async move {
+                assert_eq!(tx.transaction_mode(), TransactionMode::ReadSnapshot);
+                let row = tx.find_by_id::<SnapshotRow>(&"visible".to_owned()).await?;
+                assert_eq!(row.unwrap().value, "after");
+                let count = tx.query::<SnapshotRow>().count().await?;
+                assert_eq!(count, if cfg!(feature = "postgres") { 1 } else { 2 });
+                let first = tx
+                    .keyset_page::<SnapshotRow>(
+                        SnapshotRowWhereInput::default(),
+                        KeysetPageInput {
+                            limit: Some(1),
+                            include_total_count: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                assert_eq!(first.page_info.total_count, Some(count));
+                assert_eq!(first.edges.len(), 1);
+                assert_eq!(first.page_info.has_next_page, count > 1);
+                let last = tx
+                    .keyset_connection_page::<SnapshotRow>(
+                        SnapshotRowWhereInput::default(),
+                        KeysetConnectionInput {
+                            last: Some(1),
+                            include_total_count: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                assert_eq!(last.page_info.total_count, Some(count));
+                assert_eq!(last.edges[0].node.id, "visible");
+                let before_last = tx
+                    .keyset_connection_page::<SnapshotRow>(
+                        SnapshotRowWhereInput::default(),
+                        KeysetConnectionInput {
+                            before: last.page_info.start_cursor,
+                            last: Some(1),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                assert_eq!(before_last.edges.len(), (count - 1) as usize);
+                if count > 1 {
+                    assert_eq!(first.edges[0].node.id, "hidden");
+                    assert_eq!(before_last.edges[0].cursor, first.edges[0].cursor);
+                    let after_first = tx
+                        .keyset_page::<SnapshotRow>(
+                            SnapshotRowWhereInput::default(),
+                            KeysetPageInput {
+                                after: first.page_info.end_cursor,
+                                limit: Some(1),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                    assert_eq!(after_first.edges[0].node.id, "visible");
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+    let pool_attempt = reader
+        .transaction_with_auth(TransactionMode::ReadSnapshot, auth, |tx| {
+            Box::pin(async move {
+                let Err(error) = tx.database() else {
+                    panic!("snapshot exposed an autocommit pool");
+                };
+                assert_eq!(OrmPublicError::from(error).code, OrmErrorCode::Forbidden);
+                let write_input = WriteInputContext::internal("SnapshotRow", tx);
+                let Err(error) = write_input.database() else {
+                    panic!("snapshot exposed a pool through the write input context");
+                };
+                assert_eq!(OrmPublicError::from(error).code, OrmErrorCode::Forbidden);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        pool_attempt.read_snapshot_error(),
+        Some(ReadSnapshotError::WriteRefused)
+    ));
+
+    let result = reader
+        .transaction_with_auth(TransactionMode::ReadSnapshot, auth, |tx| {
+            Box::pin(async move {
+                let Err(error) = tx
+                    .fetch_rows("UPDATE snapshot_rows SET value = 'forbidden'", &[])
+                    .await
+                else {
+                    panic!("accepted arbitrary SQL");
+                };
+                assert_eq!(OrmPublicError::from(error).code, OrmErrorCode::Forbidden);
+                let error = EntityQuery::<SnapshotRow>::new()
+                    .where_values("id = 'visible'", vec![])
+                    .fetch_all_in_transaction(tx)
+                    .await
+                    .unwrap_err();
+                assert_eq!(OrmPublicError::from(error).code, OrmErrorCode::Forbidden);
+                let error = tx
+                    .insert::<SnapshotRow>(CreateSnapshotRowInput {
+                        id: "forbidden".into(),
+                        value: "write".into(),
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(OrmPublicError::from(error).code, OrmErrorCode::Forbidden);
+                #[cfg(not(feature = "mssql"))]
+                assert_eq!(
+                    OrmPublicError::from(tx.executor().err().unwrap()).code,
+                    OrmErrorCode::Forbidden
+                );
+                Ok(())
+            })
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        result.read_snapshot_error(),
+        Some(ReadSnapshotError::WriteRefused)
+    ));
 
     let db = writer_after.clone();
     let result = reader
@@ -296,6 +512,17 @@ async fn sqlite_checks_file_backed_attached_databases() -> graphql_orm::Result<(
         db.read_snapshot_transaction(|_| Box::pin(async { Ok(()) }))
             .await,
         Err(ReadSnapshotError::SqliteWalRequired),
+    ));
+
+    let error = db
+        .transaction(TransactionMode::ReadSnapshot, |_| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.read_snapshot_error(),
+        Some(ReadSnapshotError::SqliteWalRequired)
     ));
 
     sqlx::query(r#"PRAGMA "archive.""copy".journal_mode = wal"#)

@@ -48,7 +48,7 @@ async fn state_machine_is_serializable_auth_local_and_conflicts_are_retryable()
                             current_setting('app.user_id', true) AS user_id,
                             current_setting('app.tenant_id', true) AS tenant_id",
                 )
-                .fetch_one(tx.executor())
+                .fetch_one(tx.executor()?)
                 .await?;
                 Ok::<_, OrmPublicError>((
                     row.try_get::<String, _>("isolation")?,
@@ -70,7 +70,7 @@ async fn state_machine_is_serializable_auth_local_and_conflicts_are_retryable()
                     let row = graphql_orm::sqlx::query(
                         "SELECT value FROM graphql_orm_transaction_state WHERE id = 1",
                     )
-                    .fetch_one(tx.executor())
+                    .fetch_one(tx.executor()?)
                     .await?;
                     let value: i64 = row.try_get("value")?;
                     barrier.wait().await;
@@ -78,7 +78,7 @@ async fn state_machine_is_serializable_auth_local_and_conflicts_are_retryable()
                         "UPDATE graphql_orm_transaction_state SET value = $1 WHERE id = 1",
                     )
                     .bind(value + 1)
-                    .execute(tx.executor())
+                    .execute(tx.executor()?)
                     .await?;
                     Ok::<_, OrmPublicError>(())
                 })

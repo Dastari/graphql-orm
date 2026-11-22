@@ -543,8 +543,8 @@ pub trait StaticPreparedWrite<B: StaticDeleteBackend>: Send {
     ) -> BoxFuture<'a, Result<StaticWriteResult<StaticWriteCompletion<B>>>>;
 }
 /// A declared key column of an entity, as SQL that names it in that entity's
-/// own query: the column part of the declared path, so a table-qualified
-/// `db_column` such as `"t"."c"` reads `"c"` (#782).
+/// own query. For hand-written metadata with a qualified path, use its
+/// column part (#782). Generated metadata declares one column.
 pub(crate) fn declared_column_sql(backend: super::DatabaseBackend, column: &str) -> String {
     backend.quote_column_identifier(column)
 }

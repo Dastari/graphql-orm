@@ -401,3 +401,146 @@ async fn conditional_unique_preflight_respects_new_and_existing_predicate_column
     }
     Ok(())
 }
+
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(table = "dotted_index_records", plural = "DottedIndexRecords")]
+#[graphql_orm(conditional_index(
+    name = "idx_dotted_active",
+    columns = ["id"],
+    predicate_field = "status",
+    predicate_values = ["ACTIVE", "PENDING"]
+))]
+#[allow(dead_code)]
+struct DottedIndexRecord {
+    #[primary_key]
+    id: graphql_orm::uuid::Uuid,
+    #[graphql_orm(db_column = "\"state.code\"")]
+    status: String,
+    #[graphql_orm(db_column = "status")]
+    plain_status: String,
+    #[graphql_orm(db_column = "\"\"\"status\"\"\"")]
+    quoted_status: String,
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn conditional_index_with_literal_dotted_predicate_has_no_planned_changes()
+-> graphql_orm::Result<()> {
+    let database = database().await?;
+    let entities = [DottedIndexRecord::metadata()];
+    let plan = database
+        .schema()
+        .plan_migration_to_entities_with_options(
+            "dotted-condition",
+            "literal dotted predicate",
+            &entities,
+            PlanOptions::managed_tables_only(),
+        )
+        .await?;
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement.contains("WHERE \"state.code\" IN"))
+    );
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+
+    let clean = database
+        .schema()
+        .plan_migration_to_entities_with_options(
+            "dotted-condition-clean",
+            "replan literal dotted predicate",
+            &entities,
+            PlanOptions::managed_tables_only(),
+        )
+        .await?;
+    assert!(clean.steps.is_empty(), "{:?}", clean.steps);
+    // Hand-built metadata can supply the same physical column without delimiters.
+    let mut target = SchemaModel::from_entities(&entities);
+    target.tables[0].indexes[0]
+        .predicate
+        .as_mut()
+        .unwrap()
+        .column = "state.code";
+    let mut live = introspect(&database).await?;
+    live.tables
+        .retain(|table| table.table_name == "dotted_index_records");
+    let clean = database.schema().plan_migration(
+        "dotted-condition-raw-name",
+        "replan using a raw predicate column name",
+        &live,
+        &target,
+    )?;
+    assert!(clean.steps.is_empty(), "{:?}", clean.steps);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn conditional_index_detects_switch_from_quoted_name_to_plain_name() -> graphql_orm::Result<()>
+{
+    let database = database().await?;
+    let mut quoted = SchemaModel::from_entities(&[DottedIndexRecord::metadata()]);
+    quoted.tables[0].table_name = "quoted_index_records".to_owned();
+    quoted.tables[0].indexes[0].name = "idx_quoted_active";
+    let predicate = quoted.tables[0].indexes[0].predicate.as_mut().unwrap();
+    predicate.column = "\"\"\"status\"\"\"";
+    let only_test_table = |mut schema: SchemaModel| {
+        schema
+            .tables
+            .retain(|table| table.table_name == "quoted_index_records");
+        schema
+    };
+    let current = only_test_table(introspect(&database).await?);
+    let plan = database.schema().plan_migration(
+        "quoted-name",
+        "index on the column whose name includes quotes",
+        &current,
+        &quoted,
+    )?;
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+
+    let live = only_test_table(introspect(&database).await?);
+    let clean = database.schema().plan_migration(
+        "quoted-name-clean",
+        "replan the quoted-name index",
+        &live,
+        &quoted,
+    )?;
+    assert!(clean.steps.is_empty(), "{:?}", clean.steps);
+
+    let mut plain = quoted;
+    plain.tables[0].indexes[0]
+        .predicate
+        .as_mut()
+        .unwrap()
+        .column = "status";
+    let change = database.schema().plan_migration(
+        "quoted-name-to-plain",
+        "switch predicate to the plain column",
+        &live,
+        &plain,
+    )?;
+    assert!(
+        matches!(
+            change.steps.as_slice(),
+            [drop, create]
+                if matches!(drop.step, MigrationStep::DropIndex { .. })
+                    && matches!(create.step, MigrationStep::CreateIndex { .. })
+        ),
+        "{:?}",
+        change.steps
+    );
+    Ok(())
+}

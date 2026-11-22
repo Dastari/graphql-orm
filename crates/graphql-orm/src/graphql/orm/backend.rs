@@ -21,6 +21,14 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         !Self::READ_ONLY
     }
 
+    #[doc(hidden)]
+    fn validate_keyset_order(
+        _pool: &Self::Pool,
+        _order: &[super::KeysetOrderColumn],
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        Ok(())
+    }
+
     fn fetch_rows<'a>(
         pool: &'a Self::Pool,
         sql: &'a str,
@@ -620,12 +628,13 @@ impl WriteBackend for SqliteBackend {
         mode: super::core::TransactionMode,
     ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
-            super::ensure_sql_write_allowed()?;
+            mode.require_write()?;
             match mode {
                 super::core::TransactionMode::Default => pool.begin().await,
                 super::core::TransactionMode::StateMachine => {
                     pool.begin_with("BEGIN IMMEDIATE").await
                 }
+                super::core::TransactionMode::ReadSnapshot => unreachable!("write mode checked"),
             }
         })
     }
@@ -1000,7 +1009,7 @@ impl WriteBackend for PostgresBackend {
         mode: super::core::TransactionMode,
     ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
-            super::ensure_sql_write_allowed()?;
+            mode.require_write()?;
             let mut transaction = pool.begin().await?;
             if mode == super::core::TransactionMode::StateMachine {
                 sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
@@ -1106,6 +1115,23 @@ impl OrmBackend for MssqlBackend {
 
     fn pool_permits_entity_writes(pool: &Self::Pool) -> bool {
         pool.access_mode() == crate::db::mssql::MssqlAccessMode::ExternalWritable
+    }
+
+    fn validate_keyset_order(
+        pool: &Self::Pool,
+        order: &[super::KeysetOrderColumn],
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+
+        if pool.options().get_typed_temporal_parameters()
+            && order.iter().any(|column| column.is_temporal_text())
+        {
+            return Err(OrmPublicError::with_message(
+                OrmErrorCode::InvalidInput,
+                "SQL Server keyset order cannot include a String temporal field with native temporal parameters enabled",
+            ));
+        }
+        Ok(())
     }
 
     fn fetch_rows<'a>(
@@ -1274,7 +1300,10 @@ pub(super) fn bind_postgres_value<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match value {
         SqlValue::String(value) => query.bind(value),
-        SqlValue::Temporal(value) => query.bind(value.as_text()),
+        SqlValue::Temporal(value) => match value.native_timestamp() {
+            Some(timestamp) => query.bind(timestamp),
+            None => query.bind(value.as_text()),
+        },
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),

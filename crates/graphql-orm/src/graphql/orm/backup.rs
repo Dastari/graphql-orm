@@ -822,7 +822,7 @@ where
     B: super::WriteBackend,
 {
     if !cfg!(feature = "change-journal")
-        || !hook_ctx.database().change_journal_enabled()
+        || !hook_ctx.policy_database().change_journal_enabled()
         || event.phase != MutationPhase::After
     {
         return Ok(());
@@ -2472,6 +2472,10 @@ fn backup_value_to_sql_value(
             }
             SqlValue::Decimal(*value)
         }
+        #[cfg(feature = "postgres")]
+        BackupValue::String(value) if logical_type == BackupValueKind::DateTime => {
+            parse_backup_date_time(value)?.native_timestamp_bind()
+        }
         BackupValue::String(value) => SqlValue::String(value.clone()),
         BackupValue::Uuid(value) => SqlValue::Uuid(*value),
         BackupValue::Json(value) => SqlValue::Json(value.clone()),
@@ -2479,8 +2483,8 @@ fn backup_value_to_sql_value(
     })
 }
 
-/// The bind placeholder of an import column. A PostgreSQL `TIMESTAMPTZ` takes the canonical text
-/// through an explicit cast; its `Z` offset makes the cast independent of the session `TimeZone`.
+/// The bind placeholder of an import column. The explicit cast supplies the
+/// target type even for a null date-time parameter.
 fn import_placeholder(column: &super::ColumnBackupDescriptor) -> &'static str {
     if cfg!(feature = "postgres") && column.logical_type == BackupValueKind::DateTime {
         "CAST(? AS TIMESTAMPTZ)"
@@ -2966,7 +2970,13 @@ mod tests {
             backup_policy: ColumnBackupPolicy::Include,
         };
         let text = |value: &str| BackupValue::String(value.to_string());
-        assert!(validate_backup_value(&descriptor, &text("2026-10-27T01:02:03.000004Z")).is_ok());
+        let sample = text("2026-10-27T01:02:03.000004Z");
+        assert!(validate_backup_value(&descriptor, &sample).is_ok());
+        #[cfg(feature = "postgres")]
+        assert!(matches!(
+            backup_value_to_sql_value(&sample, &descriptor),
+            Ok(SqlValue::Temporal(value)) if value.native_timestamp().is_some()
+        ));
         assert!(validate_backup_value(&descriptor, &BackupValue::Null).is_ok());
         for refused in [
             text("2026-10-27T01:02:03Z"),

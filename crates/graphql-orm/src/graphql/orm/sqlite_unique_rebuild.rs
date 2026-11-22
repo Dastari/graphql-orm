@@ -275,7 +275,7 @@ fn rewrite(sql: &str, temporary: &str, before: &Keys, after: &Keys) -> Result<St
             " UNIQUE ({})",
             columns
                 .iter()
-                .map(|s| DatabaseBackend::Sqlite.quote_identifier(s))
+                .map(|s| DatabaseBackend::Sqlite.delimit_raw_identifier(s))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -693,7 +693,7 @@ async fn prepare_scheduled(
             // model or a reserved name. Recheck inside the apply transaction.
             let populated: bool = sqlx::query_scalar(&format!(
                 "SELECT EXISTS(SELECT 1 FROM main.{})",
-                DatabaseBackend::Sqlite.quote_identifier(&table)
+                DatabaseBackend::Sqlite.delimit_raw_identifier(&table)
             ))
             .fetch_one(&mut *conn)
             .await?;
@@ -744,11 +744,6 @@ async fn prepare_scheduled(
     let mut writable = Vec::new();
     for column in columns {
         let name: String = column.try_get("name")?;
-        // Dialect formatting accepts SQL-delimited spellings; raw catalog
-        // names shaped like those spellings are ambiguous. Refuse them.
-        if unique_identifier(&name).1 {
-            return Err(unsupported());
-        }
         match column.try_get::<i64, _>("hidden")? {
             0 => writable.push(name.clone()),
             2 | 3 => {}
@@ -902,7 +897,7 @@ impl Prepared {
     }
 
     pub(crate) async fn apply(self, conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
-        let quote = |s: &str| DatabaseBackend::Sqlite.quote_identifier(s);
+        let quote = |s: &str| DatabaseBackend::Sqlite.delimit_raw_identifier(s);
         // Preparation may have excused a foreign key that an earlier directive
         // was due to remove. That directive has run by now, so nothing is
         // excused here: the catalog must show that no remaining foreign key
@@ -994,6 +989,37 @@ mod recovery_tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn live_rebuild_preserves_a_literal_delimited_dotted_column() -> Result<(), sqlx::Error> {
+        let mut connection =
+            <sqlx::SqliteConnection as sqlx::Connection>::connect("sqlite::memory:").await?;
+        let column = r#""""a.b""""#;
+        sqlx::query(&format!(
+            "CREATE TABLE probe (id INTEGER PRIMARY KEY, {column} TEXT)"
+        ))
+        .execute(&mut connection)
+        .await?;
+        sqlx::query("INSERT INTO probe VALUES (1, 'kept')")
+            .execute(&mut connection)
+            .await?;
+        let input = Directive {
+            table: "probe".into(),
+            before: vec![],
+            after: vec![vec!["id".into(), r#""a.b""#.into()]],
+            mixed: false,
+            ddl: None,
+        };
+        prepare(&mut connection, input)
+            .await?
+            .apply(&mut connection)
+            .await?;
+        let stored: String = sqlx::query_scalar(&format!("SELECT {column} FROM probe"))
+            .fetch_one(&mut connection)
+            .await?;
+        assert_eq!(stored, "kept");
+        Ok(())
     }
 
     #[tokio::test]

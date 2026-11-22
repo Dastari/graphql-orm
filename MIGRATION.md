@@ -12,11 +12,103 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+Upgrade ORM and macros together to the next breaking ORM/macros release.
+
+### 1. Match transaction modes with a wildcard (#833)
+
+**Action needed.** Add a wildcard arm to exhaustive matches on
+`TransactionMode`. Handle the modes your application supports explicitly and
+return an error from `_ =>` for any other mode. The new `ReadSnapshot` mode
+is available through `Database::transaction` and `transaction_with_auth`.
+Use `TransactionError::read_snapshot_error()` to inspect typed refusals.
+The dedicated snapshot methods still provide the narrower read-only context.
+
+Propagate errors with `?` or handle refusal when calling
+`MutationContext::database()`, `WriteInputContext::database()` or the hidden
+SQLx `MutationContext::executor()`. A snapshot refuses access to the pool
+and to the pinned executor. Typed entity and projection reads, including
+forward and backward keyset pages, use the pinned connection.
+
+Read policies called by a snapshot receive a pool-free database view,
+including when they clone it. Use `Database::try_pool()` if a policy
+can handle a refused pool lookup.
+
+### 2. Review SQL Server keyset orders on opted-in pools (#521)
+
+**Action needed.** On pools configured with
+`MssqlPoolOptions::typed_temporal_parameters(true)`, remove String-valued
+temporal fields from generated keyset orders. The ORM refuses these orders
+because lexical order on text columns can differ from instant order and
+legacy `datetime` cursors can lose precision. Use a different keyset order
+or keep the pool's text binding default. Cursor encoding is unchanged.
+
+If you construct `KeysetOrderColumn` with a struct literal, use `asc()` or
+`desc()` and optionally `nulls_first()`. Use `temporal_text()` to mark a
+custom order column subject to the same validation.
+
+PostgreSQL runtime GraphQL date-times and backup restores bind typed
+`TIMESTAMPTZ` values with the same UTC instants.
+
+### 3. Declare dotted database columns explicitly (#793)
+
+**Action needed.** Inspect each dotted `db_column` in the existing database
+before upgrading. If the declaration was intended to refer to a column on
+the entity's table, remove the qualifier and use the physical column name.
+If an earlier migration created a column whose name contains a dot, delimit
+the entire physical name as one identifier. For example, use
+`#[graphql_orm(db_column = "\"a.b\"")]` on SQLite and PostgreSQL, or
+`#[graphql_orm(db_column = "[a.b]")]` on SQL Server. Double each closing
+delimiter that belongs to the name. The derive reports an error at an
+ambiguous declaration so an upgrade cannot silently retarget a deployed column. A declaration that
+matches the existing physical name needs no data migration.
+
+### 4. Adopt the consuming Codex turn dispatch (#828)
+
 **Action needed** for Codex app-server process implementations. The next
 breaking graphql-orm-ai release moves all six turn methods to a consuming
 dispatch. Use the protocol actor's `write_turn` with the shared process writer.
 See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release).
 No data migration is needed.
+
+## 0.192.0 to 0.193.0: handwritten fields on generated objects
+
+**No action.** Upgrade ORM and macros together. Nothing changes for an entity
+that does not declare `#[graphql_orm(object_fields)]`: its SDL, catalogues and
+fingerprints are byte-identical. `Entity` gains the provided method
+`computed_object_fields()`, which handwritten `Entity` implementations inherit.
+
+To move an entity off the `SimpleObject` + `#[graphql(complex)]` +
+`graphql_policy_object` workaround for a computed field, restore the plain
+`GraphQLEntity` derive, add `#[graphql_orm(object_fields)]`, and replace
+`#[ComplexObject]` (or `#[graphql_complex_object]`) on the impl with
+`#[graphql_orm::graphql_object_fields]`. Each handwritten resolver must then
+return `async_graphql::Result<T>`. Compare the SDL afterwards: descriptions
+come from `#[graphql_orm(description = "…")]` and doc comments again, and
+handwritten fields are named by the entity's naming rule unless
+`#[graphql(name = "…")]` names them.
+
+Authorization differs from `graphql_policy_object` in one respect. A
+handwritten field asks what a generated column field asks: the field read
+decision for its row, with its declared `read_policy` key or none. It does not
+ask the entity or row decision again. Generated queries, relations, mutations,
+entity resolution and subscriptions authorize the row before the object
+exists. A host resolver that constructs or loads an entity object itself must
+authorize that object itself, as it must for the generated column fields. A
+refused field declared `Option<T>` is an explicit `null` with a path-specific
+error. `subscribe` is accepted only on scalar or enum outputs, or an `Option`
+or list of those.
+
+Declaring `object_fields` adds the
+handwritten fields to the entity's semantic catalogue entry, so that entity's
+catalogue fingerprint changes once. See
+[handwritten fields on a generated object](docs/reference/graphql-orm/macros-and-attributes.md#handwritten-fields-on-a-generated-object).
+
+## 0.191.0 to 0.192.0: propagated parent actions
+
+**No action.** Relations continue to use the source mutation's action by
+default. To report child creates and deletes as `UPDATED` on a surviving
+parent, set `propagate_change_action = "updated"` on the relation alongside
+`propagate_change = "up"` and use `UPDATED` in the parent's subscription filter.
 
 ## 0.190.0 to 0.191.0: read snapshot transactions
 

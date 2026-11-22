@@ -5,17 +5,7 @@
     all(feature = "postgres", feature = "mssql"),
 )))]
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-//! Read predicates over a schema-qualified table and table-qualified
-//! physical columns (#782 round 3).
-//!
-//! A declared `db_column` such as `"qual_children"."parent_ref"` names the
-//! column `parent_ref`. Relation, negated-relation and closure predicates
-//! reference it through an alias or the source table, so they must render
-//! the column part, never the whole path after a prefix (which reads as
-//! `schema.table.column`) or a literal-quoted path (which SQLite reads as a
-//! string constant). A wrong column in a read predicate is an authorization
-//! bug, so every case checks exactly which rows are admitted.
-
+//! Read predicates over schema-qualified tables with literal dotted columns.
 #[cfg(feature = "mssql")]
 #[allow(dead_code)]
 #[path = "support/owned_mssql.rs"]
@@ -53,7 +43,11 @@ struct QualParent {
     #[graphql_orm(auto_generated = false)]
     #[sortable]
     id: i64,
-    #[graphql_orm(db_column = "\"qual_parents\".\"owner\"")]
+    #[cfg_attr(
+        not(feature = "mssql"),
+        graphql_orm(db_column = "\"qual_parents.owner\"")
+    )]
+    #[cfg_attr(feature = "mssql", graphql_orm(db_column = "[qual_parents.owner]"))]
     owner: Option<String>,
 }
 
@@ -84,7 +78,14 @@ struct QualChild {
     #[graphql_orm(auto_generated = false)]
     #[sortable]
     id: i64,
-    #[graphql_orm(db_column = "\"qual_children\".\"parent_ref\"")]
+    #[cfg_attr(
+        not(feature = "mssql"),
+        graphql_orm(db_column = "\"qual_children.parent_ref\"")
+    )]
+    #[cfg_attr(
+        feature = "mssql",
+        graphql_orm(db_column = "[qual_children.parent_ref]")
+    )]
     parent_ref: Option<i64>,
 }
 
@@ -115,9 +116,14 @@ struct QualNode {
     #[graphql_orm(auto_generated = false)]
     #[sortable]
     id: i64,
-    #[graphql_orm(db_column = "\"qual_nodes\".\"up\"")]
+    #[cfg_attr(not(feature = "mssql"), graphql_orm(db_column = "\"qual_nodes.up\""))]
+    #[cfg_attr(feature = "mssql", graphql_orm(db_column = "[qual_nodes.up]"))]
     up: Option<i64>,
-    #[graphql_orm(db_column = "\"qual_nodes\".\"score\"")]
+    #[cfg_attr(
+        not(feature = "mssql"),
+        graphql_orm(db_column = "\"qual_nodes.score\"")
+    )]
+    #[cfg_attr(feature = "mssql", graphql_orm(db_column = "[qual_nodes.score]"))]
     score: Option<i64>,
 }
 
@@ -130,10 +136,22 @@ schema_roots! { backend: "mssql", schema_policy: "external_writable", query_cust
 
 type B = DefaultBackend;
 
-const OWNER: &str = "\"qual_parents\".\"owner\"";
-const PARENT_REF: &str = "\"qual_children\".\"parent_ref\"";
-const UP: &str = "\"qual_nodes\".\"up\"";
-const SCORE: &str = "\"qual_nodes\".\"score\"";
+#[cfg(not(feature = "mssql"))]
+const OWNER: &str = "\"qual_parents.owner\"";
+#[cfg(feature = "mssql")]
+const OWNER: &str = "[qual_parents.owner]";
+#[cfg(not(feature = "mssql"))]
+const PARENT_REF: &str = "\"qual_children.parent_ref\"";
+#[cfg(feature = "mssql")]
+const PARENT_REF: &str = "[qual_children.parent_ref]";
+#[cfg(not(feature = "mssql"))]
+const UP: &str = "\"qual_nodes.up\"";
+#[cfg(feature = "mssql")]
+const UP: &str = "[qual_nodes.up]";
+#[cfg(not(feature = "mssql"))]
+const SCORE: &str = "\"qual_nodes.score\"";
+#[cfg(feature = "mssql")]
+const SCORE: &str = "[qual_nodes.score]";
 
 #[cfg(feature = "sqlite")]
 struct Owner;
@@ -183,52 +201,50 @@ async fn fixture() -> (Database, Owner) {
         )
         .await
         .unwrap();
-        (Database::new(pool), owner)
+        pool.install_restore_marker().await.unwrap();
+        (
+            Database::builder(pool)
+                .schema_policy(SchemaPolicy::ExternalWritable)
+                .build(),
+            owner,
+        )
     };
-    #[cfg(feature = "sqlite")]
-    let (schema, text) = ("main", "TEXT");
-    #[cfg(feature = "postgres")]
-    let (schema, text) = ("public", "TEXT");
-    #[cfg(feature = "mssql")]
-    let (schema, text) = ("dbo", "nvarchar(50)");
+    let schema = if cfg!(feature = "sqlite") {
+        "main"
+    } else if cfg!(feature = "postgres") {
+        "public"
+    } else {
+        "dbo"
+    };
+    let target = SchemaModel::from_entities(&[
+        QualParent::metadata(),
+        QualChild::metadata(),
+        QualNode::metadata(),
+    ]);
+    let plan = build_migration_plan(B::DIALECT, &SchemaModel::from_entities(&[]), &target);
+    for statement in &plan.statements {
+        execute(&db, statement).await;
+    }
     execute(
         &db,
-        &format!(
-            "CREATE TABLE {schema}.qual_parents (id BIGINT NOT NULL PRIMARY KEY, owner {text} NULL)"
-        ),
+        &format!("INSERT INTO {schema}.qual_parents (id, {OWNER}) VALUES (1, 'alice'), (2, 'bob'), (3, NULL)"),
     )
     .await;
     execute(
         &db,
-        &format!("CREATE TABLE {schema}.qual_children (id BIGINT NOT NULL PRIMARY KEY, parent_ref BIGINT NULL)"),
+        &format!("INSERT INTO {schema}.qual_children (id, {PARENT_REF}) VALUES (10, 1), (11, 2), (12, 3), (13, NULL), (14, 99)"),
     )
     .await;
     execute(
         &db,
-        &format!("CREATE TABLE {schema}.qual_nodes (id BIGINT NOT NULL PRIMARY KEY, up BIGINT NULL, score BIGINT NULL)"),
-    )
-    .await;
-    execute(
-        &db,
-        &format!("INSERT INTO {schema}.qual_parents (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, NULL)"),
-    )
-    .await;
-    execute(
-        &db,
-        &format!("INSERT INTO {schema}.qual_children (id, parent_ref) VALUES (10, 1), (11, 2), (12, 3), (13, NULL), (14, 99)"),
-    )
-    .await;
-    execute(
-        &db,
-        &format!("INSERT INTO {schema}.qual_nodes (id, up, score) VALUES (1, NULL, 5), (2, 1, 5), (3, 2, 1), (4, 3, 5)"),
+        &format!("INSERT INTO {schema}.qual_nodes (id, {UP}, {SCORE}) VALUES (1, NULL, 5), (2, 1, 5), (3, 2, 1), (4, 3, 5)"),
     )
     .await;
     (db, owner)
 }
 
 /// The ids of `ids` that `predicate` admits, read through `count` one id at
-/// a time (rows with a table-qualified column are not decoded here), with
-/// the total checked against the same predicate.
+/// a time, with the total checked against the same predicate.
 async fn admitted<T>(db: &Database, ids: &[i64], predicate: ReadPredicate) -> Vec<i64>
 where
     T: DatabaseEntity + Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
@@ -273,8 +289,33 @@ fn owned_by_alice() -> ReadPredicate {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn qualified_columns_admit_exactly_the_right_rows() {
+async fn dotted_columns_decode_and_admit_exactly_the_right_rows() {
     let (db, mut owner) = fixture().await;
+    let rows = QualParent::query(db.pool()).fetch_all().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.id == 1)
+            .unwrap()
+            .owner
+            .as_deref(),
+        Some("alice")
+    );
+    let rows = QualChild::query(db.pool()).fetch_all().await.unwrap();
+    assert_eq!(
+        rows.iter().find(|row| row.id == 11).unwrap().parent_ref,
+        Some(2)
+    );
+    let updated = QualParent::update_by_id(
+        &db,
+        &1,
+        UpdateQualParentInput {
+            owner: Some(Some("alice".into())),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(updated.owner.as_deref(), Some("alice"));
     let children = [10, 11, 12, 13, 14];
     let keys: &[(&str, &str)] = &[(PARENT_REF, "id")];
 

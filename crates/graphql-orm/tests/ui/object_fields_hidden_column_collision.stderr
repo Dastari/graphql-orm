@@ -1,0 +1,11 @@
+error: handwritten field `status` has the GraphQL name of the entity field `status` of `Record`, which the generated object does not serve; rename the handwritten field, because generated read paths decide that name by the entity field's policy
+  --> tests/ui/object_fields_hidden_column_collision.rs:22:14
+   |
+22 |     async fn status(&self) -> Result<Option<String>> {
+   |              ^^^^^^
+
+error: handwritten field `CustodyNote` has the GraphQL name of the entity field `CustodyNote` of `Other`, which the generated object does not serve; rename the handwritten field, because generated read paths decide that name by the entity field's policy
+  --> tests/ui/object_fields_hidden_column_collision.rs:42:14
+   |
+42 |     async fn note(&self) -> Result<Option<String>> {
+   |              ^^^^

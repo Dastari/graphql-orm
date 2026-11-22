@@ -340,7 +340,7 @@ certificate settings checked.
 | `max_lifetime` | 30 min | Connections older than this are closed when next released or acquired. |
 | `health_check_after_idle` | 30 s | A connection idle this long is reset and checked before reuse. |
 | `transport` | `verified()` | See above. |
-| `typed_temporal_parameters` | `false` | Enable [native parameters for temporal text](#native-temporal-parameters). |
+| `typed_temporal_parameters` | `false` | Use [native parameters for temporal text](#native-temporal-parameters). |
 
 A statement timeout has two caveats. First, the outcome of a timed-out
 autocommit write is indeterminate: the server can still finish and commit the
@@ -810,20 +810,26 @@ Generated column metadata and DDL use the corresponding types.
 - `chrono::NaiveDateTime` and `chrono::DateTime<Utc>` bind as `datetime2`.
 - `chrono::DateTime<FixedOffset>` binds as `datetimeoffset`.
 
-To use native parameters for temporal text too, pass
-`MssqlPoolOptions::new().typed_temporal_parameters(true)` to
-`MssqlPool::connect_ado_with` for reads or
-`MssqlPool::connect_ado_external_writable_with` for reads and writes. Use the
-resulting pool to construct your `Database`. Generated date filters and writes
-to text fields marked `#[date_field]` or `#[filterable(type = "date")]` then
-bind ISO dates and timestamps as `date`, `datetime2`, or `datetimeoffset`.
+Generated date filters, writes and projection lookups for string fields
+marked `#[date_field]` or `#[filterable(type = "date")]` send text by default.
+Pass `MssqlPoolOptions::new().typed_temporal_parameters(true)` to
+`MssqlPool::connect_ado_with` or `MssqlPool::connect_ado_external_writable_with`
+to bind ISO dates and timestamps as `date`, `datetime2` or `datetimeoffset`.
 When including a time, supply seconds, such as `2026-04-09T12:34:00`.
-Minute-only forms such as `2026-04-09T12:34` are rejected. Text compatibility
-mode sends the input as written. Use ISO 8601 with a `T` when writing a
-timestamp as text to legacy `datetime` columns.
+Use ISO 8601 with a `T` when writing a timestamp as text to legacy
+`datetime` columns.
+
+With native temporal text binding enabled, generated keyset pages,
+connections and scans refuse an order that includes an annotated temporal
+`String` field. Text columns can sort ISO strings lexically even though
+temporal operands compare instants. Native legacy `datetime` values can also
+lose precision in their displayed string cursors. Choose another order to
+page on an opted-in pool. On a pool using text binding, String cursor
+components bind as text and retain the database's lexical comparison for
+text columns.
 
 Native parameters avoid interpreting input using session language and
-`DATEFORMAT`. Review these effects before enabling them for temporal text.
+`DATEFORMAT`. Review these effects before opting in.
 
 - On a date-filterable `String` field stored as `NVARCHAR(MAX)`, a write can
   store SQL Server's spelling of the value. Filters convert column values
@@ -839,8 +845,9 @@ Native parameters avoid interpreting input using session language and
   An `eq` operand or a `BETWEEN` endpoint at the displayed millisecond can
   stop matching that stored value. Native writes can also round differently.
 
-Runtime GraphQL date-time values, keyset cursor values, and backup restore
-values still use text binds.
+Use `SqlValue::temporal_text` or a chrono value for explicitly temporal
+parameters in host-run restore SQL. The managed runtime GraphQL and backup
+adapters support SQLite and PostgreSQL.
 
 ## Introspection and rendered DDL
 

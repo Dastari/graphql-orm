@@ -42,8 +42,7 @@ struct History {
     units: i64,
 }
 
-/// A table-qualified physical column: grouping, metrics and the blank
-/// exclusion must all name the same column through the path renderer.
+/// Grouping, metrics and blank exclusion must name the same literal column.
 #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
     feature = "sqlite",
@@ -66,7 +65,7 @@ struct QualifiedHistory {
     #[graphql_orm(auto_generated = false)]
     id: String,
     #[filterable(type = "string")]
-    #[graphql_orm(db_column = "\"qualified_history\".\"event\"")]
+    #[graphql_orm(db_column = "\"event.code\"")]
     event: Option<String>,
 }
 
@@ -902,9 +901,8 @@ async fn postgres_db_auth_context_filters_before_pages_and_ordinary_aggregation(
     owned.finish().await
 }
 
-/// Round 2 of #782: `exclude_blank` renders the group column inside `TRIM`
-/// with the same path renderer as the grouping expression, so a
-/// table-qualified column excludes its blank values. Group pages are
+/// The grouping expression and the `TRIM` used by `exclude_blank`
+/// reference the same literal dotted column. Group pages are
 /// SQLite and PostgreSQL only; SQL Server refuses them before rendering
 /// (`complete_group_pages_unsupported`).
 #[tokio::test]
@@ -912,12 +910,30 @@ async fn postgres_db_auth_context_filters_before_pages_and_ordinary_aggregation(
     feature = "postgres",
     ignore = "owns disposable loopback PostgreSQL 17"
 )]
-async fn blank_exclusion_names_a_table_qualified_group_column()
+async fn blank_exclusion_names_a_literal_dotted_group_column()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut owned = Owned::start().await?;
-    sqlx::query("CREATE TABLE qualified_history (id TEXT PRIMARY KEY, event TEXT)")
-        .execute(owned.db.pool())
+    let target = SchemaTarget::from_entities(&[QualifiedHistory::metadata()], &[]);
+    let creation = owned
+        .db
+        .schema()
+        .plan_schema_target("dotted-1", "create", &target)
         .await?;
+    owned
+        .db
+        .schema()
+        .apply_schema_target(&creation, ApplyOptions::default())
+        .await?;
+    let unchanged = owned
+        .db
+        .schema()
+        .plan_schema_target("dotted-2", "unchanged", &target)
+        .await?;
+    assert!(
+        unchanged.migration.steps.is_empty(),
+        "{:?}",
+        unchanged.migration.steps
+    );
     for (id, event) in [
         ("a", Some("A")),
         ("b", Some("A")),
@@ -925,7 +941,7 @@ async fn blank_exclusion_names_a_table_qualified_group_column()
         ("d", Some("")),
     ] {
         sqlx::query(&format!(
-            "INSERT INTO qualified_history (id, event) VALUES ('{id}', {})",
+            "INSERT INTO qualified_history (id, \"event.code\") VALUES ('{id}', {})",
             event.map_or("NULL".to_owned(), |value| format!("'{value}'"))
         ))
         .execute(owned.db.pool())
@@ -972,7 +988,7 @@ async fn blank_exclusion_names_a_table_qualified_group_column()
     owned.finish().await
 }
 
-/// Admits rows whose table-qualified `event` column is not `A`.
+/// Admits rows whose event value differs from `A`.
 #[derive(Clone)]
 struct QualifiedVisibility;
 impl RowPolicy<Backend> for QualifiedVisibility {
@@ -989,7 +1005,7 @@ impl RowPolicy<Backend> for QualifiedVisibility {
                 Backend,
                 QualifiedHistory,
             >(
-                "\"qualified_history\".\"event\"",
+                "\"event.code\"",
                 ReadPredicateOp::Ne,
                 SqlValue::String("A".into()),
             )?))
