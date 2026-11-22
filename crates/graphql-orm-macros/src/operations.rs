@@ -7830,9 +7830,67 @@ fn generate_graphql_operations_unfiltered(
     let subscription_root_fields = exposed_root_fields(RootKind::Subscription, &[]);
     let mutations_opted_out = mutations_disabled.is_some();
     let subscriptions_opted_out = subscriptions_disabled.is_some();
+    // Resolver catalogue facts (#544). A root is named only where the
+    // resolver enforces exactly that exposed root's static requirement, so the
+    // catalogue never has to spell a requirement out.
+    //
+    // A traversal into this entity enforces its auth mode and the mapped
+    // category's fixed scopes (`relation_traversal_authorization_tokens`).
+    // That differs from the root when the category binds scope templates,
+    // which refuse a traversal, or is undeclared while another read category
+    // is declared, which the traversal then also requires.
+    let traversal_matches_root = |category: &str| match operation_authorizations.get(category) {
+        Some(authorization) => authorization.template_alternatives().is_none(),
+        None => !TRAVERSAL_READ_CATEGORIES
+            .iter()
+            .any(|declared| operation_authorizations.contains_key(*declared)),
+    };
+    let optional_root = |named: bool, name: &str| {
+        if named {
+            quote! { ::std::option::Option::Some(#name) }
+        } else {
+            quote! { ::std::option::Option::None }
+        }
+    };
+    let resolver_to_many_root = optional_root(
+        query_shape_enabled("list") && traversal_matches_root("list"),
+        &list_query_name,
+    );
+    let single_read_root_exposed = query_shape_enabled("single");
+    let resolver_to_one_root = optional_root(
+        single_read_root_exposed && traversal_matches_root("single_read"),
+        &single_query_name,
+    );
+    // Entity resolvers enforce the auth mode and the `single_read` scopes. A
+    // template is bound from key fields there, not from root arguments.
+    let resolver_entity_root = optional_root(
+        single_read_root_exposed
+            && operation_authorizations
+                .get("single_read")
+                .is_none_or(|authorization| authorization.template_alternatives().is_none()),
+        &single_query_name,
+    );
+    let mut resolver_federation_keys = federation_keys
+        .iter()
+        .map(|key| {
+            let fields = key.arguments.iter().map(|argument| &argument.graphql_name);
+            quote! { &[#(#fields),*] }
+        })
+        .collect::<Vec<_>>();
+    if entity_meta.node_id.is_some() {
+        resolver_federation_keys
+            .push(quote! { &[::graphql_orm::graphql::federation::NODE_ID_FIELD] });
+    }
     let operation_metadata_impl = quote! {
         #[doc(hidden)]
         impl #struct_name {
+            pub const __GOM_RESOLVER_FACTS: ::graphql_orm::graphql::orm::GeneratedResolverFacts =
+                ::graphql_orm::graphql::orm::GeneratedResolverFacts {
+                    federation_keys: &[#(#resolver_federation_keys),*],
+                    to_many_root: #resolver_to_many_root,
+                    to_one_root: #resolver_to_one_root,
+                    entity_root: #resolver_entity_root,
+                };
             pub const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] =
                 &[#(#query_root_fields),*];
             pub const __GOM_MUTATION_ROOT_FIELDS: &'static [&'static str] =
@@ -8112,6 +8170,22 @@ fn generate_graphql_operations_unfiltered(
             quote! {}
         };
 
+    let computed_field_invalidation_target = (!repository_entity_hook_asks).then(|| quote! {
+        impl ::graphql_orm::graphql::subscriptions::ComputedFieldInvalidationTarget<#backend_marker, #key_type> for #struct_name {
+            fn invalidation_key_values(key: &#key_type) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
+                Self::__gom_key_values(key)
+            }
+
+            fn invalidation_row_key_values(&self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
+                Self::__gom_subscription_key_values(self)
+            }
+
+            fn authorize_invalidation_target_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
+                -> ::graphql_orm::async_graphql::Result<()> {
+                Self::__gom_authorize_changed_operation(ctx)
+            }
+        }
+    });
     let full_write_surface = generates_standard_write_surface;
     let query_root = queries::root(
         &query_context,
@@ -8197,6 +8271,7 @@ fn generate_graphql_operations_unfiltered(
             #composite_mutation_surface
             #composite_write_stubs
             #readonly_composite_changed
+            #computed_field_invalidation_target
         });
     }
 
@@ -8565,6 +8640,7 @@ fn generate_graphql_operations_unfiltered(
         // ============================================================================
 
         #generated_subscription_surface
+        #computed_field_invalidation_target
 
         // ============================================================================
         // Repository Trait Implementation

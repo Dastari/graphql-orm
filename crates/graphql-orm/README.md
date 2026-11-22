@@ -10,10 +10,39 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.197.0 adds derive-level opt-outs for generated mutations and Changed
+Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
 subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
 Generated mutations, entity getters, and relations return a curated field error
 when the schema lacks the database.
+
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
+Version 0.197.0 preserves SQL Server driver diagnostics when decoding rows
+and centralizes the decision for a missing authorization policy provider.
+For handwritten SQL, bind a typed NULL that matches the destination column.
+Runtime search supports collection columns named like its internal search
+key and score.
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
+
+Version 0.196.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+when a committed related-state write should prompt an authorized client to
+refetch a computed value. The signal contains the target ID and a public topic.
+
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
+In version 0.194.0, `schema_roots!` also emits `graphql_orm_resolver_catalog()`: the generated
+relationship fields and Federation entity resolvers of the schema, which no operation
+catalogue lists. It is descriptive, names only what the SDL publishes, and
+changes no existing catalogue or fingerprint. See
+[generated resolver operation metadata](../../docs/reference/graphql-orm/resolver-operation-metadata.md#relation-and-entity-resolvers).
+
+In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
+resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put
+`#[graphql_object_fields]` on one impl of it. Entities that do not opt in are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).

@@ -282,8 +282,63 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
+    // The generated-output witness: an inherent function that only a
+    // mounted generated relation object defines. Without it the local
+    // fallback applies, and the entity has no generated relation resolver.
+    let resolver_sources = entities.iter().map(|entity| {
+        quote! {
+            ::graphql_orm::graphql::orm::ResolverEntitySource::of::<#entity>(
+                #entity::__GOM_RESOLVER_FACTS,
+                {
+                    #[allow(dead_code)]
+                    trait OutputFallback {
+                        fn __gom_mounted_relation_fields() -> &'static [&'static str] { &[] }
+                    }
+                    impl<T> OutputFallback for T {}
+                    #entity::__gom_mounted_relation_fields()
+                },
+            )
+        }
+    });
     let operation_catalog_helper = quote! {
         #client_metadata_helper
+
+        /// Returns the resolver catalogue of [`graphql_orm_semantic_catalog`]:
+        /// every generated relationship field this schema serves and every
+        /// entity it resolves by a generated Federation key, which have no
+        /// root coordinate and so appear in no operation catalogue.
+        /// Handwritten resolvers are not listed. Coordinates are the names
+        /// the schema registers. Export it at build time with
+        /// `GraphqlResolverCatalog::export_json`.
+        ///
+        /// The document is descriptive. It names only public GraphQL
+        /// identities, grants no resolver, field, row, database or provider
+        /// authority, and changes no other catalogue or fingerprint.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the semantic catalogue itself does not
+        /// compose, or when the document does not validate against it or
+        /// exceeds one of its bounds.
+        pub fn graphql_orm_resolver_catalog() -> ::std::result::Result<
+            &'static ::graphql_orm::graphql::orm::GraphqlResolverCatalog,
+            &'static ::graphql_orm::graphql::orm::GraphqlSemanticError,
+        > {
+            static CATALOG: ::std::sync::OnceLock<
+                ::std::result::Result<
+                    ::graphql_orm::graphql::orm::GraphqlResolverCatalog,
+                    ::graphql_orm::graphql::orm::GraphqlSemanticError,
+                >
+            > = ::std::sync::OnceLock::new();
+            CATALOG.get_or_init(|| {
+                ::graphql_orm::graphql::orm::compose_resolver_catalog::<QueryRoot>(
+                    __graphql_orm_try_semantic_catalog().map_err(::std::clone::Clone::clone)?,
+                    ::std::vec![#(#resolver_sources),*],
+                )
+            })
+            .as_ref()
+        }
+
 
         /// Returns this schema's interpretation fingerprint: a value that
         /// changes when a release may read existing cursors, keys or `NodeId`
@@ -340,8 +395,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         /// resolver, field, row, database, or provider authority.
         pub fn graphql_orm_semantic_catalog(
         ) -> &'static ::graphql_orm::graphql::orm::GraphqlSemanticCatalog {
+            __graphql_orm_try_semantic_catalog()
+                .expect("macro-generated GraphQL semantic catalogue must validate")
+        }
+
+        /// The semantic catalogue, or the error its composition returned.
+        /// Composed once; `graphql_orm_semantic_catalog` and the resolver
+        /// catalogue share the result.
+        #[doc(hidden)]
+        pub fn __graphql_orm_try_semantic_catalog() -> ::std::result::Result<
+            &'static ::graphql_orm::graphql::orm::GraphqlSemanticCatalog,
+            &'static ::graphql_orm::graphql::orm::GraphqlSemanticError,
+        > {
             static CATALOG: ::std::sync::OnceLock<
-                ::graphql_orm::graphql::orm::GraphqlSemanticCatalog
+                ::std::result::Result<
+                    ::graphql_orm::graphql::orm::GraphqlSemanticCatalog,
+                    ::graphql_orm::graphql::orm::GraphqlSemanticError,
+                >
             > = ::std::sync::OnceLock::new();
             CATALOG.get_or_init(|| {
                 ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom(
@@ -354,8 +424,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     graphql_orm_operation_catalog(),
                     ::std::iter::empty()
                         #(.chain(#semantic_custom_operation_items))*
-                ).expect("macro-generated GraphQL semantic catalogue must validate")
+                )
             })
+            .as_ref()
         }
     };
 

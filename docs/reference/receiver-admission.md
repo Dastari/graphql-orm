@@ -3,7 +3,7 @@ title: Exact receiver-purpose admission
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -92,6 +92,12 @@ compares its hash with the signed argument hash. Omitted variables, explicit nul
 and explicit defaults bind differently even when coercion produces equal arguments;
 array order is significant. JSON objects sort recursively, numbers retain
 serde_json's encoding (this is not RFC 8785). SHA-256 is unprefixed lowercase hex.
+An issuer that is not built on `serde_json` must reproduce that number encoding
+exactly, for example `1.0` rather than `1`; integers and strings encode the
+same way under both. Catalogue 0.11.0 adds `rfc8785_json_hash` for new formats
+and leaves version 1 bindings unchanged. The document hash covers the exact
+UTF-8 bytes with no parsing or normalisation, so any difference in whitespace,
+comments or line endings refuses the request.
 Secret-derived hash comparisons use constant-time equality. All public admission
 failures return `AgqlReceiverRefused` / `RECEIVER_ADMISSION_REFUSED` without a reason.
 

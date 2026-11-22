@@ -1,0 +1,23 @@
+error: `#[graphql_orm(object_fields)]` cannot be combined with `#[graphql(complex)]`: a `SimpleObject` entity composes handwritten fields with `#[graphql_orm(compose_complex_object)]` and `#[graphql_orm::graphql_complex_object]`
+  --> tests/ui/object_fields_with_complex.rs:10:15
+   |
+10 | #[graphql_orm(object_fields)]
+   |               ^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `Record: async_graphql::ComplexObject` is not satisfied
+  --> tests/ui/object_fields_with_complex.rs:7:25
+   |
+ 7 | #[derive(GraphQLEntity, SimpleObject, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `async_graphql::ComplexObject` is not implemented for `Record`
+  --> tests/ui/object_fields_with_complex.rs:11:1
+   |
+11 | struct Record {
+   | ^^^^^^^^^^^^^
+help: the trait `async_graphql::ComplexObject` is implemented for `async_graphql::connection::Edge<Cursor, Node, EdgeFields, Name>`
+  --> $CARGO/async-graphql-$VERSION/src/types/connection/edge.rs
+   |
+   | #[ComplexObject(internal)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the derive macro `SimpleObject` which comes from the expansion of the attribute macro `ComplexObject` (in Nightly builds, run with -Z macro-backtrace for more info)

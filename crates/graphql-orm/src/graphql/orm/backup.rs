@@ -870,10 +870,10 @@ where
         SqlValue::String(event.id.clone()),
         SqlValue::String(action.to_string()),
         SqlValue::Int(changed_at),
-        SqlValue::Null,
-        SqlValue::Null,
-        SqlValue::Null,
-        SqlValue::Null,
+        SqlValue::StringNull,
+        SqlValue::StringNull,
+        SqlValue::StringNull,
+        SqlValue::StringNull,
     ];
     hook_ctx.execute(&sql, &values).await?;
     Ok(())

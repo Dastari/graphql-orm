@@ -137,6 +137,60 @@ impl AiRunExecutionSelectionReader for OrmAiRunExecutionSelectionReader {
             encoded.as_deref().ok_or(AiError::SessionExecutionUnbound)?,
         )
     }
+
+    async fn verify_compaction_fence(
+        &self,
+        lease: &AiRunLease,
+        selection: &AiSessionExecutionSelection,
+    ) -> Result<(), AiError> {
+        let lease = lease.clone();
+        let selection = selection.clone();
+        let expires_at = lease.lease_expires_at();
+        let clock = self.clock.clone();
+        let snapshot_clock = clock.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let conflict = || OrmPublicError::new(OrmErrorCode::Conflict);
+                    let run = crate::orm_runs::load_and_validate_active_lease(
+                        tx,
+                        &lease,
+                        snapshot_clock.now(),
+                    )
+                    .await?;
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&run.session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(conflict)?;
+                    let now = snapshot_clock.now();
+                    let pin = run
+                        .execution_selection
+                        .as_deref()
+                        .and_then(|value| crate::AiSessionExecutionSelection::decode(value).ok());
+                    if lease.state() != crate::AiRunState::Running
+                        || run.cancellation_request_id.is_some()
+                        || session.state != "active"
+                        || session.deleted_at.is_some()
+                        || session.execution_selection != run.execution_selection
+                        || pin.as_ref() != Some(&selection)
+                        || run
+                            .lease_expires_at
+                            .is_none_or(|expiry| expiry <= now.unix_timestamp())
+                        || now >= expires_at
+                    {
+                        return Err(conflict());
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        if clock.now() >= expires_at {
+            return Err(AiError::Conflict);
+        }
+        Ok(())
+    }
 }
 
 /// Checks bounded historical evidence inside the same transaction as the pin.

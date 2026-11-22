@@ -1049,7 +1049,18 @@ impl AiProvider for AiGrokAcpProvider {
         })
         .await
         .map_err(|_| timeout())??;
-        let tools = self.registration.tools().to_vec();
+        let tools = self
+            .registration
+            .tools()
+            .iter()
+            .cloned()
+            .map(|tool| {
+                (
+                    tool.tool_id.clone(),
+                    crate::provider::ModelToolOffer::new(tool),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         Ok(Box::pin(async_stream::try_stream! {
             let mut calls=BTreeMap::new();
             let mut guard=guard;
@@ -1066,7 +1077,7 @@ impl AiProvider for AiGrokAcpProvider {
                             || !call_id.bytes().all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'))
                             || calls.len() >= super::grok_acp::MAX_SDK_CALLS
                             || calls.contains_key(call_id)
-                            || !tools.iter().any(|tool| tool.tool_id == *tool_id)
+                            || !tools.contains_key(tool_id)
                         {
                             Err(rejected())?;
                         }
@@ -1075,9 +1086,9 @@ impl AiProvider for AiGrokAcpProvider {
                     ProviderEvent::ToolCallCompleted { call_id, arguments } if started && !usage => {
                         let (tool_id, complete) = calls.get_mut(call_id).ok_or_else(rejected)?;
                         if *complete { Err(rejected())?; }
-                        let definition = tools.iter().find(|tool| tool.tool_id == *tool_id).ok_or_else(rejected)?;
-                        if crate::ProviderDynamicToolCall::from_definition(
-                            "validated-turn", call_id.clone(), definition, arguments.clone()
+                        let offer = tools.get(tool_id).ok_or_else(rejected)?;
+                        if crate::ProviderDynamicToolCall::from_offer(
+                            "validated-turn", call_id.clone(), offer, arguments.clone()
                         ).is_err() {
                             let digest = argument_digest(arguments)?;
                             if responder.rejected.lock().await.get(call_id) != Some(&(tool_id.clone(), digest)) {
