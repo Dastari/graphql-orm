@@ -20,6 +20,9 @@ Start with the [five-minute SQLite GraphQL quickstart](docs/learn/sqlite-quickst
 It is a runnable Axum service with a managed SQLite schema, seed data, a
 generated GraphQL query, and a smoke test.
 
+PostgreSQL search on generated RLS entities looks up documents by primary key
+from visible base rows. See the [PostgreSQL search performance notes](docs/reference/graphql-orm/postgres.md#search-performance).
+
 ## When it fits
 
 Use this workspace when you want to:

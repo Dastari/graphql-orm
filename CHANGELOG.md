@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.207.0
+
+- **Fixed (#555).** PostgreSQL native search on generated RLS entities starts
+  from visible base rows and probes the search document primary key. This
+  avoids scanning documents for hidden base rows and keeps both RLS policies
+  in force. [Migration](MIGRATION.md#02010-to-02070-postgresql-rls-search)
+
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
 - **Fixed (#829).** Repeated entity identities return a typed composition

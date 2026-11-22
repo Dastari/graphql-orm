@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.201.0 to 0.207.0: PostgreSQL RLS search
+
+**No action.** Upgrade ORM and macros together. PostgreSQL searches on
+generated `#[graphql_rls]` entities now probe the search document primary key
+from each visible base row. The change is in ORM-generated queries and needs
+no database migration, index rebuild, or policy update. PostgreSQL keeps
+`@@` behind the search-document RLS policy because the operator is not
+leakproof, so this path uses the document primary-key B-tree. The search
+[performance notes](docs/reference/graphql-orm/postgres.md#search-performance)
+describe the cost for principals with broad visibility.
+
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
 **No action.** Upgrade ORM and macros together. The generated resolver

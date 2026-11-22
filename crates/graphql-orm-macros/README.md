@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.207.0 looks up search documents by primary key from visible base
+rows for generated PostgreSQL `#[graphql_rls]` entities. Both RLS policies
+stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
+
 Version 0.201.0 makes `schema_roots!` report duplicate entity identities
 through its fallible schema builders and resolver catalogue helper. Upgrade
 ORM and macros together. See the

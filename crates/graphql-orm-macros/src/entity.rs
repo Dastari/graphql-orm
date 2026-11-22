@@ -6204,9 +6204,11 @@ fn generate_entity_tokens(
             quote! { self.#search_pk_field.to_string() }
         };
         let search_key_json_fallback = search_key.clone();
+        let postgres_search_base_row_first = entity_meta.rls.is_some();
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+                const POSTGRES_SEARCH_BASE_ROW_FIRST: bool = #postgres_search_base_row_first;
                 const SEARCH_KEY_COLUMN: &'static str = #key_column;
                 const SEARCH_SCORE_COLUMN: &'static str = #score_column;
 

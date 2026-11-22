@@ -740,6 +740,120 @@ async fn create_doc(
         .to_string())
 }
 
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn base_row_first_search_preserves_rls_results() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::filters::SearchInput;
+    use graphql_orm::graphql::orm::SqlValue;
+
+    let Provisioned { owner } = provision().await?;
+    let (_, runtime) = role_pool(&owner, "search", "NOSUPERUSER NOBYPASSRLS").await?;
+    let (full_role, full) = role_pool(&owner, "search_full", "NOSUPERUSER NOBYPASSRLS").await?;
+    // This role can see every base row through a policy, so it still exercises
+    // both RLS quals. The document table keeps its generated policy.
+    sqlx::query(&format!(
+        "CREATE POLICY test_full_visibility ON rls_cov_docs FOR SELECT TO {full_role} USING (true)"
+    ))
+    .execute(&owner)
+    .await?;
+
+    sqlx::raw_sql(&format!(
+        "INSERT INTO rls_cov_docs (id, tenant_id, title, body) VALUES
+             (md5('1')::uuid, 'tenant-a', 'needle report', 'needle needle'),
+             (md5('2')::uuid, 'tenant-a', 'needle report', NULL),
+             (md5('3')::uuid, 'tenant-b', 'needle ledger', 'private body'),
+             (md5('4')::uuid, 'tenant-b', 'ordinary ledger', 'private body'),
+             (md5('5')::uuid, 'tenant-a', 'needle without a document', NULL);
+         INSERT INTO {SEARCH_TABLE} (entity_pk, entity_pk_json, document_text, document_vector, updated_at)
+         SELECT id::text, to_jsonb(id), concat_ws(' ', title, body),
+                setweight(to_tsvector('english', title), 'A')
+                || setweight(to_tsvector('english', coalesce(body, '')), 'B'), 0
+         FROM rls_cov_docs WHERE id <> md5('5')::uuid
+         UNION ALL
+         SELECT md5('6')::uuid::text, to_jsonb(md5('6')::uuid), 'needle orphan',
+                to_tsvector('english', 'needle orphan'), 0;"
+    ))
+    .execute(&owner)
+    .await?;
+
+    let legacy_sql = format!(
+        "SELECT to_jsonb(b) AS node, s.score
+         FROM rls_cov_docs b
+         JOIN (
+             SELECT entity_pk,
+                    CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS score
+             FROM {SEARCH_TABLE} CROSS JOIN plainto_tsquery('english', $1) q(query)
+             WHERE document_vector @@ q.query
+         ) s ON s.entity_pk = b.id::text
+         ORDER BY s.score DESC, b.id ASC"
+    );
+    let raw_document_count = format!("SELECT COUNT(*) AS count FROM {SEARCH_TABLE}");
+    for (pool, auth, visible_documents, expected_hits) in [
+        (&runtime, Some(tenant("tenant-a")), 2, 2),
+        (&runtime, Some(tenant("tenant-b")), 2, 1),
+        (&runtime, Some(tenant("tenant-denied")), 0, 0),
+        (&runtime, None, 0, 0),
+        (&full, None, 4, 3),
+    ] {
+        assert_eq!(
+            count_as(pool, &raw_document_count, auth.as_ref()).await?,
+            visible_documents
+        );
+        let legacy = fetch_rows_with_auth::<PostgresBackend>(
+            pool,
+            &legacy_sql,
+            &[SqlValue::String("needle".into())],
+            auth.as_ref(),
+        )
+        .await?
+        .into_iter()
+        .map(|row| {
+            let node: sqlx::types::Json<RlsCovDoc> = row.try_get("node")?;
+            let score: f64 = row.try_get("score")?;
+            Ok((node.0, score.to_bits()))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+        let search = || {
+            RlsCovDoc::search(
+                pool,
+                SearchInput {
+                    query: "needle".into(),
+                    mode: None,
+                    min_score: None,
+                },
+            )
+        };
+        let all = search().fetch_all_with_auth(auth.as_ref()).await?;
+        let hit_bytes = all
+            .into_iter()
+            .map(|hit| (hit.entity, hit.score.to_bits()))
+            .collect::<Vec<_>>();
+        assert_eq!(legacy.len(), expected_hits);
+        assert_eq!(
+            serde_json::to_vec(&hit_bytes)?,
+            serde_json::to_vec(&legacy)?
+        );
+
+        let page = search()
+            .limit(1)
+            .offset(1)
+            .fetch_connection_with_auth(auth.as_ref())
+            .await?;
+        let page_bytes = page
+            .edges
+            .into_iter()
+            .map(|edge| (edge.node, edge.score.to_bits()))
+            .collect::<Vec<_>>();
+        assert_eq!(page.page_info.total_count, Some(expected_hits as i64));
+        assert_eq!(
+            serde_json::to_vec(&page_bytes)?,
+            serde_json::to_vec(&legacy.iter().skip(1).take(1).collect::<Vec<_>>())?
+        );
+    }
+    Ok(())
+}
+
 #[cfg(feature = "change-journal")]
 async fn search_hits(
     schema: &CoverageSchema,

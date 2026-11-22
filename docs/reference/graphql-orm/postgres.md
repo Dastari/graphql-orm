@@ -435,14 +435,18 @@ doubling the cost of parsing floats. Store values that must be exact beyond
 
 ### Search performance
 
-PostgreSQL evaluates row-security quals before non-leakproof operators, and the full-text match
-operator `@@` is not leakproof. With the search document policy in place PostgreSQL can no longer
-use the GIN index for a search on an RLS entity: each search scans the search document table and
-probes the base primary key per document. In a disposable-container measurement with 200,000
-documents across ten tenants, a selective search went from about 8 ms to about 470 ms, and a broad
-one from about 85 ms to about 430 ms. Searches on entities without `#[graphql_rls]` are unchanged.
-Plan capacity accordingly for large RLS search tables. An index-preserving design is tracked in
-[#555](https://github.com/Dastari/graphql-orm/issues/555).
+Searches on generated `#[graphql_rls]` entities start from base rows visible
+to the current principal. For each visible row PostgreSQL can probe the search
+document's primary-key B-tree. This avoids a scan of the entire document table
+and keeps the search-document policy in force for each lookup.
+
+This path does not use the document-vector GIN index. PostgreSQL keeps the
+non-leakproof full-text operator `@@` behind the document's RLS policy, so the
+operator cannot drive an index scan. The work still grows with the number of
+visible base rows, including for a highly selective search term. Measure
+representative queries for principals with broad visibility. Entities without
+`#[graphql_rls]` keep the ordinary native search query, which can use GIN on
+tables without a document RLS policy.
 
 Use a separate runtime database role without superuser, `BYPASSRLS`, or inherited
 table-owner privileges. The schema owner applies the plan; the runtime role needs
