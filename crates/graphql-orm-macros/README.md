@@ -10,8 +10,17 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-The next ORM/macros minor aligns with the ORM's
-[closure predicate rendering update](../../MIGRATION.md#next-ormmacros-minor).
+Version 0.198.0 includes the
+[standalone closure rendering update](../../MIGRATION.md#ormmacros-01980-closure-read-predicates).
+
+Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
+`#[graphql_object_fields]`: handwritten resolver fields on the object
+`GraphQLEntity` generates, each behind the field read decision of a generated
+field. Entities that do not opt in generate the same output.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
+
+Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
+See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 
 Version 0.191.0 aligns with the ORM's
 [read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
@@ -815,6 +824,7 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `RepositoryEntity` | typed repository CRUD and private projections with no GraphQL surface |
 | `GraphQLRelations` | batched single/composite-key relation resolvers |
 | `graphql_complex_object` | handwritten complex fields composed with generated relations |
+| `graphql_object_fields` | handwritten resolver fields added to the object `GraphQLEntity` generates, with `#[graphql_orm(object_fields)]` |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
 | `graphql_orm_custom_operations` | semantic metadata beside a handwritten root impl, plus its enforced authorization and assurance guards |

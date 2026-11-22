@@ -377,15 +377,14 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   negate it.
 - **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
-  search and subscription delivery re-reads. Where the target's columns can
-  be safely projected, the governed row and reached rows share one target
-  evaluation expression. A direct nested closure supplies its scalar truth
-  result. Other targets may still need separate TRUE and FALSE tests on SQL
-  Server or when a target supplies a distinct FALSE rendering. In each test,
-  the target's values retain their order. Nested closures get distinct names.
-  A closure is never evaluated
-  in memory, and never for the whole table. MySQL and other backends are
-  refused with `AUTHORIZATION_MISCONFIGURED`.
+  search and subscription delivery re-reads. SQLite and SQL Server can
+  project the governed and reached rows into one target expression for a
+  standalone closure. PostgreSQL keeps the traversal join and can encode
+  scalar truth at each site with a single target expression. Composed
+  policies keep the original rendering with separate TRUE and FALSE tests.
+  Every test keeps the target's bind order. Nested closures get distinct
+  names. The database evaluates the closure per row. Unsupported backends
+  are refused with `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
   so the walk is unrolled into a breadth-first search, with no schema objects
@@ -448,7 +447,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   | Relations that all generated relation filters and relation-count orderings add, each count ordering at least one (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 64 / 5 |
   | Terms of a generated `orderBy` list (`MAX_ORDER_BY_TERMS`), refused as `INVALID_INPUT` | one request | all | 16 |
 
-  Closures are counted once per rendered occurrence. A generated statement
+  Composition budgets count every occurrence in the original rendering,
+  including both TRUE and FALSE tests at each evaluation site. A generated statement
   holds at most its entity's own policy plus its relation filters and count
   orderings: 2 MiB of policy SQL, and 192 weighted relations on SQLite and
   PostgreSQL or 14 on SQL Server.
@@ -530,8 +530,10 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     for every two levels, so the `CASE` limit stops it at twenty levels (nine
     on SQL Server, at the relation total).
   - **What fits on SQL Server.** Each `related` or `not_related` around a
-    closure adds two subquery levels and one relation. The budget checks
-    the resulting shape, including the target expression. A relation chain
+    closure adds two subquery levels and one relation. At the default bound,
+    the standalone projection uses 66 subquery levels. A closure through a relation
+    inside another closure uses 73 in the original composition rendering.
+    The budget checks the original shape, including the target expression. A relation chain
     alone may be nine deep, and a relation filter or count ordering may add
     five relations to a statement.
   - **Cost guidance.** Keep closures to one level where you can. Index the key

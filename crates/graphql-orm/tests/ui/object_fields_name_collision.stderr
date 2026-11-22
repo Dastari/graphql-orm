@@ -1,0 +1,11 @@
+error: handwritten field `DisplayName` collides with the generated field `DisplayName` of `Record`; rename one of them
+  --> tests/ui/object_fields_name_collision.rs:21:14
+   |
+21 |     async fn display_name(&self) -> Result<String> {
+   |              ^^^^^^^^^^^^
+
+error: handwritten field `RecordVersion` collides with the generated field `RecordVersion` of `Other`; rename one of them
+  --> tests/ui/object_fields_name_collision.rs:40:14
+   |
+40 |     async fn handwritten_version(&self) -> Result<i64> {
+   |              ^^^^^^^^^^^^^^^^^^^

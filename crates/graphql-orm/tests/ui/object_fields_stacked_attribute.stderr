@@ -1,0 +1,11 @@
+error: graphql_object_fields accepts only `allow`, `warn`, `deny`, `forbid`, `expect` and `cfg` beside it on the impl: any other attribute would run on the generated object after its resolvers were given their field check
+  --> tests/ui/object_fields_stacked_attribute.rs:20:1
+   |
+20 | #[graphql_orm::graphql_complex_object]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: graphql_object_fields accepts only `allow`, `warn`, `deny`, `forbid`, `expect` and `cfg` beside it on the impl: any other attribute would run on the generated object after its resolvers were given their field check
+  --> tests/ui/object_fields_stacked_attribute.rs:38:1
+   |
+38 | #[cfg_attr(all(), graphql_orm::graphql_complex_object)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

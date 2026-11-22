@@ -79,7 +79,7 @@ struct GraphqlNames {
 }
 
 /// Whether a boolean option such as `skip` is set, as `skip` or `skip = true`.
-fn flag(option: &Meta, name: &str) -> syn::Result<bool> {
+pub(crate) fn flag(option: &Meta, name: &str) -> syn::Result<bool> {
     match option {
         Meta::Path(path) if path.is_ident(name) => Ok(true),
         Meta::NameValue(value) if value.path.is_ident(name) => {

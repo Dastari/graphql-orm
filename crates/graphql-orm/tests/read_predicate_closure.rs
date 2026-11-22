@@ -567,9 +567,26 @@ mod portable {
                 ));
             }
         }
-        // Sibling closures do not add nesting depth.
+        // Combining closures side by side is not nesting; each counts towards
+        // the relation total, so two two-level closures together exceed it.
         two.clone().or(any(PARENT, passes())).unwrap();
-        two.or(through).unwrap();
+        misconfigured(two.or(through));
+    }
+
+    #[test]
+    fn nested_closures_charge_every_original_copy_of_inner_relations() {
+        let packed = |target| {
+            ReadPredicate::related_closure_all::<B, ClosureNode>(PARENT, target)
+                .and_then(|inner| ReadPredicate::related_closure::<B, ClosureNode>(PARENT, inner))
+        };
+        let mut target = passes();
+        if B::DIALECT != DatabaseBackend::Mssql {
+            for _ in 0..2 {
+                target = target.and(related_to_itself(passes())).unwrap();
+            }
+        }
+        packed(target.clone()).unwrap();
+        misconfigured(packed(target.and(related_to_itself(passes())).unwrap()));
     }
 
     #[test]
@@ -673,7 +690,12 @@ mod portable {
     #[test]
     fn statement_nesting_is_budgeted_on_sql_server() {
         let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
-        for target in [all(PARENT, passes()), two_levels] {
+        // A standalone closure shares the target. Nested closures and
+        // relation wrappers use the original shape and budgets.
+        for (target, room, levels) in [(all(PARENT, passes()), 4, 66), (two_levels, 0, 73)] {
+            if B::DIALECT == DatabaseBackend::Mssql {
+                assert_eq!(subquery_nesting(&rendered(&target)), levels);
+            }
             let (deepest, wrappers) = deepest_wrapped_closure(target);
             let nesting = subquery_nesting(&rendered(&deepest));
             if B::DIALECT == DatabaseBackend::Mssql {
@@ -682,6 +704,7 @@ mod portable {
                 // when the policy is built.
                 assert_eq!(READ_PREDICATE_MSSQL_MAX_NESTING, 75);
                 assert!(nesting <= READ_PREDICATE_MSSQL_MAX_NESTING, "{nesting}");
+                assert_eq!(wrappers, room);
             } else {
                 // No subquery budget off SQL Server: the relation nesting
                 // limit stops it, counting the closure's own relations.
@@ -1339,24 +1362,14 @@ mod portable {
             .with_read_visibility(&ReadVisibility::Complete(tree))
             .unwrap()
             .build_delete_sql();
-        let expected: &[i64] = if B::DIALECT == DatabaseBackend::Mssql {
-            &[11, 12, 13, 12, 13, 14]
-        } else {
-            &[11, 12, 13, 14]
-        };
         assert_eq!(
             binds,
-            expected
-                .iter()
-                .copied()
+            [11, 12, 13, 12, 13, 12, 13, 12, 13, 14]
                 .map(SqlValue::Int)
-                .collect::<Vec<_>>(),
+                .to_vec(),
             "{sql}"
         );
-        assert_eq!(
-            placeholder_positions(&sql),
-            (1..=expected.len()).collect::<Vec<_>>()
-        );
+        assert_eq!(placeholder_positions(&sql), (1..=10).collect::<Vec<_>>());
         if B::DIALECT == DatabaseBackend::Mssql {
             // One nested level and OUTER APPLY per hop, and no CTE.
             assert!(!sql.contains("WITH"), "{sql}");
@@ -1376,20 +1389,7 @@ mod portable {
             )))
             .unwrap()
             .build_delete_sql();
-        eprintln!(
-            "nested closure ({:?}): {} SQL bytes, {} binds",
-            B::DIALECT,
-            sql.len(),
-            binds.len()
-        );
-        assert_eq!(
-            binds.len(),
-            if B::DIALECT == DatabaseBackend::Mssql {
-                2
-            } else {
-                1
-            }
-        );
+        assert_eq!(binds.len(), 16, "{sql}");
         assert!(sql.contains("__gom_closure_1") && sql.contains("__gom_closure_2"));
         // Composite keys join every column.
         let (sql, _) = EntityQuery::<ClosureNode>::new()
@@ -1400,6 +1400,29 @@ mod portable {
         // Negating a valid closure is not mistaken for a match-nothing term.
         not(any(PARENT, passes()));
         not(all(COMPOSITE, passes()));
+    }
+
+    #[test]
+    fn standalone_closure_reduces_target_copies() {
+        let (sql, binds) = EntityQuery::<ClosureNode>::new()
+            .with_read_visibility(&ReadVisibility::Complete(all(PARENT, passes())))
+            .unwrap()
+            .build_delete_sql();
+        let copies = if B::DIALECT == DatabaseBackend::Sqlite {
+            1
+        } else {
+            2
+        };
+        assert_eq!(binds, vec![SqlValue::Int(5); copies]);
+        assert_eq!(
+            placeholder_positions(&sql),
+            (1..=copies).collect::<Vec<_>>()
+        );
+        eprintln!(
+            "standalone closure ({:?}): {} bytes, {copies} binds",
+            B::DIALECT,
+            sql.len()
+        );
     }
 
     fn empty_score_list() -> ReadPredicate {
