@@ -25,9 +25,16 @@ for historical context.
   declarations that map to the same physical identifier. SQL Server
   planning now refuses these collisions (#813).
 - **No action.** SQL Server supports bounded row-size preflights and filtered
-  unique indexes over non-null keys. Entities opting in to
-  `exact_string_filters = true` have length-sensitive string comparisons and
-  plans use BIN2 collation on generated Unicode string keys (#813).
+  unique indexes over non-null keys.
+- **Action needed, only when opting in.** Entities opting in to
+  `exact_string_filters = true` get length-sensitive string comparisons, and
+  SQL Server plans give their generated Unicode string keys (primary keys,
+  unique columns, relation foreign-key sources and index members)
+  `COLLATE Latin1_General_100_BIN2`. Opt in both sides of a string foreign key
+  together, because SQL Server requires matching collations. On an existing
+  table, the generated `ALTER COLUMN … COLLATE` fails on indexed or constrained
+  columns: drop and recreate the dependent indexes and constraints around it.
+  Removing the option later leaves the live BIN2 collation in place (#813).
 
 ## Unreleased - ORM/macros 0.200.0
 

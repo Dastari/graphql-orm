@@ -879,7 +879,18 @@ it, for review or for a host's own tooling.
 - `exact_string_filters = true` applies binary, length-sensitive matching to
   generated equality and membership filters for Unicode columns. The default
   string filters, pattern matching, sort order, and uniqueness use the column's
-  collation.
+  collation. Plans also render `COLLATE Latin1_General_100_BIN2` on the
+  entity's generated Unicode key columns: primary keys, unique columns,
+  relation foreign-key sources and index members.
+  - SQL Server requires both sides of a string foreign key to share a
+    collation, so opt in the referencing and referenced entities together.
+  - On an existing table the planner emits `ALTER COLUMN … COLLATE`, which
+    SQL Server refuses on indexed or constrained columns. Drop the dependent
+    indexes, unique constraints or primary key, apply the step, and recreate
+    them.
+  - BIN2 makes uniqueness case-sensitive, which is stricter than the default,
+    so existing rows don't collide. Removing the option leaves the live BIN2
+    collation in place, and schema validation accepts it.
 - Search metadata statements are T-SQL. SQL Server full-text indexes are not
   created; the plan renders a comment for them.
 
