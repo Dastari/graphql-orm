@@ -146,7 +146,8 @@ struct RecordRelationship {
         target = "Record",
         from = "source_record_id",
         to = "id",
-        propagate_change = "up"
+        propagate_change = "up",
+        propagate_change_action = "updated"
     )]
     pub source_record: Option<Record>,
 
@@ -739,16 +740,26 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
         (
             first_event["record"]["id"].as_str().unwrap().to_string(),
             first_event["path"][0].as_str().unwrap().to_string(),
+            first_event["action"].as_str().unwrap().to_string(),
         ),
         (
             second_event["record"]["id"].as_str().unwrap().to_string(),
             second_event["path"][0].as_str().unwrap().to_string(),
+            second_event["action"].as_str().unwrap().to_string(),
         ),
     ];
     received.sort();
     let mut expected = vec![
-        (first_record_id.clone(), "sourceRecord".to_string()),
-        (second_record_id.clone(), "targetRecord".to_string()),
+        (
+            first_record_id.clone(),
+            "sourceRecord".to_string(),
+            "UPDATED".to_string(),
+        ),
+        (
+            second_record_id.clone(),
+            "targetRecord".to_string(),
+            "CREATED".to_string(),
+        ),
     ];
     expected.sort();
     assert_eq!(received, expected);
@@ -830,6 +841,227 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
             .await
             .is_err(),
         "propagation emitted an extra event for the same path"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn propagation_action_is_selected_per_hop() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let database = graphql_orm::db::Database::new(setup_pool().await?);
+    let schema = schema(database.clone());
+
+    let mut records = Vec::new();
+    for name in ["Source", "Target"] {
+        let collection =
+            Collection::insert(&database, CreateCollectionInput { name: name.into() }).await?;
+        records.push(
+            Record::insert(
+                &database,
+                CreateRecordInput {
+                    collection_id: collection.id,
+                    title: name.into(),
+                },
+            )
+            .await?,
+        );
+    }
+    let [source, target] = records.as_slice() else {
+        unreachable!("the fixture creates two records");
+    };
+    let mut record = Box::pin(schema.execute_stream(Request::new(format!(
+        r#"subscription {{ recordChanged(key: "{}") {{ action path }} }}"#,
+        source.id,
+    ))));
+    let mut collection = Box::pin(schema.execute_stream(Request::new(format!(
+        r#"subscription {{ collectionChanged(key: "{}") {{ action path }} }}"#,
+        source.collection_id,
+    ))));
+    wait_until_pending(&mut record).await;
+    wait_until_pending(&mut collection).await;
+
+    RecordRelationship::insert(
+        &database,
+        CreateRecordRelationshipInput {
+            source_record_id: source.id,
+            target_record_id: target.id,
+            kind: "related".into(),
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        next_json(&mut record).await,
+        serde_json::json!({"recordChanged": {"action": "UPDATED", "path": ["sourceRecord"]}}),
+    );
+    assert_eq!(
+        next_json(&mut collection).await,
+        serde_json::json!({
+            "collectionChanged": {"action": "CREATED", "path": ["sourceRecord", "collection"]},
+        }),
+    );
+    Ok(())
+}
+
+struct DenyRelationshipRead;
+
+impl EntityPolicy for DenyRelationshipRead {
+    fn can_access_entity<'a>(
+        &'a self,
+        ctx: Option<&'a graphql_orm::async_graphql::Context<'_>>,
+        _: &'a graphql_orm::db::Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        kind: EntityAccessKind,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
+        Box::pin(async move {
+            let denied = entity == "RecordRelationship"
+                && kind == EntityAccessKind::Read
+                && ctx.is_some_and(|ctx| ctx.data_opt::<Self>().is_some());
+            Ok(!denied)
+        })
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn opted_in_relation_reports_parent_updates() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let pool = setup_pool().await?;
+    let mut database = graphql_orm::db::Database::new(pool);
+    database.set_entity_policy(DenyRelationshipRead);
+    let schema = schema(database.clone());
+    let collection = Collection::insert(
+        &database,
+        CreateCollectionInput {
+            name: "Collection".into(),
+        },
+    )
+    .await?;
+    let source = Record::insert(
+        &database,
+        CreateRecordInput {
+            collection_id: collection.id,
+            title: "Source".into(),
+        },
+    )
+    .await?;
+    let target = Record::insert(
+        &database,
+        CreateRecordInput {
+            collection_id: collection.id,
+            title: "Target".into(),
+        },
+    )
+    .await?;
+
+    let parent_request = |filter| {
+        Request::new(format!(
+            r#"subscription {{
+            recordChanged(key: "{}", {filter}) {{
+                action changeKind sourceEntity sourceId path record {{ id }}
+            }}
+        }}"#,
+            source.id
+        ))
+    };
+    let mut all = Box::pin(schema.execute_stream(parent_request("")));
+    let mut updated =
+        Box::pin(schema.execute_stream(parent_request("filter: { actions: [UPDATED] }")));
+    let mut created =
+        Box::pin(schema.execute_stream(parent_request("filter: { actions: [CREATED] }")));
+    let mut denied = Box::pin(schema.execute_stream(
+        parent_request("filter: { actions: [UPDATED] }").data(DenyRelationshipRead),
+    ));
+    let mut child = Box::pin(schema.execute_stream(Request::new(
+        "subscription { recordRelationshipChanged { action changeKind } }",
+    )));
+    for stream in [
+        &mut all,
+        &mut updated,
+        &mut created,
+        &mut denied,
+        &mut child,
+    ] {
+        wait_until_pending(stream).await;
+    }
+
+    let created_relationship = schema
+        .execute(Request::new(format!(
+            r#"mutation {{
+            createRecordRelationship(input: {{
+                sourceRecordId: "{}"
+                targetRecordId: "{}"
+                kind: "related"
+            }}) {{ recordRelationship {{ id }} }}
+        }}"#,
+            source.id, target.id
+        )))
+        .await;
+    assert!(
+        created_relationship.errors.is_empty(),
+        "{:?}",
+        created_relationship.errors
+    );
+    let relationship_id =
+        created_relationship.data.into_json()?["createRecordRelationship"]["recordRelationship"]["id"]
+            .as_str().expect("relationship id").to_string();
+
+    let create_event = serde_json::json!({
+        "recordChanged": {
+            "action": "UPDATED", "changeKind": "PROPAGATED",
+            "sourceEntity": "RecordRelationship", "sourceId": relationship_id,
+            "path": ["sourceRecord"], "record": { "id": source.id },
+        }
+    });
+    assert_eq!(next_json(&mut all).await, create_event);
+    assert_eq!(next_json(&mut updated).await, create_event);
+    assert_eq!(
+        next_json(&mut child).await,
+        serde_json::json!({
+            "recordRelationshipChanged": { "action": "CREATED", "changeKind": "DIRECT" },
+        })
+    );
+    assert!(
+        timeout(Duration::from_millis(250), denied.next())
+            .await
+            .is_err()
+    );
+
+    let deleted = schema
+        .execute(Request::new(format!(
+            r#"mutation {{ deleteRecordRelationship(id: "{relationship_id}") {{ success }} }}"#,
+        )))
+        .await;
+    assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
+    assert_eq!(
+        deleted.data.into_json()?["deleteRecordRelationship"]["success"],
+        true
+    );
+
+    let delete_event = serde_json::json!({
+        "recordChanged": {
+            "action": "UPDATED", "changeKind": "PROPAGATED",
+            "sourceEntity": null, "sourceId": null,
+            "path": ["sourceRecord"], "record": { "id": source.id },
+        }
+    });
+    assert_eq!(next_json(&mut all).await, delete_event);
+    assert_eq!(next_json(&mut updated).await, delete_event);
+    assert_eq!(next_json(&mut denied).await, delete_event);
+    assert!(
+        timeout(Duration::from_millis(250), created.next())
+            .await
+            .is_err()
     );
 
     Ok(())

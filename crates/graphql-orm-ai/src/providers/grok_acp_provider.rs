@@ -104,6 +104,7 @@ pub struct AiGrokAcpRegistration {
     retained_namespace: Option<String>,
     base_identity: String,
     capability_binding: Option<AiProviderCapabilitySessionBinding>,
+    resolved_entity_reference_delivery: Option<Duration>,
 }
 
 impl std::fmt::Debug for AiGrokAcpRegistration {
@@ -189,6 +190,7 @@ impl AiGrokAcpRegistration {
             base_identity: identity.clone(),
             identity,
             capability_binding: None,
+            resolved_entity_reference_delivery: None,
         })
     }
 
@@ -253,6 +255,44 @@ impl AiGrokAcpRegistration {
         self.refresh_identity();
         self.capability_binding = None;
         Ok(self)
+    }
+    /// Opts this registration in to receiving what entity references
+    /// resolved to. Off by default: without this call the Grok process is
+    /// sent the unavailable marker for every reference, whatever the
+    /// deployment's [`crate::AiEntityReferenceRegistry`] resolves.
+    ///
+    /// `maximum_age` bounds the time from the start of resolution to the
+    /// moment the one `session/prompt` write that carries the data may
+    /// begin. It covers the host hook, launch admission, process launch,
+    /// session resume and frame encoding. A prompt whose resolution is older
+    /// than that when its write would start is sent with markers instead. A
+    /// write that has started may complete; one still in progress when the
+    /// bound passes is stopped, the turn fails, the process's writer is
+    /// disabled for good and the process tree is killed, so no remainder of
+    /// the frame is delivered.
+    ///
+    /// Opting in is a disclosure decision the crate cannot check. Grok
+    /// keeps the session, including reference data a prompt sent, in its
+    /// retained session files until the session is deleted. The setting is
+    /// not part of the registration identity or any session fingerprint.
+    ///
+    /// # Errors
+    /// Rejects a zero age or one above
+    /// [`crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`].
+    pub fn with_resolved_entity_reference_delivery(
+        mut self,
+        maximum_age: Duration,
+    ) -> Result<Self, ProviderError> {
+        if maximum_age.is_zero() || maximum_age > crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE {
+            return Err(ProviderError::InvalidRequest);
+        }
+        self.resolved_entity_reference_delivery = Some(maximum_age);
+        Ok(self)
+    }
+    /// The freshness bound of resolved entity-reference delivery, or `None`
+    /// when the registration has not opted in and receives markers only.
+    pub const fn resolved_entity_reference_delivery(&self) -> Option<Duration> {
+        self.resolved_entity_reference_delivery
     }
     /// Binds retained storage to a host-verified stable path/account namespace.
     /// Changing models or effort must not change this value; changing storage or
@@ -403,6 +443,147 @@ impl AiGrokAcpRegistration {
     }
 }
 
+/// The text of one admitted prompt, with what its entity references resolved
+/// to for this one dispatch.
+///
+/// The value is built by [`AiGrokAcpProvider`] from the dispatch the
+/// provider-call executor resolved for the run's current principal, and is
+/// moved to [`AiGrokAcpRunProcess::prompt_dispatch`]. It is neither `Clone`
+/// nor `Serialize` and its `Debug` output prints a block count only, so the
+/// resolved text can be read exactly once, by consuming the value. It holds
+/// resolved text only for a registration that opted in with
+/// [`AiGrokAcpRegistration::with_resolved_entity_reference_delivery`], and
+/// gives it up only until the registration's freshness bound, counted from
+/// the start of resolution. It proves nothing about access or egress; those
+/// were checked before it was built.
+pub struct AiGrokAcpPromptInput {
+    /// One entry per input block: the text to send when nothing resolved is
+    /// sent, and the resolved text when the block is an entity reference
+    /// that resolved.
+    blocks: Vec<(String, Option<String>)>,
+    /// The latest instant at which the write that carries resolved text may
+    /// begin. `None` when the value holds no resolved text.
+    write_deadline: Option<std::time::Instant>,
+}
+
+impl std::fmt::Debug for AiGrokAcpPromptInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiGrokAcpPromptInput")
+            .field("blocks", &self.blocks.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AiGrokAcpPromptInput {
+    /// Builds the prompt from an already validated text/JSON request.
+    ///
+    /// `request` is the marker form of the dispatched request and
+    /// `references` what its references resolved to. `delivery` is the
+    /// registration's opt-in: without it nothing resolved is kept.
+    fn from_parts(
+        request: ModelRequest,
+        references: &crate::ModelDispatchReferences,
+        delivery: Option<Duration>,
+    ) -> Self {
+        let write_deadline =
+            delivery.and_then(|maximum_age| references.write_deadline(maximum_age));
+        let blocks = request
+            .input
+            .into_iter()
+            .map(|block| match block {
+                ModelInputBlock::Text { text } => (text, None),
+                ModelInputBlock::Json { value } => {
+                    let wire = references.wire_json(&value);
+                    let resolved = (write_deadline.is_some() && !std::ptr::eq(wire, &value))
+                        .then(|| wire.to_string());
+                    (value.to_string(), resolved)
+                }
+                _ => unreachable!("validated text only"),
+            })
+            .collect();
+        Self {
+            blocks,
+            write_deadline,
+        }
+    }
+
+    /// A value for wire-process tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        blocks: Vec<(String, Option<String>)>,
+        write_deadline: Option<std::time::Instant>,
+    ) -> Self {
+        Self {
+            blocks,
+            write_deadline,
+        }
+    }
+
+    /// A copy of the prompt text with every entity reference as the
+    /// unavailable marker. It holds no reference data.
+    pub fn unavailable_text(&self) -> Vec<String> {
+        self.blocks.iter().map(|(text, _)| text.clone()).collect()
+    }
+
+    /// Discards everything resolved and returns the prompt text with every
+    /// entity reference as the unavailable marker. The result holds no
+    /// reference data.
+    pub fn into_unavailable_text(self) -> Vec<String> {
+        self.blocks.into_iter().map(|(text, _)| text).collect()
+    }
+
+    /// Returns the prompt text for the one `session/prompt` write, and the
+    /// instant by which that write must begin.
+    ///
+    /// Call this immediately before the write, when the process and session
+    /// are ready. The text carries what each entity reference resolved to
+    /// only if the freshness bound has not passed at the time of the call and
+    /// `fits` accepts it; the second value is then `Some`. Otherwise every
+    /// reference is the unavailable marker, which is the text the request was
+    /// admitted with, and the second value is `None`.
+    ///
+    /// The returned instant bounds when the write may begin. The caller must
+    /// compare it with the clock again after encoding the frame, after any
+    /// wait for a shared writer, and immediately before the transport write
+    /// starts, and send
+    /// [`Self::unavailable_text`] (taken before this call) if it has passed.
+    /// A write that has started may complete. If it is still in progress at
+    /// that instant the caller must stop it, fail the turn, never write to
+    /// that transport again (not even `session/cancel`), and have the process
+    /// tree killed, so that no remainder of the frame is delivered.
+    ///
+    /// `fits` is asked at most once whether the resolved text is within the
+    /// bounds the process enforces on a prompt and on its frame. It must not
+    /// keep what it is shown. Use the returned text for the one transport
+    /// write and drop it.
+    pub fn into_wire_text(
+        self,
+        fits: impl FnOnce(&[String]) -> bool,
+    ) -> (Vec<String>, Option<std::time::Instant>) {
+        let deadline = self
+            .write_deadline
+            .filter(|deadline| std::time::Instant::now() < *deadline)
+            .filter(|_| self.blocks.iter().any(|(_, resolved)| resolved.is_some()));
+        let Some(deadline) = deadline else {
+            return (self.into_unavailable_text(), None);
+        };
+        let (unavailable, wire): (Vec<String>, Vec<String>) = self
+            .blocks
+            .into_iter()
+            .map(|(text, resolved)| match resolved {
+                Some(resolved) => (text, resolved),
+                None => (text.clone(), text),
+            })
+            .unzip();
+        if fits(&wire) {
+            (wire, Some(deadline))
+        } else {
+            (unavailable, None)
+        }
+    }
+}
+
 /// Trusted deployment-owned, strictly typed Grok process operations.
 /// Implementations must use the upstream ACP codec/actor, never execute tools,
 /// disclose credentials, replay completed callbacks, or infer session absence
@@ -430,6 +611,32 @@ pub trait AiGrokAcpRunProcess: Send + Sync {
         input: Vec<String>,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError>;
+    /// Starts one exact admitted prompt and consumes what its entity
+    /// references resolved to for this one dispatch.
+    ///
+    /// [`AiGrokAcpProvider`] calls this method only for a registration that
+    /// opted in with
+    /// [`AiGrokAcpRegistration::with_resolved_entity_reference_delivery`];
+    /// otherwise it calls [`Self::prompt`] with markers. The default discards
+    /// everything resolved and calls [`Self::prompt`] with text in which
+    /// every entity reference is the unavailable marker, so a process
+    /// written before this method existed keeps sending markers.
+    ///
+    /// A process that overrides it must call
+    /// [`AiGrokAcpPromptInput::into_wire_text`] immediately before its one
+    /// `session/prompt` write, follow the deadline rules documented there,
+    /// and must not copy that text into anything that is cloned, stored,
+    /// logged, queued or retried.
+    ///
+    /// # Errors
+    /// Rejects unsupported state, transport failures and uncertain terminals.
+    async fn prompt_dispatch(
+        &self,
+        input: AiGrokAcpPromptInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.prompt(input.into_unavailable_text(), responder).await
+    }
     /// Sends `session/cancel` for this exact live session. This is not settled
     /// cancellation proof and must not report partial context as reusable.
     ///
@@ -806,32 +1013,40 @@ impl AiProvider for AiGrokAcpProvider {
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        // This adapter turns a request into a cloneable, queued turn for a
-        // local agent process, so it never takes resolved reference data:
-        // every entity reference is sent as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
+        // The request is admitted in its marker form, which holds no
+        // reference data: validation, session binding and activation see
+        // nothing resolved. For a registration that opted in, what the
+        // references resolved to stays in the non-`Clone` prompt input, which
+        // is moved to the process for its one `session/prompt` write. A
+        // process that does not take it sends the markers.
+        let (request, references) = dispatch.into_unavailable_parts();
         let binding = self.validate_context(&request, &context)?;
+        let delivery = self.registration.resolved_entity_reference_delivery();
+        let input = AiGrokAcpPromptInput::from_parts(request, &references, delivery);
+        drop(references);
         let session = context.provider_session().ok_or_else(rejected)?;
         let guard = self.activate(binding, session).await?;
         let entry = guard.entry.clone();
-        let input = request
-            .input
-            .into_iter()
-            .map(|block| match block {
-                ModelInputBlock::Text { text } => text,
-                ModelInputBlock::Json { value } => value.to_string(),
-                _ => unreachable!("validated text only"),
-            })
-            .collect();
         let deadline = tokio::time::Instant::now() + self.turn_timeout;
         let responder = Arc::new(RejectionTrackingResponder {
             inner: responder,
             rejected: Mutex::new(BTreeMap::new()),
         });
-        let mut stream = tokio::time::timeout_at(
-            deadline,
-            entry.process.process.prompt(input, responder.clone()),
-        )
+        // The prompt input's freshness bound started at resolution, so it
+        // already includes validation, launch admission, launch and resume
+        // above. The process checks it again at the write.
+        let process = entry.process.process.clone();
+        let mut stream = tokio::time::timeout_at(deadline, async {
+            if delivery.is_some() {
+                process.prompt_dispatch(input, responder.clone()).await
+            } else {
+                // Not opted in: the process is given marker text and never
+                // sees the prompt input.
+                process
+                    .prompt(input.into_unavailable_text(), responder.clone())
+                    .await
+            }
+        })
         .await
         .map_err(|_| timeout())??;
         let tools = self.registration.tools().to_vec();

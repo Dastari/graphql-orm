@@ -196,6 +196,7 @@ mod entity;
 mod federation;
 mod mutation_result;
 mod naming;
+mod object_fields;
 mod operations;
 mod policy_object;
 mod relations;
@@ -605,6 +606,68 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         impl ::graphql_orm::graphql::orm::GeneratedComplexObjectMounted for #self_ty {}
     }
     .into()
+}
+
+#[proc_macro_attribute]
+/// Add handwritten resolver fields to the GraphQL object `GraphQLEntity` generates.
+///
+/// Mark the entity with `#[graphql_orm(object_fields)]` and apply this to one
+/// inherent `impl` of it, in the entity's module. Each `async fn` taking
+/// `&self` and returning `async_graphql::Result<T>` becomes a field of the
+/// generated object, beside the generated column fields, `NodeId` and
+/// `RecordVersion`, which are unchanged. Its doc comment is its description,
+/// and it is named by the entity's naming rule unless `#[graphql(name = "...")]`
+/// names it. A method marked `#[graphql(skip)]` stays a plain helper.
+///
+/// A handwritten field runs the checks a generated column field runs before
+/// its body: it is refused in generated `Changed` subscriptions unless the
+/// method declares `#[graphql_orm(subscribe)]`, and the field read decision is
+/// asked for its row, with the policy key declared by
+/// `#[graphql_orm(read_policy = "key")]` or none. A refusal is the field's
+/// error. A field declared `Option<T>` then resolves to an explicit `null`,
+/// with its key in the response and the error at its path. Any other field
+/// returns the error. async-graphql 7.2.1 then leaves its key out of the
+/// parent object when another selected field of that object resolves, and
+/// resolves the parent object to `null` when none does, as for a refused
+/// non-null generated field.
+///
+/// Beside this attribute the impl may carry only `allow`, `warn`, `deny`,
+/// `forbid`, `expect` and `cfg`. Any other attribute, `cfg_attr` included, is
+/// a compile error: it would run on the generated object after the resolvers
+/// were given their field check.
+///
+/// An attribute macro the host places on one of its own handwritten methods
+/// is host code. It receives that method and can rewrite it, including the
+/// inserted check, with the same trust as writing the method body. It cannot
+/// add a field to the object.
+///
+/// A handwritten field may not take the GraphQL name of a generated field or
+/// of any other declared entity field, served by the object or not. `subscribe` requires a
+/// scalar or enum output type, or an `Option` or list of those.
+///
+/// As with generated column fields, no entity or row decision is asked at the
+/// field. Generated queries, relations, mutations and subscriptions authorize
+/// the row before the object exists. A host resolver that constructs or loads
+/// an entity object itself must authorize it itself.
+///
+/// The fields are computed: they have no column and take no part in generated
+/// filters, ordering, grouping, aggregates or writes.
+pub fn graphql_object_fields(args: TokenStream, input: TokenStream) -> TokenStream {
+    let item_impl = parse_macro_input!(input as syn::ItemImpl);
+    match object_fields::attribute(args.into(), item_impl) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(err) => TokenStream::from(err.to_compile_error()),
+    }
+}
+
+/// Implementation detail of [`macro@graphql_object_fields`].
+#[doc(hidden)]
+#[proc_macro]
+pub fn __graphql_object_fields_wrap(input: TokenStream) -> TokenStream {
+    match object_fields::wrap(input.into()) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(err) => TokenStream::from(err.to_compile_error()),
+    }
 }
 
 #[proc_macro_derive(

@@ -160,3 +160,20 @@ pub(crate) fn graphql_field_name(
         apply_graphql_case(rust_name, GraphqlNameCase::Camel)
     }
 }
+
+/// The GraphQL name a generated object gives a field that declares none: the
+/// rule [`graphql_field_name`] applies to an entity field without `name` or
+/// serde rename, so a handwritten field of that object is named like its
+/// generated neighbours.
+pub(crate) fn derived_field_name(
+    rust_name: &str,
+    graphql_rename_fields: Option<&str>,
+    serde_rename_all: Option<&str>,
+) -> String {
+    graphql_field_name(
+        &FieldMetadata::default(),
+        rust_name,
+        graphql_rename_fields,
+        serde_rename_all,
+    )
+}

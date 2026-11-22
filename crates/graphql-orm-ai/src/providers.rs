@@ -127,8 +127,8 @@ pub use grok_acp::{AiGrokAcpSdkBroker, AiGrokAcpSdkInbound, AiGrokAcpUsage};
 mod grok_acp_provider;
 #[cfg(feature = "provider-grok-acp")]
 pub use grok_acp_provider::{
-    AiGrokAcpDeletionService, AiGrokAcpLaunchedProcess, AiGrokAcpProcessFactory, AiGrokAcpProvider,
-    AiGrokAcpRegistration, AiGrokAcpRunProcess,
+    AiGrokAcpDeletionService, AiGrokAcpLaunchedProcess, AiGrokAcpProcessFactory,
+    AiGrokAcpPromptInput, AiGrokAcpProvider, AiGrokAcpRegistration, AiGrokAcpRunProcess,
 };
 
 #[cfg(feature = "provider-grok-acp")]
@@ -137,4 +137,4 @@ mod grok_acp_wire;
 pub use grok_acp_wire::{AiGrokAcpWireProcess, AiGrokAcpWireTransport};
 
 #[cfg(all(test, feature = "provider-grok-acp", feature = "sqlite"))]
-pub(crate) use grok_acp_wire::tests::ExecutorWireFactory;
+pub(crate) use grok_acp_wire::tests::{ExecutorWireFactory, ReferenceWireFactory};

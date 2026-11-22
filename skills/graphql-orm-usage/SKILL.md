@@ -685,6 +685,7 @@ with `operation_authorization`, or a write policy that refuses it. Don't replace
 | Managed version | `#[graphql_orm(version = "managed", default = "0")]` on an `i64` | Rows rewritten while users watch them. Every generated write advances it, `updateOrder(expectedVersion:)` refuses a stale write with `CONFLICT`, and `RecordVersion` lets clients order writes. Bare `version` is compare-and-swap only |
 | `NodeId` | `#[graphql_entity(node_id)]` | A global ID for refetching one record |
 | `compose_complex_object` | `#[graphql_orm(compose_complex_object)]` with `#[graphql_complex_object]` on your impl | Computed fields on an entity that also has relations |
+| `object_fields` | `#[graphql_orm(object_fields)]` with `#[graphql_object_fields]` on your impl | Computed fields on an entity whose object is generated (no `SimpleObject`); each asks its field read decision first, like a generated column field |
 | Aggregates | `aggregate = true`, or `order_aggregate` on a relation to sort by a count | Totals and grouped metrics, instead of loading rows to count them |
 | Keyset pages | `keyset = "created_at desc, id asc"` | Deep or append-heavy lists, where offsets drift |
 | Search | `#[graphql_orm(search(index = true))]` with `searchable` fields | Full-text search, instead of `LIKE` in a resolver |

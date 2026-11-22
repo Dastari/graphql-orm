@@ -195,6 +195,7 @@ pub struct AiLocalHarnessRegistration {
     sandbox_profile: String,
     limits: AiLocalHarnessLimits,
     capabilities: ProviderCapabilities,
+    resolved_entity_reference_delivery: Option<Duration>,
 }
 
 impl std::fmt::Debug for AiLocalHarnessRegistration {
@@ -210,6 +211,10 @@ impl std::fmt::Debug for AiLocalHarnessRegistration {
             .field("sandbox_profile", &"<deployment-reviewed>")
             .field("limits", &self.limits)
             .field("capabilities", &self.capabilities)
+            .field(
+                "resolved_entity_reference_delivery",
+                &self.resolved_entity_reference_delivery,
+            )
             .finish()
     }
 }
@@ -252,9 +257,54 @@ impl AiLocalHarnessRegistration {
             sandbox_profile: sandbox_profile.into(),
             limits,
             capabilities,
+            resolved_entity_reference_delivery: None,
         };
         registration.validate()?;
         Ok(registration)
+    }
+
+    /// Opts this registration in to receiving what entity references
+    /// resolved to. Off by default: without this call the harness process is
+    /// sent the unavailable marker for every reference, whatever the
+    /// deployment's [`crate::AiEntityReferenceRegistry`] resolves.
+    ///
+    /// `maximum_age` bounds the time from the start of resolution to the
+    /// moment the one stdin write that carries the data may begin. It covers
+    /// the host hook, process launch and frame encoding. A request whose
+    /// resolution is older than that when its write would start is written
+    /// with markers instead. A write that has started may complete; one
+    /// still in progress when the bound passes is stopped, the turn fails
+    /// and the process is killed without a graceful close, so no remainder
+    /// of the frame is delivered.
+    ///
+    /// Opting in is a disclosure decision the crate cannot check. Reference
+    /// data written to the process is outside the crate from then on: the
+    /// host must make sure the harness, its sandbox and any log or transcript
+    /// it keeps may hold that data and are cleaned up under the host's
+    /// retention rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when `maximum_age` is
+    /// zero or exceeds
+    /// [`crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE`].
+    pub fn with_resolved_entity_reference_delivery(
+        mut self,
+        maximum_age: Duration,
+    ) -> Result<Self, ProviderError> {
+        if maximum_age.is_zero() || maximum_age > crate::AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid entity-reference delivery age".to_owned(),
+            ));
+        }
+        self.resolved_entity_reference_delivery = Some(maximum_age);
+        Ok(self)
+    }
+
+    /// The freshness bound of resolved entity-reference delivery, or `None`
+    /// when the registration has not opted in and receives markers only.
+    pub const fn resolved_entity_reference_delivery(&self) -> Option<Duration> {
+        self.resolved_entity_reference_delivery
     }
 
     fn validate(&self) -> Result<(), ProviderError> {
@@ -452,6 +502,16 @@ pub enum AiLocalHarnessProcessOutput {
 pub trait AiLocalHarnessProcess: Send {
     /// Writes the one bounded JSON-lines request frame exactly.
     ///
+    /// The returned future may be dropped before it completes. That happens
+    /// when the frame carries resolved entity-reference data and the
+    /// registration's freshness bound passes during the write. The driver
+    /// then drops the process without calling [`Self::terminate`] or
+    /// [`Self::close_stdin`]. From the moment the future is dropped, no byte
+    /// of the frame that the harness has not yet received may reach it: the
+    /// implementation must discard anything it buffered, must not flush it
+    /// from `Drop` or from any later call, and its `Drop` must kill the
+    /// process tree without a graceful close.
+    ///
     /// # Errors
     ///
     /// Returns a non-sensitive transport error when the complete frame was not
@@ -477,7 +537,9 @@ pub trait AiLocalHarnessProcess: Send {
 
     /// Terminates the complete process tree. Implementations should first use
     /// a supported protocol close only when it stays within the supplied host
-    /// sandbox policy, then force termination.
+    /// sandbox policy, then force termination. Termination must never deliver
+    /// input the harness has not yet received: bytes buffered from an
+    /// incomplete [`Self::write_stdin`] are discarded, not flushed.
     ///
     /// # Errors
     ///
@@ -527,6 +589,46 @@ pub trait AiLocalHarnessDriver: Send + Sync {
         registration: Arc<AiLocalHarnessRegistration>,
         request: ModelRequest,
     ) -> Result<ProviderEventStream, ProviderError>;
+
+    /// Starts one already-authorized request and consumes what its entity
+    /// references resolved to for this one dispatch.
+    ///
+    /// [`AiLocalHarnessProvider`] calls this method only for a registration
+    /// that opted in with
+    /// [`AiLocalHarnessRegistration::with_resolved_entity_reference_delivery`];
+    /// otherwise it calls [`Self::stream`] with markers. The default discards
+    /// everything resolved and calls [`Self::stream`] with a plain request in
+    /// which every entity reference is the unavailable marker, so a driver
+    /// written before this method existed keeps sending markers.
+    ///
+    /// A driver that overrides it must move `dispatch` into the one write
+    /// that delivers the request to the harness process: serialize each JSON
+    /// input block through [`crate::ModelDispatchReferences::wire_json`],
+    /// write those bytes once, and drop them. It must not copy what
+    /// `wire_json` returns into anything that is cloned, stored, logged,
+    /// queued or retried. [`crate::ModelDispatchRequest`] is not `Clone`, so
+    /// a second write needs a second dispatch, which resolves again.
+    ///
+    /// It must also honour the registration's freshness bound: take
+    /// [`crate::ModelDispatchReferences::write_deadline`] for
+    /// [`AiLocalHarnessRegistration::resolved_entity_reference_delivery`],
+    /// compare it with the current time after encoding and immediately
+    /// before the write starts, and send markers if it has passed. A write
+    /// that has started may complete; if it is still in progress when the
+    /// bound passes, stop it, fail the request and kill the process without
+    /// a graceful close, so that no remainder of the frame is delivered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] for the same failures as [`Self::stream`].
+    async fn stream_dispatch(
+        &self,
+        registration: Arc<AiLocalHarnessRegistration>,
+        dispatch: crate::ModelDispatchRequest,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.stream(registration, dispatch.into_unavailable_request())
+            .await
+    }
 }
 
 /// Bounded JSON-lines driver over a trusted process launcher.
@@ -563,6 +665,24 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
         registration: Arc<AiLocalHarnessRegistration>,
         request: ModelRequest,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // A plain request carries no resolutions: every entity reference in
+        // it is written as the unavailable marker.
+        self.stream_dispatch(
+            registration,
+            crate::ModelDispatchRequest::withholding(request),
+        )
+        .await
+    }
+
+    async fn stream_dispatch(
+        &self,
+        registration: Arc<AiLocalHarnessRegistration>,
+        dispatch: crate::ModelDispatchRequest,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        // `request` holds handles only. `references` is what they resolved to
+        // for this dispatch. It is read at most once, after the process is
+        // ready and immediately before the one stdin write.
+        let (request, references) = dispatch.into_parts();
         validate_registered_request(&registration, &request)?;
         let limits = registration.limits();
         let offered_tool_ids = request
@@ -570,23 +690,28 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             .iter()
             .map(|tool| tool.tool_id.clone())
             .collect::<BTreeSet<_>>();
-        let mut encoded = serde_json::to_vec(&json!({
-            "protocol": "graphql-orm-ai/local-harness-jsonl/v2",
-            "type": "request",
-            "model": request.model,
-            "instructions": request.instructions,
-            "input": request.input,
-            "continuation_mode": request.continuation_mode,
-            "continuation": request.continuation,
-            "tools": request.tools,
-            "output_schema": request.output_schema,
-            "maximum_output_tokens": request.maximum_output_tokens,
-        }))
-        .map_err(|_| ProviderError::InvalidRequest)?;
-        encoded.push(b'\n');
-        if encoded.len() > limits.maximum_request_bytes()
-            || encoded.len() > limits.maximum_frame_bytes()
-        {
+        let maximum_output_tokens = request
+            .maximum_output_tokens
+            .expect("validated local-harness output ceiling");
+        let fits = |frame: &[u8]| {
+            frame.len() <= limits.maximum_request_bytes()
+                && frame.len() <= limits.maximum_frame_bytes()
+        };
+        // Resolved data may be written only if the registration opted in,
+        // and only until this instant, which is counted from the start of
+        // resolution in the executor.
+        let resolved_deadline = registration
+            .resolved_entity_reference_delivery()
+            .and_then(|maximum_age| references.write_deadline(maximum_age));
+        // The frame that is sent whenever resolved data is not: every
+        // reference is the marker. It must fit, and it is what the request is
+        // refused or admitted on before any process is launched.
+        let marker_frame = {
+            let (request, markers) =
+                crate::ModelDispatchRequest::withholding(request.clone()).into_parts();
+            encode_request_frame(&request, &markers)?
+        };
+        if !fits(&marker_frame) {
             return Err(ProviderError::InvalidRequest);
         }
 
@@ -595,10 +720,57 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             timeout_until(startup_deadline, self.launcher.launch(registration.clone()))
                 .await
                 .map_err(map_process_error)?;
-        if let Err(error) = timeout_until(startup_deadline, process.write_stdin(&encoded)).await {
+        // The process is ready. Encode the resolved frame; a frame over the
+        // request ceiling is not sent, the marker frame is.
+        let mut resolved_frame = None;
+        if let Some(deadline) = resolved_deadline
+            && let Ok(frame) = encode_request_frame(&request, &references)
+            && fits(&frame)
+        {
+            resolved_frame = Some((frame, deadline));
+        }
+        drop(references);
+        let mut written = false;
+        if let Some((frame, deadline)) = resolved_frame {
+            // The freshness deadline bounds when this write may begin. It is
+            // checked after encoding, on the first poll and before the
+            // process is given a byte, and it is polled before every later
+            // poll of the write.
+            let outcome = crate::entity_references::write_resolved_before(
+                deadline,
+                timeout_until(startup_deadline, process.write_stdin(&frame)),
+            )
+            .await;
+            drop(frame);
+            match outcome {
+                crate::entity_references::ResolvedWrite::Completed(Ok(())) => written = true,
+                // Stale before the write began: nothing was written, and the
+                // turn continues with the marker frame.
+                crate::entity_references::ResolvedWrite::NotStarted => {}
+                // The resolved write began and did not complete: the deadline
+                // or the startup timeout passed, or the pipe failed. The
+                // process may hold part of the frame. It is dropped, which
+                // the process contract defines as a forced tree kill that
+                // discards unwritten input. `terminate` is deliberately not
+                // called: its graceful protocol close could flush.
+                crate::entity_references::ResolvedWrite::Abandoned => {
+                    drop(process);
+                    return Err(map_process_error(AiLocalHarnessProcessError::Cancelled));
+                }
+                crate::entity_references::ResolvedWrite::Completed(Err(error)) => {
+                    drop(process);
+                    return Err(map_process_error(error));
+                }
+            }
+        }
+        if !written
+            && let Err(error) =
+                timeout_until(startup_deadline, process.write_stdin(&marker_frame)).await
+        {
             stop_process(process.as_mut(), limits.shutdown_timeout()).await;
             return Err(map_process_error(error));
         }
+        drop(marker_frame);
         if let Err(error) = timeout_until(startup_deadline, process.close_stdin()).await {
             stop_process(process.as_mut(), limits.shutdown_timeout()).await;
             return Err(map_process_error(error));
@@ -608,9 +780,6 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             .capabilities()
             .maximum_context_tokens
             .expect("validated local-harness context ceiling");
-        let maximum_output_tokens = request
-            .maximum_output_tokens
-            .expect("validated local-harness output ceiling");
         Ok(normalized_process_stream(
             process,
             limits,
@@ -664,17 +833,27 @@ impl AiProvider for AiLocalHarnessProvider {
         dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // Everything is validated against the handle-only request. For a
+        // registration that opted in to resolved delivery, the dispatch
+        // value, which alone holds what the request's entity references
+        // resolved to, is moved to the driver unsplit: the driver either
+        // consumes it in its one write to the harness process or, by default,
+        // discards it and sends the unavailable marker.
         context.validate_request(&ProviderKind::LocalHarness, dispatch.request())?;
-        // A harness driver receives a plain, cloneable request and runs a
-        // local process, so resolved reference data is never handed to it.
-        // Every entity reference reaches the driver as the unavailable marker.
-        let request = dispatch.into_unavailable_request();
         let registration = self
             .registry
-            .registration(&request.model)
+            .registration(&dispatch.request().model)
             .ok_or(ProviderError::Unsupported)?;
-        validate_registered_request(&registration, &request)?;
-        self.driver.stream(registration, request).await
+        validate_registered_request(&registration, dispatch.request())?;
+        if registration.resolved_entity_reference_delivery().is_none() {
+            // Not opted in: the driver is given a plain request with markers
+            // and never sees the dispatch value.
+            return self
+                .driver
+                .stream(registration, dispatch.into_unavailable_request())
+                .await;
+        }
+        self.driver.stream_dispatch(registration, dispatch).await
     }
 }
 
@@ -864,6 +1043,69 @@ impl HarnessEventState {
     const fn complete(&self) -> bool {
         self.started && self.usage && self.completed
     }
+}
+
+/// Encodes the one JSON-lines request frame written to a harness process.
+///
+/// `request` is the handle-only request. Each JSON input block, in the
+/// current input and in the replayed user messages of a stateless
+/// continuation, is written as [`crate::ModelDispatchReferences::wire_json`]
+/// returns it, so an entity-reference handle becomes what it resolved to for
+/// this dispatch or the unavailable marker. The returned bytes are the only
+/// copy of resolved data outside `references`.
+fn encode_request_frame(
+    request: &ModelRequest,
+    references: &crate::ModelDispatchReferences,
+) -> Result<Vec<u8>, ProviderError> {
+    fn rewrite(
+        blocks: Option<&mut serde_json::Value>,
+        references: &crate::ModelDispatchReferences,
+    ) {
+        let Some(blocks) = blocks.and_then(serde_json::Value::as_array_mut) else {
+            return;
+        };
+        for block in blocks {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("json") {
+                continue;
+            }
+            let Some(value) = block.get_mut("value") else {
+                continue;
+            };
+            let wire = references.wire_json(value);
+            if !std::ptr::eq(wire, &*value) {
+                *value = wire.clone();
+            }
+        }
+    }
+    let invalid = |_| ProviderError::InvalidRequest;
+    let mut input = serde_json::to_value(&request.input).map_err(invalid)?;
+    rewrite(Some(&mut input), references);
+    let mut continuation = serde_json::to_value(&request.continuation).map_err(invalid)?;
+    if let Some(messages) = continuation
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for message in messages {
+            if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                rewrite(message.get_mut("content"), references);
+            }
+        }
+    }
+    let mut encoded = serde_json::to_vec(&json!({
+        "protocol": "graphql-orm-ai/local-harness-jsonl/v2",
+        "type": "request",
+        "model": request.model,
+        "instructions": request.instructions,
+        "input": input,
+        "continuation_mode": request.continuation_mode,
+        "continuation": continuation,
+        "tools": request.tools,
+        "output_schema": request.output_schema,
+        "maximum_output_tokens": request.maximum_output_tokens,
+    }))
+    .map_err(invalid)?;
+    encoded.push(b'\n');
+    Ok(encoded)
 }
 
 fn validate_registered_request(

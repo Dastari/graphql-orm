@@ -20,6 +20,44 @@ for historical context.
 - **Added (operation catalogue, #544).** `rfc8785_canonical_json` and `rfc8785_json_hash` encode JSON as RFC 8785 specifies and refuse an integer that is not exactly a double, including integers of any length under `serde_json/arbitrary_precision`. They are opt-in: `canonical_json_hash`, the semantic catalogue and the client metadata keep their encoding and bytes.
 - **Documented (#544).** The catalogue README states which encoding each fingerprint uses and where it differs from RFC 8785, that `exact_document_hash` hashes exact bytes without normalisation, and what each export discloses, including that a router descriptor carries scope names and scope templates.
 
+## Unreleased - ORM/macros 0.193.0
+
+- **Added:** a `GraphQLEntity`-generated object can host handwritten resolver
+  fields. Mark the entity `#[graphql_orm(object_fields)]` and put
+  `#[graphql_orm::graphql_object_fields]` on one inherent impl of it. The
+  generated column fields, descriptions, `RecordVersion` and `NodeId` are
+  unchanged; the handwritten fields follow them in the same object. Each
+  handwritten field runs the checks of a generated column field before its
+  body: the field read decision for its row, with the key it may declare with
+  `#[graphql_orm(read_policy = "…")]`. Generated read paths authorize the row
+  before the object exists; an object a host resolver builds itself is the
+  host's to authorize. A refused `Option<T>` field is an explicit `null` with
+  a path-specific error. The field is refused in generated `Changed`
+  subscriptions unless it declares `#[graphql_orm(subscribe)]`, which needs a
+  scalar or enum output, or an `Option` or list of those. The fields are listed by
+  `Entity::computed_object_fields()` and in the semantic catalogue as
+  selectable, never-exported fields with no filter, ordering, grouping or
+  aggregate. Entities that do not opt in generate exactly what they did
+  ([#808](https://github.com/Dastari/graphql-orm/issues/808)). See the
+  [migration guide](MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
+
+## Unreleased - ORM/macros 0.192.0
+
+- **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation
+  to report child creates and deletes as `UPDATED` in the parent's `Changed`
+  subscription and action filter.
+  [Migration](MIGRATION.md#01910-to-01920-propagated-parent-actions)
+
+## Unreleased - ORM/macros 0.191.0
+
+- **Added (#831):** `Database::read_snapshot_transaction` runs multiple
+  policy-aware reads against one pinned snapshot, with a companion runner for
+  transaction-local authorization. SQLite requires WAL and normal locking
+  for every database file. PostgreSQL uses read-only repeatable read, and
+  SQL Server requires snapshot isolation.
+  Backend prerequisites and refused writes have typed errors.
+  See the [migration guide](MIGRATION.md#01900-to-01910-read-snapshot-transactions).
+
 ## Unreleased - ORM/macros 0.190.0
 
 - **Fixed (generated queries, #542 and #723).** Query resolver emission is shared
