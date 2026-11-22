@@ -133,14 +133,18 @@ the bounded stable attachment/artifact lifecycle, exact session/message owner
 graph, provider tuple shape, and unique safe local-object references. Live
 upload/cleanup states and backup-redacted transient/provider references remain
 invalid until explicitly repaired. The restore target and every writer must
-remain closed throughout that transaction. The collector reads at most 128
-rows per query using its own pagination view, so host GraphQL page caps
+remain closed throughout that transaction. The collector requests pages of
+at most 128 rows using its own pagination view, so host GraphQL page caps
 cannot silently truncate an audit. Attachment parent reads batch up to 128
 distinct IDs per entity type. The configured row ceilings still apply, and a
 64 MiB aggregate budget counts each retained row's inline representation and
-serialized size. The collector checks each page's database payload length
-before loading the rows in the same transaction. Exceeding the budget fails
-the whole collection with `PersistenceFailed`. It returns opaque
+serialized size. The collector checks database payload lengths before loading
+rows in the same transaction. A page with row callbacks or in-memory
+predicates checks all candidates through the scan ceiling and its look-ahead
+row, or until exhaustion. This may include candidates beyond the returned
+page. If the range exceeds the budget, no payload for that page is decoded
+and its per-row and per-field checks have not run. Exceeding the budget
+fails the whole collection with `PersistenceFailed`. It returns opaque
 `AiCollectedRestoreFacts` with a deterministic digest and an explicit status
 for every required audit. Reaching a limit returns no partial evidence or
 candidate actions for that category; observing an invalid row/graph, missing

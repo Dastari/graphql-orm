@@ -2492,16 +2492,19 @@ impl OrmAiRunService {
         ) {
             return Err(AiError::Conflict);
         }
-        let now = canonical_second(self.clock.now());
+        let clock = self.clock.clone();
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
         retry_transaction(self.limits.maximum_transaction_retries, || {
             let lease = lease.clone();
+            let clock = clock.clone();
             self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
-                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        let current =
+                            load_and_validate_active_lease(tx, &lease, clock.now()).await?;
                         if persisted_state(&current)? != AiRunState::Running
+                            || current.cancellation_request_id.is_some()
                             || current.latest_checkpoint_id != Some(checkpoint_id)
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -2525,6 +2528,13 @@ impl OrmAiRunService {
                             || checkpoint.budget_reservation_id.is_none()
                             || checkpoint.assistant_message_id.is_some()
                             || checkpoint.protected_state.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let now = canonical_second(clock.now());
+                        if current
+                            .lease_expires_at
+                            .is_none_or(|expires| expires <= now.unix_timestamp())
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }

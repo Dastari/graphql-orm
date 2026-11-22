@@ -15,24 +15,29 @@ supersedes: []
 **Action needed** for direct checkpoint adoption callers. Start each claimed
 lease before adopting a completed tool batch. Pass the latest lease proof and
 handle a conflict if it expires, is cancelled, or is superseded during adoption.
+Consumption also refuses a lease that expires while waiting for the transaction.
 
 **Action needed** for hosts using context compaction. Register the adapter
 with `AiRuntimeBuilder::provider_with_compaction_admission`, supplying its
-exact stable profile ID and the host's execution selection resolver. Install
+exact stable profile ID and the host's execution selection resolver. Implement
+its `compaction_provider` method to return the exact adapter instance from the
+host's approved route registration. Install
 `OrmAiRunExecutionSelectionReader` on the executor with
 `with_context_compaction_selection_reader`. Use
 `AiPreparedContextCompaction::provider_profile_id()` and the prepared source
 list in the model-inference manifest. Use the prepared request's pinned
 reasoning effort for the reservation. Re-admission must authorize that exact
-provider, profile, model and effort at dispatch. Give an unrelated replacement
-adapter a different profile ID.
+provider, profile, model and effort at dispatch. The approved and registered
+adapters must be the same instance. The runtime verifies the live lease again
+after re-admission. Give an unrelated replacement adapter a different profile ID.
 
 **Action needed** for legacy sessions using compaction. Pin a verified
 execution selection where the retained evidence supports it. Start a new chat
 when there is insufficient evidence to pin the existing session.
 
-Restore collection checks the payload size before loading each page and
-charges the decoded rows to the aggregate budget. No persistent schema,
+Restore collection checks the candidate payload size before loading each page
+and charges the decoded rows to the aggregate budget. With residual row policy,
+it checks all candidates through the scan ceiling and look-ahead or exhaustion. No persistent schema,
 GraphQL SDL, or data migration is needed.
 
 ## 0.151.2 to 0.152.0: opt-in entity references on local-process adapters

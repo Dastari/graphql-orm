@@ -1614,6 +1614,8 @@ pub struct ProviderRequestContext {
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
     compaction_admitted: bool,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    compaction_admission: Option<Box<crate::runtime::CompactionDispatchAdmission>>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
     retained_tool_images: Vec<crate::AiResolvedToolImage>,
     static_offering_reset_receipt:
@@ -1646,6 +1648,8 @@ impl ProviderRequestContext {
             budget,
             transfers: Vec::new(),
             compaction_admitted: false,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            compaction_admission: None,
             resolved_attachments: Vec::new(),
             retained_tool_images: Vec::new(),
             static_offering_reset_receipt: None,
@@ -1719,8 +1723,32 @@ impl ProviderRequestContext {
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    pub(crate) fn mark_compaction_admitted(&mut self) {
+    pub(crate) fn set_compaction_admission(
+        &mut self,
+        admission: crate::runtime::CompactionDispatchAdmission,
+    ) {
         self.compaction_admitted = true;
+        self.compaction_admission = Some(Box::new(admission));
+    }
+
+    pub(crate) async fn authorize_runtime_dispatch(
+        &mut self,
+        provider: &Arc<dyn AiProvider>,
+    ) -> Result<(), ProviderError> {
+        self.authorize_tool_source_delivery().await?;
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        if self.compaction_admitted {
+            // Check after all other asynchronous authorization, using the exact adapter
+            // that will receive the request. The proof is never handed to the adapter.
+            self.compaction_admission
+                .take()
+                .ok_or(ProviderError::EgressDenied)?
+                .verify(provider)
+                .await?;
+        }
+        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        let _ = provider;
+        Ok(())
     }
 
     /// Adds a separately authorized built-in or attachment transfer.

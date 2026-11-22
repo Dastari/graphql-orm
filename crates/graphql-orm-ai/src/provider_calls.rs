@@ -3789,6 +3789,7 @@ impl AiProviderCallExecutor {
     /// Installs the fenced selection reader required before context-compaction transport.
     ///
     /// The ORM reader checks that the live run and session still carry the same pin.
+    /// Compaction requires a durable fence check from any custom reader.
     pub fn with_context_compaction_selection_reader(
         mut self,
         reader: Arc<dyn crate::AiRunExecutionSelectionReader>,
@@ -4935,27 +4936,34 @@ impl AiProviderCallExecutor {
             .await;
         if model_inference_manifest.purpose == crate::provider::CONTEXT_COMPACTION_PURPOSE {
             let admission = async {
-                let selection = self
+                let reader = self
                     .compaction_selection
                     .as_ref()
-                    .ok_or(AiError::SessionExecutionUnavailable)?
-                    .selection_for_run(&lease)
-                    .await?;
-                self.runtime
+                    .ok_or(AiError::SessionExecutionUnavailable)?;
+                let selection = reader.selection_for_run(&lease).await?;
+                let provider = self
+                    .runtime
                     .admit_context_compaction(
                         current.principal(),
                         &selection,
                         &model_inference_manifest,
                         dispatch_request.request(),
                     )
-                    .await
+                    .await?;
+                Ok::<_, AiError>(crate::runtime::CompactionDispatchAdmission {
+                    provider,
+                    reader: reader.clone(),
+                    clock: self.clock.clone(),
+                    lease: lease.clone(),
+                    selection,
+                })
             }
             .await;
-            if admission.is_err() {
+            let Ok(admission) = admission else {
                 self.release_unstarted(&lease, &reservation).await?;
                 return Err(AiError::PreTransportProviderFailed);
-            }
-            context.mark_compaction_admitted();
+            };
+            context.set_compaction_admission(admission);
         }
         // Read from the same registered provider that sends the request: the
         // OpenAI adapter sends `store` equal to this declaration.
@@ -5912,11 +5920,9 @@ mod tests {
     };
 
     use super::*;
-    #[cfg(feature = "provider-openai-core")]
-    use agql_auth::FixedClock;
     use agql_auth::{
-        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, ResolvedPrincipal,
-        SessionContext, SystemClock,
+        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, FixedClock,
+        ResolvedPrincipal, SessionContext, SystemClock,
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -6764,7 +6770,11 @@ mod tests {
         }
     }
 
-    struct CompactionAdmissionResolver(Arc<AtomicBool>);
+    struct CompactionAdmissionResolver {
+        admitted: AtomicBool,
+        provider: std::sync::Mutex<Arc<dyn crate::AiProvider>>,
+        expire_during_admission: std::sync::Mutex<Option<FixedClock>>,
+    }
 
     #[async_trait]
     impl crate::AiSessionExecutionSelectionResolver for CompactionAdmissionResolver {
@@ -6775,8 +6785,13 @@ mod tests {
             requested: Option<&crate::AiSessionExecutionSelectionInput>,
         ) -> Result<crate::AiSessionExecutionSelection, AiError> {
             let requested = requested.ok_or(AiError::SessionExecutionUnavailable)?;
-            if !self.0.load(Ordering::SeqCst) {
+            if !self.admitted.load(Ordering::SeqCst) {
                 return Err(AiError::SessionExecutionUnavailable);
+            }
+            let clock = self.expire_during_admission.lock().unwrap().take();
+            if let Some(clock) = clock {
+                tokio::task::yield_now().await;
+                clock.advance_seconds(3600);
             }
             crate::AiSessionExecutionSelection::new(
                 requested.provider.into(),
@@ -6785,9 +6800,19 @@ mod tests {
                 requested.reasoning_effort,
             )
         }
+
+        fn compaction_provider(
+            &self,
+            _: &crate::AiSessionExecutionSelection,
+        ) -> Option<Arc<dyn crate::AiProvider>> {
+            Some(self.provider.lock().unwrap().clone())
+        }
     }
 
-    struct CompactionSelectionReader(crate::AiSessionExecutionSelection);
+    struct CompactionSelectionReader {
+        selection: crate::AiSessionExecutionSelection,
+        durable: crate::OrmAiRunExecutionSelectionReader,
+    }
 
     #[async_trait]
     impl crate::AiRunExecutionSelectionReader for CompactionSelectionReader {
@@ -6795,7 +6820,20 @@ mod tests {
             &self,
             _: &AiRunLease,
         ) -> Result<crate::AiSessionExecutionSelection, AiError> {
-            Ok(self.0.clone())
+            Ok(self.selection.clone())
+        }
+
+        async fn verify_compaction_fence(
+            &self,
+            lease: &AiRunLease,
+            selection: &crate::AiSessionExecutionSelection,
+        ) -> Result<(), AiError> {
+            crate::AiRunExecutionSelectionReader::verify_compaction_fence(
+                &self.durable,
+                lease,
+                selection,
+            )
+            .await
         }
     }
 
@@ -6814,7 +6852,7 @@ mod tests {
         refusal: Arc<AtomicUsize>,
         completed_executions: Arc<AtomicUsize>,
         principal_resolutions: Arc<AtomicUsize>,
-        compaction_admitted: Arc<AtomicBool>,
+        compaction_admission: Arc<CompactionAdmissionResolver>,
         generated_query_id: Option<AiToolId>,
         generated_query_fingerprint: Option<String>,
         generated_target_policy: AiGeneratedGraphqlTargetPolicySet,
@@ -7596,7 +7634,12 @@ mod tests {
             generated_target_policy.clone(),
             Arc::new(AllowTools(tool_policy_version.clone())),
         );
-        let compaction_admitted = Arc::new(AtomicBool::new(true));
+        let provider = provider.unwrap_or_else(|| Arc::new(mock.clone()));
+        let compaction_admission = Arc::new(CompactionAdmissionResolver {
+            admitted: AtomicBool::new(true),
+            provider: std::sync::Mutex::new(provider.clone()),
+            expire_during_admission: std::sync::Mutex::new(None),
+        });
         let runtime = AiRuntime::builder()
             .principal_resolver(Arc::new(CountingResolver {
                 principal: principal.clone(),
@@ -7643,9 +7686,9 @@ mod tests {
             .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
             .content_protector(Arc::new(DatabaseManagedContentProtector))
             .provider_with_compaction_admission(
-                provider.unwrap_or_else(|| Arc::new(mock.clone())),
+                provider,
                 "mock-profile",
-                Arc::new(CompactionAdmissionResolver(compaction_admitted.clone())),
+                compaction_admission.clone(),
             )
             .expect("mock provider should register")
             .build()
@@ -7670,7 +7713,7 @@ mod tests {
             refusal,
             completed_executions,
             principal_resolutions,
-            compaction_admitted,
+            compaction_admission,
             generated_query_id,
             generated_query_fingerprint,
             generated_target_policy,
@@ -8295,84 +8338,151 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_readmits_the_model_and_rejects_a_replacement_adapter_before_dispatch() {
-        use crate::{AiProvider as _, ModelReasoningEffort, ModelReasoningEffortProfile};
         for (profile, admitted, dispatched) in [
             ("mock-profile", false, false),
             ("retired-profile", true, false),
             ("mock-profile", true, true),
         ] {
-            let mock = MockProvider::new(vec![
-                ProviderEvent::ResponseStarted {
-                    response_id: Some("summary".into()),
-                },
-                ProviderEvent::TextDelta {
-                    text: "summary".into(),
-                },
-                ProviderEvent::Usage {
-                    input_tokens: 10,
-                    output_tokens: 3,
-                    cached_input_tokens: 0,
-                },
-                ProviderEvent::ResponseCompleted {
-                    response_id: Some("summary".into()),
-                },
-            ]);
-            let capabilities = mock.capabilities();
-            let mock = mock.with_capabilities(crate::ProviderCapabilities {
-                reasoning_effort_profiles: vec![
-                    ModelReasoningEffortProfile::new(
-                        "mock-model",
-                        [ModelReasoningEffort::Low],
-                        ModelReasoningEffort::Low,
-                    )
-                    .unwrap(),
-                ],
-                ..capabilities
-            });
-            let fixture = fixture_with_provider(mock).await;
-            let mut plan = plan(&fixture);
-            plan.request.reasoning_effort = ModelReasoningEffort::Low;
-            plan.budget.reasoning_effort = ModelReasoningEffort::Low;
-            plan.transfers[0].provider_profile_id = profile.to_owned();
-            plan.transfers[0].purpose = crate::provider::CONTEXT_COMPACTION_PURPOSE.to_owned();
-            let selection = crate::AiSessionExecutionSelection::new(
-                plan.provider_kind.clone(),
-                profile,
-                plan.request.model.as_str(),
-                ModelReasoningEffort::Low,
-            )
-            .unwrap();
-            let plan = AiProviderCallPlan::new(
-                plan.provider_kind,
-                plan.request,
-                plan.budget,
-                plan.transfers,
-                plan.correlation_id,
-            )
-            .expect("pinned compaction plan should validate");
-            // Change host admission after constructing the request and before dispatch.
-            fixture
-                .compaction_admitted
-                .store(admitted, Ordering::SeqCst);
-            let executor = AiProviderCallExecutor::new(
-                fixture.runtime.clone(),
-                fixture.budget_service.clone(),
-                fixture.audit.clone(),
-                Arc::new(TestUsageAccounting),
-                Arc::new(SystemClock),
-                AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
-            )
-            .with_context_compaction_selection_reader(Arc::new(
-                CompactionSelectionReader(selection),
-            ));
-            let result = executor.execute(&fixture.lease, plan).await;
-            if dispatched {
-                result.expect("the admitted profile and model should dispatch");
-            } else {
-                assert!(matches!(result, Err(AiError::PreTransportProviderFailed)));
-            }
-            assert_eq!(fixture.mock.request_count(), u64::from(dispatched));
+            check_compaction_dispatch(profile, admitted, false, false, dispatched).await;
         }
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_a_same_profile_replacement_adapter() {
+        check_compaction_dispatch("mock-profile", true, true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_a_lease_that_expires_during_host_admission() {
+        check_compaction_dispatch("mock-profile", true, false, true, false).await;
+    }
+
+    async fn check_compaction_dispatch(
+        profile: &str,
+        admitted: bool,
+        replaces_adapter: bool,
+        expires_during_admission: bool,
+        dispatched: bool,
+    ) {
+        use crate::{AiProvider as _, ModelReasoningEffort, ModelReasoningEffortProfile};
+        let mock = MockProvider::new(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("summary".into()),
+            },
+            ProviderEvent::TextDelta {
+                text: "summary".into(),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("summary".into()),
+            },
+        ]);
+        let capabilities = mock.capabilities();
+        let mock = mock.with_capabilities(crate::ProviderCapabilities {
+            reasoning_effort_profiles: vec![
+                ModelReasoningEffortProfile::new(
+                    "mock-model",
+                    [ModelReasoningEffort::Low],
+                    ModelReasoningEffort::Low,
+                )
+                .unwrap(),
+            ],
+            ..capabilities
+        });
+        let fixture = fixture_with_provider(mock).await;
+        let mut plan = plan(&fixture);
+        plan.request.reasoning_effort = ModelReasoningEffort::Low;
+        plan.budget.reasoning_effort = ModelReasoningEffort::Low;
+        plan.transfers[0].provider_profile_id = profile.to_owned();
+        plan.transfers[0].purpose = crate::provider::CONTEXT_COMPACTION_PURPOSE.to_owned();
+        let selection = crate::AiSessionExecutionSelection::new(
+            plan.provider_kind.clone(),
+            profile,
+            plan.request.model.as_str(),
+            ModelReasoningEffort::Low,
+        )
+        .unwrap();
+        let encoded = selection.encode().unwrap();
+        AiSessionRecord::update_by_id(
+            &fixture.database,
+            &fixture.lease.session_id().0,
+            crate::persistence::UpdateAiSessionRecordInput {
+                execution_selection: Some(Some(encoded.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        AiRunRecord::update_by_id(
+            &fixture.database,
+            &fixture.lease.run_id().0,
+            crate::persistence::UpdateAiRunRecordInput {
+                execution_selection: Some(Some(encoded)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = crate::orm_runs::lease_from_record(&run).unwrap();
+        let plan = AiProviderCallPlan::new(
+            plan.provider_kind,
+            plan.request,
+            plan.budget,
+            plan.transfers,
+            plan.correlation_id,
+        )
+        .expect("pinned compaction plan should validate");
+        // Change host admission after constructing the request and before dispatch.
+        fixture
+            .compaction_admission
+            .admitted
+            .store(admitted, Ordering::SeqCst);
+        if replaces_adapter {
+            // Both routes have the same kind, profile, and model. The
+            // registered adapter is a different instance from the approved one.
+            *fixture.compaction_admission.provider.lock().unwrap() =
+                Arc::new(MockProvider::new(vec![]).with_capabilities(fixture.mock.capabilities()));
+        }
+        let clock = FixedClock::new(OffsetDateTime::now_utc());
+        if expires_during_admission {
+            *fixture
+                .compaction_admission
+                .expire_during_admission
+                .lock()
+                .unwrap() = Some(clock.clone());
+        }
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(clock.clone()),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        )
+        .with_context_compaction_selection_reader(Arc::new(CompactionSelectionReader {
+            selection,
+            durable: crate::OrmAiRunExecutionSelectionReader::new(
+                fixture.database.clone(),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(AllowAccess),
+                Arc::new(clock),
+            ),
+        }));
+        let result = executor.execute(&lease, plan).await;
+        if dispatched {
+            result.expect("the admitted profile and model should dispatch");
+        } else {
+            assert!(matches!(result, Err(AiError::PreTransportProviderFailed)));
+        }
+        assert_eq!(fixture.mock.request_count(), u64::from(dispatched));
     }
 
     fn plan(fixture: &Fixture) -> AiProviderCallPlan {
@@ -17005,6 +17115,35 @@ mod tests {
             Err(AiError::Conflict)
         ));
         let lease = rule_resolver.renewed_lease.lock().unwrap().take().unwrap();
+        {
+            let clock = FixedClock::new(lease.lease_expires_at() - Duration::SECOND);
+            let service = OrmAiRunService::new(
+                fixture.database.clone(),
+                Arc::new(clock.clone()),
+                AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+                    .unwrap(),
+            );
+            // Hold the in-memory store's only connection until the lease expires.
+            let connection = fixture.database.pool().acquire().await.unwrap();
+            let mut consume = std::pin::pin!(service.consume_adoption_checkpoint(
+                &lease,
+                checkpoint_id,
+                "tool_batch_persisted",
+            ));
+            assert!(futures::poll!(consume.as_mut()).is_pending());
+            clock.advance_seconds(1);
+            drop(connection);
+            assert!(matches!(consume.await, Err(AiError::Conflict)));
+            let row = AiRunRecord::find_by_id(&fixture.database, &lease.run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.latest_checkpoint_id, Some(checkpoint_id));
+            assert_eq!(
+                row.lease_expires_at,
+                Some(lease.lease_expires_at().unix_timestamp())
+            );
+        }
         let consumed = checkpoint_service
             .consume_before_provider(&lease, checkpoint_id)
             .await

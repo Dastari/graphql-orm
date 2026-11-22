@@ -55,11 +55,15 @@ budget reservation.
 
 Register the adapter and stable profile together with
 `AiRuntimeBuilder::provider_with_compaction_admission` and the host's normal
-selection resolver. Install `OrmAiRunExecutionSelectionReader` on the
-executor with `with_context_compaction_selection_reader`. Immediately before
+selection resolver. Implement `compaction_provider` on that resolver using
+the host's approved adapter registration. Install
+`OrmAiRunExecutionSelectionReader` on the executor with
+`with_context_compaction_selection_reader`. Immediately before
 dispatch, the executor reads the live run and session pin and re-admits the
-exact profile, model and effort. A profile ID identifies the host's reviewed
-adapter route. Give an unrelated replacement adapter a different profile ID.
+exact profile, model and effort. The runtime compares the approved adapter
+with the dispatch adapter by instance and checks the durable run fence again
+after the host resolver returns. Give an unrelated replacement adapter a
+different profile ID.
 An unpinnable legacy session requires a new chat for compaction.
 
 Validated entity-reference blocks contribute only their kind and identifier.

@@ -1445,9 +1445,12 @@ where
             .pagination_config()
             .with_read_scan_budget(self.max_scanned_rows)
             .max_scanned_rows;
-        if mode != RowCheckMode::Residual
-            && (byte_budget.is_none() || !self.query.requires_in_memory_filtering())
-        {
+        // A byte-bounded callback may refuse any row, even after a complete
+        // SQL decision. Preflight its entire candidate range before decoding
+        // or calling row policy. Fixed SQL reads keep the exact window.
+        let preflight_scan = byte_budget.is_some()
+            && (mode != RowCheckMode::Fixed || self.query.requires_in_memory_filtering());
+        if mode != RowCheckMode::Residual && !preflight_scan {
             let (rows, refused, read) = self
                 .fetch_window(bound, self.offset, byte_budget.as_deref_mut())
                 .await?;
@@ -1462,6 +1465,11 @@ where
         // One budget covers the whole scan. An unlimited read also keeps its
         // fail-closed maximum, counted before row policy; whichever bound is
         // reached first refuses the read.
+        if let Some(remaining) = byte_budget {
+            self.query
+                .preflight_candidate_scan(self.hook_ctx, budget, remaining)
+                .await?;
+        }
         let overflow = match (take, bound) {
             (None, super::query::RepositoryBound::FailClosed(maximum)) => Some(maximum),
             _ => None,
@@ -1469,7 +1477,7 @@ where
         let mut scan =
             VisibleRowScan::new(self.offset, take, budget).with_overflow_after_skip(overflow);
         let mut visible = Vec::new();
-        while let Some(batch) = if byte_budget.is_some() {
+        while let Some(batch) = if preflight_scan {
             scan.next_size_checked_batch()?
         } else {
             scan.next_batch()?
@@ -1480,7 +1488,7 @@ where
                     self.hook_ctx,
                     batch.offset,
                     Some(batch.fetch),
-                    byte_budget.as_deref_mut(),
+                    None,
                 )
                 .await?;
             let fetched = rows.len();
@@ -1526,11 +1534,15 @@ where
         self.fetch_visible(bound, take, None).await
     }
 
-    /// Fetch a repository page after checking the database payload size of
-    /// each candidate window. The budget includes rows read for residual
-    /// predicates and row-policy callbacks.
+    /// Fetch a repository page after checking its candidate payload sizes.
     ///
-    /// The size-only query and row read share the same state-machine snapshot.
+    /// For reads requiring row callbacks or in-memory predicates, preflight all
+    /// candidates through the scan ceiling and its look-ahead row, or until
+    /// exhaustion. No payload is decoded and no per-row or per-field callback runs if
+    /// that range exceeds the byte budget. A row callback can deny any row,
+    /// so the preflight can include candidates beyond the returned page.
+    ///
+    /// The size probes and payload reads share the state-machine snapshot.
     /// The byte limit charges column representations and inline Rust row size.
     ///
     /// # Errors

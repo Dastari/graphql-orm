@@ -231,6 +231,18 @@ pub trait AiSessionExecutionSelectionResolver: Send + Sync {
         requested: Option<&AiSessionExecutionSelectionInput>,
     ) -> Result<AiSessionExecutionSelection, AiError>;
 
+    /// Returns the adapter instance approved by the host for an admitted compaction route.
+    ///
+    /// Resolve this from the host's approved route registration. The runtime checks
+    /// that this is the same instance as its dispatch adapter. By default, no
+    /// adapter is approved for compaction.
+    fn compaction_provider(
+        &self,
+        _selection: &AiSessionExecutionSelection,
+    ) -> Option<std::sync::Arc<dyn crate::AiProvider>> {
+        None
+    }
+
     /// Supplies an independently verified descriptor for explicit legacy pinning.
     /// It must describe the selected route/model/effort, never today's fallback.
     ///
@@ -272,6 +284,19 @@ pub trait AiRunExecutionSelectionReader: Send + Sync {
         &self,
         lease: &crate::AiRunLease,
     ) -> Result<AiSessionExecutionSelection, AiError>;
+
+    /// Rechecks the live run fence and the exact pin at the provider handoff.
+    ///
+    /// # Errors
+    /// Returns conflict if the lease is stale, cancelled or expired, or if
+    /// the selection changed. Readers without a durable check fail closed.
+    async fn verify_compaction_fence(
+        &self,
+        _lease: &crate::AiRunLease,
+        _selection: &AiSessionExecutionSelection,
+    ) -> Result<(), AiError> {
+        Err(AiError::SessionExecutionUnavailable)
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

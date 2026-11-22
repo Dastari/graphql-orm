@@ -155,6 +155,44 @@ struct CompactionProviderAdmission {
     resolver: Arc<dyn crate::AiSessionExecutionSelectionResolver>,
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[derive(Clone)]
+pub(crate) struct CompactionDispatchAdmission {
+    pub(crate) provider: Arc<dyn AiProvider>,
+    pub(crate) reader: Arc<dyn crate::AiRunExecutionSelectionReader>,
+    pub(crate) clock: Arc<dyn agql_auth::Clock>,
+    pub(crate) lease: crate::AiRunLease,
+    pub(crate) selection: crate::AiSessionExecutionSelection,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl std::fmt::Debug for CompactionDispatchAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompactionDispatchAdmission")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl CompactionDispatchAdmission {
+    pub(crate) async fn verify(self, provider: &Arc<dyn AiProvider>) -> Result<(), ProviderError> {
+        if !Arc::ptr_eq(provider, &self.provider) {
+            return Err(ProviderError::EgressDenied);
+        }
+        let expires_at = self.lease.lease_expires_at();
+        let clock = self.clock;
+        self.reader
+            .verify_compaction_fence(&self.lease, &self.selection)
+            .await
+            .map_err(|_| ProviderError::EgressDenied)?;
+        if clock.now() >= expires_at {
+            return Err(ProviderError::EgressDenied);
+        }
+        Ok(())
+    }
+}
+
 /// Built project-agnostic runtime.
 pub struct AiRuntime {
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
@@ -1315,7 +1353,7 @@ impl AiRuntime {
         selection: &crate::AiSessionExecutionSelection,
         manifest: &crate::AiEgressManifest,
         request: &ModelRequest,
-    ) -> Result<(), AiError> {
+    ) -> Result<Arc<dyn AiProvider>, AiError> {
         let kind = selection.provider_kind();
         let admission = self
             .compaction_admission
@@ -1336,17 +1374,29 @@ impl AiRuntime {
             Some(&selection.as_input()),
         )
         .await?;
-        self.provider_capabilities(&kind)
-            .ok_or(AiError::SessionExecutionUnavailable)?
+        let provider = self
+            .providers
+            .get(&kind)
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        let approved = admission
+            .resolver
+            .compaction_provider(selection)
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        if !Arc::ptr_eq(provider, &approved) {
+            return Err(AiError::SessionExecutionUnavailable);
+        }
+        provider
+            .capabilities()
             .validate_reasoning_effort(selection.model(), selection.reasoning_effort())
-            .map_err(|_| AiError::SessionExecutionUnavailable)
+            .map_err(|_| AiError::SessionExecutionUnavailable)?;
+        Ok(approved)
     }
 
     pub(crate) async fn dispatch_provider_request(
         &self,
         provider_kind: &ProviderKind,
         dispatch: crate::ModelDispatchRequest,
-        context: ProviderRequestContext,
+        mut context: ProviderRequestContext,
     ) -> crate::AiProviderDispatchOutcome {
         let request = dispatch.request();
         let local = || {
@@ -1383,7 +1433,7 @@ impl AiRuntime {
         };
         match local() {
             Ok(provider) => {
-                if let Err(error) = context.authorize_tool_source_delivery().await {
+                if let Err(error) = context.authorize_runtime_dispatch(provider).await {
                     return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
                 }
                 provider.dispatch(dispatch, context).await
@@ -1442,7 +1492,7 @@ impl AiRuntime {
         &self,
         provider_kind: &ProviderKind,
         dispatch: crate::ModelDispatchRequest,
-        context: ProviderRequestContext,
+        mut context: ProviderRequestContext,
         responder: Arc<dyn crate::ProviderDynamicToolResponder>,
     ) -> crate::AiProviderDispatchOutcome {
         let request = dispatch.request();
@@ -1495,7 +1545,7 @@ impl AiRuntime {
         };
         match local() {
             Ok(provider) => {
-                if let Err(error) = context.authorize_tool_source_delivery().await {
+                if let Err(error) = context.authorize_runtime_dispatch(provider).await {
                     return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
                 }
                 provider
@@ -2313,7 +2363,8 @@ impl AiRuntimeBuilder {
 
     /// Registers the exact provider adapter and host profile used for context compaction.
     ///
-    /// The resolver is consulted with the pinned selection on every compaction dispatch.
+    /// The resolver must approve the pinned selection and return the same adapter
+    /// instance through its compaction provider method on every compaction dispatch.
     ///
     /// # Errors
     ///

@@ -17,13 +17,17 @@ supersedes: []
 - Reuse argument validators bound to the exact provider offer or native
   tool admission, including cached refusals for malformed schemas (#819).
 - Re-admit context compaction against the session's pinned provider profile,
-  model, and reasoning effort immediately before dispatch. Classify validated handle-only sources as `Confidential` and
-  keep unlabelled blocks and inherited summaries `Restricted` (#532).
+  model, and reasoning effort. Bind admission to the approved adapter instance
+  and verify the live run fence at dispatch. Classify validated handle-only
+  sources as `Confidential` and keep unlabelled blocks and inherited
+  summaries `Restricted` (#532).
 - Require a running lease and a positive checkpoint generation no newer
   than the lease when adopting completed tool batches. Recheck the live fence
-  after reading and reauthorizing the checkpoint (#532).
+  after reading and reauthorizing the checkpoint. Consumption checks expiry
+  inside each transaction attempt (#532).
 - Check payload lengths before materializing restore pages or batched
-  attachment parent rows in the same transaction (#532).
+  attachment parent rows in the same transaction. Preflight residual pages
+  before any per-row checks (#532).
 
 ## Unreleased - 0.152.0
 

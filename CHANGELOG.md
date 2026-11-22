@@ -14,10 +14,11 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.195.0
+## Unreleased - ORM/macros 0.197.0
 
-- Check the payload size of bounded SQLite and PostgreSQL repository pages
-  before loading the rows for AI restore (#532). [Migration](MIGRATION.md#01940-to-01950-restore-page-size-checks)
+- Check payload sizes for bounded SQLite and PostgreSQL restore pages before
+  loading rows. Preflight residual scans before decoding any candidates and
+  measure PostgreSQL spatial fields in their projected form (#532). [Migration](MIGRATION.md#01960-to-01970-restore-page-size-checks)
 
 ## Unreleased - ORM/macros 0.194.0, operation catalogue 0.11.0
 
