@@ -10,11 +10,44 @@ supersedes: []
 
 # Migration Guide
 
-## 0.192.0 to 0.193.0: restore page size checks
+## 0.193.0 to 0.194.0: restore page size checks
 
 **No action.** Upgrade ORM and macros together. The AI restore collector
 uses a size check before loading repository pages on SQLite and PostgreSQL.
 No data migration is needed.
+
+## 0.192.0 to 0.193.0: handwritten fields on generated objects
+
+**No action.** Upgrade ORM and macros together. Nothing changes for an entity
+that does not declare `#[graphql_orm(object_fields)]`: its SDL, catalogues and
+fingerprints are byte-identical. `Entity` gains the provided method
+`computed_object_fields()`, which handwritten `Entity` implementations inherit.
+
+To move an entity off the `SimpleObject` + `#[graphql(complex)]` +
+`graphql_policy_object` workaround for a computed field, restore the plain
+`GraphQLEntity` derive, add `#[graphql_orm(object_fields)]`, and replace
+`#[ComplexObject]` (or `#[graphql_complex_object]`) on the impl with
+`#[graphql_orm::graphql_object_fields]`. Each handwritten resolver must then
+return `async_graphql::Result<T>`. Compare the SDL afterwards: descriptions
+come from `#[graphql_orm(description = "…")]` and doc comments again, and
+handwritten fields are named by the entity's naming rule unless
+`#[graphql(name = "…")]` names them.
+
+Authorization differs from `graphql_policy_object` in one respect. A
+handwritten field asks what a generated column field asks: the field read
+decision for its row, with its declared `read_policy` key or none. It does not
+ask the entity or row decision again. Generated queries, relations, mutations,
+entity resolution and subscriptions authorize the row before the object
+exists. A host resolver that constructs or loads an entity object itself must
+authorize that object itself, as it must for the generated column fields. A
+refused field declared `Option<T>` is an explicit `null` with a path-specific
+error. `subscribe` is accepted only on scalar or enum outputs, or an `Option`
+or list of those.
+
+Declaring `object_fields` adds the
+handwritten fields to the entity's semantic catalogue entry, so that entity's
+catalogue fingerprint changes once. See
+[handwritten fields on a generated object](docs/reference/graphql-orm/macros-and-attributes.md#handwritten-fields-on-a-generated-object).
 
 ## 0.191.0 to 0.192.0: propagated parent actions
 

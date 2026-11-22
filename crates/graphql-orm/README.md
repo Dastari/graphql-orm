@@ -10,8 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.193.0 supports size checks for AI restore pages.
-See the [migration guide](../../MIGRATION.md#01920-to-01930-restore-page-size-checks).
+Version 0.194.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-restore-page-size-checks).
+
+In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
+resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put
+`#[graphql_object_fields]` on one impl of it. Entities that do not opt in are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).

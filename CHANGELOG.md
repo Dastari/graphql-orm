@@ -14,10 +14,31 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.193.0
+## Unreleased - ORM/macros 0.194.0
 
 - Check the payload size of bounded SQLite and PostgreSQL repository pages
-  before loading the rows for AI restore (#532). [Migration](MIGRATION.md#01920-to-01930-restore-page-size-checks)
+  before loading the rows for AI restore (#532). [Migration](MIGRATION.md#01930-to-01940-restore-page-size-checks)
+
+## Unreleased - ORM/macros 0.193.0
+
+- **Added:** a `GraphQLEntity`-generated object can host handwritten resolver
+  fields. Mark the entity `#[graphql_orm(object_fields)]` and put
+  `#[graphql_orm::graphql_object_fields]` on one inherent impl of it. The
+  generated column fields, descriptions, `RecordVersion` and `NodeId` are
+  unchanged; the handwritten fields follow them in the same object. Each
+  handwritten field runs the checks of a generated column field before its
+  body: the field read decision for its row, with the key it may declare with
+  `#[graphql_orm(read_policy = "…")]`. Generated read paths authorize the row
+  before the object exists; an object a host resolver builds itself is the
+  host's to authorize. A refused `Option<T>` field is an explicit `null` with
+  a path-specific error. The field is refused in generated `Changed`
+  subscriptions unless it declares `#[graphql_orm(subscribe)]`, which needs a
+  scalar or enum output, or an `Option` or list of those. The fields are listed by
+  `Entity::computed_object_fields()` and in the semantic catalogue as
+  selectable, never-exported fields with no filter, ordering, grouping or
+  aggregate. Entities that do not opt in generate exactly what they did
+  ([#808](https://github.com/Dastari/graphql-orm/issues/808)). See the
+  [migration guide](MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
 ## Unreleased - ORM/macros 0.192.0
 

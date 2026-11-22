@@ -10,8 +10,14 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.193.0 supports size checks for AI restore pages.
-See the [migration guide](../../MIGRATION.md#01920-to-01930-restore-page-size-checks).
+Version 0.194.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-restore-page-size-checks).
+
+Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
+`#[graphql_object_fields]`: handwritten resolver fields on the object
+`GraphQLEntity` generates, each behind the field read decision of a generated
+field. Entities that do not opt in generate the same output.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
@@ -818,6 +824,7 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `RepositoryEntity` | typed repository CRUD and private projections with no GraphQL surface |
 | `GraphQLRelations` | batched single/composite-key relation resolvers |
 | `graphql_complex_object` | handwritten complex fields composed with generated relations |
+| `graphql_object_fields` | handwritten resolver fields added to the object `GraphQLEntity` generates, with `#[graphql_orm(object_fields)]` |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
 | `graphql_orm_custom_operations` | semantic metadata beside a handwritten root impl, plus its enforced authorization and assurance guards |
