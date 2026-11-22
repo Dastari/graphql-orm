@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.199.0
+
+- **Added (#842).** Trusted transaction writers can enqueue a typed computed-field
+  invalidation. An opted-in subscription releases the target ID and public topic
+  under a disclosure policy and current target authorization. Related-state
+  changes leave the target row, revision and ordinary Changed delivery intact.
+  [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+
 ## Unreleased - ORM/macros 0.193.0
 
 - **Added:** a `GraphQLEntity`-generated object can host handwritten resolver

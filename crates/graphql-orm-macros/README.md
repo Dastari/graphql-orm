@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.199.0 lets hosts use generated entity keys and subscription
+authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
+
 Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
 `#[graphql_object_fields]`: handwritten resolver fields on the object
 `GraphQLEntity` generates, each behind the field read decision of a generated

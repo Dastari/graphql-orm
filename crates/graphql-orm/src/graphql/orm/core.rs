@@ -1004,6 +1004,7 @@ impl MutationEvent {
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 trait DeferredEventEmitter<B: OrmBackend>: Send {
+    fn requires_commit(&self) -> bool;
     fn emit(self: Box<Self>, db: &crate::db::Database<B>);
 }
 
@@ -1016,7 +1017,7 @@ trait PostCommitActionRunner<B: OrmBackend>: Send {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-struct DeferredEvent<T>
+struct DeferredEvent<T, const COMMIT_ONLY: bool>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -1024,11 +1025,15 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-impl<T, B> DeferredEventEmitter<B> for DeferredEvent<T>
+impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, COMMIT_ONLY>
 where
     B: OrmBackend,
     T: Clone + Send + Sync + 'static,
 {
+    fn requires_commit(&self) -> bool {
+        COMMIT_ONLY
+    }
+
     fn emit(self: Box<Self>, db: &crate::db::Database<B>) {
         db.emit_event(self.event);
     }
@@ -2168,10 +2173,26 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
+        self.queue_deferred_event::<T, false>(event);
+    }
+
+    /// Queue an event that even an explicit drain must hold until commit.
+    pub(crate) fn queue_commit_only_event<T>(&mut self, event: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.queue_deferred_event::<T, true>(event);
+    }
+
+    fn queue_deferred_event<T, const COMMIT_ONLY: bool>(&mut self, event: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
         if super::ensure_write_allowed().is_err() {
             return;
         }
-        self.deferred_events.push(Box::new(DeferredEvent { event }));
+        self.deferred_events
+            .push(Box::new(DeferredEvent::<T, COMMIT_ONLY> { event }));
     }
 
     /// Register an action to run once, after this transaction commits.
@@ -2213,7 +2234,10 @@ where
     }
 
     pub fn emit_queued_events(&mut self) {
-        for event in self.deferred_events.drain(..) {
+        for event in self
+            .deferred_events
+            .extract_if(.., |event| !event.requires_commit())
+        {
             event.emit(self.db);
         }
     }

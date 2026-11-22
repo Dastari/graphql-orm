@@ -8225,6 +8225,22 @@ fn generate_graphql_operations_unfiltered(
             quote! {}
         };
 
+    let computed_field_invalidation_target = (!repository_entity_hook_asks).then(|| quote! {
+        impl ::graphql_orm::graphql::subscriptions::ComputedFieldInvalidationTarget<#backend_marker, #key_type> for #struct_name {
+            fn invalidation_key_values(key: &#key_type) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
+                Self::__gom_key_values(key)
+            }
+
+            fn invalidation_row_key_values(&self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
+                Self::__gom_subscription_key_values(self)
+            }
+
+            fn authorize_invalidation_target_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
+                -> ::graphql_orm::async_graphql::Result<()> {
+                Self::__gom_authorize_changed_operation(ctx)
+            }
+        }
+    });
     let full_write_surface = generates_standard_write_surface;
     let query_root = queries::root(
         &query_context,
@@ -8310,6 +8326,7 @@ fn generate_graphql_operations_unfiltered(
             #composite_mutation_surface
             #composite_write_stubs
             #readonly_composite_changed
+            #computed_field_invalidation_target
         });
     }
 
@@ -9085,6 +9102,7 @@ fn generate_graphql_operations_unfiltered(
         // ============================================================================
 
         #generated_subscription_surface
+        #computed_field_invalidation_target
 
         // ============================================================================
         // Repository Trait Implementation

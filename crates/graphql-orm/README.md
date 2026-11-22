@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.199.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+when a committed related-state write should prompt an authorized client to
+refetch a computed value. The signal contains the target ID and a public topic.
+
 In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
 resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put
 `#[graphql_object_fields]` on one impl of it. Entities that do not opt in are
