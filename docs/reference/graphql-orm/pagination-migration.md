@@ -531,11 +531,15 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     on SQL Server, at the relation total).
   - **What fits on SQL Server.** Each `related` or `not_related` around a
     closure adds two subquery levels and one relation. At the default bound,
-    the standalone projection uses 66 subquery levels. A closure through a relation
-    inside another closure uses 73 in the original composition rendering.
-    The budget checks the original shape, including the target expression. A relation chain
-    alone may be nine deep, and a relation filter or count ordering may add
-    five relations to a statement.
+    the standalone projection uses 66 subquery levels. The original
+    composition rendering uses 67 levels for one closure and leaves room for
+    four relations around it. A directly nested closure counts as five
+    relations and leaves room for one surrounding relation. Putting a
+    relation between two closures uses 73 levels and exhausts the
+    nine-relation budget. A relation chain alone may be nine deep, and a
+    relation filter or count ordering may add five relations to a statement.
+    On SQLite and PostgreSQL, a closure counts as 16 relations, plus its
+    three `EXISTS` subqueries, and a relation chain may be 32 deep.
   - **Cost guidance.** Keep closures to one level where you can. Index the key
     columns and prefer unique keys to limit fan-out. Use a shorter
     `related_closure_within` bound when chains are known to be shallow. The

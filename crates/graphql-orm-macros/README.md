@@ -10,8 +10,36 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.198.0 includes the
-[standalone closure rendering update](../../MIGRATION.md#ormmacros-01980-closure-read-predicates).
+Version 0.200.0 includes the
+[standalone closure rendering update](../../MIGRATION.md#01990-to-02000-closure-read-predicates).
+
+Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
+subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+Generated mutations, entity getters, and relations return a curated field error
+when the schema lacks the database.
+
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
+Version 0.197.0 keeps SQL Server generated identifiers delimited and extends
+the quoting cases shared with the runtime. The runtime's general SQL Server
+identifier renderer also supports bare temporary table and variable names.
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
+
+Version 0.196.0 lets hosts use generated entity keys and subscription
+authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
+
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
+In version 0.194.0, `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
+and semantic catalogue functions, and `GraphQLRelations` and
+`#[graphql_complex_object]` (with any options) record which generated
+relation resolvers an object mounts. `GraphQLOperations` supplies each entity's
+resolvable `@key` field sets and the roots whose static requirement its
+traversals and entity resolvers enforce. Generated SDL and resolvers are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110).
 
 Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
 `#[graphql_object_fields]`: handwritten resolver fields on the object

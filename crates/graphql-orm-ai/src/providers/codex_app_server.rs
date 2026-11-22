@@ -14,6 +14,7 @@ use super::{
     AiCodexAppServerSupportedVersions, AiCodexAppServerVersionObservation,
     AiCodexAppServerVersionReadiness,
 };
+use crate::provider::ModelToolOffer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -3874,7 +3875,7 @@ pub struct AiCodexAppServerProtocolActor {
     thread_web_search_maximum_calls: Option<u64>,
     active_web_search_maximum_calls: Option<u64>,
     started_web_search_calls: u64,
-    dynamic_tools: BTreeMap<String, ModelToolDefinition>,
+    dynamic_tools: BTreeMap<String, ModelToolOffer>,
     dynamic_tool_projection_fingerprints: BTreeMap<String, String>,
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
     started_dynamic_calls: BTreeMap<String, String>,
@@ -4333,8 +4334,10 @@ impl AiCodexAppServerProtocolActor {
             .map(|search| search.domain_policy().clone());
         self.thread_web_search_maximum_calls =
             input.web_search().map(|search| search.maximum_calls());
-        self.dynamic_tools = projected_tools.definitions;
-        self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
+        if !has_bound_retained_state {
+            self.dynamic_tools = projected_tools.definitions;
+            self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
+        }
         Ok(frame)
     }
 
@@ -4564,6 +4567,7 @@ impl AiCodexAppServerProtocolActor {
         let definition = self
             .dynamic_tools
             .values()
+            .map(ModelToolOffer::definition)
             .find(|definition| definition.tool_id == tool_id)
             .ok_or(ProviderError::Rejected)?;
         if self
@@ -4834,7 +4838,7 @@ impl AiCodexAppServerProtocolActor {
                 .get("tool")
                 .and_then(Value::as_str)
                 .ok_or(ProviderError::Rejected)?;
-            let definition = self
+            let offer = self
                 .dynamic_tools
                 .get(tool_name)
                 .ok_or(ProviderError::Rejected)?;
@@ -4846,16 +4850,15 @@ impl AiCodexAppServerProtocolActor {
                 .get("arguments")
                 .cloned()
                 .ok_or(ProviderError::Rejected)?;
-            let validator = jsonschema::validator_for(&definition.parameters)
-                .map_err(|_| ProviderError::InvalidRequest)?;
+            let validator = offer.validator()?;
             let invalid_arguments = !arguments.is_object() || !validator.is_valid(&arguments);
             let inbound = if invalid_arguments {
                 AiCodexAppServerInbound::InvalidDynamicToolCall {
                     request_id,
                     thread_id: thread_id.to_owned(),
                     turn_id: turn_id.to_owned(),
-                    call: crate::ProviderInvalidDynamicToolCall::from_definition(
-                        turn_id, call_id, definition, arguments,
+                    call: crate::ProviderInvalidDynamicToolCall::from_offer(
+                        turn_id, call_id, offer, arguments,
                     )?,
                 }
             } else {
@@ -4863,13 +4866,13 @@ impl AiCodexAppServerProtocolActor {
                     request_id,
                     thread_id: thread_id.to_owned(),
                     turn_id: turn_id.to_owned(),
-                    call: ProviderDynamicToolCall::from_definition(
-                        turn_id, call_id, definition, arguments,
-                    )?,
+                    call: ProviderDynamicToolCall::from_offer(turn_id, call_id, offer, arguments)?,
                 }
             };
-            self.pending_dynamic_requests
-                .insert(request_id, (call_id.to_owned(), definition.tool_id.clone()));
+            self.pending_dynamic_requests.insert(
+                request_id,
+                (call_id.to_owned(), offer.definition().tool_id.clone()),
+            );
             return Ok(inbound);
         }
         if let Some(id) = object.get("id").and_then(Value::as_u64) {
@@ -6565,7 +6568,7 @@ fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), Pro
 
 struct ProjectedCodexDynamicTools {
     protocol_values: Vec<Value>,
-    definitions: BTreeMap<String, ModelToolDefinition>,
+    definitions: BTreeMap<String, ModelToolOffer>,
     fingerprints: BTreeMap<String, String>,
 }
 
@@ -6579,11 +6582,16 @@ fn project_codex_dynamic_tools(
         tool.validate()?;
         if !tool.strict
             || definitions
-                .insert(tool.provider_name.clone(), tool.clone())
+                .insert(
+                    tool.provider_name.clone(),
+                    ModelToolOffer::new(tool.clone()),
+                )
                 .is_some()
         {
             return Err(ProviderError::Rejected);
         }
+        // The wire projection can omit constraints. Keep local admission
+        // bound to the complete definition accepted for this tool.
         let projected_schema = project_codex_argument_schema(&tool.parameters)?;
         let fingerprint = codex_schema_projection_fingerprint(tool, &projected_schema)?;
         fingerprints.insert(tool.provider_name.clone(), fingerprint);

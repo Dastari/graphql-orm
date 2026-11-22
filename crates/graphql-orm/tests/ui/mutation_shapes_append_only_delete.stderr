@@ -1,5 +1,5 @@
 error: mutation_shapes selects unavailable delete mutation: append_only entities generate only create
- --> tests/ui/mutation_shapes_append_only_delete.rs:5:8
+ --> tests/ui/mutation_shapes_append_only_delete.rs:4:74
   |
-5 | struct Shaped {
-  |        ^^^^^^
+4 | #[graphql_entity(table = "shaped", append_only = true, mutation_shapes = "create,delete")]
+  |                                                                          ^^^^^^^^^^^^^^^

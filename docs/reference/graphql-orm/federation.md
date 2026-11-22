@@ -3,7 +3,7 @@ title: "Federation entities, keys, and operation roots"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-20
 review_by: 2027-03-01
 supersedes: []
 ---
@@ -119,6 +119,12 @@ appearing anywhere a client can select it. Consequently the **operation
 catalogue and the router-protocol descriptor are byte-identical with and
 without a key** — declaring one changes no root field, argument, or
 authorization requirement.
+
+A consumer that needs to see entity lookups reads them from
+`graphql_orm_resolver_catalog()` instead: it lists every entity with a
+resolvable key, its `@key` field sets, and a reference to the single-read root
+whose static requirement the resolver enforces. See
+[relation and entity resolvers](resolver-operation-metadata.md#relation-and-entity-resolvers).
 
 Note that the exported SDL reads `@key(fields: "id")`, not
 `@key(fields: "id", resolvable: true)`: `resolvable` defaults to true, and

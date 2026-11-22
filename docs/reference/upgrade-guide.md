@@ -70,8 +70,35 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.193.0, `graphql-orm-macros` 0.193.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.200.0, `graphql-orm-macros` 0.200.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.153.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.200.0: standalone closure read predicates can use fewer target SQL copies, and the reference describes incomplete descendant walks and non-unique-key fan-out. [Migration](../../MIGRATION.md#01990-to-02000-closure-read-predicates)
+- **No action** — ORM/macros 0.199.0: derives can opt out of generated mutation and subscription fields. Default schemas keep their original Rust root structs (#677). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
+- **No action** — ORM/macros 0.199.0: generated writes, scalar getters, and relation resolvers return field errors when database context is missing (#542). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
+- **No action** — ORM/macros 0.199.0: generated writes and Changed subscriptions qualify standard paths, mutation shape errors point to the declaration, and implicit update timestamps use backend identifier quoting (#542). [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01990)
+- **No action** — ORM/macros 0.198.0: AI restore pages check payload size before
+  loading on SQLite and PostgreSQL (#532). [Migration](../../MIGRATION.md#01970-to-01980-restore-page-size-checks)
+- **Action needed** — AI 0.153.0: configure provider profile and adapter instance
+  re-admission and use the pinned effort and prepared manifest for compaction. Pin a legacy
+  session with verified evidence or start a new chat (#532).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-to-01530)
+- **Action needed** — AI 0.153.0: direct callers must start a replacement
+  lease before adopting its completed tool batch (#532).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01520-to-01530)
+- **No action** — AI 0.153.0: restore collection reads bounded pages, batches
+  attachment parent lookups, and fails closed when its aggregate row-data
+  budget is exceeded (#532).
+  [Restore collection](../../crates/graphql-orm-ai/docs/recovery-and-restore.md)
+- **No action** — AI 0.153.0: bounded debug codes identify content-protection
+  failures, and provider tool validation reuses validators for exact offers
+  (#818, #819).
+  [AI changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01530)
+- **No action** — ORM/macros 0.197.0. SQL Server scalar reads preserve driver diagnostics and accept `SMALLINT` for boolean reads (#541). [Migration](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding)
+- **No action** — ORM/macros 0.197.0. The database binding guide describes typed UUID and binary NULLs, fallible JSON decoding, and the legacy text-backed array fallback (#541). [Migration](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding)
+- **No action** — ORM/macros 0.197.0. Runtime search supports collections with columns named `__gom_search_key` or `__gom_search_score` and keeps existing cursors and indexes compatible (#821). [Migration](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding)
+- **No action** — ORM/macros 0.196.0. Hosts can opt in to typed computed-field invalidations with commit-only publishing and an explicit disclosure policy (#842). [Migration](../../MIGRATION.md#01950-to-01960-computed-field-invalidations)
+- **No action** — ORM/macros 0.195.0 groups selected integration-test targets (#771). Application hosts can upgrade without configuration changes. [Migration](../../MIGRATION.md#01940-to-01950-integration-test-consolidation)
+- **No action** — ORM/macros 0.194.0, operation catalog 0.11.0: `schema_roots!` also emits `graphql_orm_resolver_catalog()`, a separate document listing the generated relationship fields and Federation entity resolvers a schema serves, and the catalogue adds an opt-in RFC 8785 encoder. Existing SDL, catalogues, fingerprints and receiver bindings are unchanged (#544). [Migration](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110)
 - **No action** — ORM/macros 0.193.0: a `GraphQLEntity`-generated object can host handwritten resolver fields with `#[graphql_orm(object_fields)]` and `#[graphql_object_fields]`; entities that do not opt in are unchanged (#808). [Migration](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects)
 - **No action** — ORM/macros 0.192.0: set `propagate_change_action = "updated"` on an upward relation to report child creates and deletes as parent updates (#812). [Migration](../../MIGRATION.md#01910-to-01920-propagated-parent-actions)
 - **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
@@ -81,8 +108,6 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 Commit `14eff311f18e` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.3)
 
 Packages (changed in bold): **`graphql-orm` 0.191.0, `graphql-orm-macros` 0.191.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.1**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
-
-- **No action** — ORM/macros 0.198.0: standalone closure read predicates can use fewer target SQL copies, and the reference describes incomplete descendant walks and non-unique-key fan-out. [Migration](../../MIGRATION.md#ormmacros-01980-closure-read-predicates)
 
 - **No action** — ORM/macros 0.191.0 and backup 0.28.1: use
   `Database::read_snapshot_transaction` or its auth-aware counterpart

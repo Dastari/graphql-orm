@@ -44,6 +44,7 @@ fn assert_qualified(tokens: TokenStream) {
                         | "Err"
                         | "vec"
                         | "std"
+                        | "serde"
                         | "String"
                         | "Result"
                         | "Send"
@@ -62,12 +63,16 @@ fn assert_qualified(tokens: TokenStream) {
 }
 
 fn assert_resolver(file: &syn::File, name: &str) {
+    assert_resolver_on(file, "RecordQueries", name);
+}
+
+fn assert_resolver_on(file: &syn::File, root: &str, name: &str) {
     let resolver = file.items.iter().find_map(|item| {
         let Item::Impl(item) = item else { return None };
         let Type::Path(target) = item.self_ty.as_ref() else {
             return None;
         };
-        if !target.path.is_ident("RecordQueries") {
+        if !target.path.is_ident(root) {
             return None;
         }
         item.items.iter().find_map(|item| match item {
@@ -110,6 +115,35 @@ fn search_resolver_uses_qualified_standard_library_names() {
 #[test]
 fn aggregate_resolver_uses_qualified_standard_library_names() {
     assert_resolver(&generated(false), "aggregate");
+}
+
+#[test]
+fn write_and_changed_resolvers_use_qualified_names() {
+    let mut input: syn::DeriveInput = syn::parse_str(ENTITY_SOURCE).unwrap();
+    if cfg!(feature = "mssql") {
+        input
+            .attrs
+            .push(parse_quote!(#[graphql_entity(schema_policy = "external_writable")]));
+    }
+    let file = syn::parse2(generate_graphql_operations(&input).unwrap()).unwrap();
+    for method in [
+        "create",
+        "upsert",
+        "update",
+        "update_many",
+        "delete",
+        "delete_many",
+    ] {
+        assert_resolver_on(&file, "RecordMutations", method);
+    }
+    assert_resolver_on(&file, "RecordSubscriptions", "on_changed");
+
+    let event = file
+        .items
+        .iter()
+        .find(|item| matches!(item, Item::Struct(item) if item.ident == "RecordChangedEvent"))
+        .expect("generated change event");
+    assert_qualified(event.to_token_stream());
 }
 
 fn targets(implementation: &syn::ItemImpl, name: &str) -> bool {
@@ -212,23 +246,30 @@ fn query_hygiene_trybuild_fixture_matches_the_generator() {
         .into_iter()
         .filter(|item| match item {
             Item::Struct(item) => {
-                item.ident == "RecordQueries" || item.ident == "RecordKeysetOrderByInput"
+                matches!(
+                    item.ident.to_string().as_str(),
+                    "RecordQueries"
+                        | "RecordKeysetOrderByInput"
+                        | "RecordMutations"
+                        | "RecordSubscriptions"
+                )
             }
             Item::Impl(implementation) => {
                 targets(implementation, "RecordQueries")
                     || targets(implementation, "RecordKeysetOrderByInput")
+                    || targets(implementation, "RecordMutations")
+                    || targets(implementation, "RecordSubscriptions")
             }
             _ => false,
         })
         .collect::<Vec<_>>();
     // Type-check the resolver bodies in the shadowed namespace without
-    // expanding async-graphql's Object macro there. Its own generated
-    // Federation dispatcher depends on unqualified prelude names.
+    // introducing async-graphql's own generated code there.
     for item in &mut items {
         let Item::Impl(implementation) = item else {
             continue;
         };
-        if !targets(implementation, "RecordQueries") {
+        if targets(implementation, "RecordKeysetOrderByInput") {
             continue;
         }
         implementation.attrs.retain(|attr| {
@@ -236,7 +277,7 @@ fn query_hygiene_trybuild_fixture_matches_the_generator() {
                 .path()
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == "Object")
+                .is_some_and(|segment| segment.ident == "Object" || segment.ident == "Subscription")
         });
         for item in &mut implementation.items {
             let ImplItem::Fn(method) = item else {

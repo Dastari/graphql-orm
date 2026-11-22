@@ -1,5 +1,5 @@
 error: `delete` is declared for operation authorization or AI mutation policy but mutation_shapes does not select it
- --> tests/ui/mutation_shapes_conflicting_authorization.rs:9:8
+ --> tests/ui/mutation_shapes_conflicting_authorization.rs:4:54
   |
-9 | struct Shaped {
-  |        ^^^^^^
+4 | #[graphql_entity(table = "shaped", mutation_shapes = "create,update")]
+  |                                                      ^^^^^^^^^^^^^^^
