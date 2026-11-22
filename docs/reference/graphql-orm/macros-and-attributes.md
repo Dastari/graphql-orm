@@ -390,7 +390,13 @@ payload field: `Changed` snapshots serve `NodeId`, `RecordVersion` and persisted
 selection of `Children` is refused before registration.
 A host row policy over a relation target also needs `Database::with_authorized_scan_config`.
 `propagate_change = "up"` on a relation delivers a `PROPAGATED` event to the target's `Changed`
-stream; `"none"` delivers none.
+stream; `"none"` delivers none. Add `propagate_change_action = "updated"` to a
+relation with `propagate_change = "up"` to report a child create or delete as
+`UPDATED` on the surviving target. The subscription's action filter matches
+`UPDATED` for those events. Each relation in a multi-hop path applies its own
+setting. By default each relation uses the original mutation action. The child
+keeps its direct event action, and propagated deletes continue to redact
+`sourceEntity` and `sourceId`.
 Both are available in `Changed` snapshots; relations and arbitrary computed fields
 still require a query refresh. Selecting `NodeId` requires every primary-key field
 to remain subscribable and pass its read policy.

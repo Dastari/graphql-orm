@@ -35,6 +35,23 @@ for historical context.
   ([#808](https://github.com/Dastari/graphql-orm/issues/808)). See the
   [migration guide](MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
+## Unreleased - ORM/macros 0.192.0
+
+- **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation
+  to report child creates and deletes as `UPDATED` in the parent's `Changed`
+  subscription and action filter.
+  [Migration](MIGRATION.md#01910-to-01920-propagated-parent-actions)
+
+## Unreleased - ORM/macros 0.191.0
+
+- **Added (#831):** `Database::read_snapshot_transaction` runs multiple
+  policy-aware reads against one pinned snapshot, with a companion runner for
+  transaction-local authorization. SQLite requires WAL and normal locking
+  for every database file. PostgreSQL uses read-only repeatable read, and
+  SQL Server requires snapshot isolation.
+  Backend prerequisites and refused writes have typed errors.
+  See the [migration guide](MIGRATION.md#01900-to-01910-read-snapshot-transactions).
+
 ## Unreleased - ORM/macros 0.190.0
 
 - **Fixed (generated queries, #542 and #723).** Query resolver emission is shared

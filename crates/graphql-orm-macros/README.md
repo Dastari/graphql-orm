@@ -16,6 +16,13 @@ Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
 field. Entities that do not opt in generate the same output.
 See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
+Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
+See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
+
+Version 0.191.0 aligns with the ORM's
+[read snapshot transactions](../graphql-orm/README.md#read-snapshot-transactions).
+Existing generated reads work through the snapshot context.
+
 In version 0.190.0, `GraphQLOperations` reports malformed keyset orders at
 the keyset attribute. Use `field asc|desc [nulls first|last]` for each
 comma-separated entry and end the order with the complete primary key.

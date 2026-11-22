@@ -810,6 +810,7 @@ fn classify_propagation_value_type(ty: &syn::Type) -> Option<(PropagationValueKi
 
 struct PropagatedRelation {
     graphql_name: String,
+    report_as_updated: bool,
     source_fields: Vec<(syn::Ident, syn::Type, FieldMetadata)>,
     target_fields: Vec<String>,
     target_type: syn::Ident,
@@ -2291,6 +2292,7 @@ fn generate_graphql_operations_unfiltered(
         );
         propagated_relations.push(PropagatedRelation {
             graphql_name,
+            report_as_updated: meta.relation_propagate_as_updated,
             source_fields,
             target_fields,
             target_type,
@@ -2841,6 +2843,7 @@ fn generate_graphql_operations_unfiltered(
         #subscription_key_visibility fn __gom_queue_propagated_changed_event(
             hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
             action: ::graphql_orm::graphql::orm::ChangeAction,
+            source_action: ::graphql_orm::graphql::orm::ChangeAction,
             id: #key_type,
             parent_entity: Option<&Self>,
             source_entity: &str,
@@ -2853,8 +2856,8 @@ fn generate_graphql_operations_unfiltered(
                 change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
                 id: #propagated_event_id,
                 #subscription_key_initializer
-                source_entity: (action != ::graphql_orm::graphql::orm::ChangeAction::Deleted).then(|| source_entity.to_string()),
-                source_id: (action != ::graphql_orm::graphql::orm::ChangeAction::Deleted).then(|| source_id.to_string()),
+                source_entity: (source_action != ::graphql_orm::graphql::orm::ChangeAction::Deleted).then(|| source_entity.to_string()),
+                source_id: (source_action != ::graphql_orm::graphql::orm::ChangeAction::Deleted).then(|| source_id.to_string()),
                 path,
                 entity: parent_entity.cloned(),
             };
@@ -2878,6 +2881,13 @@ fn generate_graphql_operations_unfiltered(
             let relation_name = &relation.graphql_name;
             let target_type = &relation.target_type;
             let target_fields = &relation.target_fields;
+            // This edge controls the emitted action. The original action still
+            // controls delete provenance and traversal through subsequent edges.
+            let parent_action = if relation.report_as_updated {
+                quote! { ::graphql_orm::graphql::orm::ChangeAction::Updated }
+            } else {
+                quote! { action }
+            };
             let mut value_tokens = Vec::new();
             let mut optional_checks = Vec::new();
             let mut source_names = Vec::new();
@@ -2931,7 +2941,7 @@ fn generate_graphql_operations_unfiltered(
                             next_provenance.iter().map(|source| source.propagation_identity()).collect::<Vec<_>>(),
                         )).map_err(|error| ::graphql_orm::sqlx::Error::Protocol(error.to_string()))?;
                         if visited.insert(dedupe_key) {
-                            <#target_type>::__gom_queue_propagated_changed_event(hook_ctx, action, parent_id,
+                            <#target_type>::__gom_queue_propagated_changed_event(hook_ctx, #parent_action, action, parent_id,
                                 Some(&parent_entity), source_entity, source_id, next_path.clone(), next_provenance.clone());
                             <#target_type>::__gom_propagate_changed_event(hook_ctx, action, &parent_entity,
                                 source_entity, source_id, next_path, visited, &next_provenance).await?;

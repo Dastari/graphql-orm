@@ -70,15 +70,29 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.193.0, `graphql-orm-macros` 0.193.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.193.0, `graphql-orm-macros` 0.193.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **No action** — ORM/macros 0.193.0: a `GraphQLEntity`-generated object can host handwritten resolver fields with `#[graphql_orm(object_fields)]` and `#[graphql_object_fields]`; entities that do not opt in are unchanged (#808). [Migration](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects)
+- **No action** — ORM/macros 0.192.0: set `propagate_change_action = "updated"` on an upward relation to report child creates and deletes as parent updates (#812). [Migration](../../MIGRATION.md#01910-to-01920-propagated-parent-actions)
+- **No action** — AI 0.152.0: the local-harness and Grok ACP adapters can send resolved entity references to their local process. Off by default: a registration opts in with `with_resolved_entity_reference_delivery`, and until then every reference is still the unavailable marker. Review what the process retains before opting in. The Codex app-server adapter stays marker-only (#721, #828). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters)
+
+### workspace-2026.11.21.3
+
+Commit `14eff311f18e` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.3)
+
+Packages (changed in bold): **`graphql-orm` 0.191.0, `graphql-orm-macros` 0.191.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.28.1**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **No action** — ORM/macros 0.191.0 and backup 0.28.1: use
+  `Database::read_snapshot_transaction` or its auth-aware counterpart
+  to opt in to policy-aware snapshot reads (#831). The optional ORM backup
+  adapter refuses restore writes inside the snapshot callback.
+  [ORM migration](../../MIGRATION.md#01900-to-01910-read-snapshot-transactions) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0280-to-0281-read-snapshot-write-refusal)
 
 ### workspace-2026.11.21.2
 
 Commit `3111331f3a31` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.21.2)
 
-Packages (changed in bold): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; **`graphql-orm-ai-tool-profiles` 0.27.1**; **`graphql-orm-ai` 0.151.2**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Packages (changed in bold): **`graphql-orm` 0.190.0, `graphql-orm-macros` 0.190.0**; `graphql-orm-operation-catalog` 0.10.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.151.2; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **Action needed** — ORM/macros 0.190.0: fix any keyset order with an incomplete null-order clause or trailing tokens (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)
 - **No action** — ORM/macros 0.190.0: generated query resolver emission is shared across writable and read-only entity profiles (#723), and generated queries, Changed subscriptions and the NodeId object field return field errors when required schema data is missing (#542). [Migration](../../MIGRATION.md#01890-to-01900-generated-query-resolvers)

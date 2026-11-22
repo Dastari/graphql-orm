@@ -32,6 +32,12 @@ pub const AI_ENTITY_REFERENCE_ENVELOPE_RESERVED_BYTES: u64 = 512;
 /// Largest per-block reservation the estimator honours.
 const MAXIMUM_BLOCK_RESERVED_BYTES: u64 = 1024 * 1024;
 
+/// Longest time a local-process provider registration may allow between the
+/// resolution of a dispatch's entity references and the moment the one write
+/// that delivers them to the process may begin.
+pub const AI_MAXIMUM_ENTITY_REFERENCE_DELIVERY_AGE: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
 /// Message-block kind of a stored entity-reference handle.
 pub const AI_ENTITY_REFERENCE_BLOCK_KIND: &str = "entity_reference";
 /// Provenance tag carried by every resolved reference.
@@ -804,6 +810,10 @@ impl AiEntityReferenceRegistry {
 pub struct ModelDispatchReferences {
     entries: Vec<(AiEntityReferenceInput, Value)>,
     anonymous: Value,
+    /// Taken immediately before the first host hook call of this dispatch.
+    resolved_at: std::time::Instant,
+    /// Whether any entry carries resolved data, as opposed to a marker.
+    holds_resolved_data: bool,
 }
 
 impl std::fmt::Debug for ModelDispatchReferences {
@@ -823,7 +833,32 @@ impl ModelDispatchReferences {
         Self {
             entries: Vec::new(),
             anonymous: anonymous_unavailable_wire_envelope(),
+            resolved_at: std::time::Instant::now(),
+            holds_resolved_data: false,
         }
+    }
+
+    /// The instant by which the one transport write that carries this
+    /// dispatch's resolved data must begin, for an adapter that may start
+    /// sending it for at most `maximum_age` after resolution.
+    ///
+    /// The age is counted from the moment the executor started resolving,
+    /// before the first host hook call, so it also covers the resolution
+    /// itself. `None` means the value holds no resolved data: every reference
+    /// is already the unavailable marker and no deadline applies.
+    ///
+    /// The instant bounds when the write may begin. An adapter that does not
+    /// write at once (one that launches, resumes or queues for a local
+    /// process first) must compare it with the current time after encoding
+    /// and immediately before its write starts, and send the marker form if
+    /// it has passed. A write that has started may complete. If it is still
+    /// in progress at this instant the adapter must stop it, fail the turn,
+    /// and never write through that writer again, so that no remainder of
+    /// the frame can be flushed later.
+    pub fn write_deadline(&self, maximum_age: std::time::Duration) -> Option<std::time::Instant> {
+        self.holds_resolved_data
+            .then(|| self.resolved_at.checked_add(maximum_age))
+            .flatten()
     }
 
     /// Returns the JSON an adapter must send for one JSON input value.
@@ -927,7 +962,7 @@ impl ModelDispatchRequest {
             .iter()
             .map(|_| AiEntityReferenceOutcome::Unavailable)
             .collect();
-        Self::assemble(request, slots, outcomes)
+        Self::assemble(request, slots, outcomes, std::time::Instant::now())
     }
 
     /// Resolves every reference of `request` for `principal`, now.
@@ -948,6 +983,9 @@ impl ModelDispatchRequest {
         mut request: ModelRequest,
     ) -> Self {
         withhold_request_entity_references(&mut request);
+        // The freshness of everything resolved below is counted from here,
+        // before the first hook call.
+        let resolved_at = std::time::Instant::now();
         let slots = dispatch_slots(&request);
         let handles = slots
             .iter()
@@ -962,7 +1000,7 @@ impl ModelDispatchRequest {
                 .map(|_| AiEntityReferenceOutcome::Unavailable)
                 .collect(),
         };
-        Self::assemble(request, slots, outcomes)
+        Self::assemble(request, slots, outcomes, resolved_at)
     }
 
     /// Pairs each distinct handle with what is sent for it. A reference that
@@ -972,7 +1010,9 @@ impl ModelDispatchRequest {
         request: ModelRequest,
         slots: Vec<DispatchSlot>,
         outcomes: Vec<AiEntityReferenceOutcome>,
+        resolved_at: std::time::Instant,
     ) -> Self {
+        let mut holds_resolved_data = false;
         let entries = slots
             .into_iter()
             .zip(outcomes)
@@ -986,6 +1026,7 @@ impl ModelDispatchRequest {
                     | AiEntityReferenceOutcome::Unavailable
                     | AiEntityReferenceOutcome::TooLarge => None,
                 };
+                holds_resolved_data |= resolved.is_some();
                 let wire = resolved.unwrap_or_else(|| {
                     Some(unavailable_wire_envelope(&reference))
                         .filter(|marker| wire_cost(marker) <= allowance)
@@ -999,6 +1040,8 @@ impl ModelDispatchRequest {
             references: ModelDispatchReferences {
                 entries,
                 anonymous: anonymous_unavailable_wire_envelope(),
+                resolved_at,
+                holds_resolved_data,
             },
         }
     }
@@ -1028,6 +1071,19 @@ impl ModelDispatchRequest {
     /// transport write, for example one that hands the request to another
     /// component. The result holds no reference data.
     pub fn into_unavailable_request(self) -> ModelRequest {
+        self.into_unavailable_parts().0
+    }
+
+    /// Splits the value into a plain request in which every entity reference
+    /// is the unavailable marker, and what the references resolved to.
+    ///
+    /// The request holds no reference data and may be validated, cloned and
+    /// logged. An adapter for a local process uses it for everything except
+    /// the one write that delivers the turn, where it passes each marker
+    /// block through [`ModelDispatchReferences::wire_json`], which accepts a
+    /// marker as well as a handle.
+    #[cfg_attr(not(feature = "provider-grok-acp"), allow(dead_code))]
+    pub(crate) fn into_unavailable_parts(self) -> (ModelRequest, ModelDispatchReferences) {
         let mut request = self.request;
         let mark = |blocks: &mut [ModelInputBlock]| {
             for block in blocks {
@@ -1051,7 +1107,80 @@ impl ModelDispatchRequest {
             }
         }
         mark(&mut request.input);
-        request
+        (request, self.references)
+    }
+}
+
+/// How an attempt to write a frame that carries resolved data ended.
+#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+pub(crate) enum ResolvedWrite<T> {
+    /// The freshness deadline had passed before the write was first polled.
+    /// Nothing was written; the caller sends the all-marker frame instead.
+    NotStarted,
+    /// The write ran to completion and returned this.
+    Completed(T),
+    /// The deadline passed while the write was in progress. The write future
+    /// has been dropped. The caller must fail the turn and make sure nothing
+    /// is ever written through that writer again.
+    Abandoned,
+}
+
+#[cfg(all(test, any(feature = "local-harness", feature = "provider-grok-acp")))]
+thread_local! {
+    /// Test seam: time that passes between the encoding of a resolved frame
+    /// and the start check of its write, on the current thread.
+    pub(crate) static DELAY_BEFORE_RESOLVED_WRITE: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// Runs the one write of an already encoded frame that carries resolved
+/// data, under the freshness `deadline` of its dispatch.
+///
+/// The deadline bounds when the write may **begin**. It is compared with the
+/// clock here, after encoding, on the first poll of `write` and before `write`
+/// itself is polled; if it has passed, `write` is never polled and
+/// [`ResolvedWrite::NotStarted`] is returned. Once the write has begun, the
+/// deadline is polled before every further poll of `write` (a deadline-first,
+/// biased select), so expiry wins over more writing. A write that completes
+/// within a poll that began before expiry is allowed to finish.
+#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+pub(crate) async fn write_resolved_before<T>(
+    deadline: std::time::Instant,
+    write: impl std::future::Future<Output = T>,
+) -> ResolvedWrite<T> {
+    #[cfg(test)]
+    {
+        let delay = DELAY_BEFORE_RESOLVED_WRITE.get();
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+    }
+    let started = std::sync::atomic::AtomicBool::new(false);
+    let has_started = || started.load(std::sync::atomic::Ordering::SeqCst);
+    let mut write = std::pin::pin!(write);
+    let tracked = std::future::poll_fn(|context| {
+        if !has_started() {
+            if std::time::Instant::now() >= deadline {
+                return std::task::Poll::Ready(None);
+            }
+            started.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        write.as_mut().poll(context).map(Some)
+    });
+    let expiry = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+    tokio::select! {
+        biased;
+        () = expiry => {
+            if has_started() {
+                ResolvedWrite::Abandoned
+            } else {
+                ResolvedWrite::NotStarted
+            }
+        }
+        output = tracked => match output {
+            Some(output) => ResolvedWrite::Completed(output),
+            None => ResolvedWrite::NotStarted,
+        },
     }
 }
 
@@ -1109,6 +1238,60 @@ pub fn is_entity_reference_block_kind(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn a_resolved_write_starts_only_before_its_deadline_and_expiry_wins_over_more_writing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let polls = AtomicUsize::new(0);
+        let counted = |ready: bool| {
+            let polls = &polls;
+            std::future::poll_fn(move |_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+                if ready {
+                    std::task::Poll::Ready(7)
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+        };
+
+        // Fresh: the write is polled and completes.
+        let fresh = Instant::now() + Duration::from_secs(30);
+        assert!(matches!(
+            write_resolved_before(fresh, counted(true)).await,
+            ResolvedWrite::Completed(7)
+        ));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 1);
+
+        // Already expired: the write is never polled.
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            write_resolved_before(expired, counted(true)).await,
+            ResolvedWrite::NotStarted
+        ));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 0);
+
+        // Expires between encoding and the start check: never polled.
+        DELAY_BEFORE_RESOLVED_WRITE.set(Duration::from_millis(80));
+        let soon = Instant::now() + Duration::from_millis(20);
+        let outcome = write_resolved_before(soon, counted(true)).await;
+        DELAY_BEFORE_RESOLVED_WRITE.set(Duration::ZERO);
+        assert!(matches!(outcome, ResolvedWrite::NotStarted));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 0);
+
+        // Started, then the deadline passes while the writer stays pending:
+        // abandoned, and not polled again after expiry.
+        let soon = Instant::now() + Duration::from_millis(60);
+        assert!(matches!(
+            write_resolved_before(soon, counted(false)).await,
+            ResolvedWrite::Abandoned
+        ));
+        assert_eq!(polls.swap(0, Ordering::SeqCst), 1);
+    }
 
     struct Fixed;
 

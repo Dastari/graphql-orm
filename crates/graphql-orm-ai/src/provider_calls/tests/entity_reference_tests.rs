@@ -7,6 +7,10 @@
 
 use super::*;
 
+#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+#[path = "entity_reference_local_transport_tests.rs"]
+mod local_transport;
+
 /// A field value the host hook returns while access holds.
 const FIELD: &str = "field value readable before revocation";
 
@@ -65,6 +69,15 @@ fn registry_with_limits(
 /// A fixture whose runtime resolves references and whose provider records
 /// what it was sent.
 async fn references_with(mock: MockProvider) -> References {
+    references_for(mock, None).await
+}
+
+/// The same fixture with `provider` registered in place of the mock, for the
+/// adapters that deliver a request to a local process.
+async fn references_for(
+    mock: MockProvider,
+    provider: Option<Arc<dyn crate::AiProvider>>,
+) -> References {
     let access = Arc::new(AtomicBool::new(true));
     let calls = Arc::new(AtomicUsize::new(0));
     // Small bounds: the fixture's deployment boundary admits 16 KiB a call.
@@ -73,7 +86,13 @@ async fn references_with(mock: MockProvider) -> References {
         &calls,
         crate::AiEntityReferenceLimits::new(8, 64, 512, 2_048).expect("limits should validate"),
     );
-    let mut fixture = fixture_with_provider(mock.with_wire_capture()).await;
+    let mut fixture = fixture_with_optional_provider(
+        mock.with_wire_capture(),
+        Arc::new(AllowAccess),
+        true,
+        provider,
+    )
+    .await;
     Arc::get_mut(&mut fixture.runtime)
         .expect("the fixture owns its runtime")
         .install_entity_references_for_test(registry.clone());
@@ -382,13 +401,27 @@ struct ToolLoop {
 /// checkpoints, all through the real services.
 async fn tool_loop(batches: impl IntoIterator<Item = Vec<ProviderEvent>>) -> ToolLoop {
     let references = references(batches).await;
+    let mock = references.fixture.mock.clone();
+    tool_loop_on(references, |plan| plan, &move || mock.captured_wire()).await
+}
+
+/// [`tool_loop`] over any registered provider: `adapt` turns the fixture's
+/// plan into one for that provider and `wire` returns what it has been sent.
+async fn tool_loop_on(
+    references: References,
+    adapt: fn(AiProviderCallPlan) -> AiProviderCallPlan,
+    wire: &dyn Fn() -> Vec<String>,
+) -> ToolLoop {
     let fixture = &references.fixture;
-    let first = with_reference(stateless_tool_plan(fixture), &references.registry);
+    let first = adapt(with_reference(
+        stateless_tool_plan(fixture),
+        &references.registry,
+    ));
     let result = executor(fixture)
         .execute(&fixture.lease, first)
         .await
         .expect("turn one should normalize");
-    assert_resolved(&fixture.mock.captured_wire()[0]);
+    assert_resolved(&wire()[0]);
     assert_handles_only("the call result", &format!("{result:?}"));
     assert_handles_only(
         "the next continuation",
@@ -512,6 +545,17 @@ fn continuation_plan(
     continuation: crate::AiAgentContinuation,
     number: u32,
 ) -> AiProviderCallPlan {
+    continuation_plan_on(fixture, continuation, number, |plan| plan)
+}
+
+/// [`continuation_plan`] for any registered provider: `adapt` turns the
+/// fixture's base plan into one for that provider before the plan is sealed.
+fn continuation_plan_on(
+    fixture: &Fixture,
+    continuation: crate::AiAgentContinuation,
+    number: u32,
+    adapt: fn(AiProviderCallPlan) -> AiProviderCallPlan,
+) -> AiProviderCallPlan {
     let descriptor = fixture
         .runtime
         .tool_catalog()
@@ -523,7 +567,7 @@ fn continuation_plan(
         fingerprint: descriptor.fingerprint.clone(),
         enabled: true,
     });
-    let base = attempt(plan(fixture), fixture, number);
+    let base = adapt(attempt(plan(fixture), fixture, number));
     AiProviderCallPlan::new_continuation_with_read_capabilities(
         base.provider_kind,
         ModelRequest {
