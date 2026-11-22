@@ -9,6 +9,8 @@ use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationCatalog, GraphqlO
 
 mod client;
 pub use client::*;
+mod resolvers;
+pub use resolvers::*;
 
 /// Current semantic-catalogue wire version.
 pub const GRAPHQL_SEMANTIC_CATALOG_VERSION: u16 = 3;
@@ -2202,7 +2204,7 @@ pub fn parse_graphql_type(value: &str) -> Result<GraphqlSemanticTypeRef, Graphql
     parse(value, true)
 }
 
-fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
+pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
     fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(object) => serde_json::Value::Object(

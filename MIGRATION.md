@@ -10,12 +10,26 @@ supersedes: []
 
 # Migration Guide
 
-## 0.193.0 to 0.199.0: computed-field invalidations
+## 0.194.0 to 0.199.0: computed-field invalidations
 
 **No action.** Upgrade ORM and macros together. To opt in, declare a topic and
 its disclosure policy, register a subscription resolver and enqueue invalidations
 from the trusted writer's transaction. Existing schema surfaces and Changed
 streams require no configuration changes. [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+
+## 0.193.0 to 0.194.0: resolver catalogue (operation catalogue 0.11.0)
+
+Upgrade ORM and macros together, with operation catalogue 0.11.0.
+
+**No action.** `schema_roots!` emits one more function,
+`graphql_orm_resolver_catalog()`, which returns
+`Result<&GraphqlResolverCatalog, &GraphqlSemanticError>`, and the operation catalogue crate adds
+`GraphqlResolverCatalog`, `rfc8785_canonical_json` and `rfc8785_json_hash`.
+The SDL, the operation and semantic catalogues, the client metadata, the
+router export and every existing fingerprint and receiver binding are
+unchanged, so nothing stored needs to be regenerated. A module that already
+defines an item named `graphql_orm_resolver_catalog` beside `schema_roots!`
+must rename it.
 
 ## 0.192.0 to 0.193.0: handwritten fields on generated objects
 

@@ -13,6 +13,15 @@ supersedes: []
 Version 0.199.0 lets hosts use generated entity keys and subscription
 authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
 
+In version 0.194.0, `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
+and semantic catalogue functions, and `GraphQLRelations` and
+`#[graphql_complex_object]` (with any options) record which generated
+relation resolvers an object mounts. `GraphQLOperations` supplies each entity's
+resolvable `@key` field sets and the roots whose static requirement its
+traversals and entity resolvers enforce. Generated SDL and resolvers are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110).
+
 Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
 `#[graphql_object_fields]`: handwritten resolver fields on the object
 `GraphQLEntity` generates, each behind the field read decision of a generated

@@ -14,6 +14,12 @@ Version 0.199.0 adds opt-in [computed-field invalidations](../../docs/reference/
 when a committed related-state write should prompt an authorized client to
 refetch a computed value. The signal contains the target ID and a public topic.
 
+In version 0.194.0, `schema_roots!` also emits `graphql_orm_resolver_catalog()`: the generated
+relationship fields and Federation entity resolvers of the schema, which no operation
+catalogue lists. It is descriptive, names only what the SDL publishes, and
+changes no existing catalogue or fingerprint. See
+[generated resolver operation metadata](../../docs/reference/graphql-orm/resolver-operation-metadata.md#relation-and-entity-resolvers).
+
 In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
 resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put
 `#[graphql_object_fields]` on one impl of it. Entities that do not opt in are
