@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.205.0
+
+- **Changed (part of #677, #358).** Generated Changed subscriptions share
+  the runtime's stream and authorization code, reducing the work rustc does
+  for each entity with subscriptions enabled.
+  **No action.** See the
+  [migration guide](MIGRATION.md#02010-to-02050-generated-changed-subscriptions).
+
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
 - **Fixed (#829).** Repeated entity identities return a typed composition

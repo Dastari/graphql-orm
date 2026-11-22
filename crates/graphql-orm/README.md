@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02010-to-02050-generated-changed-subscriptions).
+
 Version 0.201.0 returns duplicate entity identities as errors from the
 generated resolver catalogue and fallible schema builders. See the
 [migration guide](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120).

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02010-to-02050-generated-changed-subscriptions).
+
 Version 0.201.0 makes `schema_roots!` report duplicate entity identities
 through its fallible schema builders and resolver catalogue helper. Upgrade
 ORM and macros together. See the

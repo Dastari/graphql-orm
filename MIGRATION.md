@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.201.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
+
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
 **No action.** Upgrade ORM and macros together. The generated resolver
