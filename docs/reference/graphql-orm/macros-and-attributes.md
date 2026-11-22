@@ -1158,6 +1158,10 @@ records remain available. The existing `schema_roots!` entity list works with
 both opted-out and enabled entities. SDL, operation catalogues and Changed
 stream metadata omit the disabled fields.
 
+When an opt-out leaves a generated root with no fields, `schema_builder(database)`
+uses async-graphql's empty root type for that root. A manually assembled schema
+can pass `EmptyMutation` or `EmptySubscription` in the corresponding position.
+
 Remove stale declarations before opting out. `mutations = false` conflicts
 with `mutation_shapes`, dependent deletes, and GraphQL mutation authorization
 or AI policies. `subscriptions = false` conflicts with `changed_started`

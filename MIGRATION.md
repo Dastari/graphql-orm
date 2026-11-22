@@ -12,21 +12,18 @@ supersedes: []
 
 ## 0.192.0 to 0.197.0: generated mutation and subscription roots
 
-**Action needed for hosts using the generated Rust root structs directly.**
-`schema_roots!` can now select a root type from the entities' generated
-fields. For a composed mutation or subscription root backed only by generated
-entity fields, `MutationRoot` or `SubscriptionRoot` is a Rust type alias,
-including when all entities use default settings. Update code that constructs
-or destructures the former tuple structs to use `Default::default()`, and move
-trait implementations that require a concrete root to a host-owned wrapper.
-The names still work as types in schema signatures, and default SDL is unchanged.
+**No action.** Default schemas retain their `MutationRoot` and
+`SubscriptionRoot` Rust tuple structs, schema builder types, and SDL.
 
 **No action for missing database handling.** Hand-built schemas missing the
 database now receive field errors from generated mutations, entity getters,
 and relation resolvers.
 
-When you opt out with `mutations = false` or `subscriptions = false`, update
-clients and regenerate exported schema and catalogues for the removed fields.
+When you opt out with `mutations = false` or `subscriptions = false`, use
+`schema_builder(database)` to omit a root whose last field is disabled.
+For a manually assembled schema, pass async-graphql's `EmptyMutation` or
+`EmptySubscription` for that root. Update clients and regenerate exported
+schema and catalogues for the removed fields.
 Repository inputs and repository and transaction writes still compile.
 See [omitting generated roots](docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
 

@@ -53,6 +53,46 @@ pub struct WriteRecord {
     title: String,
 }
 
+mod legacy_root_types {
+    use super::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql_entity(table = "default_records", auth = "none")]
+    struct DefaultRecord {
+        #[primary_key]
+        #[sortable]
+        id: String,
+        title: String,
+    }
+
+    schema_roots! { entities: [DefaultRecord] }
+
+    #[tokio::test]
+    async fn default_schema_keeps_the_original_tuple_roots() {
+        let MutationRoot(mutations) = MutationRoot(MutationRootChunk0(DefaultRecordMutations));
+        let SubscriptionRoot(subscriptions) =
+            SubscriptionRoot(SubscriptionRootChunk0(DefaultRecordSubscriptions));
+        let schema: AppSchema = graphql_orm::async_graphql::Schema::build(
+            QueryRoot::default(),
+            MutationRoot(mutations),
+            SubscriptionRoot(subscriptions),
+        )
+        .finish();
+
+        let db = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+        let builder: graphql_orm::async_graphql::SchemaBuilder<
+            QueryRoot,
+            MutationRoot,
+            SubscriptionRoot,
+        > = schema_builder(db);
+        assert_eq!(schema.sdl(), builder.finish().sdl());
+        assert!(schema.sdl().contains("createDefaultRecord("));
+        assert!(schema.sdl().contains("defaultRecordChanged("));
+    }
+}
+
 mod quiet {
     use super::*;
     schema_roots! { entities: [QuietRecord], client_metadata: true }
@@ -95,7 +135,11 @@ async fn omitting_every_write_and_stream_root_preserves_repository_writes_and_qu
     .await
     .unwrap();
 
-    let schema = quiet::schema_builder(database).finish();
+    let schema: graphql_orm::async_graphql::Schema<
+        quiet::QueryRoot,
+        graphql_orm::async_graphql::EmptyMutation,
+        graphql_orm::async_graphql::EmptySubscription,
+    > = quiet::schema_builder(database).finish();
     let sdl = schema.sdl();
     assert!(!sdl.contains("mutation:"), "{sdl}");
     assert!(!sdl.contains("subscription:"), "{sdl}");

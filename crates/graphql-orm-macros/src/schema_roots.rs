@@ -395,6 +395,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let generated_mutations =
         root_field_sources("__GOM_MUTATION_ROOT_FIELDS", &generated_mutation_is_exposed);
     let generated_subscriptions = root_field_sources("__GOM_SUBSCRIPTION_ROOT_FIELDS", &|_| true);
+    let mutation_opt_outs = entities
+        .iter()
+        .filter(|entity| generated_mutation_is_exposed(entity))
+        .map(|entity| quote! { #entity::__GOM_MUTATIONS_OPTED_OUT })
+        .collect::<Vec<_>>();
+    let subscription_opt_outs = entities
+        .iter()
+        .map(|entity| quote! { #entity::__GOM_SUBSCRIPTIONS_OPTED_OUT })
+        .collect::<Vec<_>>();
     let handwritten_queries = handwritten_sources(&custom_op_types.iter().collect::<Vec<_>>());
     let handwritten_mutations =
         handwritten_sources(&extra_mutation_type_streams.iter().collect::<Vec<_>>());
@@ -482,7 +491,6 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         query_custom_chunk,
         &query_types,
         async_graphql_merged_object_derive(),
-        None,
     );
 
     if !backend_writable || schema_policy_read_only {
@@ -538,28 +546,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             })
             .collect();
 
-        let (readonly_subscription_root, readonly_subscription_value) = if subscription_types
-            .is_empty()
-        {
-            (
-                quote! { pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription; },
-                quote! { ::graphql_orm::async_graphql::EmptySubscription },
-            )
+        let readonly_subscription_root = if subscription_types.is_empty() {
+            quote! { pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription; }
         } else {
-            (
-                emit_chunked_merged(
-                    "Subscription",
-                    None,
-                    &subscription_types,
-                    quote! { ::graphql_orm::async_graphql::MergedSubscription },
-                    Some((
-                        &generated_subscriptions,
-                        quote! { ::graphql_orm::async_graphql::EmptySubscription },
-                    )),
-                ),
-                quote! { SubscriptionRoot::default() },
+            emit_chunked_merged(
+                "Subscription",
+                None,
+                &subscription_types,
+                quote! { ::graphql_orm::async_graphql::MergedSubscription },
             )
         };
+        let subscription_schema_type = select_schema_root(
+            quote! { SubscriptionRoot },
+            quote! { ::graphql_orm::async_graphql::EmptySubscription },
+            &generated_subscriptions,
+            &subscription_opt_outs,
+            false,
+        );
         return quote! {
             #policy_decision_checks
             #query_root
@@ -568,7 +571,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
             pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
             #readonly_subscription_root
-            pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+            pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, #subscription_schema_type>;
+            type __GomSchemaBuilder = ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, #subscription_schema_type>;
 
             pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
 
@@ -576,7 +580,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
             pub fn schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
-            ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+            ) -> __GomSchemaBuilder {
                 schema_builder_with_limits(
                     database,
                     ::graphql_orm::graphql::orm::SchemaLimits::default(),
@@ -588,7 +592,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             pub fn schema_builder_with_limits(
                 database: ::graphql_orm::db::Database<#backend_marker>,
                 limits: ::graphql_orm::graphql::orm::SchemaLimits,
-            ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+            ) -> __GomSchemaBuilder {
                 match try_schema_builder_with_limits(database, limits) {
                     Ok(builder) => builder,
                     Err(error) => panic!("{error}"),
@@ -605,7 +609,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             pub fn try_schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
             ) -> ::std::result::Result<
-                ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+                __GomSchemaBuilder,
                 ::graphql_orm::graphql::orm::KeysetReadPolicyError,
             > {
                 try_schema_builder_with_limits(
@@ -627,7 +631,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 database: ::graphql_orm::db::Database<#backend_marker>,
                 limits: ::graphql_orm::graphql::orm::SchemaLimits,
             ) -> ::std::result::Result<
-                ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+                __GomSchemaBuilder,
                 ::graphql_orm::graphql::orm::KeysetReadPolicyError,
             > {
                 #root_field_declaration_check
@@ -639,7 +643,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
                     ::graphql_orm::async_graphql::EmptyMutation,
-                    #readonly_subscription_value,
+                    ::std::default::Default::default(),
                 )
                 .data(database.clone())
             .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
@@ -697,61 +701,40 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .into();
     }
 
-    let mutation_root_is_empty = mutation_custom_ops.is_none() && mutation_types.is_empty();
-    let (mutation_root, mutation_root_value) = if mutation_root_is_empty {
-        (
-            quote! {
-                pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
-            },
-            quote! {
-                ::graphql_orm::async_graphql::EmptyMutation
-            },
-        )
+    let mutation_root = if mutation_custom_ops.is_none() && mutation_types.is_empty() {
+        quote! { pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation; }
     } else {
-        (
-            emit_chunked_merged(
-                "Mutation",
-                mutation_custom_ops,
-                &mutation_types,
-                async_graphql_merged_object_derive(),
-                Some((
-                    &generated_mutations,
-                    quote! { ::graphql_orm::async_graphql::EmptyMutation },
-                )),
-            ),
-            quote! {
-                MutationRoot::default()
-            },
+        emit_chunked_merged(
+            "Mutation",
+            mutation_custom_ops,
+            &mutation_types,
+            async_graphql_merged_object_derive(),
         )
     };
-    let subscription_root_is_empty =
-        subscription_custom_ops.is_none() && subscription_types.is_empty();
-    let (subscription_root, subscription_root_value) = if subscription_root_is_empty {
-        (
-            quote! {
-                pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription;
-            },
-            quote! {
-                ::graphql_orm::async_graphql::EmptySubscription
-            },
-        )
+    let subscription_root = if subscription_custom_ops.is_none() && subscription_types.is_empty() {
+        quote! { pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription; }
     } else {
-        (
-            emit_chunked_merged(
-                "Subscription",
-                subscription_custom_ops,
-                &subscription_types,
-                quote! { ::graphql_orm::async_graphql::MergedSubscription },
-                Some((
-                    &generated_subscriptions,
-                    quote! { ::graphql_orm::async_graphql::EmptySubscription },
-                )),
-            ),
-            quote! {
-                SubscriptionRoot::default()
-            },
+        emit_chunked_merged(
+            "Subscription",
+            subscription_custom_ops,
+            &subscription_types,
+            quote! { ::graphql_orm::async_graphql::MergedSubscription },
         )
     };
+    let mutation_schema_type = select_schema_root(
+        quote! { MutationRoot },
+        quote! { ::graphql_orm::async_graphql::EmptyMutation },
+        &generated_mutations,
+        &mutation_opt_outs,
+        mutation_custom_ops.is_some(),
+    );
+    let subscription_schema_type = select_schema_root(
+        quote! { SubscriptionRoot },
+        quote! { ::graphql_orm::async_graphql::EmptySubscription },
+        &generated_subscriptions,
+        &subscription_opt_outs,
+        subscription_custom_ops.is_some(),
+    );
     let schema_loader_data: Vec<proc_macro2::TokenStream> = entities
         .iter()
         .map(|entity| {
@@ -799,7 +782,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #operation_catalog_helper
         #root_field_collision_check
 
-        pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+        pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, #mutation_schema_type, #subscription_schema_type>;
+        type __GomSchemaBuilder = ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, #mutation_schema_type, #subscription_schema_type>;
 
         pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
 
@@ -807,7 +791,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
         pub fn schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
-        ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+        ) -> __GomSchemaBuilder {
             schema_builder_with_limits(
                 database,
                 ::graphql_orm::graphql::orm::SchemaLimits::default(),
@@ -819,7 +803,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         pub fn schema_builder_with_limits(
             database: ::graphql_orm::db::Database<#backend_marker>,
             limits: ::graphql_orm::graphql::orm::SchemaLimits,
-        ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+        ) -> __GomSchemaBuilder {
             match try_schema_builder_with_limits(database, limits) {
                 Ok(builder) => builder,
                 Err(error) => panic!("{error}"),
@@ -836,7 +820,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         pub fn try_schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
         ) -> ::std::result::Result<
-            ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+            __GomSchemaBuilder,
             ::graphql_orm::graphql::orm::KeysetReadPolicyError,
         > {
             try_schema_builder_with_limits(
@@ -858,7 +842,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             database: ::graphql_orm::db::Database<#backend_marker>,
             limits: ::graphql_orm::graphql::orm::SchemaLimits,
         ) -> ::std::result::Result<
-            ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+            __GomSchemaBuilder,
             ::graphql_orm::graphql::orm::KeysetReadPolicyError,
         > {
             #root_field_declaration_check
@@ -869,8 +853,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )?;
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
-                #mutation_root_value,
-                #subscription_root_value,
+                ::std::default::Default::default(),
+                ::std::default::Default::default(),
             )
             .data(database.clone())
             .data(::graphql_orm::graphql::orm::DeclaredPageMaximum(GRAPHQL_ORM_MAX_PAGE_LIMIT))
@@ -937,7 +921,6 @@ fn emit_chunked_merged(
     custom_ops: Option<&[proc_macro2::TokenStream]>,
     types: &[proc_macro2::TokenStream],
     derive_macro: proc_macro2::TokenStream,
-    optional_root: Option<(&[proc_macro2::TokenStream], proc_macro2::TokenStream)>,
 ) -> proc_macro2::TokenStream {
     let chunk_size = 12usize;
     let mut chunk_defs = Vec::new();
@@ -978,32 +961,39 @@ fn emit_chunked_merged(
     }
 
     let root_name = syn::Ident::new(&format!("{}Root", name), proc_macro2::Span::mixed_site());
-    // A generated root can be empty when every included entity opts out.
-    // Type selection lets async-graphql omit the root from the schema entirely.
-    let (implementation, selection) = match optional_root {
-        Some((sources, empty)) if custom_ops.is_none() => {
-            let implementation = syn::Ident::new(
-                &format!("__Gom{root_name}"),
-                proc_macro2::Span::mixed_site(),
-            );
-            let selection = quote! {
-                pub type #root_name = <::graphql_orm::graphql::orm::GeneratedRootSelection<
-                    { ::graphql_orm::graphql::orm::has_generated_root_fields(&[#(#sources),*]) },
-                > as ::graphql_orm::graphql::orm::SelectGeneratedRoot<#implementation, #empty>>::Root;
-            };
-            (implementation, selection)
-        }
-        _ => (root_name, quote! {}),
-    };
     let graphql_name = name;
     quote! {
         #(#chunk_defs)*
         #[derive(#derive_macro, Default)]
         #[graphql(name = #graphql_name)]
-        pub struct #implementation(
+        pub struct #root_name(
             #(#root_chunk_idents),*
         );
-        #selection
+    }
+}
+
+// Keep the emitted tuple structs intact. Rust evaluates the contributing
+// entities' associated constants, including for derives in other crates. The
+// schema uses the original struct when any field remains, or async-graphql's
+// empty root when the derives removed every generated field.
+fn select_schema_root(
+    root: proc_macro2::TokenStream,
+    empty: proc_macro2::TokenStream,
+    sources: &[proc_macro2::TokenStream],
+    opt_outs: &[proc_macro2::TokenStream],
+    has_custom_ops: bool,
+) -> proc_macro2::TokenStream {
+    if has_custom_ops || sources.is_empty() {
+        return root;
+    }
+
+    quote! {
+        <::graphql_orm::graphql::orm::GeneratedRootSelection<
+            {
+                !(#(#opt_outs)||*)
+                    || ::graphql_orm::graphql::orm::has_generated_root_fields(&[#(#sources),*])
+            },
+        > as ::graphql_orm::graphql::orm::SelectGeneratedRoot<#root, #empty>>::Root
     }
 }
 

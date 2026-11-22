@@ -51,8 +51,10 @@ lib = ['use async_graphql::SimpleObject;', 'use graphql_orm::prelude::*;',
        '#[cfg(feature = "postgres")]', 'type DbRow = sqlx::postgres::PgRow;']
 for i in range(a.entities):
     lib += [f'mod record_{i:02};', f'pub use record_{i:02}::*;']
+mutation_root = 'async_graphql::EmptyMutation' if a.opt_out else 'MutationRoot::default()'
+subscription_root = 'async_graphql::EmptySubscription' if a.opt_out else 'SubscriptionRoot::default()'
 lib += ['schema_roots! { query_custom_ops: [], entities: [' + ', '.join(f'Record{i:02}' for i in range(a.entities)) + '] }',
         'pub fn export_sdl() -> String {',
-        '    async_graphql::Schema::build(QueryRoot::default(), MutationRoot::default(), SubscriptionRoot::default()).finish().sdl()', '}']
+        f'    async_graphql::Schema::build(QueryRoot::default(), {mutation_root}, {subscription_root}).finish().sdl()', '}']
 (src / 'lib.rs').write_text('\n'.join(lib) + '\n')
 print(f'{a.entities} entity modules; {sum(len(f.read_text().splitlines()) for f in src.glob("*.rs"))} source lines')

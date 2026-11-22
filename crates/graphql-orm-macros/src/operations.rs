@@ -7828,6 +7828,8 @@ fn generate_graphql_operations_unfiltered(
     let query_root_fields = exposed_root_fields(RootKind::Query, &disabled_query_fields);
     let mutation_root_fields = exposed_root_fields(RootKind::Mutation, &disabled_mutation_fields);
     let subscription_root_fields = exposed_root_fields(RootKind::Subscription, &[]);
+    let mutations_opted_out = mutations_disabled.is_some();
+    let subscriptions_opted_out = subscriptions_disabled.is_some();
     let operation_metadata_impl = quote! {
         impl #struct_name {
             #[doc(hidden)]
@@ -7839,6 +7841,10 @@ fn generate_graphql_operations_unfiltered(
             #[doc(hidden)]
             pub const __GOM_SUBSCRIPTION_ROOT_FIELDS: &'static [&'static str] =
                 &[#(#subscription_root_fields),*];
+            #[doc(hidden)]
+            pub const __GOM_MUTATIONS_OPTED_OUT: bool = #mutations_opted_out;
+            #[doc(hidden)]
+            pub const __GOM_SUBSCRIPTIONS_OPTED_OUT: bool = #subscriptions_opted_out;
         }
 
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
