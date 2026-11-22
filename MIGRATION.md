@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.201.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
+
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
 **No action.** Upgrade ORM and macros together. The generated resolver
