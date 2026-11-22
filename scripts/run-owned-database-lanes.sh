@@ -77,7 +77,7 @@ run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test search_filter_binding -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test read_snapshot_transaction -- --include-ignored --test-threads=1
+    --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test authorized_pagination_postgres --test bounded_mutation_sentinels \

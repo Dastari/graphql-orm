@@ -532,3 +532,46 @@ async fn rollback_foreign_row_revoked_grant_and_disclosure_denial() {
     let (_owner, db, schema, grants) = fixture().await;
     rollback_and_delivery_denials(&db, &schema, &grants).await;
 }
+
+#[tokio::test]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    ignore = "starts a capped, test-owned database"
+)]
+async fn repeated_enqueues_deliver_once_per_transaction() {
+    let (_owner, db, schema, _) = fixture().await;
+    <DefaultBackend as WriteBackend>::execute_with_binds(
+        db.pool(),
+        "INSERT INTO shelves VALUES ('also-visible', 'reader', 0)",
+        &[],
+    )
+    .await
+    .unwrap();
+    let mut stream = listen(&schema, INVALIDATION, READER_SCOPES).await;
+
+    for _ in 0..2 {
+        db.transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move {
+                let key = "visible".to_owned();
+                update_placement_and_enqueue(tx, key.clone()).await?;
+                for _ in 0..3 {
+                    tx.invalidate_computed_field::<Quantity>(&key);
+                }
+                tx.invalidate_computed_field::<Quantity>(&"also-visible".to_owned());
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read(&mut stream).await,
+            json!({"quantityInvalidated": {"id": "visible", "topic": "quantity"}})
+        );
+        assert_eq!(
+            read(&mut stream).await,
+            json!({"quantityInvalidated": {"id": "also-visible", "topic": "quantity"}})
+        );
+        quiet(&mut stream).await;
+    }
+}

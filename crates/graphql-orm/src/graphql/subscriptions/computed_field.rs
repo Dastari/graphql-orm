@@ -83,13 +83,16 @@ impl<T, B> Clone for PendingInvalidation<T, B> {
 impl<B: WriteBackend> MutationContext<'_, B> {
     /// Enqueue one invalidation of a typed target key from trusted writer code.
     ///
-    /// Publishes after successful commit. Rollbacks and failed commits discard
-    /// it. This emits an in-process notification with no database writes.
+    /// Publishes once per topic type and typed key after successful commit.
+    /// A full rollback or failed commit discards it. Raw SQL savepoint rollbacks
+    /// leave queued invalidations in the enclosing transaction.
     pub fn invalidate_computed_field<T: ComputedFieldTopic<B>>(&mut self, key: &T::Key) {
-        self.queue_commit_only_event(PendingInvalidation::<T, B>(
-            T::Target::invalidation_key_values(key).into(),
-            PhantomData,
-        ));
+        let keys = T::Target::invalidation_key_values(key);
+        let identity = RelationKey::from_sql_values(&keys);
+        self.queue_commit_only_event(
+            PendingInvalidation::<T, B>(keys.into(), PhantomData),
+            identity,
+        );
     }
 }
 

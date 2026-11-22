@@ -1078,6 +1078,15 @@ struct TransactionExtensions(
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl TransactionExtensions {
+    fn get_or_insert_default<T: Default + Send + Sync + 'static>(&mut self) -> &mut T {
+        self.0
+            .get_or_insert_with(Default::default)
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(T::default()))
+            .downcast_mut::<T>()
+            .expect("transaction extensions are stored under their own type IDs")
+    }
+
     fn insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
         self.0
             .get_or_insert_with(Default::default)
@@ -1101,6 +1110,12 @@ impl TransactionExtensions {
             .map(|value| *value)
     }
 }
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Default)]
+struct CommitOnlyEventKeys(
+    std::collections::HashSet<(std::any::TypeId, crate::graphql::loaders::RelationKey)>,
+);
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
@@ -2173,26 +2188,30 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.queue_deferred_event::<T, false>(event);
-    }
-
-    /// Queue an event that even an explicit drain must hold until commit.
-    pub(crate) fn queue_commit_only_event<T>(&mut self, event: T)
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        self.queue_deferred_event::<T, true>(event);
-    }
-
-    fn queue_deferred_event<T, const COMMIT_ONLY: bool>(&mut self, event: T)
-    where
-        T: Clone + Send + Sync + 'static,
-    {
-        if super::ensure_write_allowed().is_err() {
-            return;
+        if super::ensure_write_allowed().is_ok() {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, false> { event }));
         }
-        self.deferred_events
-            .push(Box::new(DeferredEvent::<T, COMMIT_ONLY> { event }));
+    }
+
+    /// Queue one event per type and key that an explicit drain holds until commit.
+    pub(crate) fn queue_commit_only_event<T>(
+        &mut self,
+        event: T,
+        key: crate::graphql::loaders::RelationKey,
+    ) where
+        T: Clone + Send + Sync + 'static,
+    {
+        if super::ensure_write_allowed().is_ok()
+            && self
+                .extensions
+                .get_or_insert_default::<CommitOnlyEventKeys>()
+                .0
+                .insert((std::any::TypeId::of::<T>(), key))
+        {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, true> { event }));
+        }
     }
 
     /// Register an action to run once, after this transaction commits.
