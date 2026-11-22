@@ -1687,6 +1687,23 @@ impl DatabaseBackend {
         }
     }
 
+    pub(super) fn mssql_schema_and_table(self, path: &str) -> Option<(String, String)> {
+        debug_assert_eq!(self, Self::Mssql);
+        let parts = identifier_path_parts(self, path).collect::<Vec<_>>();
+        let (schema, table) = match parts.as_slice() {
+            [table] => ("dbo", *table),
+            [schema, table] => (*schema, *table),
+            _ => return None,
+        };
+        if schema.is_empty() || table.is_empty() {
+            return None;
+        }
+        Some((
+            self.identifier_part_name(schema),
+            self.identifier_part_name(table),
+        ))
+    }
+
     /// The name a table path's last part denotes, undelimited.
     pub(crate) fn table_name_part(self, table: &str) -> String {
         let part = identifier_path_parts(self, table)

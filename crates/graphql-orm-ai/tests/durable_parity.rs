@@ -1,9 +1,7 @@
-#![cfg(feature = "postgres")]
+#![cfg(any(feature = "postgres", feature = "mssql"))]
 
-use std::process::{Command, Output};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Duration as StdDuration;
 
 use agql_auth::{
     AccessTokenMetadata, AssuranceMatchMode, AuthPrincipal, AuthUser, Clock,
@@ -11,12 +9,22 @@ use agql_auth::{
     ResolvedPrincipal, SessionAssurance, SessionContext, SystemClock,
 };
 use async_trait::async_trait;
-use graphql_orm::graphql::orm::{ApplyOptions, Entity, OrmSchemaModule};
+use graphql_orm::graphql::orm::OrmSchemaModule;
+#[cfg(feature = "postgres")]
+use graphql_orm::graphql::orm::{ApplyOptions, Entity};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
-use graphql_orm::prelude::{Database, GraphQLEntity, GraphQLOperations, PostgresBackend};
+#[cfg(any(feature = "postgres", feature = "provider-openai-core"))]
+use graphql_orm::prelude::Database;
+use graphql_orm::prelude::{GraphQLEntity, GraphQLOperations};
 use graphql_orm_ai::*;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+
+#[path = "support/durable_database.rs"]
+mod durable_database;
+#[cfg(feature = "postgres")]
+use durable_database::OwnedPostgres;
+use durable_database::{apply_parity_migration, owned_database};
 
 #[cfg(feature = "provider-openai-core")]
 use base64::Engine;
@@ -30,19 +38,28 @@ use secrecy::SecretString;
 use sha2::Sha256;
 
 #[path = "support/broker_entity_parity.rs"]
+#[cfg(feature = "postgres")]
 mod broker_entity_parity;
-
-const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
-const POSTGRES_IMAGE: &str =
-    "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065";
 
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[graphql_entity(
-    table = "graphql_orm_ai_sessions",
-    plural = "PostgresRestoreAttachmentSeedSessions",
-    default_sort = "id ASC"
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "graphql_orm_ai_sessions",
+        plural = "PostgresRestoreAttachmentSeedSessions",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        table = "graphql_orm_ai_sessions",
+        plural = "PostgresRestoreAttachmentSeedSessions",
+        default_sort = "id ASC",
+        schema_policy = "external_writable"
+    )
 )]
 struct PostgresRestoreAttachmentSessionSeed {
     #[primary_key]
@@ -67,10 +84,22 @@ struct PostgresRestoreAttachmentSessionSeed {
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[graphql_entity(
-    table = "graphql_orm_ai_attachments",
-    plural = "PostgresRestoreAttachmentSeeds",
-    default_sort = "id ASC"
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "graphql_orm_ai_attachments",
+        plural = "PostgresRestoreAttachmentSeeds",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        table = "graphql_orm_ai_attachments",
+        plural = "PostgresRestoreAttachmentSeeds",
+        default_sort = "id ASC",
+        schema_policy = "external_writable"
+    )
 )]
 struct PostgresRestoreAttachmentSeed {
     #[primary_key]
@@ -100,10 +129,22 @@ struct PostgresRestoreAttachmentSeed {
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[graphql_entity(
-    table = "graphql_orm_ai_attachment_artifacts",
-    plural = "PostgresRestoreAttachmentArtifactSeeds",
-    default_sort = "id ASC"
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "graphql_orm_ai_attachment_artifacts",
+        plural = "PostgresRestoreAttachmentArtifactSeeds",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        table = "graphql_orm_ai_attachment_artifacts",
+        plural = "PostgresRestoreAttachmentArtifactSeeds",
+        default_sort = "id ASC",
+        schema_policy = "external_writable"
+    )
 )]
 struct PostgresRestoreAttachmentArtifactSeed {
     #[primary_key]
@@ -119,13 +160,17 @@ struct PostgresRestoreAttachmentArtifactSeed {
     sha256: Option<String>,
 }
 
+#[cfg(feature = "postgres")]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[graphql_entity(
-    table = "graphql_orm_ai_provider_background_submissions",
-    plural = "LegacyGraphqlOrmAiProviderBackgroundSubmissions",
-    default_sort = "created_at ASC"
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "graphql_orm_ai_provider_background_submissions",
+        plural = "LegacyGraphqlOrmAiProviderBackgroundSubmissions",
+        default_sort = "created_at ASC"
+    )
 )]
 struct LegacyProviderBackgroundSubmissionRecord {
     #[primary_key]
@@ -166,14 +211,18 @@ struct LegacyProviderBackgroundSubmissionRecord {
     row_version: i64,
 }
 
+#[cfg(feature = "postgres")]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[graphql_entity(
-    table = "graphql_orm_ai_provider_webhook_receipts",
-    plural = "LegacyGraphqlOrmAiProviderWebhookReceipts",
-    default_sort = "received_at DESC",
-    repository_mutations = true
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "graphql_orm_ai_provider_webhook_receipts",
+        plural = "LegacyGraphqlOrmAiProviderWebhookReceipts",
+        default_sort = "received_at DESC",
+        repository_mutations = true
+    )
 )]
 struct LegacyProviderWebhookReceiptRecord {
     #[primary_key]
@@ -208,183 +257,6 @@ struct LegacyProviderWebhookReceiptRecord {
     processed_at: Option<i64>,
     #[graphql_orm(version, default = "0")]
     row_version: i64,
-}
-
-struct OwnedPostgres {
-    container_id: String,
-    owner_token: String,
-    user: String,
-    password: String,
-    database: String,
-    port: u16,
-}
-
-impl OwnedPostgres {
-    fn start() -> Result<Option<Self>, String> {
-        if !local_docker_available() {
-            if std::env::var_os("CI").is_some() {
-                return Err(
-                    "the CI PostgreSQL parity job requires the local Docker socket".to_owned(),
-                );
-            }
-            eprintln!("skipping PostgreSQL parity: local Docker socket is unavailable");
-            return Ok(None);
-        }
-
-        let owner_token = Uuid::new_v4().simple().to_string();
-        let user = format!("ai_user_{owner_token}");
-        let password = format!("ai_password_{owner_token}");
-        let database = format!("ai_database_{owner_token}");
-        let name = format!("graphql-orm-ai-pg-{owner_token}");
-        let output = local_docker()
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--pull=missing",
-                "--name",
-                &name,
-                "--label",
-                &format!("com.dastari.graphql-orm-ai.test-owner={owner_token}"),
-                "--memory",
-                "4g",
-                "--memory-swap",
-                "4g",
-                "--publish",
-                "127.0.0.1::5432/tcp",
-                "--tmpfs",
-                "/var/lib/postgresql/data:rw,nosuid,nodev,size=1g",
-                "--health-cmd",
-                "pg_isready -h 127.0.0.1 -U $POSTGRES_USER -d $POSTGRES_DB",
-                "--health-interval",
-                "250ms",
-                "--health-timeout",
-                "2s",
-                "--health-retries",
-                "120",
-                "--env",
-                &format!("POSTGRES_USER={user}"),
-                "--env",
-                &format!("POSTGRES_PASSWORD={password}"),
-                "--env",
-                &format!("POSTGRES_DB={database}"),
-                POSTGRES_IMAGE,
-            ])
-            .output()
-            .map_err(|_| "failed to invoke the local Docker CLI".to_owned())?;
-        if !output.status.success() {
-            return Err("failed to create the owned disposable PostgreSQL container".to_owned());
-        }
-        let container_id = String::from_utf8(output.stdout)
-            .map_err(|_| "Docker returned a non-UTF-8 container ID".to_owned())?
-            .trim()
-            .to_owned();
-        if container_id.len() < 12 || !container_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("Docker returned an invalid container ID".to_owned());
-        }
-
-        let mut owned = Self {
-            container_id,
-            owner_token,
-            user,
-            password,
-            database,
-            port: 0,
-        };
-        owned.port = owned.published_port()?;
-        owned.wait_until_healthy()?;
-        Ok(Some(owned))
-    }
-
-    fn connection_url(&self) -> String {
-        format!(
-            "postgres://{}:{}@127.0.0.1:{}/{}?sslmode=disable",
-            self.user, self.password, self.port, self.database
-        )
-    }
-
-    fn published_port(&self) -> Result<u16, String> {
-        let output = self.docker_output(&["port", &self.container_id, "5432/tcp"])?;
-        if !output.status.success() {
-            return Err("failed to read the owned PostgreSQL port".to_owned());
-        }
-        let value = String::from_utf8(output.stdout)
-            .map_err(|_| "Docker returned a non-UTF-8 port".to_owned())?;
-        let port = value
-            .trim()
-            .strip_prefix("127.0.0.1:")
-            .ok_or_else(|| "Docker did not bind PostgreSQL to IPv4 loopback".to_owned())?
-            .parse::<u16>()
-            .map_err(|_| "Docker returned an invalid PostgreSQL port".to_owned())?;
-        if port == 0 {
-            return Err("Docker returned an invalid PostgreSQL port".to_owned());
-        }
-        Ok(port)
-    }
-
-    fn wait_until_healthy(&self) -> Result<(), String> {
-        let deadline = Instant::now() + StdDuration::from_secs(30);
-        while Instant::now() < deadline {
-            let output = self.docker_output(&[
-                "inspect",
-                "--format={{.State.Health.Status}}",
-                &self.container_id,
-            ])?;
-            if output.status.success() {
-                let health = String::from_utf8(output.stdout)
-                    .map_err(|_| "Docker returned non-UTF-8 health state".to_owned())?;
-                match health.trim() {
-                    "healthy" => return Ok(()),
-                    "unhealthy" => {
-                        return Err("the owned PostgreSQL container became unhealthy".to_owned());
-                    }
-                    _ => {}
-                }
-            }
-            thread::sleep(StdDuration::from_millis(250));
-        }
-        Err("the owned PostgreSQL container did not become healthy in time".to_owned())
-    }
-
-    fn docker_output(&self, args: &[&str]) -> Result<Output, String> {
-        local_docker()
-            .args(args)
-            .output()
-            .map_err(|_| "failed to invoke the local Docker CLI".to_owned())
-    }
-
-    fn still_owned(&self) -> bool {
-        self.docker_output(&[
-            "inspect",
-            "--format={{index .Config.Labels \"com.dastari.graphql-orm-ai.test-owner\"}}",
-            &self.container_id,
-        ])
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .is_some_and(|value| value.trim() == self.owner_token)
-    }
-}
-
-impl Drop for OwnedPostgres {
-    fn drop(&mut self) {
-        if self.still_owned() {
-            let _ = self.docker_output(&["rm", "--force", &self.container_id]);
-        }
-    }
-}
-
-fn local_docker() -> Command {
-    let mut command = Command::new("docker");
-    command.args(["--host", LOCAL_DOCKER_SOCKET]);
-    command
-}
-
-fn local_docker_available() -> bool {
-    local_docker()
-        .args(["version", "--format={{.Server.Version}}"])
-        .output()
-        .is_ok_and(|output| output.status.success())
 }
 
 struct AllowAll;
@@ -516,7 +388,7 @@ impl AiSecretStore for PostgresWebhookSecrets {
 }
 
 #[cfg(feature = "provider-openai-core")]
-async fn verify_webhook_receipt_parity(database: &Database<PostgresBackend>, now: OffsetDateTime) {
+async fn verify_webhook_receipt_parity(database: &Database<AiOrmBackend>, now: OffsetDateTime) {
     let reference = SecretRef::parse("openai/postgres-webhook-parity")
         .expect("webhook secret reference should validate");
     let secret = "synthetic-postgres-webhook-secret";
@@ -608,7 +480,7 @@ fn principal(now: OffsetDateTime) -> AuthPrincipal {
     let assurance = SessionAssurance::new(
         now,
         ["otp", "pwd"],
-        Some("urn:postgres-parity:loa:2".to_owned()),
+        Some("urn:durable-parity:loa:2".to_owned()),
         Some("postgres-parity".to_owned()),
         MfaAcceptance::Satisfied,
     )
@@ -622,8 +494,8 @@ fn principal(now: OffsetDateTime) -> AuthPrincipal {
         token_claims: AccessTokenMetadata {
             auth_time: Some(now.unix_timestamp()),
             amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
-            acr: Some("urn:postgres-parity:loa:2".to_owned()),
-            tenant_id: Some("postgres-parity-tenant".to_owned()),
+            acr: Some("urn:durable-parity:loa:2".to_owned()),
+            tenant_id: Some("durable-parity-tenant".to_owned()),
             ..AccessTokenMetadata::default()
         },
     })
@@ -632,6 +504,7 @@ fn principal(now: OffsetDateTime) -> AuthPrincipal {
 /// A database created at schema module 0.72.0 holds the provider webhook-receipt
 /// index under PostgreSQL's truncated 63-byte name. Upgrading replaces exactly
 /// that index once with the bounded name, then re-plans empty.
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_once() {
     use graphql_orm::graphql::orm::{
@@ -643,7 +516,7 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
         .await
         .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
@@ -744,7 +617,11 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
         .plan_migration_to_entities("ai-upgrade-v3", "replan", module.entities())
         .await
         .expect("upgraded module should re-plan");
-    assert!(replan.steps.is_empty(), "{:?}", replan.statements);
+    assert!(
+        replan.steps.is_empty(),
+        "{:?}",
+        &replan.steps[..replan.steps.len().min(5)]
+    );
     let ownership = ManagedTableSet::new(
         module
             .entities()
@@ -771,6 +648,7 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
 /// A store at schema module 0.81.0 has no unique index on context-checkpoint
 /// positions. When a key already repeats, the 0.82.0 upgrade is refused with a
 /// typed error before any statement runs, and applies once the row is resolved.
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn owned_postgres_upgrade_refuses_repeated_unique_keys_before_any_ddl() {
     use graphql_orm::graphql::orm::{MigrationStep, SchemaModuleCatalog, UniqueIndexDuplicates};
@@ -787,7 +665,7 @@ async fn owned_postgres_upgrade_refuses_repeated_unique_keys_before_any_ddl() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
         .await
         .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
@@ -905,12 +783,13 @@ async fn owned_postgres_upgrade_refuses_repeated_unique_keys_before_any_ddl() {
     );
 }
 
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn owned_postgres_ai_schema_module_owned_replan_is_empty() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
         .await
         .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
@@ -955,63 +834,72 @@ async fn owned_postgres_ai_schema_module_owned_replan_is_empty() {
 }
 
 #[tokio::test]
-async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fencing() {
-    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+async fn owned_database_runs_generated_migration_sessions_skills_rules_and_fencing() {
+    let Some((container, database)) = owned_database().await else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
-        .await
-        .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
-    let mut prior_entities = module
-        .entities()
-        .iter()
-        .copied()
-        .filter(|entity| {
-            !matches!(
-                entity.table_name,
-                "graphql_orm_ai_provider_background_submissions"
-                    | "graphql_orm_ai_provider_webhook_receipts"
+    #[cfg(feature = "postgres")]
+    {
+        let mut prior_entities = module
+            .entities()
+            .iter()
+            .copied()
+            .filter(|entity| {
+                !matches!(
+                    entity.table_name,
+                    "graphql_orm_ai_provider_background_submissions"
+                        | "graphql_orm_ai_provider_webhook_receipts"
+                )
+            })
+            .collect::<Vec<_>>();
+        prior_entities.push(LegacyProviderBackgroundSubmissionRecord::metadata());
+        prior_entities.push(LegacyProviderWebhookReceiptRecord::metadata());
+        let prior_migration = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-postgres-parity-v047",
+                "graphql-orm-ai prior disposable PostgreSQL parity",
+                &prior_entities,
             )
-        })
-        .collect::<Vec<_>>();
-    prior_entities.push(LegacyProviderBackgroundSubmissionRecord::metadata());
-    prior_entities.push(LegacyProviderWebhookReceiptRecord::metadata());
-    let prior_migration = database
-        .schema()
-        .plan_migration_to_entities(
-            "ai-postgres-parity-v047",
-            "graphql-orm-ai prior disposable PostgreSQL parity",
-            &prior_entities,
+            .await
+            .expect("prior generated AI schema should plan for PostgreSQL");
+        apply_parity_migration(&container, &database, &prior_migration).await;
+        graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+            database.clone(),
+            std::sync::Arc::new(agql_auth::SystemClock),
         )
+        .readiness_proof()
         .await
-        .expect("prior generated AI schema should plan for PostgreSQL");
-    database
-        .schema()
-        .apply_migration(&prior_migration, ApplyOptions::default())
-        .await
-        .expect("prior generated AI schema should apply to the owned PostgreSQL database");
-    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
-        database.clone(),
-        std::sync::Arc::new(agql_auth::SystemClock),
-    )
-    .readiness_proof()
-    .await
-    .expect("a test store should record its first live epoch");
+        .expect("a test store should record its first live epoch");
+    }
     let migration = database
         .schema()
         .plan_migration_to_entities(
-            "ai-postgres-parity-v048",
-            "graphql-orm-ai current disposable PostgreSQL parity",
+            "ai-durable-parity-v048",
+            "graphql-orm-ai current disposable database parity",
             module.entities(),
         )
         .await
-        .expect("current generated AI schema should plan for PostgreSQL");
-    database
-        .schema()
-        .apply_migration(&migration, ApplyOptions::default())
-        .await
-        .expect("background reconciliation schema should migrate in owned PostgreSQL");
+        .expect("current generated AI schema should plan for database");
+    apply_parity_migration(&container, &database, &migration).await;
+    #[cfg(feature = "mssql")]
+    {
+        let replan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-durable-parity-replan",
+                "SQL Server schema catalog round trip",
+                module.entities(),
+            )
+            .await
+            .expect("SQL Server should recognize the provisioned metadata");
+        assert!(
+            replan.steps.is_empty(),
+            "{:?}",
+            &replan.steps[..replan.steps.len().min(5)]
+        );
+    }
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
         std::sync::Arc::new(agql_auth::SystemClock),
@@ -1027,11 +915,11 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         CreatePostgresRestoreAttachmentSessionSeedInput {
             id: restore_attachment_session_id,
             owner_principal_kind: "user".to_owned(),
-            owner_subject: "postgres-restore-attachment".to_owned(),
+            owner_subject: "durable-restore-attachment".to_owned(),
             tenant_id: Some("tenant-1".to_owned()),
             scope_kind: "project".to_owned(),
-            scope_id: "postgres-restore".to_owned(),
-            title: "PostgreSQL restore attachment".to_owned(),
+            scope_id: "durable-restore".to_owned(),
+            title: "database restore attachment".to_owned(),
             state: "active".to_owned(),
             stream_head: 0,
             message_head: 0,
@@ -1041,13 +929,13 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         },
     )
     .await
-    .expect("PostgreSQL restore attachment parent should insert");
+    .expect("database restore attachment parent should insert");
     PostgresRestoreAttachmentSeed::insert(
         &database,
         CreatePostgresRestoreAttachmentSeedInput {
             id: restore_attachment_id,
             owner_principal_kind: "user".to_owned(),
-            owner_subject: "postgres-restore-attachment".to_owned(),
+            owner_subject: "durable-restore-attachment".to_owned(),
             session_id: restore_attachment_session_id,
             blob_reference: Some("ai-attachments/objects/postgres/attachment".to_owned()),
             safe_filename: "postgres.txt".to_owned(),
@@ -1060,13 +948,13 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             quarantine_state: "released".to_owned(),
             scan_state: "clean".to_owned(),
             processing_state: "complete".to_owned(),
-            scanner_version: Some("postgres-restore-scanner".to_owned()),
-            acceptance_policy_version: Some("postgres-restore-policy".to_owned()),
+            scanner_version: Some("durable-restore-scanner".to_owned()),
+            acceptance_policy_version: Some("durable-restore-policy".to_owned()),
             finalized_at: Some(1_900_000_000),
         },
     )
     .await
-    .expect("PostgreSQL restore attachment should insert");
+    .expect("database restore attachment should insert");
     PostgresRestoreAttachmentArtifactSeed::insert(
         &database,
         CreatePostgresRestoreAttachmentArtifactSeedInput {
@@ -1080,7 +968,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         },
     )
     .await
-    .expect("PostgreSQL restore attachment artifact should insert");
+    .expect("database restore attachment artifact should insert");
 
     let restore_budget_limits = AiBudgetPolicyManagementLimits::new(
         AiBudgetAmounts {
@@ -1114,9 +1002,9 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     let collected = OrmAiRestoreFactCollector::new(database.clone())
         .with_policy_audits(restore_policy_limits)
         .with_attachment_metadata_audit(restore_attachment_limits)
-        .collect("postgres-parity-module-fingerprint")
+        .collect("durable-parity-module-fingerprint")
         .await
-        .expect("bounded restore facts should collect through generated PostgreSQL ORM queries");
+        .expect("bounded restore facts should collect through generated database ORM queries");
     assert_eq!(
         collected
             .audit_statuses()
@@ -1165,11 +1053,11 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             CreateAiSessionInput {
                 execution_selection: None,
                 scope: AiScopeInput {
-                    kind: "postgres-parity".to_owned(),
+                    kind: "durable-parity".to_owned(),
                     id: "scope-1".to_owned(),
-                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                    tenant_id: Some("durable-parity-tenant".to_owned()),
                 },
-                title: Some("Disposable PostgreSQL parity".to_owned()),
+                title: Some("Disposable database parity".to_owned()),
             },
         )
         .await
@@ -1179,7 +1067,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             &principal,
             SendAiMessageInput {
                 session_id: session.id,
-                text: "Synthetic PostgreSQL parity message".to_owned(),
+                text: "Synthetic database parity message".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
                 references: Vec::new(),
@@ -1187,6 +1075,57 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         )
         .await
         .expect("message, block, event, inbox fact, and run should commit atomically");
+    use futures::StreamExt as _;
+
+    let subscription = OrmAiSubscriptionService::new(
+        Arc::new(OrmAiSessionService::new(
+            database.clone(),
+            Arc::new(AllowAll),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+        )),
+        Arc::new(ParityPrincipalResolver {
+            principal: principal.clone(),
+            clock: Arc::new(FixedClock::new(now)),
+        }),
+    );
+    let mut events = subscription
+        .session_events(principal.clone(), AiSessionId(session.id), 0)
+        .await
+        .expect("owner should open the durable stream");
+    let frame = tokio::time::timeout(StdDuration::from_secs(5), events.next())
+        .await
+        .expect("durable replay should finish within the test bound")
+        .expect("the stream should replay an event")
+        .expect("authorized event should be readable");
+    assert_eq!(
+        frame
+            .event
+            .expect("durable event should be present")
+            .sequence,
+        1
+    );
+    drop(events);
+
+    let AuthPrincipal::User(owner) = &principal else {
+        unreachable!("the fixture principal is a user");
+    };
+    for alias in [owner.user_id.to_uppercase(), format!("{} ", owner.user_id)] {
+        let mut other = owner.clone();
+        other.user_id = alias;
+        let page = KeysetConnectionInput {
+            first: Some(10),
+            ..Default::default()
+        }
+        .validate(10, 10)
+        .expect("bounded keyset should validate");
+        let visible = sessions
+            .sessions(&AuthPrincipal::User(other), page)
+            .await
+            .expect("a different principal should receive an empty page");
+        assert!(visible.edges.is_empty());
+    }
+
     let messages = sessions
         .messages(
             &principal,
@@ -1199,7 +1138,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             .expect("bounded keyset should validate"),
         )
         .await
-        .expect("generated PostgreSQL keyset query should load the message");
+        .expect("generated database keyset query should load the message");
     assert_eq!(messages.edges.len(), 1);
     assert_eq!(messages.edges[0].node.id, queued.message_id);
 
@@ -1208,15 +1147,15 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             &principal,
             RenameAiSessionInput {
                 session_id: session.id,
-                title: "Renamed PostgreSQL parity".to_owned(),
+                title: "Renamed database parity".to_owned(),
                 client_mutation_id: Uuid::new_v4(),
                 expected_title_revision: Some(0),
             },
         )
         .await
-        .expect("owner rename should commit on PostgreSQL");
+        .expect("owner rename should commit on database");
     assert_eq!(renamed.title_revision, 1);
-    assert_eq!(renamed.title, "Renamed PostgreSQL parity");
+    assert_eq!(renamed.title, "Renamed database parity");
 
     let default_session = sessions
         .create_session(
@@ -1224,28 +1163,28 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             CreateAiSessionInput {
                 execution_selection: None,
                 scope: AiScopeInput {
-                    kind: "postgres-parity".to_owned(),
+                    kind: "durable-parity".to_owned(),
                     id: "scope-1".to_owned(),
-                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                    tenant_id: Some("durable-parity-tenant".to_owned()),
                 },
                 title: None,
             },
         )
         .await
-        .expect("default-title session should insert on PostgreSQL");
+        .expect("default-title session should insert on database");
     let default_queued = sessions
         .send_message(
             &principal,
             SendAiMessageInput {
                 session_id: default_session.id,
-                text: "Generate a PostgreSQL-backed title".to_owned(),
+                text: "Generate a database-backed title".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
                 references: Vec::new(),
             },
         )
         .await
-        .expect("first PostgreSQL message should enqueue title work");
+        .expect("first database message should enqueue title work");
     let title_clock = Arc::new(FixedClock::new(
         OffsetDateTime::now_utc() + Duration::seconds(2),
     ));
@@ -1262,32 +1201,32 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         AiSessionTitleWorkLimits::default(),
     );
     let title_claim = match title_work
-        .claim_next("postgres-title-worker")
+        .claim_next("durable-title-worker")
         .await
-        .expect("PostgreSQL title claim should succeed")
+        .expect("database title claim should succeed")
     {
         Some(claim) => claim,
         None => title_work
-            .claim_next("postgres-title-worker")
+            .claim_next("durable-title-worker")
             .await
-            .expect("PostgreSQL title claim retry should succeed")
+            .expect("database title claim retry should succeed")
             .expect("default-title work should remain after custom-title work is superseded"),
     };
     assert_eq!(title_claim.session_id(), AiSessionId(default_session.id));
     let title_input = title_work
         .open_first_message(&title_claim)
         .await
-        .expect("current principal should open PostgreSQL first-message content");
-    assert_eq!(title_input.text(), "Generate a PostgreSQL-backed title");
+        .expect("current principal should open database first-message content");
+    assert_eq!(title_input.text(), "Generate a database-backed title");
     let title_outcome = title_work
-        .complete(&title_claim, "PostgreSQL title lifecycle".to_owned())
+        .complete(&title_claim, "database title lifecycle".to_owned())
         .await
-        .expect("PostgreSQL title completion should commit");
+        .expect("database title completion should commit");
     let AiSessionTitleCommitOutcome::Applied(titled_session) = title_outcome else {
-        panic!("default PostgreSQL title should remain eligible");
+        panic!("default database title should remain eligible");
     };
     assert_eq!(titled_session.id, default_session.id);
-    assert_eq!(titled_session.title, "PostgreSQL title lifecycle");
+    assert_eq!(titled_session.title, "database title lifecycle");
     assert_eq!(titled_session.title_revision, 1);
 
     let skills = OrmAiSkillCatalogService::new(
@@ -1299,7 +1238,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             maximum_age: Duration::minutes(5),
             clock_skew: Duration::seconds(30),
             allowed_amr: vec!["otp".to_owned()],
-            allowed_acr: vec!["urn:postgres-parity:loa:2".to_owned()],
+            allowed_acr: vec!["urn:durable-parity:loa:2".to_owned()],
             match_mode: AssuranceMatchMode::All,
         },
         Arc::new(FixedClock::new(now)),
@@ -1310,17 +1249,17 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             UpsertAiSkillInput {
                 id: None,
                 scope: AiScopeInput {
-                    kind: "postgres-parity".to_owned(),
+                    kind: "durable-parity".to_owned(),
                     id: "scope-1".to_owned(),
-                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                    tenant_id: Some("durable-parity-tenant".to_owned()),
                 },
-                name: "PostgreSQL parity skill".to_owned(),
+                name: "database parity skill".to_owned(),
                 description: "Exercises generated exact-scope skill persistence.".to_owned(),
                 expected_version: None,
             },
         )
         .await
-        .expect("skill metadata should persist through generated PostgreSQL ORM APIs");
+        .expect("skill metadata should persist through generated database ORM APIs");
     let published_skill = skills
         .publish_version(
             &principal,
@@ -1356,22 +1295,22 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             },
         )
         .await
-        .expect("protected immutable skill version should persist on PostgreSQL");
+        .expect("protected immutable skill version should persist on database");
     assert!(published_skill.enabled);
     assert_eq!(
         skills
             .resolve_enabled_skills(
                 &principal,
-                AiScope::new("postgres-parity", "scope-1").with_tenant_id("postgres-parity-tenant"),
+                AiScope::new("durable-parity", "scope-1").with_tenant_id("durable-parity-tenant"),
             )
             .await
-            .expect("exact-scope PostgreSQL skill query should resolve")
+            .expect("exact-scope database skill query should resolve")
             .len(),
         1
     );
 
     let rule_scope =
-        AiScope::new("postgres-parity", "scope-1").with_tenant_id("postgres-parity-tenant");
+        AiScope::new("durable-parity", "scope-1").with_tenant_id("durable-parity-tenant");
     let rules = OrmAiRulePolicyService::new(
         database.clone(),
         Arc::new(AllowRules),
@@ -1380,7 +1319,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             maximum_age: Duration::minutes(5),
             clock_skew: Duration::seconds(30),
             allowed_amr: vec!["otp".to_owned()],
-            allowed_acr: vec!["urn:postgres-parity:loa:2".to_owned()],
+            allowed_acr: vec!["urn:durable-parity:loa:2".to_owned()],
             match_mode: AssuranceMatchMode::All,
         },
         Arc::new(FixedClock::new(now)),
@@ -1418,11 +1357,11 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             },
         )
         .await
-        .expect("strict rule policy should persist through generated PostgreSQL ORM APIs");
+        .expect("strict rule policy should persist through generated database ORM APIs");
     let resolved_rules = rules
         .resolve_for_run(&principal, rule_scope)
         .await
-        .expect("exact PostgreSQL rule hierarchy should resolve");
+        .expect("exact database rule hierarchy should resolve");
     assert_eq!(
         resolved_rules.constraints().maximum_classification,
         DataClassification::Internal
@@ -1437,15 +1376,15 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             .expect("run limits should validate"),
     );
     let claimed = runs
-        .claim_next("postgres-parity-worker")
+        .claim_next("durable-parity-worker")
         .await
-        .expect("generated PostgreSQL claim transaction should succeed")
+        .expect("generated database claim transaction should succeed")
         .expect("queued run should be claimable");
     assert!([queued.run_id, default_queued.run_id].contains(&claimed.run_id().0));
     let running = runs
         .start(&claimed)
         .await
-        .expect("fenced PostgreSQL state transition should succeed");
+        .expect("fenced database state transition should succeed");
     assert!(matches!(runs.start(&claimed).await, Err(AiError::Conflict)));
     assert_eq!(running.run_id(), claimed.run_id());
 
@@ -1457,6 +1396,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
 }
 
 /// The 0.127.0 shape of the run table, before `recovery_epoch_id`.
+#[cfg(feature = "postgres")]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
@@ -1497,6 +1437,7 @@ struct LegacyAiRunRecord {
 }
 
 /// The 0.127.0 shape of the recovery table, which that release never wrote.
+#[cfg(feature = "postgres")]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
@@ -1527,12 +1468,13 @@ struct LegacyAiRuntimeRecoveryRecord {
 
 /// A 0.127.0 store with runs upgrades the recovery ledger and run epoch
 /// columns in place, re-plans empty, and opens its first epoch.
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn owned_postgres_upgrades_a_prior_store_to_the_recovery_ledger() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
         .await
         .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
@@ -1656,13 +1598,10 @@ async fn owned_postgres_upgrades_a_prior_store_to_the_recovery_ledger() {
 /// serialization failure, which must be retried rather than reported as a
 /// persistence failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transitions() {
-    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+async fn owned_database_retries_serialization_failures_in_concurrent_run_transitions() {
+    let Some((container, database)) = owned_database().await else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
-        .await
-        .expect("ORM should connect only to the owned container");
     let migration = database
         .schema()
         .plan_migration_to_entities(
@@ -1672,11 +1611,7 @@ async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transit
         )
         .await
         .expect("AI schema should plan for PostgreSQL");
-    database
-        .schema()
-        .apply_migration(&migration, ApplyOptions::default())
-        .await
-        .expect("AI schema should apply to the owned PostgreSQL database");
+    apply_parity_migration(&container, &database, &migration).await;
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
         std::sync::Arc::new(agql_auth::SystemClock),
@@ -1703,7 +1638,7 @@ async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transit
                     scope: AiScopeInput {
                         kind: "postgres-parity".to_owned(),
                         id: "scope-1".to_owned(),
-                        tenant_id: Some("postgres-parity-tenant".to_owned()),
+                        tenant_id: Some("durable-parity-tenant".to_owned()),
                     },
                     title: Some(format!("Concurrent transition {index}")),
                 },
@@ -1772,12 +1707,13 @@ async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transit
 /// recovery role must not make the run look corrupt: the run is skipped and
 /// left as it is, never quarantined, and is recovered once the row is
 /// readable again.
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantining() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
         .await
         .expect("ORM should connect only to the owned container");
     let migration = database
@@ -1799,7 +1735,13 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
         "__missing_security_probe".to_owned(),
         "graphql_orm_ai_sessions".to_owned(),
     ];
-    let states = <PostgresBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(database.pool(), &paths).await.unwrap();
+    let states =
+        <AiOrmBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(
+            database.pool(),
+            &paths,
+        )
+        .await
+        .unwrap();
     assert_eq!(states, vec![Some(false), None, Some(false)]);
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
@@ -1825,7 +1767,7 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
                 scope: AiScopeInput {
                     kind: "postgres-parity".to_owned(),
                     id: "scope-1".to_owned(),
-                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                    tenant_id: Some("durable-parity-tenant".to_owned()),
                 },
                 title: Some("Row security recovery".to_owned()),
             },
@@ -1881,7 +1823,7 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
         "ai_recovery_role:ai_recovery_password@",
         1,
     );
-    let role_database = Database::<PostgresBackend>::connect_postgres(role_url)
+    let role_database = Database::<AiOrmBackend>::connect_postgres(role_url)
         .await
         .expect("the recovery role should connect");
     let shadowed: bool =
@@ -1893,7 +1835,13 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
         !shadowed,
         "the hostile operator really is first on this role's search path"
     );
-    let states = <PostgresBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(role_database.pool(), &paths).await.unwrap();
+    let states =
+        <AiOrmBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(
+            role_database.pool(),
+            &paths,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         states,
         vec![Some(true), None, Some(true)],
@@ -1970,13 +1918,10 @@ impl AiRuntimeEpochAnchorStore for ParityEpochAnchor {
 /// a store whose generation the host does not hold stays closed until an
 /// operator reconciles and acknowledges.
 #[tokio::test]
-async fn owned_postgres_epoch_anchor_rotates_and_refuses_a_generation_it_does_not_hold() {
-    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+async fn owned_database_epoch_anchor_rotates_and_refuses_a_generation_it_does_not_hold() {
+    let Some((container, database)) = owned_database().await else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
-        .await
-        .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
     let plan = database
         .schema()
@@ -1987,15 +1932,34 @@ async fn owned_postgres_epoch_anchor_rotates_and_refuses_a_generation_it_does_no
         )
         .await
         .expect("AI schema should plan");
-    database
-        .schema()
-        .apply_migration(&plan, ApplyOptions::default())
-        .await
-        .expect("AI schema should apply");
+    apply_parity_migration(&container, &database, &plan).await;
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
     let anchor = Arc::new(ParityEpochAnchor::default());
     let recovery = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
         .with_epoch_anchor(anchor.clone());
+
+    #[cfg(feature = "mssql")]
+    {
+        let restore = database
+            .begin_restore("owned-ai-restore", StdDuration::from_secs(1))
+            .await
+            .expect("host should take the SQL Server restore lock");
+        assert!(recovery.readiness_proof().await.is_err());
+        restore
+            .finish()
+            .await
+            .expect("host should finish physical restore");
+
+        let retention = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        );
+        assert!(matches!(
+            retention.prune_session_content(None).await,
+            Err(AiError::InvalidConfiguration(message)) if message.contains("checkpoint purge")
+        ));
+    }
 
     let first = recovery.readiness_proof().await.expect("first open");
     let parallel = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
@@ -2121,15 +2085,12 @@ impl AiRuntimeEpochAnchorStore for GatedParityAnchor {
 /// lease makes B wait for A, so the anchor ends on B's generation and a fresh
 /// open succeeds. Without the lease, A's late write strands the store.
 #[tokio::test]
-async fn owned_postgres_rotation_held_after_commit_cannot_strand_a_later_rotation() {
+async fn owned_database_rotation_held_after_commit_cannot_strand_a_later_rotation() {
     use std::sync::atomic::Ordering::SeqCst;
 
-    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+    let Some((container, database)) = owned_database().await else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
-        .await
-        .expect("ORM should connect only to the owned container");
     let plan = database
         .schema()
         .plan_migration_to_entities(
@@ -2139,11 +2100,7 @@ async fn owned_postgres_rotation_held_after_commit_cannot_strand_a_later_rotatio
         )
         .await
         .expect("AI schema should plan");
-    database
-        .schema()
-        .apply_migration(&plan, ApplyOptions::default())
-        .await
-        .expect("AI schema should apply");
+    apply_parity_migration(&container, &database, &plan).await;
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
     let anchor = Arc::new(GatedParityAnchor::default());
     let recovery = |anchor: &Arc<GatedParityAnchor>| {
@@ -2218,13 +2175,14 @@ async fn owned_postgres_rotation_held_after_commit_cannot_strand_a_later_rotatio
     drop(container);
 }
 
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn owned_postgres_broker_v2_entity_capability_executes_one_root_through_the_generated_schema()
 {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
-    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
         .await
         .expect("ORM should connect only to the owned container");
     broker_entity_parity::entity_capability_round_trip(database).await;

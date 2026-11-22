@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.154.0
+
+- **Action needed.** To adopt SQL Server, enable durable AI ORM services
+  on externally provisioned SQL Server schemas. The owned parity lane
+  exercises session and run persistence, lease fencing and retries, durable
+  replay, checkpoints, context compaction, and bounded restore reconciliation.
+- **No action.** SQLite and PostgreSQL keep their existing physical schema.
+  AI schema module 0.84.0 declares SQL Server filtered unique indexes for
+  provider responses and client message IDs. The SQL Server session-content
+  retention worker refuses changes because checkpoint purge is unavailable.
+
 ## Unreleased - 0.153.0
 
 - Emit fixed, content-free debug codes for the approval, attachment, and

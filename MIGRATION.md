@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.198.0 to 0.203.0: durable AI SQL Server prerequisites
+
+**No action** for existing ORM consumers. Update ORM and macros together.
+Opt in to binary, length-sensitive generated string comparisons with
+`exact_string_filters = true` on SQL Server. SQL Server DDL plans can render
+`IS NOT NULL` filtered indexes and append-only triggers. Hosts provision
+these changes externally. No general schema or data migration is needed.
+
 ## 0.197.0 to 0.198.0: restore page size checks
 
 **No action.** Upgrade ORM and macros together. The AI restore collector

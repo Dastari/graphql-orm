@@ -1,6 +1,7 @@
 //! Metadata-only proof for atomic expiry of a closed native checkpoint graph.
 
 use super::*;
+use crate::AiOrmBackend;
 use graphql_orm::graphql::orm::RetentionContext;
 
 pub(super) const SOURCE: &str = "native_approval_provider_turn_persisted";
@@ -11,7 +12,7 @@ pub(super) fn is_native(kind: &str) -> bool {
 }
 
 pub(super) async fn group(
-    tx: &mut RetentionContext<'_, DefaultWriteBackend>,
+    tx: &mut RetentionContext<'_, AiOrmBackend>,
     checkpoint: &AiRunCheckpointRetentionProjection,
 ) -> Result<Vec<AiRunCheckpointRetentionProjection>, OrmPublicError> {
     let Some(budget) = checkpoint.budget_reservation_id else {
@@ -69,7 +70,7 @@ fn hash(value: &str) -> bool {
 }
 
 async fn attempt_outcome(
-    tx: &mut RetentionContext<'_, DefaultWriteBackend>,
+    tx: &mut RetentionContext<'_, AiOrmBackend>,
     checkpoint: &AiRunCheckpointRetentionProjection,
 ) -> Result<Option<AiRunAttemptOutcomeRecord>, OrmPublicError> {
     let attempts = tx
@@ -129,7 +130,7 @@ async fn attempt_outcome(
 /// tombstoned call/candidate/approval graph are the retention authority.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn validate(
-    tx: &mut RetentionContext<'_, DefaultWriteBackend>,
+    tx: &mut RetentionContext<'_, AiOrmBackend>,
     checkpoint: &AiRunCheckpointRetentionProjection,
     run: &AiRunRecord,
     session_id: Uuid,

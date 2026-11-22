@@ -1,7 +1,6 @@
 //! ORM-backed durable first-message session-title work.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{
     content_context, map_orm, map_transaction, principal_identity, record_scope,
@@ -16,8 +15,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionError,
-    TransactionMode,
+    ConditionalUpdateOutcome, MutationContext, TransactionError, TransactionMode,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -129,7 +127,7 @@ impl Default for AiSessionTitleWorkLimits {
 /// message only after exact current-principal and owner/scope authorization,
 /// and it repeats that boundary before committing a generated title.
 pub struct OrmAiSessionTitleWorkService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -142,7 +140,7 @@ impl OrmAiSessionTitleWorkService {
     /// Creates a provider-neutral durable title-work service.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -987,7 +985,7 @@ enum TitleCompletion {
 }
 
 async fn load_active_claim(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     claim: &AiSessionTitleWorkClaim,
     now: OffsetDateTime,
 ) -> Result<AiSessionTitleWorkRecord, OrmPublicError> {

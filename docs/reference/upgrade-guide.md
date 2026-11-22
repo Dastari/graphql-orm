@@ -70,8 +70,17 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.198.0, `graphql-orm-macros` 0.198.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.153.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.203.0, `graphql-orm-macros` 0.203.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.154.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **Action needed** when adopting SQL Server with AI 0.154.0. Apply the
+  external schema plan, install the restore marker, and use an explicitly
+  writable pool (#813). Drain active workers before the module epoch rotates.
+  SQLite and PostgreSQL hosts need no data migration.
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
+- **No action** for existing ORM hosts upgrading to ORM/macros 0.203.0. SQL
+  Server plans can render append-only triggers and non-null filtered indexes,
+  and entities can opt in to exact string filters (#813).
+  [ORM migration](../../MIGRATION.md#01980-to-02030-durable-ai-sql-server-prerequisites)
 - **No action** — ORM/macros 0.198.0: AI restore pages check payload size before
   loading on SQLite and PostgreSQL (#532). [Migration](../../MIGRATION.md#01970-to-01980-restore-page-size-checks)
 - **Action needed** — AI 0.153.0: configure provider profile and adapter instance

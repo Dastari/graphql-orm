@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.203.0
+
+- **No action.** Add SQL Server support for bounded row-size preflights,
+  filtered unique indexes over non-null keys, and rendered append-only
+  triggers for externally managed schemas. Plans align catalog and declared
+  table names and omit implicit indexes on unindexable MAX columns (#813).
+- **No action.** Generated SQL Server entities can opt in to exact string
+  equality and membership through `exact_string_filters = true` (#813).
+
 ## Unreleased - ORM/macros 0.198.0
 
 - Check payload sizes for bounded SQLite and PostgreSQL restore pages before

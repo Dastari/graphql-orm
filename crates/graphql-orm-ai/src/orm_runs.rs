@@ -1,7 +1,6 @@
 //! Durable ORM-backed run leasing, fencing, and recovery.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::map_transaction;
 use crate::persisted_state::ToolCallState;
@@ -13,8 +12,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{Int64Filter, IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, OrderDirection,
-    TransactionError, TransactionMode,
+    ConditionalUpdateOutcome, MutationContext, OrderDirection, TransactionError, TransactionMode,
 };
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
@@ -430,9 +428,9 @@ impl AiApprovedRunClaim {
 /// repositories and state-machine transactions.
 #[derive(Clone)]
 pub struct OrmAiRunService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     clock: Arc<dyn Clock>,
     limits: AiRunServiceLimits,
     cancellation_hub: Option<Arc<AiRunCancellationHub>>,
@@ -803,7 +801,7 @@ impl OrmAiRunService {
 
     /// Creates an ORM-backed run service.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         clock: Arc<dyn Clock>,
         limits: AiRunServiceLimits,
     ) -> Self {
@@ -830,12 +828,12 @@ impl OrmAiRunService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
     /// The crate's internal handle: the host handle behind the custody field policy.
-    pub(crate) fn custody_database(&self) -> &Database<DefaultWriteBackend> {
+    pub(crate) fn custody_database(&self) -> &Database<AiOrmBackend> {
         &self.database
     }
 
@@ -5923,7 +5921,7 @@ enum ExpiredLeaseRecovery {
 /// Classifies one expired lease from committed rows only. Every write happens
 /// in [`recover_expired_run`]; malformed linked state returns `InternalError`.
 async fn classify_expired_lease(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     current: &AiRunRecord,
     lease: &AiRunLease,
     now: OffsetDateTime,
@@ -6316,7 +6314,7 @@ async fn classify_expired_lease(
 /// `RecoveryRequired` with `lease_recovery_state_invalid`, which is never
 /// replayed, and the caller continues with the next candidate.
 async fn recover_expired_run(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
     now: OffsetDateTime,
     cutoff: i64,
@@ -6463,7 +6461,7 @@ async fn recover_expired_run(
 /// Stamps a reservation the sweep must leave to its owner, inside the
 /// settlement transaction that checked the live epoch and observed the owner.
 async fn stamp_owned_reservation(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     reservation: &AiBudgetReservationRecord,
     now: OffsetDateTime,
 ) -> Result<(), OrmPublicError> {
@@ -6492,7 +6490,7 @@ enum ReservationSettlement {
 }
 
 async fn settle_stranded_budget_reservation(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     reservation_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<ReservationSettlement, OrmPublicError> {
@@ -6590,21 +6588,21 @@ fn filtering_excluded_decision(row_policy_registered: bool, backend: BackendRowS
 /// of rows is an operational skip, never a quarantine. The PostgreSQL state
 /// is read through the ORM's row-security introspection
 /// (`row_security_active` for each AI table and the current role); a failed
-/// or incomplete introspection counts as "cannot be excluded". The run
-/// service is compiled only for SQLite and PostgreSQL.
-pub(crate) async fn recovery_filtering_excluded(database: &Database<DefaultWriteBackend>) -> bool {
+/// or incomplete introspection counts as "cannot be excluded". SQL Server
+/// also requires positive evidence before classifying a missing row as absent.
+pub(crate) async fn recovery_filtering_excluded(database: &Database<AiOrmBackend>) -> bool {
     use graphql_orm::graphql::orm::{OrmBackend, RlsIntrospectionBackend};
     let paths = <crate::AiSchemaModule as graphql_orm::graphql::orm::OrmSchemaModule>::entities(
         &crate::AiSchemaModule,
     )
     .iter()
     .map(|entity| {
-        <DefaultWriteBackend as OrmBackend>::DIALECT
+        <AiOrmBackend as OrmBackend>::DIALECT
             .render_identifier_path(entity.table_name)
             .into_owned()
     })
     .collect::<Vec<_>>();
-    let backend = match <DefaultWriteBackend as RlsIntrospectionBackend>::probe_row_security(
+    let backend = match <AiOrmBackend as RlsIntrospectionBackend>::probe_row_security(
         database.pool(),
         &paths,
     )
@@ -6656,7 +6654,7 @@ fn is_recovery_state_invalid(error: &OrmPublicError) -> bool {
 /// principal reference, a missing session, or a session that does not match
 /// the run's owner, scope or tenant.
 async fn terminal_event_session(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
 ) -> Result<Result<AiSessionRecord, OrmPublicError>, OrmPublicError> {
     let Ok(principal_reference) =
@@ -6710,7 +6708,7 @@ async fn terminal_event_session(
 /// rotate. Returns `false` when the run changed since it was scanned (someone
 /// else progressed it); any other failure is returned as an error.
 pub(crate) async fn stamp_run_recovery_progress(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
     observed_version: i64,
     observed_state: &str,
@@ -6747,7 +6745,7 @@ pub(crate) async fn stamp_run_recovery_progress(
 /// unresolved, under the same fencing and stamp rule as
 /// [`stamp_run_recovery_progress`].
 async fn stamp_reservation_settlement_progress(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     reservation_id: Uuid,
     observed_version: i64,
     observed_state: &str,
@@ -6816,7 +6814,7 @@ enum ApprovedHandoff {
 /// [`append_terminal_run_event`]; cancellation and the quarantine paths, which
 /// write no terminal event, call it directly.
 pub(crate) async fn close_run_dependents(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
 ) -> Result<(), OrmPublicError> {
     expire_open_approvals_of_run(tx, run.id).await?;
@@ -6831,7 +6829,7 @@ pub(crate) async fn close_run_dependents(
 /// The binding now reaches the ordinary `cleanup_required` scan bucket in the
 /// same transaction that closes the run.
 async fn close_parked_provider_session_of_run(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
 ) -> Result<(), OrmPublicError> {
     const REASON: &str = "provider_session_parked_wait_closed";
@@ -6925,7 +6923,7 @@ async fn close_parked_provider_session_of_run(
 /// exit from `WaitingApproval` can leave an approval that a later decision or
 /// approved claim would act on.
 pub(crate) async fn expire_open_approvals_of_run(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
 ) -> Result<(), OrmPublicError> {
     const MAXIMUM_CALLS: usize = 4_096;
@@ -6993,7 +6991,7 @@ pub(crate) async fn expire_open_approvals_of_run(
 
 /// Expires an approved approval that can never be handed off and audits it.
 async fn expire_unclaimable_approval(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     approval: &AiApprovalRecord,
     worker_id: &str,
     reason_code: &str,
@@ -7039,7 +7037,7 @@ async fn expire_unclaimable_approval(
 /// Closes a queued or retry-scheduled run whose durable claim state is
 /// malformed, so it cannot block the bounded claim window.
 async fn quarantine_unclaimable_run(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     current: &AiRunRecord,
     worker_id: &str,
 ) -> Result<(), OrmPublicError> {
@@ -7088,7 +7086,7 @@ async fn quarantine_unclaimable_run(
 }
 
 pub(crate) async fn abandon_native_approval_candidates(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
     final_state: AiRunState,
     now: i64,
@@ -7193,7 +7191,7 @@ fn valid_digest(value: &str) -> bool {
 }
 
 async fn load_native_candidate(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     lease: &AiRunLease,
     id: AiToolCallId,
 ) -> Result<AiNativeApprovalCandidateRecord, OrmPublicError> {
@@ -7265,7 +7263,7 @@ pub(crate) fn exact_state(state: &str) -> AiRunRecordWhereInput {
 /// Every lease-fenced write calls this, either through
 /// [`load_and_validate_active_lease`] or beside its own inline lease check.
 pub(crate) async fn require_current_lease_epoch(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
     lease: &AiRunLease,
 ) -> Result<(), OrmPublicError> {
@@ -7286,7 +7284,7 @@ pub(crate) async fn require_current_lease_epoch(
 /// which retry admission refuses, exactly as an ordinary fenced completion
 /// would record it. Nothing is resolved, decrypted, or sent anywhere.
 async fn refuse_delegated_claim(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     leased: &AiRunRecord,
     lease: &AiRunLease,
     now: OffsetDateTime,
@@ -7332,7 +7330,7 @@ async fn refuse_delegated_claim(
 }
 
 pub(crate) async fn load_and_validate_active_lease(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     lease: &AiRunLease,
     now: OffsetDateTime,
 ) -> Result<AiRunRecord, OrmPublicError> {
@@ -7634,7 +7632,7 @@ fn terminal_event_metadata(
 /// Appends the canonical session and owner-inbox terminal event in the
 /// caller's exact run-transition transaction.
 pub(crate) async fn append_terminal_run_event(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
     final_state: AiRunState,
     outcome_code: Option<&str>,
@@ -7738,7 +7736,7 @@ pub(crate) async fn append_terminal_run_event(
 }
 
 pub(crate) async fn append_attempt_outcome(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     lease: &AiRunLease,
     final_state: AiRunState,
     outcome_code: String,
@@ -7914,140 +7912,9 @@ pub(crate) fn timestamp_at_or_before(timestamp: i64) -> Option<IntFilter> {
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
-    use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, SessionContext};
-    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
     use graphql_orm::prelude::{Database, SqliteBackend};
 
-    struct Fixture {
-        service: OrmAiRunService,
-        database: Database<SqliteBackend>,
-        clock: FixedClock,
-        principal_reference: PrincipalReference,
-    }
-
-    async fn fixture() -> Fixture {
-        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
-            .await
-            .expect("in-memory SQLite should open");
-        let module = crate::AiSchemaModule;
-        let plan = database
-            .schema()
-            .plan_migration_to_entities("ai-run-test-v1", "AI run service test", module.entities())
-            .await
-            .expect("AI schema should plan");
-        database
-            .schema()
-            .apply_migration(&plan, ApplyOptions::default())
-            .await
-            .expect("AI schema should apply");
-        crate::orm_runtime_recovery::open_test_epoch(&database).await;
-
-        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
-            .expect("test timestamp should be valid");
-        let clock = FixedClock::new(now);
-        let principal = AuthPrincipal::User(AuthUser {
-            user_id: "run-user".to_owned(),
-            session_id: Uuid::new_v4(),
-            roles: vec![],
-            scopes: vec![],
-            session: SessionContext::default(),
-            token_claims: AccessTokenMetadata {
-                tenant_id: Some("tenant-run".to_owned()),
-                ..AccessTokenMetadata::default()
-            },
-        });
-        // These tests pin recovery at the instant a lease expires; the
-        // default clock-skew grace has its own test.
-        let limits = AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
-            .and_then(|limits| limits.with_lease_recovery_grace(Duration::ZERO))
-            .expect("test run limits should validate");
-        let service = OrmAiRunService::new(database.clone(), Arc::new(clock.clone()), limits);
-        Fixture {
-            service,
-            database,
-            clock,
-            principal_reference: principal.reference(),
-        }
-    }
-
-    async fn seed_queued(fixture: &Fixture) -> AiRunId {
-        let run_id = AiRunId::new();
-        let session_id = AiSessionId::new();
-        AiSessionRecord::insert(
-            &fixture.database,
-            CreateAiSessionRecordInput {
-                execution_selection: None,
-                id: session_id.0,
-                owner_principal_kind: "user".to_owned(),
-                owner_subject: "run-user".to_owned(),
-                tenant_id: Some("tenant-run".to_owned()),
-                scope_kind: "tenant".to_owned(),
-                scope_id: "tenant-run".to_owned(),
-                title: "Run service test".to_owned(),
-                title_revision: 0,
-                title_source: "default".to_owned(),
-                state: "active".to_owned(),
-                stream_head: 0,
-                message_head: 0,
-                last_activity_at: fixture.clock.now().unix_timestamp(),
-                archived_at: None,
-                deleted_at: None,
-            },
-        )
-        .await
-        .expect("test session should insert");
-        AiRunRecord::insert(
-            &fixture.database,
-            CreateAiRunRecordInput {
-                recovery_epoch_id: None,
-                execution_selection: None,
-                id: run_id.0,
-                session_id: session_id.0,
-                input_message_id: Uuid::new_v4(),
-                principal_reference: serde_json::to_value(&fixture.principal_reference)
-                    .expect("principal reference should serialize"),
-                state: AiRunState::Queued.as_str().to_owned(),
-                attempt_id: None,
-                lease_owner: None,
-                lease_generation: 0,
-                lease_expires_at: None,
-                lease_heartbeat_at: None,
-                retry_count: 0,
-                next_attempt_at: Some(fixture.clock.now().unix_timestamp()),
-                error_code: None,
-                latest_checkpoint_id: None,
-                cancellation_request_id: None,
-                cancellation_requested_at: None,
-                recovery_examined_at: 0,
-            },
-        )
-        .await
-        .expect("queued test run should insert");
-        run_id
-    }
-
-    async fn run_record(fixture: &Fixture, run_id: AiRunId) -> AiRunRecord {
-        AiRunRecord::find_by_id(&fixture.database, &run_id.0)
-            .await
-            .expect("run lookup should succeed")
-            .expect("run should exist")
-    }
-
-    async fn attempt_outcomes(fixture: &Fixture) -> Vec<AiRunAttemptOutcomeRecord> {
-        fixture
-            .database
-            .transaction(TransactionMode::Default, |tx| {
-                Box::pin(async move {
-                    tx.query::<AiRunAttemptOutcomeRecord>()
-                        .limit(16)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)
-                })
-            })
-            .await
-            .expect("attempt outcomes should query")
-    }
+    use super::checkpoint_parity::{Fixture, attempt_outcomes, fixture, run_record, seed_queued};
 
     async fn session_events(fixture: &Fixture) -> Vec<AiSessionEventRecord> {
         fixture
@@ -8288,149 +8155,6 @@ mod tests {
             outcomes
                 .iter()
                 .any(|outcome| outcome.outcome_code == "lease_expired_after_start")
-        );
-    }
-
-    #[tokio::test]
-    async fn recovery_finalizes_an_exact_persisted_output_checkpoint() {
-        let fixture = fixture().await;
-        let run_id = seed_queued(&fixture).await;
-        let lease = fixture
-            .service
-            .claim_next("worker-output-checkpoint")
-            .await
-            .expect("claim should succeed")
-            .expect("run should be eligible");
-        let lease = fixture
-            .service
-            .start(&lease)
-            .await
-            .expect("claim should start");
-        let message_id = Uuid::new_v4();
-        let provider_response_id = "response-checkpoint";
-        let budget_reservation = AiBudgetReservationRecord::insert(
-            &fixture.database,
-            CreateAiBudgetReservationRecordInput {
-                budget_counter_ids: serde_json::json!([]),
-                scope_kind: "tenant".to_owned(),
-                scope_id: "tenant-run".to_owned(),
-                tenant_id: Some("tenant-run".to_owned()),
-                principal_kind: "user".to_owned(),
-                principal_subject: "run-user".to_owned(),
-                session_id: lease.session_id().0,
-                run_id: lease.run_id().0,
-                attempt_id: lease.attempt_id(),
-                lease_generation: lease.lease_generation(),
-                provider_kind: "openai".to_owned(),
-                provider_model: "checkpoint-test".to_owned(),
-                reasoning_effort: "unspecified".to_owned(),
-                pricing_policy_version: "checkpoint-pricing-v1".to_owned(),
-                reserved_input_tokens: 1,
-                reserved_output_tokens: 1,
-                reserved_tool_units: 0,
-                reserved_image_units: 0,
-                reserved_cost_microunits: 1,
-                reserved_runs: 1,
-                actual_input_tokens: Some(1),
-                actual_cached_input_tokens: Some(0),
-                actual_output_tokens: Some(1),
-                actual_tool_units: Some(0),
-                actual_image_units: Some(0),
-                actual_cost_microunits: Some(1),
-                actual_runs: Some(1),
-                idempotency_key: "output-checkpoint-test".to_owned(),
-                state: "committed".to_owned(),
-                expires_at: (fixture.clock.now() + Duration::minutes(5)).unix_timestamp(),
-                reconciled_at: Some(fixture.clock.now().unix_timestamp()),
-                settlement_examined_at: 0,
-            },
-        )
-        .await
-        .expect("committed test budget should insert");
-        let budget_reservation_id = budget_reservation.id;
-        let checkpoint_hash = final_output_checkpoint_hash(
-            lease.run_id(),
-            lease.attempt_id(),
-            lease.lease_generation(),
-            message_id,
-            Some(provider_response_id),
-            budget_reservation_id,
-        );
-        fixture
-            .service
-            .append_provider_output(
-                &lease,
-                PreparedProviderOutput {
-                    message_id,
-                    event_id: Uuid::new_v4(),
-                    inbox_event_id: Uuid::new_v4(),
-                    provider_kind: "openai".to_owned(),
-                    provider_model: "checkpoint-test".to_owned(),
-                    protected_preview: serde_json::json!({"protected": true}),
-                    protected_event: serde_json::json!({"protected": true}),
-                    protected_inbox_event: serde_json::json!({"protected": true}),
-                    blocks: vec![PreparedProviderBlock {
-                        id: Uuid::new_v4(),
-                        kind: "text".to_owned(),
-                        protected_content: serde_json::json!({"protected": true}),
-                        byte_count: 4,
-                        line_count: 1,
-                    }],
-                    correlation_id: budget_reservation_id.to_string(),
-                    provider_response_id: Some(provider_response_id.to_owned()),
-                    retained_response_profile: Some("profile-openai".to_owned()),
-                    budget_reservation_id,
-                    checkpoint_hash,
-                    expected_owner_principal_kind: "user".to_owned(),
-                    expected_owner_subject: "run-user".to_owned(),
-                    expected_scope_kind: "tenant".to_owned(),
-                    expected_scope_id: "tenant-run".to_owned(),
-                    expected_tenant_id: Some("tenant-run".to_owned()),
-                },
-            )
-            .await
-            .expect("output and checkpoint should commit atomically");
-        // The retained response joined the stored-response ledger in the same
-        // transaction, bound to its session and profile.
-        let ledger = fixture
-            .database
-            .transaction(TransactionMode::Default, |tx| {
-                Box::pin(async move {
-                    tx.query::<AiStoredProviderResponseRecord>()
-                        .limit(4)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)
-                })
-            })
-            .await
-            .expect("ledger should load");
-        assert_eq!(ledger.len(), 1);
-        assert_eq!(ledger[0].session_id, lease.session_id().0);
-        assert_eq!(ledger[0].provider_kind, "openai");
-        assert_eq!(ledger[0].provider_profile_id, "profile-openai");
-        assert_eq!(ledger[0].provider_response_id, provider_response_id);
-        assert_eq!(ledger[0].cleanup_state, "retained");
-
-        fixture.clock.advance_seconds(61);
-        let report = fixture
-            .service
-            .recover_expired_leases()
-            .await
-            .expect("exact output checkpoint should reconcile");
-
-        assert_eq!(report.completed, 1);
-        assert_eq!(report.recovery_required, 0);
-        assert_eq!(run_record(&fixture, run_id).await.state, "completed");
-        let outcomes = attempt_outcomes(&fixture).await;
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(
-            outcomes[0].outcome_code,
-            "lease_expired_after_output_persisted"
-        );
-        assert_eq!(
-            outcomes[0].provider_response_id.as_deref(),
-            Some(provider_response_id)
         );
     }
 
@@ -9567,11 +9291,11 @@ mod tests {
         refuse: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl graphql_orm::graphql::orm::EntityPolicy<DefaultWriteBackend> for RefuseSessionEvents {
+    impl graphql_orm::graphql::orm::EntityPolicy<AiOrmBackend> for RefuseSessionEvents {
         fn can_access_entity<'a>(
             &'a self,
             _context: Option<&'a async_graphql::Context<'_>>,
-            _database: &'a Database<DefaultWriteBackend>,
+            _database: &'a Database<AiOrmBackend>,
             entity_name: &'static str,
             _policy_key: Option<&'static str>,
             kind: graphql_orm::graphql::orm::EntityAccessKind,
@@ -9618,11 +9342,11 @@ mod tests {
 
     /// A host field policy that refuses every repository field decision.
     struct DenyEveryRepositoryField;
-    impl graphql_orm::graphql::orm::FieldPolicy<DefaultWriteBackend> for DenyEveryRepositoryField {
+    impl graphql_orm::graphql::orm::FieldPolicy<AiOrmBackend> for DenyEveryRepositoryField {
         fn can_read_field<'a>(
             &'a self,
             _: &'a async_graphql::Context<'_>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -9633,7 +9357,7 @@ mod tests {
         fn can_write_field<'a>(
             &'a self,
             _: &'a async_graphql::Context<'_>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -9645,7 +9369,7 @@ mod tests {
         fn can_read_repository_field<'a>(
             &'a self,
             _: Option<graphql_orm::graphql::auth::AccessContext<'a>>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -9656,7 +9380,7 @@ mod tests {
         fn can_write_repository_field<'a>(
             &'a self,
             _: Option<graphql_orm::graphql::auth::AccessContext<'a>>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -9980,11 +9704,11 @@ mod tests {
     /// A host row policy that decides AI run rows in Rust, row by row.
     struct CallbackRunRows;
 
-    impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for CallbackRunRows {
+    impl graphql_orm::graphql::orm::RowPolicy<AiOrmBackend> for CallbackRunRows {
         fn can_read_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<DefaultWriteBackend>,
+            _db: &'a Database<AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -9996,7 +9720,7 @@ mod tests {
         fn can_write_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<DefaultWriteBackend>,
+            _db: &'a Database<AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -10051,11 +9775,11 @@ mod tests {
         hide: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for HideSessions {
+    impl graphql_orm::graphql::orm::RowPolicy<AiOrmBackend> for HideSessions {
         fn can_read_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<DefaultWriteBackend>,
+            _db: &'a Database<AiOrmBackend>,
             entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -10069,7 +9793,7 @@ mod tests {
         fn can_write_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<DefaultWriteBackend>,
+            _db: &'a Database<AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -10110,11 +9834,11 @@ mod tests {
     /// A host update hook that refuses every recovery progress stamp.
     struct RefuseRecoveryStamps;
 
-    impl graphql_orm::graphql::orm::WriteInputTransform<DefaultWriteBackend> for RefuseRecoveryStamps {
+    impl graphql_orm::graphql::orm::WriteInputTransform<AiOrmBackend> for RefuseRecoveryStamps {
         fn before_update<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<DefaultWriteBackend>,
+            _db: &'a Database<AiOrmBackend>,
             _entity_name: &'static str,
             _existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
             input: &'a mut (dyn std::any::Any + Send + Sync),
@@ -11731,7 +11455,7 @@ mod tests {
 /// committed rows in the caller's transaction and never consults worker state,
 /// elapsed time, or a provider report.
 pub(crate) async fn run_produced_assistant_output(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     session_id: Uuid,
     run_id: Uuid,
 ) -> Result<bool, OrmPublicError> {
@@ -11767,7 +11491,7 @@ pub(crate) async fn run_produced_assistant_output(
 /// reservation is durably `released`/`expired`. Any other value, including a
 /// malformed future state, remains fail-closed as possible dispatch.
 pub(crate) async fn run_provider_dispatch_possible(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
 ) -> Result<bool, OrmPublicError> {
     let rows = tx
@@ -11805,7 +11529,7 @@ pub(crate) async fn run_provider_dispatch_possible(
 /// without approval consumption evidence, so such a call stays possible, as
 /// does any unknown state or an unbounded call set.
 pub(crate) async fn run_consequential_tool_dispatch_possible(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
 ) -> Result<bool, OrmPublicError> {
     const MAXIMUM_CALLS: usize = 4_096;
@@ -11857,3 +11581,315 @@ pub(crate) async fn run_consequential_tool_dispatch_possible(
 #[cfg(all(test, feature = "sqlite"))]
 #[path = "orm_run_heartbeat_tests.rs"]
 mod heartbeat_contention_tests;
+
+#[cfg(test)]
+mod checkpoint_parity {
+    use super::*;
+    use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, SessionContext};
+    #[cfg(feature = "sqlite")]
+    use graphql_orm::graphql::orm::ApplyOptions;
+    use graphql_orm::graphql::orm::OrmSchemaModule;
+
+    pub(super) struct Fixture {
+        pub(super) service: OrmAiRunService,
+        pub(super) database: Database<AiOrmBackend>,
+        pub(super) clock: FixedClock,
+        pub(super) principal_reference: PrincipalReference,
+        #[cfg(not(feature = "sqlite"))]
+        _server: crate::durable_database::OwnedServer,
+    }
+
+    pub(super) async fn fixture() -> Fixture {
+        #[cfg(feature = "sqlite")]
+        let database = Database::<AiOrmBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        #[cfg(not(feature = "sqlite"))]
+        let (server, database) = crate::durable_database::owned_database()
+            .await
+            .expect("owned database is required for checkpoint parity");
+        let module = crate::AiSchemaModule;
+        let plan = database
+            .schema()
+            .plan_migration_to_entities("ai-run-test-v1", "AI run service test", module.entities())
+            .await
+            .expect("AI schema should plan");
+        #[cfg(feature = "sqlite")]
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .expect("AI schema should apply");
+        #[cfg(not(feature = "sqlite"))]
+        crate::durable_database::apply_parity_migration(&server, &database, &plan).await;
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
+
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("test timestamp should be valid");
+        let clock = FixedClock::new(now);
+        let principal = AuthPrincipal::User(AuthUser {
+            user_id: "run-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec![],
+            scopes: vec![],
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("tenant-run".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        });
+        // These tests pin recovery at the instant a lease expires; the
+        // default clock-skew grace has its own test.
+        let limits = AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
+            .and_then(|limits| limits.with_lease_recovery_grace(Duration::ZERO))
+            .expect("test run limits should validate");
+        let service = OrmAiRunService::new(database.clone(), Arc::new(clock.clone()), limits);
+        Fixture {
+            service,
+            database,
+            clock,
+            principal_reference: principal.reference(),
+            #[cfg(not(feature = "sqlite"))]
+            _server: server,
+        }
+    }
+
+    pub(super) async fn seed_queued(fixture: &Fixture) -> AiRunId {
+        let run_id = AiRunId::new();
+        let session_id = AiSessionId::new();
+        AiSessionRecord::insert(
+            &fixture.database,
+            CreateAiSessionRecordInput {
+                execution_selection: None,
+                id: session_id.0,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "run-user".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                title: "Run service test".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 0,
+                last_activity_at: fixture.clock.now().unix_timestamp(),
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("test session should insert");
+        AiRunRecord::insert(
+            &fixture.database,
+            CreateAiRunRecordInput {
+                recovery_epoch_id: None,
+                execution_selection: None,
+                id: run_id.0,
+                session_id: session_id.0,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::to_value(&fixture.principal_reference)
+                    .expect("principal reference should serialize"),
+                state: AiRunState::Queued.as_str().to_owned(),
+                attempt_id: None,
+                lease_owner: None,
+                lease_generation: 0,
+                lease_expires_at: None,
+                lease_heartbeat_at: None,
+                retry_count: 0,
+                next_attempt_at: Some(fixture.clock.now().unix_timestamp()),
+                error_code: None,
+                latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
+                recovery_examined_at: 0,
+            },
+        )
+        .await
+        .expect("queued test run should insert");
+        run_id
+    }
+
+    pub(super) async fn run_record(fixture: &Fixture, run_id: AiRunId) -> AiRunRecord {
+        AiRunRecord::find_by_id(&fixture.database, &run_id.0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist")
+    }
+
+    pub(super) async fn attempt_outcomes(fixture: &Fixture) -> Vec<AiRunAttemptOutcomeRecord> {
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunAttemptOutcomeRecord>()
+                        .limit(16)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attempt outcomes should query")
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_recovery_finalizes_an_exact_persisted_output_checkpoint() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        let budget_refusal = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunRecord>()
+                        .limit(1)
+                        .fetch_sql_page_with_byte_limit(1)
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await;
+        assert!(
+            budget_refusal.is_err(),
+            "restore-sized read must refuse an over-budget row"
+        );
+        let lease = fixture
+            .service
+            .claim_next("worker-output-checkpoint")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("claim should start");
+        let message_id = Uuid::new_v4();
+        let provider_response_id = "response-checkpoint";
+        let budget_reservation = AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id: lease.session_id().0,
+                run_id: lease.run_id().0,
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: "openai".to_owned(),
+                provider_model: "checkpoint-test".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
+                pricing_policy_version: "checkpoint-pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 0,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: Some(1),
+                actual_cached_input_tokens: Some(0),
+                actual_output_tokens: Some(1),
+                actual_tool_units: Some(0),
+                actual_image_units: Some(0),
+                actual_cost_microunits: Some(1),
+                actual_runs: Some(1),
+                idempotency_key: "output-checkpoint-test".to_owned(),
+                state: "committed".to_owned(),
+                expires_at: (fixture.clock.now() + Duration::minutes(5)).unix_timestamp(),
+                reconciled_at: Some(fixture.clock.now().unix_timestamp()),
+                settlement_examined_at: 0,
+            },
+        )
+        .await
+        .expect("committed test budget should insert");
+        let budget_reservation_id = budget_reservation.id;
+        let checkpoint_hash = final_output_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            message_id,
+            Some(provider_response_id),
+            budget_reservation_id,
+        );
+        fixture
+            .service
+            .append_provider_output(
+                &lease,
+                PreparedProviderOutput {
+                    message_id,
+                    event_id: Uuid::new_v4(),
+                    inbox_event_id: Uuid::new_v4(),
+                    provider_kind: "openai".to_owned(),
+                    provider_model: "checkpoint-test".to_owned(),
+                    protected_preview: serde_json::json!({"protected": true}),
+                    protected_event: serde_json::json!({"protected": true}),
+                    protected_inbox_event: serde_json::json!({"protected": true}),
+                    blocks: vec![PreparedProviderBlock {
+                        id: Uuid::new_v4(),
+                        kind: "text".to_owned(),
+                        protected_content: serde_json::json!({"protected": true}),
+                        byte_count: 4,
+                        line_count: 1,
+                    }],
+                    correlation_id: budget_reservation_id.to_string(),
+                    provider_response_id: Some(provider_response_id.to_owned()),
+                    retained_response_profile: Some("profile-openai".to_owned()),
+                    budget_reservation_id,
+                    checkpoint_hash,
+                    expected_owner_principal_kind: "user".to_owned(),
+                    expected_owner_subject: "run-user".to_owned(),
+                    expected_scope_kind: "tenant".to_owned(),
+                    expected_scope_id: "tenant-run".to_owned(),
+                    expected_tenant_id: Some("tenant-run".to_owned()),
+                },
+            )
+            .await
+            .expect("output and checkpoint should commit atomically");
+        // The retained response joined the stored-response ledger in the same
+        // transaction, bound to its session and profile.
+        let ledger = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiStoredProviderResponseRecord>()
+                        .limit(4)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("ledger should load");
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].session_id, lease.session_id().0);
+        assert_eq!(ledger[0].provider_kind, "openai");
+        assert_eq!(ledger[0].provider_profile_id, "profile-openai");
+        assert_eq!(ledger[0].provider_response_id, provider_response_id);
+        assert_eq!(ledger[0].cleanup_state, "retained");
+
+        fixture.clock.advance_seconds(61);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("exact output checkpoint should reconcile");
+
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.recovery_required, 0);
+        assert_eq!(run_record(&fixture, run_id).await.state, "completed");
+        let outcomes = attempt_outcomes(&fixture).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].outcome_code,
+            "lease_expired_after_output_persisted"
+        );
+        assert_eq!(
+            outcomes[0].provider_response_id.as_deref(),
+            Some(provider_response_id)
+        );
+    }
+}

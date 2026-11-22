@@ -1,7 +1,5 @@
 //! Protected, exact-source context compaction for active run workers.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{content_context, map_context_compaction as map_orm, record_scope};
 use std::collections::{HashMap, HashSet};
@@ -1334,16 +1332,19 @@ fn map_transaction(error: TransactionError) -> AiError {
     map_orm(error.public_error().clone())
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AiOrmBackend;
     use agql_auth::{
         AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, ResolvedPrincipal, SessionContext,
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::OrmErrorCode;
-    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
-    use graphql_orm::prelude::{Database, SqliteBackend};
+    #[cfg(feature = "sqlite")]
+    use graphql_orm::graphql::orm::ApplyOptions;
+    use graphql_orm::graphql::orm::OrmSchemaModule;
+    use graphql_orm::prelude::Database;
     use time::OffsetDateTime;
 
     use crate::{
@@ -1409,17 +1410,24 @@ mod tests {
     }
 
     struct Fixture {
-        database: Database<SqliteBackend>,
+        database: Database<AiOrmBackend>,
         service: OrmAiContextCompactionService,
         lease: AiRunLease,
         scope: AiScope,
         first_block_id: Uuid,
+        #[cfg(not(feature = "sqlite"))]
+        _server: crate::durable_database::OwnedServer,
     }
 
     async fn fixture() -> Fixture {
-        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        #[cfg(feature = "sqlite")]
+        let database = Database::<AiOrmBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
+        #[cfg(not(feature = "sqlite"))]
+        let (server, database) = crate::durable_database::owned_database()
+            .await
+            .expect("owned database is required for compaction parity");
         let module = AiSchemaModule;
         let migration = database
             .schema()
@@ -1430,11 +1438,14 @@ mod tests {
             )
             .await
             .expect("AI schema should plan");
+        #[cfg(feature = "sqlite")]
         database
             .schema()
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        #[cfg(not(feature = "sqlite"))]
+        crate::durable_database::apply_parity_migration(&server, &database, &migration).await;
         crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let now = OffsetDateTime::now_utc();
@@ -1608,6 +1619,8 @@ mod tests {
             lease,
             scope,
             first_block_id,
+            #[cfg(not(feature = "sqlite"))]
+            _server: server,
         }
     }
 
@@ -1686,7 +1699,8 @@ mod tests {
     /// writes (`stored_handle_content`); `tests/entity_references.rs` proves
     /// the send path stores nothing else.
     #[tokio::test]
-    async fn compaction_after_revocation_carries_reference_handles_only() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_compaction_after_revocation_carries_reference_handles_only() {
         const PAYLOAD: &str = "payload readable before revocation";
         struct Hook(Arc<std::sync::atomic::AtomicBool>);
         #[async_trait]
@@ -1863,7 +1877,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compaction_refuses_a_provider_or_model_other_than_the_session_pin() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_compaction_refuses_a_provider_or_model_other_than_the_session_pin() {
         let fixture = fixture().await;
         for (provider, model) in [
             (ProviderKind::Anthropic, "test-model"),
@@ -1885,7 +1900,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_compaction_chains_and_loads_without_debug_disclosure() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_exact_compaction_chains_and_loads_without_debug_disclosure() {
         let fixture = fixture().await;
         let prepared = fixture
             .service
@@ -1972,7 +1988,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_sources_and_inexact_egress_fail_closed() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_changed_sources_and_inexact_egress_fail_closed() {
         let fixture = fixture().await;
         let prepared = fixture
             .service
@@ -2031,7 +2048,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_access_denial_prevents_source_opening() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_current_access_denial_prevents_source_opening() {
         let mut fixture = fixture().await;
         fixture.service.access_policy = Arc::new(crate::DenyAllAiAccessPolicy);
         assert!(matches!(

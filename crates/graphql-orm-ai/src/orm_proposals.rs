@@ -1,7 +1,6 @@
 //! ORM-backed protected proposal staging and human review.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_support::{
     content_context, map_orm, map_transaction, page_input, principal_identity, record_scope,
 };
@@ -12,7 +11,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::UuidFilter;
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionMode};
 use graphql_orm::graphql::pagination::ValidatedKeysetConnection;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -106,9 +105,9 @@ impl AiPersistedProposal {
 /// such a credential would yield the full user behind it.
 #[derive(Clone)]
 pub struct OrmAiProposalService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     run_service: OrmAiRunService,
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiProposalAccessPolicy>,
@@ -124,7 +123,7 @@ impl OrmAiProposalService {
     /// Creates a protected proposal service.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         run_service: OrmAiRunService,
         principal_resolver: Arc<dyn CurrentPrincipalResolver>,
         access_policy: Arc<dyn AiProposalAccessPolicy>,
@@ -176,7 +175,7 @@ impl OrmAiProposalService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 

@@ -1,5 +1,6 @@
 //! Read-only, bounded activity from durable newest-request/run metadata.
 
+use crate::AiOrmBackend;
 use std::collections::{BTreeMap, BTreeSet};
 
 use graphql_orm::db::Database;
@@ -120,7 +121,7 @@ pub(crate) fn activity_state(state: &str) -> Option<AiSessionActivityState> {
 }
 
 async fn read_metadata(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     schema: &ValidatedRuntimeSchema,
     table: &str,
     key: &str,
@@ -172,7 +173,7 @@ async fn read_metadata(
 /// The ORM batches one LIMIT 2 (one result plus sentinel) branch per parent into
 /// one statement. It never hydrates full history or protected payloads.
 pub(crate) async fn session_activity(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     principal_kind: &str,
     principal_subject: &str,
     edges: &[AiSessionEdge],
@@ -454,7 +455,7 @@ mod tests {
     use graphql_orm::graphql::errors::OrmPublicError;
     use graphql_orm::graphql::orm::OrmSchemaModule;
 
-    async fn database() -> Database<DefaultWriteBackend> {
+    async fn database() -> Database<AiOrmBackend> {
         let db = Database::connect_sqlite("sqlite::memory:").await.unwrap();
         let plan = db
             .schema()
@@ -474,7 +475,7 @@ mod tests {
     }
 
     async fn seed(
-        db: &Database<DefaultWriteBackend>,
+        db: &Database<AiOrmBackend>,
         owner: &str,
         states: &[&str],
         extra_assistant: bool,

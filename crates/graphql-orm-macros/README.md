@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.203.0 adds SQL Server-only options to
+`backend_selected_graphql_entity` and opt-in exact string filters. See the
+[migration guide](../../MIGRATION.md#01980-to-02030-durable-ai-sql-server-prerequisites).
+
 Version 0.198.0 supports size checks for AI restore pages.
 See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
 

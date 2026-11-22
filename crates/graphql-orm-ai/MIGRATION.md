@@ -10,6 +10,28 @@ supersedes: []
 
 # Migration Guide
 
+## 0.153.0 to 0.154.0
+
+**Action needed.** When adopting SQL Server, install the ORM restore marker with
+the schema owner, then generate the external schema plan for `AiSchemaModule`
+0.84.0 with `Database::schema().plan_migration_to_entities` and
+`AiSchemaModule.entities()`. Review and apply the statements with your own
+migration tooling. Use a verified TLS connection and an explicitly writable
+runtime pool. Rehearse readiness and restore on an owned copy. If a schema-only
+deployment already created the AI tables, replace the nullable provider response
+UNIQUE constraint and the message client-ID index with the planned filtered
+indexes. Install the append-only triggers before enabling writers. Existing
+responses keep their values. See the
+[SQL Server capability matrix](docs/backend-capability-matrix.md#sql-server-deployment).
+
+**No action.** For SQLite and PostgreSQL, the module version advances
+to 0.84.0 without a physical schema or data migration on these backends.
+
+**Action needed.** For a rolling upgrade with active workers, quiesce new
+claims and drain current runs before reopening on the upgraded module. The
+successor epoch invalidates leases from the previous module. Let ordinary
+lease recovery classify any work that did not drain.
+
 ## 0.152.0 to 0.153.0
 
 **Action needed** for direct checkpoint adoption callers. Start each claimed

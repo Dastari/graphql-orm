@@ -1,7 +1,6 @@
 //! ORM-backed owner-isolated attachment intake and lifecycle.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_orm, map_transaction, page_input, principal_identity};
 use crate::persisted_state::{
@@ -19,7 +18,7 @@ use futures::StreamExt;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionMode};
 use graphql_orm::graphql::pagination::{KeysetConnectionInput, ValidatedKeysetConnection};
 use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, StorageError};
 use secrecy::{ExposeSecret, SecretString};
@@ -231,9 +230,9 @@ enum ArtifactCleanupOutcome {
 /// [`AiError::ReauthorizationFailed`] before any read or write, as the session
 /// roots do. Provider resolution for a lease is unchanged.
 pub struct OrmAiAttachmentService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -259,7 +258,7 @@ impl OrmAiAttachmentService {
     /// Creates an attachment service with secure default hard limits.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -318,7 +317,7 @@ impl OrmAiAttachmentService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub const fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub const fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 

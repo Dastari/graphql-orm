@@ -157,7 +157,6 @@ pub struct AiStoredProviderResponseDeletionRequest {
 }
 
 impl AiStoredProviderResponseDeletionRequest {
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) fn new(
         provider_kind: crate::ProviderKind,
         provider_profile_id: String,

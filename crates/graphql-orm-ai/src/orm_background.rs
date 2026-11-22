@@ -1,10 +1,8 @@
 //! Fenced OpenAI background-response submission and durable binding.
 
-#![cfg(all(
-    any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai-core"
-))]
+#![cfg(all(feature = "provider-openai-core"))]
 
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::map_transaction;
 use crate::sha256::valid_sha256_any_case;
@@ -15,8 +13,8 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, OrderDirection,
-    PredicateUpdateOutcome, TransactionError, TransactionMode,
+    ConditionalUpdateOutcome, MutationContext, OrderDirection, PredicateUpdateOutcome,
+    TransactionError, TransactionMode,
 };
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
@@ -643,10 +641,10 @@ impl std::fmt::Debug for AiOpenAiBackgroundReconciliationClaim {
 /// or mutate the parked run.
 #[derive(Clone)]
 pub struct OrmAiOpenAiBackgroundReconciliationService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
-    worker_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
+    worker_database: Database<AiOrmBackend>,
     clock: Arc<dyn Clock>,
     limits: AiOpenAiBackgroundReconciliationLimits,
 }
@@ -657,7 +655,7 @@ pub struct OrmAiOpenAiBackgroundReconciliationService {
 /// exact reconciliation claim. It cannot select webhook content, settle
 /// budget, protect or persist output, or mutate the parked run terminally.
 pub struct OrmAiOpenAiBackgroundRetrievalService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     runtime: Arc<AiRuntime>,
     egress_audit: Arc<dyn AiEgressDecisionAudit>,
     clock: Arc<dyn Clock>,
@@ -779,8 +777,8 @@ impl std::fmt::Debug for AiOpenAiBackgroundRetrievalFailure {
 /// and protection immediately before mutation, and commits the complete local
 /// terminal graph in one generated-ORM state-machine transaction.
 pub struct OrmAiOpenAiBackgroundTerminalService {
-    database: Database<DefaultWriteBackend>,
-    worker_database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
+    worker_database: Database<AiOrmBackend>,
     runtime: Arc<AiRuntime>,
     usage_accounting: Arc<dyn AiProviderUsageAccounting>,
     clock: Arc<dyn Clock>,
@@ -1619,7 +1617,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
     /// Every other access uses the host entity policy, or is refused when the
     /// database has none; see [`Self::with_entity_fallback`].
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         clock: Arc<dyn Clock>,
         limits: AiOpenAiBackgroundReconciliationLimits,
     ) -> Self {
@@ -1656,7 +1654,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub const fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub const fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -2505,7 +2503,7 @@ impl OrmAiOpenAiBackgroundRetrievalService {
     /// The egress audit must durably include the generated-ORM decision event
     /// in this same database before the service can bind transport authority.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         runtime: Arc<AiRuntime>,
         egress_audit: Arc<dyn AiEgressDecisionAudit>,
         clock: Arc<dyn Clock>,
@@ -2870,7 +2868,7 @@ impl OrmAiOpenAiBackgroundTerminalService {
     /// Returns [`AiError::InvalidConfiguration`] unless the accepted
     /// current-principal age is positive and no greater than one hour.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         runtime: Arc<AiRuntime>,
         usage_accounting: Arc<dyn AiProviderUsageAccounting>,
         clock: Arc<dyn Clock>,
@@ -3261,7 +3259,7 @@ fn validate_terminal_budget_binding(
 }
 
 async fn commit_background_terminal_graph(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     graph: &BackgroundClaimGraph,
     matched_receipt: Option<&MatchedBackgroundReceipt>,
@@ -3444,7 +3442,7 @@ async fn commit_background_terminal_graph(
 }
 
 async fn persist_background_provider_output(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     run: &AiRunRecord,
     output: PreparedProviderOutput,
@@ -3598,7 +3596,7 @@ async fn persist_background_provider_output(
 }
 
 async fn commit_matched_terminal_receipt(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     matched: &MatchedBackgroundReceipt,
     status: ProviderBackgroundStatus,
@@ -3662,7 +3660,7 @@ async fn commit_matched_terminal_receipt(
 }
 
 async fn close_duplicate_terminal_receipts(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     status: ProviderBackgroundStatus,
     now: OffsetDateTime,
@@ -3738,7 +3736,7 @@ async fn close_duplicate_terminal_receipts(
 }
 
 async fn validate_existing_background_terminal(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     observation: &AiOpenAiBackgroundRetrievalObservation,
     actual: AiBudgetAmounts,
 ) -> Result<(), TransactionError> {
@@ -3923,7 +3921,7 @@ async fn validate_existing_background_terminal(
 }
 
 async fn validate_existing_background_output(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     run: &AiRunRecord,
     message_id: Uuid,
@@ -4207,7 +4205,7 @@ struct BackgroundClaimGraph {
 }
 
 async fn load_background_claim_graph(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
 ) -> Result<BackgroundClaimGraph, OrmPublicError> {
     let run = tx
@@ -4734,7 +4732,7 @@ fn validate_released_reconciliation_record(
 }
 
 async fn close_background_recovery(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     graph: &BackgroundClaimGraph,
     safe_error_code: &'static str,
@@ -4854,7 +4852,7 @@ async fn close_background_recovery(
 }
 
 async fn close_matched_receipt_recovery(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     safe_error_code: &str,
     now: OffsetDateTime,
@@ -4932,7 +4930,7 @@ async fn close_matched_receipt_recovery(
 }
 
 async fn match_background_receipt(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     submission: &AiProviderBackgroundSubmissionRecord,
     maximum_scan: usize,
 ) -> Result<Option<MatchedBackgroundReceipt>, OrmPublicError> {
