@@ -19,6 +19,11 @@ checks the whole candidate range through the scan ceiling or exhaustion
 before loading rows. Spatial fields are measured in their normal projected
 form. No data migration is needed.
 
+## 0.194.0 to 0.195.0: integration test consolidation
+
+**No action** for application hosts. For individual integration tests in source
+checkouts, use the [grouped test selectors](docs/development/testing.md).
+
 ## 0.193.0 to 0.194.0: resolver catalogue (operation catalogue 0.11.0)
 
 Upgrade ORM and macros together, with operation catalogue 0.11.0.

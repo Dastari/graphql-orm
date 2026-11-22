@@ -74,6 +74,7 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 
 - **No action** — ORM/macros 0.197.0: AI restore pages check payload size before
   loading on SQLite and PostgreSQL (#532). [Migration](../../MIGRATION.md#01960-to-01970-restore-page-size-checks)
+- **No action** — ORM/macros 0.195.0 groups selected integration-test targets (#771). Application hosts can upgrade without configuration changes. [Migration](../../MIGRATION.md#01940-to-01950-integration-test-consolidation)
 - **No action** — ORM/macros 0.194.0, operation catalog 0.11.0: `schema_roots!` also emits `graphql_orm_resolver_catalog()`, a separate document listing the generated relationship fields and Federation entity resolvers a schema serves, and the catalogue adds an opt-in RFC 8785 encoder. Existing SDL, catalogues, fingerprints and receiver bindings are unchanged (#544). [Migration](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110)
 - **No action** — ORM/macros 0.193.0: a `GraphQLEntity`-generated object can host handwritten resolver fields with `#[graphql_orm(object_fields)]` and `#[graphql_object_fields]`; entities that do not opt in are unchanged (#808). [Migration](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects)
 - **No action** — ORM/macros 0.192.0: set `propagate_change_action = "updated"` on an upward relation to report child creates and deletes as parent updates (#812). [Migration](../../MIGRATION.md#01910-to-01920-propagated-parent-actions)

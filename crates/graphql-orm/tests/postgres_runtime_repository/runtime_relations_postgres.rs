@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres")]
-
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     CollectionId, DbAuthContext, FieldId, PostgresBackend, RelationCardinality, RelationId,
@@ -9,10 +7,7 @@ use graphql_orm::graphql::orm::{
     RuntimeValueKind,
 };
 
-#[path = "support/owned_postgres.rs"]
-mod owned_postgres;
-
-use owned_postgres::OwnedPostgres;
+use super::owned_postgres::{OwnedPostgres, POSTGRES_IMAGE};
 
 fn cid(value: &str) -> CollectionId {
     CollectionId::new(value).unwrap()
@@ -182,7 +177,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
 #[ignore = "creates and owns a disposable loopback-only PostgreSQL 17 container"]
 async fn composite_relation_batches_match_portable_sqlite_semantics()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start("runtime-relation")?;
+    let owned = OwnedPostgres::start_ready("runtime-relation", POSTGRES_IMAGE).await?;
     let database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_relation_pg_customers (

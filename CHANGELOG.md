@@ -20,6 +20,11 @@ for historical context.
   loading rows. Preflight residual scans before decoding any candidates and
   measure PostgreSQL spatial fields in their projected form (#532). [Migration](MIGRATION.md#01960-to-01970-restore-page-size-checks)
 
+## Unreleased - ORM/macros 0.195.0
+
+- Consolidated selected PostgreSQL, SQL Server and SQLite integration test binaries.
+  See the [test lanes](docs/development/testing.md) for the grouped selectors.
+
 ## Unreleased - ORM/macros 0.194.0, operation catalogue 0.11.0
 
 - **Added (operation catalogue, #544).** `GraphqlResolverCatalog` lists what has no root coordinate and so appears in no operation catalogue: every generated relationship field (owning type, field, target, cardinality, argument names, field-policy flag) and every entity with a resolvable Federation key (its `@key` field sets, including `NodeId`). It is a separate document, wire version 1, with its own fingerprint (`graphql-orm-resolver-catalog-rfc8785-sha256-v1`), bound to the semantic catalogue by fingerprint. `schema_roots!` emits `graphql_orm_resolver_catalog()`, which returns a `Result` and reads the served schema: a declared relation with no mounted generated resolver, and a key the schema does not resolve, are left out; handwritten relationship fields and entity resolvers are out of scope for this version, and a type is listed under its registered GraphQL name with its semantic catalogue name beside it when they differ. An authorization requirement is given only as a reference to an exposed generated root, never as scope names. Existing SDL, descriptors, wire formats and fingerprints are unchanged.

@@ -53,7 +53,7 @@ run_sqlite() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal \
     --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
-    --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
+    --lib --test runtime_graphql --test runtime_strings --test sqlite_runtime_queries \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
@@ -82,8 +82,8 @@ run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test authorized_pagination_postgres --test bounded_mutation_sentinels \
     --test bulk_refusals --test delete_propagation --test denied_relations \
-    --test host_primary_keys --test postgres_constraint_index_idempotency --test repository_only_postgres \
-    --test runtime_records_postgres --test runtime_relations_postgres --test single_row_refusals \
+    --test host_primary_keys --test postgres_constraint_index_idempotency --test postgres_runtime_repository \
+    --test single_row_refusals \
     -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test temporal_bind_compatibility --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
@@ -200,7 +200,7 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib the_probe_reads_the_rows_the_filtered_index_covers -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_trigger_writes --test mssql_restore_marker --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
+    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
   # Closure rendering and depth refusals need no server.
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test read_predicate_closure
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
@@ -316,8 +316,8 @@ case "${lane}" in
     ;;
   runtime-live)
     cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
-      --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_queries \
-      --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes \
+      --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test sqlite_runtime_queries \
+      --test runtime_live --test runtime_search_graphql --test runtime_search_writes \
       --test runtime_operation_assurance --test runtime_graphql_formats -- --test-threads=1
     cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
       --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_live \
