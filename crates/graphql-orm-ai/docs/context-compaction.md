@@ -48,8 +48,19 @@ in logs, queues, frontend state, generic caches, or model-authored tool data.
 Use `AiPreparedContextCompaction::model_request()` as the exact request for an
 ordinary `AiProviderCallPlan`. The plan must contain exactly one model-
 inference manifest for the returned session, run, scope, provider, and model.
-Set its purpose to `context_compaction`, copy `egress_sources()` exactly, and
-use byte/token estimates at least as large as the prepared estimates.
+Set its purpose to `context_compaction`. Copy `provider_profile_id()` and
+`egress_sources()` exactly. Use byte and token estimates at least as large as
+the prepared estimates and use the prepared request's reasoning effort in the
+budget reservation.
+
+Register the adapter and stable profile together with
+`AiRuntimeBuilder::provider_with_compaction_admission` and the host's normal
+selection resolver. Install `OrmAiRunExecutionSelectionReader` on the
+executor with `with_context_compaction_selection_reader`. Immediately before
+dispatch, the executor reads the live run and session pin and re-admits the
+exact profile, model and effort. A profile ID identifies the host's reviewed
+adapter route. Give an unrelated replacement adapter a different profile ID.
+An unpinnable legacy session requires a new chat for compaction.
 
 Validated entity-reference blocks contribute only their kind and identifier.
 These handles are `Confidential` because their identifiers can identify tenant

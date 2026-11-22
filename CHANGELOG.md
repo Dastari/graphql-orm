@@ -14,6 +14,11 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.193.0
+
+- Check the payload size of bounded SQLite and PostgreSQL repository pages
+  before loading the rows for AI restore (#532). [Migration](MIGRATION.md#01920-to-01930-restore-page-size-checks)
+
 ## Unreleased - ORM/macros 0.192.0
 
 - **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation

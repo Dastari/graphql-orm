@@ -2296,6 +2296,15 @@ impl VisibleRowScan {
     ///
     /// `PAGE_LIMIT_EXCEEDED` when the scan budget is spent and more rows remain.
     pub(crate) fn next_batch(&mut self) -> crate::Result<Option<ScanBatch>> {
+        self.next_batch_with_maximum(u64::MAX)
+    }
+
+    /// Keep a size-only metadata read bounded even when skipping many rows.
+    pub(crate) fn next_size_checked_batch(&mut self) -> crate::Result<Option<ScanBatch>> {
+        self.next_batch_with_maximum(Self::MAX_GROWN_BATCH)
+    }
+
+    fn next_batch_with_maximum(&mut self, maximum: u64) -> crate::Result<Option<ScanBatch>> {
         if !self.wants_more() {
             return Ok(None);
         }
@@ -2306,7 +2315,7 @@ impl VisibleRowScan {
                 .overflow_after_skip
                 .map_or(Self::MAX_GROWN_BATCH, |maximum| maximum.saturating_add(1)),
         });
-        let wanted = needed.max(self.batch).max(1);
+        let wanted = needed.max(self.batch).clamp(1, maximum);
         self.batch = wanted.saturating_mul(2).min(Self::MAX_GROWN_BATCH);
         let (examine, fetch) = match self.budget {
             // A spent budget still reads one row to learn whether any remain,
@@ -6000,13 +6009,76 @@ where
         context: &mut MutationContext<'_, B>,
         offset: i64,
         limit: Option<i64>,
+        byte_budget: Option<&mut usize>,
     ) -> crate::Result<Vec<(T, bool)>>
     where
         B: WriteBackend,
     {
-        let rendered = render_select_query(B::DIALECT, &self.candidate_select(offset, limit)?);
+        let selection = self.candidate_select(offset, limit)?;
+        let rendered = render_select_query(B::DIALECT, &selection);
+        if let Some(remaining) = byte_budget {
+            let rows =
+                Self::fetch_sized_candidate_rows(context, selection, &rendered, remaining).await?;
+            return self.decode_candidates(&rows);
+        }
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         self.decode_candidates(&rows)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    async fn fetch_sized_candidate_rows(
+        context: &mut MutationContext<'_, B>,
+        mut selection: SelectQuery,
+        rendered: &RenderedQuery,
+        remaining: &mut usize,
+    ) -> crate::Result<Vec<B::Row>>
+    where
+        B: WriteBackend,
+    {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+
+        let rejected = || sqlx_error_from_public(OrmPublicError::new(OrmErrorCode::InternalError));
+        let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
+        let lengths = T::column_names()
+            .iter()
+            .map(|column| {
+                let column = format!("{table}.{}", B::DIALECT.quote_identifier(column));
+                match B::DIALECT {
+                    DatabaseBackend::Sqlite => {
+                        Ok(format!("COALESCE(length(CAST({column} AS BLOB)), 0)"))
+                    }
+                    DatabaseBackend::Postgres => Ok(format!(
+                        "COALESCE(octet_length(CAST({column} AS TEXT)), 0)::bigint"
+                    )),
+                    _ => Err(rejected()),
+                }
+            })
+            .collect::<crate::Result<Vec<_>>>()?
+            .join(" + ");
+        // Project lengths before sorting and limiting the page so the size
+        // query never has to return or buffer the full selected columns.
+        selection.columns = vec![format!("CAST(({lengths}) AS BIGINT) AS row_bytes")];
+        let sizes_query = render_select_query(B::DIALECT, &selection);
+        let sizes = context
+            .fetch_rows(&sizes_query.sql, &sizes_query.values)
+            .await?;
+        if sizes.is_empty() {
+            return Ok(Vec::new());
+        }
+        for row in &sizes {
+            let bytes =
+                usize::try_from(B::try_get_i64(row, "row_bytes")?).map_err(|_| rejected())?;
+            *remaining = remaining
+                .checked_sub(std::mem::size_of::<T>())
+                .and_then(|remaining| remaining.checked_sub(bytes))
+                .ok_or_else(rejected)?;
+        }
+
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        if rows.len() != sizes.len() {
+            return Err(rejected());
+        }
+        Ok(rows)
     }
 
     pub(crate) async fn fetch_all_with_auth_and_pagination<P>(

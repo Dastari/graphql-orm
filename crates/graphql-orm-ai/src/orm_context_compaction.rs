@@ -145,7 +145,7 @@ pub struct AiPreparedContextCompaction {
     lease: AiRunLease,
     checkpoint_id: Uuid,
     scope: AiScope,
-    provider_kind: ProviderKind,
+    selection: crate::AiSessionExecutionSelection,
     request: ModelRequest,
     egress_sources: Vec<AiDataSourceRef>,
     estimated_source_bytes: u64,
@@ -167,7 +167,7 @@ impl fmt::Debug for AiPreparedContextCompaction {
             .field("session_id", &self.lease.session_id())
             .field("run_id", &self.lease.run_id())
             .field("checkpoint_id", &self.checkpoint_id)
-            .field("provider_kind", &self.provider_kind)
+            .field("provider_kind", &self.selection.provider_kind())
             .field("provider_model", &self.request.model)
             .field("through_sequence", &self.through_sequence)
             .field("source_hash", &self.source_hash)
@@ -185,6 +185,11 @@ impl AiPreparedContextCompaction {
     /// Exact provider-neutral request. Its content is sensitive.
     pub fn model_request(&self) -> &ModelRequest {
         &self.request
+    }
+
+    /// Exact pinned profile ID required in the model-inference manifest.
+    pub fn provider_profile_id(&self) -> &str {
+        self.selection.profile_id()
     }
 
     /// Exact redacted source set required in the model-inference manifest.
@@ -428,7 +433,7 @@ impl OrmAiContextCompactionService {
         let scope = record_scope(&session);
         validate_session_binding(&session, lease, &scope)?;
         let (principal, policy) = self.authorize(lease, &scope).await?;
-        validate_compaction_route(&session, &provider_kind, &provider_model)?;
+        let selection = validate_compaction_route(&session, &provider_kind, &provider_model)?;
         let lease = self.run_service.heartbeat(lease).await?;
 
         let recent = i64::try_from(self.limits.minimum_recent_messages)
@@ -614,7 +619,7 @@ impl OrmAiContextCompactionService {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
-            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            reasoning_effort: selection.reasoning_effort(),
             output_schema: None,
             maximum_output_tokens: Some(maximum_output_tokens),
         };
@@ -626,7 +631,7 @@ impl OrmAiContextCompactionService {
             lease,
             checkpoint_id: Uuid::new_v4(),
             scope,
-            provider_kind,
+            selection,
             request,
             egress_sources,
             estimated_source_bytes,
@@ -706,8 +711,7 @@ impl OrmAiContextCompactionService {
                     through_sequence,
                     source_hash: source_hash.clone(),
                     token_estimate,
-                    provider_kind: result.provider_kind().clone(),
-                    provider_model: result.provider_model().to_owned(),
+                    selection: prepared.selection,
                     protected_summary,
                     expected_parent: prepared.parent,
                     sources: prepared.sources,
@@ -1144,20 +1148,21 @@ fn validate_result(
         || result.run_id() != prepared.lease.run_id()
         || result.attempt_id() != prepared.lease.attempt_id()
         || result.lease_generation() != prepared.lease.lease_generation()
-        || result.provider_kind() != &prepared.provider_kind
+        || *result.provider_kind() != prepared.selection.provider_kind()
         || result.provider_model() != prepared.request.model
         || result.request_snapshot() != &prepared.request
         || !result.tool_calls().is_empty()
         || result.usage().runs != 1
         || result.usage().output_tokens == 0
         || manifest.capability != AiEgressCapability::ModelInference
-        || manifest.provider_kind != prepared.provider_kind.as_str()
+        || manifest.provider_kind != prepared.selection.provider_kind().as_str()
+        || manifest.provider_profile_id != prepared.selection.profile_id()
         || manifest.model != prepared.request.model
         || manifest.scope != prepared.scope
         || manifest.session_id != Some(prepared.lease.session_id())
         || manifest.run_id != Some(prepared.lease.run_id())
         || manifest.attachment_count != 0
-        || manifest.purpose != "context_compaction"
+        || manifest.purpose != crate::provider::CONTEXT_COMPACTION_PURPOSE
         || manifest.estimated_bytes < prepared.estimated_source_bytes
         || manifest.estimated_tokens < prepared.estimated_source_tokens
         || actual_sources != prepared.egress_sources
@@ -1262,7 +1267,7 @@ pub(crate) fn validate_compaction_route(
     session: &AiSessionRecord,
     provider_kind: &ProviderKind,
     model: &str,
-) -> Result<(), AiError> {
+) -> Result<crate::AiSessionExecutionSelection, AiError> {
     let selection = crate::AiSessionExecutionSelection::decode(
         session
             .execution_selection
@@ -1272,7 +1277,7 @@ pub(crate) fn validate_compaction_route(
     if selection.provider_kind() != *provider_kind || selection.model() != model {
         return Err(AiError::Conflict);
     }
-    Ok(())
+    Ok(selection)
 }
 
 fn validate_session_binding(
@@ -1611,7 +1616,7 @@ mod tests {
         scope: &AiScope,
     ) -> crate::AiEgressManifest {
         crate::AiEgressManifest {
-            provider_profile_id: "context-test-profile".to_owned(),
+            provider_profile_id: prepared.provider_profile_id().to_owned(),
             provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
             model: prepared.model_request().model.clone(),
             destination: "context-test-provider".to_owned(),

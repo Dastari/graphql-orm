@@ -1795,7 +1795,7 @@ fn serialized_digest(value: &impl serde::Serialize) -> Result<String, AiError> {
 
 // Charge retained rows without making a second copy of their protected fields.
 // The inline representation and serialized size approximate residency. Reads
-// are independently paged to bound the decoded batch before accounting.
+// check their database payload size before materializing any full rows.
 struct RestoreRowBudget(usize);
 
 impl RestoreRowBudget {
@@ -1844,7 +1844,7 @@ where
         let page = query(tx)
             .internal_limit(size as i64)
             .offset(rows.len() as i64)
-            .fetch_all()
+            .fetch_sql_page_with_byte_limit(budget.0)
             .await
             .map_err(OrmPublicError::from)?;
         let exhausted = page.len() < size;
@@ -1884,7 +1884,7 @@ where
             },
         )
         .internal_limit(batch.len() as i64)
-        .fetch_all()
+        .fetch_sql_page_with_byte_limit(budget.0)
         .await
         .map_err(OrmPublicError::from)?;
         for row in rows {
@@ -3365,6 +3365,88 @@ mod tests {
         assert_eq!(complete.len(), count);
         assert_eq!(overflow, complete);
         assert!(matches!(over_budget, Err(error) if error.code == OrmErrorCode::InternalError));
+    }
+
+    #[tokio::test]
+    async fn restore_budget_refuses_an_oversized_page_before_loading_any_row() {
+        use graphql_orm::futures::future::BoxFuture;
+        use graphql_orm::graphql::orm::{EntityAccessSurface, ReadVisibility, RowPolicy};
+        use std::any::Any;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct CountReads(Arc<AtomicUsize>);
+
+        impl RowPolicy<SqliteBackend> for CountReads {
+            fn read_visibility<'a>(
+                &'a self,
+                _: Option<&'a async_graphql::Context<'_>>,
+                _: &'a Database<SqliteBackend>,
+                _: &'static str,
+                _: Option<&'static str>,
+                _: EntityAccessSurface,
+            ) -> BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+                Box::pin(async { Ok(ReadVisibility::Unrestricted) })
+            }
+
+            fn can_read_row<'a>(
+                &'a self,
+                _: Option<&'a async_graphql::Context<'_>>,
+                _: &'a Database<SqliteBackend>,
+                _: &'static str,
+                _: Option<&'static str>,
+                _: EntityAccessSurface,
+                _: &'a (dyn Any + Send + Sync),
+            ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(true) })
+            }
+
+            fn can_write_row<'a>(
+                &'a self,
+                _: Option<&'a async_graphql::Context<'_>>,
+                _: &'a Database<SqliteBackend>,
+                _: &'static str,
+                _: Option<&'static str>,
+                _: EntityAccessSurface,
+                _: &'a (dyn Any + Send + Sync),
+            ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+                Box::pin(async { Ok(true) })
+            }
+        }
+
+        let mut database = database().await;
+        for _ in 0..3 {
+            let id = seed_run(&database, AiRunState::Running.as_str(), 1_900_000_000).await;
+            AiRunRecord::update_by_id(
+                &database,
+                &id,
+                crate::persistence::UpdateAiRunRecordInput {
+                    principal_reference: Some(serde_json::json!({"subject": "a".repeat(4 * 1024)})),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("seed individually small rows whose combined payload is over budget");
+        }
+        let observed = Arc::new(AtomicUsize::new(0));
+        database.set_row_policy(CountReads(observed.clone()));
+        let result = database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    collect_rows(tx, &mut RestoreRowBudget(8 * 1024), 3, |tx| {
+                        tx.query::<AiRunRecord>().default_order()
+                    })
+                    .await
+                })
+            })
+            .await;
+        assert!(
+            matches!(result, Err(error) if error.public_error().code == OrmErrorCode::InternalError)
+        );
+        assert_eq!(observed.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

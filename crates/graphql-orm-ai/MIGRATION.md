@@ -10,20 +10,29 @@ supersedes: []
 
 # Migration Guide
 
-## 0.152.0 to 0.152.1
+## 0.152.0 to 0.153.0
 
-**No action** for hosts already compacting with the session's pinned
-provider and model and starting replacement leases before adopting their
-checkpoints.
+**Action needed** for direct checkpoint adoption callers. Start each claimed
+lease before adopting a completed tool batch. Pass the latest lease proof and
+handle a conflict if it expires, is cancelled, or is superseded during adoption.
 
-**Action needed** for direct adoption callers that previously passed a
-newly claimed lease. Call `start` before adopting the completed tool batch.
-Legacy sessions must pin a verified execution selection before compaction.
-Copy the prepared source list verbatim into the egress manifest.
+**Action needed** for hosts using context compaction. Register the adapter
+with `AiRuntimeBuilder::provider_with_compaction_admission`, supplying its
+exact stable profile ID and the host's execution selection resolver. Install
+`OrmAiRunExecutionSelectionReader` on the executor with
+`with_context_compaction_selection_reader`. Use
+`AiPreparedContextCompaction::provider_profile_id()` and the prepared source
+list in the model-inference manifest. Use the prepared request's pinned
+reasoning effort for the reservation. Re-admission must authorize that exact
+provider, profile, model and effort at dispatch. Give an unrelated replacement
+adapter a different profile ID.
 
-Restore collection keeps its configured row ceilings and now aborts if the
-aggregate row-data budget is exceeded. Content-protection public error
-mappings and provider schema refusals are unchanged. No persistent schema,
+**Action needed** for legacy sessions using compaction. Pin a verified
+execution selection where the retained evidence supports it. Start a new chat
+when there is insufficient evidence to pin the existing session.
+
+Restore collection checks the payload size before loading each page and
+charges the decoded rows to the aggregate budget. No persistent schema,
 GraphQL SDL, or data migration is needed.
 
 ## 0.151.2 to 0.152.0: opt-in entity references on local-process adapters

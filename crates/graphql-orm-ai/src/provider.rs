@@ -1597,6 +1597,8 @@ struct AuthorizedProviderTransfer {
     proof: AuthorizedEgress,
 }
 
+pub(crate) const CONTEXT_COMPACTION_PURPOSE: &str = "context_compaction";
+
 /// Safe context accompanying a provider call.
 ///
 /// Fields are private so an authorized manifest cannot be swapped after this
@@ -1611,6 +1613,7 @@ pub struct ProviderRequestContext {
     correlation_id: String,
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
+    compaction_admitted: bool,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
     retained_tool_images: Vec<crate::AiResolvedToolImage>,
     static_offering_reset_receipt:
@@ -1642,6 +1645,7 @@ impl ProviderRequestContext {
             correlation_id: correlation_id.into(),
             budget,
             transfers: Vec::new(),
+            compaction_admitted: false,
             resolved_attachments: Vec::new(),
             retained_tool_images: Vec::new(),
             static_offering_reset_receipt: None,
@@ -1712,6 +1716,11 @@ impl ProviderRequestContext {
     ) -> Self {
         self.tool_source_delivery = delivery;
         self
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn mark_compaction_admitted(&mut self) {
+        self.compaction_admitted = true;
     }
 
     /// Adds a separately authorized built-in or attachment transfer.
@@ -1903,6 +1912,14 @@ impl ProviderRequestContext {
         request: &ModelRequest,
     ) -> Result<(), ProviderError> {
         request.validate()?;
+        if !self.compaction_admitted
+            && self.transfers.iter().any(|transfer| {
+                transfer.manifest.capability == AiEgressCapability::ModelInference
+                    && transfer.manifest.purpose == CONTEXT_COMPACTION_PURPOSE
+            })
+        {
+            return Err(ProviderError::EgressDenied);
+        }
         if !self.budget.matches(
             self.run_id,
             provider_kind,

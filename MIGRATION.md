@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.192.0 to 0.193.0: restore page size checks
+
+**No action.** Upgrade ORM and macros together. The AI restore collector
+uses a size check before loading repository pages on SQLite and PostgreSQL.
+No data migration is needed.
+
 ## 0.191.0 to 0.192.0: propagated parent actions
 
 **No action.** Relations continue to use the source mutation's action by

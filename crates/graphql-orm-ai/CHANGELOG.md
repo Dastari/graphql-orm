@@ -10,19 +10,20 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.152.1
+## Unreleased - 0.153.0
 
 - Emit fixed, content-free debug codes for the approval, attachment, and
   context-compaction content-protection mappings (#818).
 - Reuse argument validators bound to the exact provider offer or native
   tool admission, including cached refusals for malformed schemas (#819).
-- Require context compaction to match the session's pinned provider and
-  model. Classify validated handle-only sources as `Confidential` and
+- Re-admit context compaction against the session's pinned provider profile,
+  model, and reasoning effort immediately before dispatch. Classify validated handle-only sources as `Confidential` and
   keep unlabelled blocks and inherited summaries `Restricted` (#532).
 - Require a running lease and a positive checkpoint generation no newer
-  than the lease when adopting completed tool batches (#532).
-- Page restore scans under an aggregate row-data budget and batch attachment
-  parent lookups in the same restore transaction (#532).
+  than the lease when adopting completed tool batches. Recheck the live fence
+  after reading and reauthorizing the checkpoint (#532).
+- Check payload lengths before materializing restore pages or batched
+  attachment parent rows in the same transaction (#532).
 
 ## Unreleased - 0.152.0
 

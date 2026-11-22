@@ -138,8 +138,9 @@ rows per query using its own pagination view, so host GraphQL page caps
 cannot silently truncate an audit. Attachment parent reads batch up to 128
 distinct IDs per entity type. The configured row ceilings still apply, and a
 64 MiB aggregate budget counts each retained row's inline representation and
-serialized size. Exceeding that budget fails the whole collection with
-`PersistenceFailed`. It returns opaque
+serialized size. The collector checks each page's database payload length
+before loading the rows in the same transaction. Exceeding the budget fails
+the whole collection with `PersistenceFailed`. It returns opaque
 `AiCollectedRestoreFacts` with a deterministic digest and an explicit status
 for every required audit. Reaching a limit returns no partial evidence or
 candidate actions for that category; observing an invalid row/graph, missing

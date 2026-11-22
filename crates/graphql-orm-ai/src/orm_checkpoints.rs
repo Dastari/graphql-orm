@@ -2365,6 +2365,9 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::ReauthorizationFailed);
         }
+        self.run_service
+            .verify_adoption_fence(lease, checkpoint_id)
+            .await?;
         Ok(AiAdoptedReadOnlyToolBatch::new(
             checkpoint_id,
             payload.provider_turns,
