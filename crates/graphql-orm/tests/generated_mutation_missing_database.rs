@@ -42,7 +42,7 @@ struct Place {
     parent: Option<Box<Place>>,
     #[graphql(skip)]
     #[relation(target = "Place", from = "id", to = "parent_id", multiple)]
-    children: Vec<Box<Place>>,
+    children: Vec<Place>,
 }
 
 impl BatchLoadEntity for Place {
