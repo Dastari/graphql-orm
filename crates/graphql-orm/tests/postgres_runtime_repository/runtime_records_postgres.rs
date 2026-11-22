@@ -1,4 +1,3 @@
-#![cfg(feature = "postgres")]
 //! Owned disposable PostgreSQL conformance for runtime-row decoding.
 
 use graphql_orm::graphql::orm::{
@@ -10,10 +9,7 @@ use graphql_orm::graphql::orm::{
 };
 use graphql_orm::sqlx::Connection;
 
-#[path = "support/owned_postgres.rs"]
-mod owned_postgres;
-
-use owned_postgres::OwnedPostgres;
+use super::owned_postgres::{OwnedPostgres, POSTGRES_16_IMAGE};
 
 const _: () = assert!(<PostgresBackend as RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED);
 
@@ -161,7 +157,7 @@ async fn decode_postgres(
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_closed()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start_postgres_16("runtime-record")?;
+    let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
     let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
     let schema = schema();
     let projection = projection(&schema);
@@ -218,7 +214,7 @@ async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_clo
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start_postgres_16("runtime-record")?;
+    let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
     let database = graphql_orm::db::Database::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_customers (
@@ -295,7 +291,7 @@ async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn disposable_postgres_out_of_range_timestamps_are_typed_errors()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start_postgres_16("runtime-record")?;
+    let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
     let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
     let schema = schema();
     let projection = schema.resolve_projection_ids(&cid("customers"), &[fid("happened_at")])?;

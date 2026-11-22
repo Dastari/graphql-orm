@@ -1,16 +1,11 @@
 //! SQL Server behaviour that only a server can confirm, run on the disposable
 //! container these tests own. Rendered text is asserted in the unit tests and
 //! `mssql_ddl_rendering.rs`; here the same statements execute.
-#![cfg(feature = "mssql")]
-
 #[allow(dead_code)]
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
-
-#[allow(dead_code)]
-#[path = "support/like_matrix.rs"]
+#[path = "../support/like_matrix.rs"]
 mod like_matrix;
 
+use super::owned_mssql::{OwnedSqlServer, execute_batch};
 use graphql_orm::db::mssql::{MssqlPool, MssqlServerError};
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::loaders::{
@@ -25,7 +20,6 @@ use graphql_orm::graphql::orm::{
 };
 use graphql_orm::rust_decimal::Decimal;
 use graphql_orm::{chrono, prelude::*};
-use owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[graphql_entity(
