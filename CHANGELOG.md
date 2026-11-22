@@ -36,6 +36,20 @@ for historical context.
   columns: drop and recreate the dependent indexes and constraints around it.
   Removing the option later leaves the live BIN2 collation in place (#813).
 
+## Unreleased - ORM/macros 0.202.0
+
+- Grouped additional SQLite GraphQL, owned database and consumer fixture tests.
+  See the [test lanes](docs/development/testing.md) for the selectors.
+- Documented the blocking filesystem operations in `write_migration_file`.
+
+## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
+
+- **Fixed (#829).** Repeated entity identities return a typed composition
+  error from `GraphqlOperationCatalog::try_compose`. The generated resolver
+  catalogue and fallible schema builders return that error through their
+  existing error types. The error records the repeated identity and both Rust
+  types.
+
 ## Unreleased - ORM/macros 0.200.0
 
 - **Changed (#778, part of #785).** Standalone closure policies can use fewer

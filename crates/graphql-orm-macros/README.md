@@ -12,7 +12,16 @@ supersedes: []
 
 Version 0.203.0 adds SQL Server-only options to
 `backend_selected_graphql_entity` and opt-in exact string filters. See the
-[migration guide](../../MIGRATION.md#02000-to-02030-durable-ai-sql-server-prerequisites).
+[migration guide](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites).
+
+Version 0.202.0 aligns with the ORM's
+[integration test consolidation](../../docs/development/testing.md).
+See the [migration guide](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene).
+
+Version 0.201.0 makes `schema_roots!` report duplicate entity identities
+through its fallible schema builders and resolver catalogue helper. Upgrade
+ORM and macros together. See the
+[migration guide](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120).
 
 Version 0.200.0 includes the
 [standalone closure rendering update](../../MIGRATION.md#01990-to-02000-closure-read-predicates).

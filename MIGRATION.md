@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.200.0 to 0.203.0: durable AI SQL Server prerequisites
+## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
 
 **Action needed** for SQL Server hosts with `append_only = true` entities.
 Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
@@ -27,6 +27,20 @@ when an unqualified name and a `dbo`-qualified name refer to the same object.
 
 **No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
 together. No physical schema or data migration is required on these backends.
+
+## 0.201.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
+
+## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
+
+**No action.** Upgrade ORM and macros together. The generated resolver
+catalogue and `try_schema_builder*` report duplicate entity identities as
+errors. Use unique `stable_type_id` values or distinct default Rust type paths
+if you receive this error. Call `GraphqlOperationCatalog::try_compose` for
+fallible composition of descriptor groups. Existing SDL, catalogue exports
+and fingerprints are unchanged.
 
 ## 0.199.0 to 0.200.0: closure read predicates
 

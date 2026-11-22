@@ -20,7 +20,7 @@ use graphql_orm_ai::*;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-#[path = "support/durable_database.rs"]
+#[path = "../support/durable_database.rs"]
 mod durable_database;
 #[cfg(feature = "postgres")]
 use durable_database::OwnedPostgres;
@@ -37,7 +37,7 @@ use secrecy::SecretString;
 #[cfg(feature = "provider-openai-core")]
 use sha2::Sha256;
 
-#[path = "support/broker_entity_parity.rs"]
+#[path = "../support/broker_entity_parity.rs"]
 #[cfg(feature = "postgres")]
 mod broker_entity_parity;
 

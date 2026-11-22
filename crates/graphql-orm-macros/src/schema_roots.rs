@@ -317,9 +317,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         ///
         /// # Errors
         ///
-        /// Returns an error when the semantic catalogue itself does not
-        /// compose, or when the document does not validate against it or
-        /// exceeds one of its bounds.
+        /// Returns an error when either underlying catalogue fails to compose,
+        /// or when the resolver catalogue fails validation. For a repeated
+        /// entity identity, `Error::source` gives the operation catalogue error.
         pub fn graphql_orm_resolver_catalog() -> ::std::result::Result<
             &'static ::graphql_orm::graphql::orm::GraphqlResolverCatalog,
             &'static ::graphql_orm::graphql::orm::GraphqlSemanticError,
@@ -369,8 +369,18 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         /// schema build, naming both Rust types.
         pub fn graphql_orm_operation_catalog(
         ) -> &'static ::graphql_orm::graphql::orm::GraphqlOperationCatalog {
+            __graphql_orm_try_operation_catalog().unwrap_or_else(|error| panic!("{}", error))
+        }
+
+        fn __graphql_orm_try_operation_catalog() -> ::std::result::Result<
+            &'static ::graphql_orm::graphql::orm::GraphqlOperationCatalog,
+            &'static ::graphql_orm::graphql::orm::GraphqlOperationCatalogError,
+        > {
             static CATALOG: ::std::sync::OnceLock<
-                ::graphql_orm::graphql::orm::GraphqlOperationCatalog
+                ::std::result::Result<
+                    ::graphql_orm::graphql::orm::GraphqlOperationCatalog,
+                    ::graphql_orm::graphql::orm::GraphqlOperationCatalogError,
+                >
             > = ::std::sync::OnceLock::new();
             CATALOG.get_or_init(|| {
                 let groups: &[(
@@ -382,10 +392,11 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 )] = &[
                     #(#operation_metadata_groups),*
                 ];
-                ::graphql_orm::graphql::orm::GraphqlOperationCatalog::compose(
+                ::graphql_orm::graphql::orm::GraphqlOperationCatalog::try_compose(
                     groups.iter().copied(),
                 )
             })
+            .as_ref()
         }
 
         /// Returns the canonical public GraphQL semantic catalogue for this
@@ -414,6 +425,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 >
             > = ::std::sync::OnceLock::new();
             CATALOG.get_or_init(|| {
+                let operation_catalog = __graphql_orm_try_operation_catalog().map_err(|&error| error)?;
                 ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom(
                     ::std::iter::empty::<
                         ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
@@ -421,7 +433,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                         .chain(vec![#(#semantic_entity_items),*])
                         .chain(vec![#(#semantic_type_items),*])
                         #(.chain(#described_result_type_items))*,
-                    graphql_orm_operation_catalog(),
+                    operation_catalog,
                     ::std::iter::empty()
                         #(.chain(#semantic_custom_operation_items))*
                 )
@@ -667,17 +679,20 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ) -> __GomSchemaBuilder {
                 match try_schema_builder_with_limits(database, limits) {
                     Ok(builder) => builder,
-                    Err(error) => panic!("{error}"),
+                    Err(error) => panic!("{}", error),
                 }
             }
 
-            /// Build the schema, or return the Keyset read-policy contradiction.
+            /// Build the schema.
+            ///
+            /// # Errors
+            ///
+            /// Returns an error for a repeated entity identity or a Keyset read-policy contradiction.
             ///
             /// # Panics
             ///
-            /// Panics on a repeated entity identity during catalogue composition at
-            /// schema build, naming both Rust types. This is not returned as a
-            /// `KeysetReadPolicyError`.
+            /// Panics when a handwritten root exposes a field its
+            /// `GraphqlRootFieldNames` declaration omits.
             pub fn try_schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
             ) -> ::std::result::Result<
@@ -690,14 +705,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 )
             }
 
-            /// Build the schema with limits, or return the Keyset read-policy contradiction.
+            /// Build the schema with limits.
+            ///
+            /// # Errors
+            ///
+            /// Returns an error for a repeated entity identity or a Keyset read-policy contradiction.
             ///
             /// # Panics
             ///
-            /// Panics on a repeated entity identity during catalogue composition at
-            /// schema build, naming both Rust types. This is not returned as a
-            /// `KeysetReadPolicyError`.
-            /// It also panics when a handwritten root exposes a field its
+            /// Panics when a handwritten root exposes a field its
             /// `GraphqlRootFieldNames` declaration omits.
             pub fn try_schema_builder_with_limits(
                 database: ::graphql_orm::db::Database<#backend_marker>,
@@ -706,12 +722,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 __GomSchemaBuilder,
                 ::graphql_orm::graphql::orm::KeysetReadPolicyError,
             > {
+                let operation_catalog = __graphql_orm_try_operation_catalog().map_err(|&error| error)?;
                 #root_field_declaration_check
                 #page_maximum_check
-                database.validate_keyset_read_policies(
-                    graphql_orm_operation_catalog(),
-                    &graphql_orm_entity_metadata(),
-                )?;
+                database.validate_keyset_read_policies(operation_catalog, &graphql_orm_entity_metadata())?;
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
                     ::graphql_orm::async_graphql::EmptyMutation,
@@ -880,17 +894,20 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         ) -> __GomSchemaBuilder {
             match try_schema_builder_with_limits(database, limits) {
                 Ok(builder) => builder,
-                Err(error) => panic!("{error}"),
+                Err(error) => panic!("{}", error),
             }
         }
 
-        /// Build the schema, or return the Keyset read-policy contradiction.
+        /// Build the schema.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error for a repeated entity identity or a Keyset read-policy contradiction.
         ///
         /// # Panics
         ///
-        /// Panics on a repeated entity identity during catalogue composition at
-        /// schema build, naming both Rust types. This is not returned as a
-        /// `KeysetReadPolicyError`.
+        /// Panics when a handwritten root exposes a field its
+        /// `GraphqlRootFieldNames` declaration omits.
         pub fn try_schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
         ) -> ::std::result::Result<
@@ -903,14 +920,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )
         }
 
-        /// Build the schema with limits, or return the Keyset read-policy contradiction.
+        /// Build the schema with limits.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error for a repeated entity identity or a Keyset read-policy contradiction.
         ///
         /// # Panics
         ///
-        /// Panics on a repeated entity identity during catalogue composition at
-        /// schema build, naming both Rust types. This is not returned as a
-        /// `KeysetReadPolicyError`.
-        /// It also panics when a handwritten root exposes a field its
+        /// Panics when a handwritten root exposes a field its
         /// `GraphqlRootFieldNames` declaration omits.
         pub fn try_schema_builder_with_limits(
             database: ::graphql_orm::db::Database<#backend_marker>,
@@ -919,12 +937,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             __GomSchemaBuilder,
             ::graphql_orm::graphql::orm::KeysetReadPolicyError,
         > {
+            let operation_catalog = __graphql_orm_try_operation_catalog().map_err(|&error| error)?;
             #root_field_declaration_check
-                #page_maximum_check
-            database.validate_keyset_read_policies(
-                graphql_orm_operation_catalog(),
-                &graphql_orm_entity_metadata(),
-            )?;
+            #page_maximum_check
+            database.validate_keyset_read_policies(operation_catalog, &graphql_orm_entity_metadata())?;
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
                 ::std::default::Default::default(),
