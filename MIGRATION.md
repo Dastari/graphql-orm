@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.199.0 to 0.203.0: durable AI SQL Server prerequisites
+## 0.200.0 to 0.203.0: durable AI SQL Server prerequisites
 
 **Action needed** for SQL Server hosts with `append_only = true` entities.
 Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
@@ -27,6 +27,14 @@ when an unqualified name and a `dbo`-qualified name refer to the same object.
 
 **No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
 together. No physical schema or data migration is required on these backends.
+
+## 0.199.0 to 0.200.0: closure read predicates
+
+**No action** for policy definitions or stored data. Only standalone closure
+policies can render fewer SQL placeholders. Update assertions that compare
+their exact SQL or bind count. Composed closures keep their existing SQL
+and composition limits.
+See [closure read predicates](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
 
 ## 0.198.0 to 0.199.0: generated mutation and subscription roots
 

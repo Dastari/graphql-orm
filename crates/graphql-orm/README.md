@@ -13,6 +13,9 @@ supersedes: []
 Version 0.203.0 adds SQL Server prerequisites for durable AI stores. See the
 [SQL Server DDL reference](../../docs/reference/graphql-orm/mssql.md#introspection-and-rendered-ddl).
 
+Version 0.200.0 includes the
+[standalone closure rendering update](../../MIGRATION.md#01990-to-02000-closure-read-predicates).
+
 Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
 subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
 Generated mutations, entity getters, and relations return a curated field error
