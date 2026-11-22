@@ -18,6 +18,23 @@ Opt in to binary, length-sensitive generated string comparisons with
 `IS NOT NULL` filtered indexes and append-only triggers. Hosts provision
 these changes externally. No general schema or data migration is needed.
 
+## 0.198.0 to 0.199.0: generated mutation and subscription roots
+
+**No action.** Default schemas retain their `MutationRoot` and
+`SubscriptionRoot` Rust tuple structs, schema builder types, and SDL.
+
+**No action for missing database handling.** Hand-built schemas missing the
+database now receive field errors from generated mutations, entity getters,
+and relation resolvers.
+
+When you opt out with `mutations = false` or `subscriptions = false`, use
+`schema_builder(database)` to omit a root whose last field is disabled.
+For a manually assembled schema, pass async-graphql's `EmptyMutation` or
+`EmptySubscription` for that root. Update clients and regenerate exported
+schema and catalogues for the removed fields.
+Repository inputs and repository and transaction writes still compile.
+See [omitting generated roots](docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+
 ## 0.197.0 to 0.198.0: restore page size checks
 
 **No action.** Upgrade ORM and macros together. The AI restore collector

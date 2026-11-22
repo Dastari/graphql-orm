@@ -81,6 +81,10 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
   Server plans can render append-only triggers and non-null filtered indexes,
   and entities can opt in to exact string filters (#813).
   [ORM migration](../../MIGRATION.md#01980-to-02030-durable-ai-sql-server-prerequisites)
+
+- **No action** — ORM/macros 0.199.0: derives can opt out of generated mutation and subscription fields. Default schemas keep their original Rust root structs (#677). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
+- **No action** — ORM/macros 0.199.0: generated writes, scalar getters, and relation resolvers return field errors when database context is missing (#542). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
+- **No action** — ORM/macros 0.199.0: generated writes and Changed subscriptions qualify standard paths, mutation shape errors point to the declaration, and implicit update timestamps use backend identifier quoting (#542). [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01990)
 - **No action** — ORM/macros 0.198.0: AI restore pages check payload size before
   loading on SQLite and PostgreSQL (#532). [Migration](../../MIGRATION.md#01970-to-01980-restore-page-size-checks)
 - **Action needed** — AI 0.153.0: configure provider profile and adapter instance

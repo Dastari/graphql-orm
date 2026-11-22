@@ -1,0 +1,5 @@
+error: expected boolean literal
+ --> tests/ui/root_opt_out_non_boolean.rs:4:53
+  |
+4 | #[graphql_entity(table = "records", subscriptions = "false")]
+  |                                                     ^^^^^^^

@@ -1,0 +1,5 @@
+error: mutations = false conflicts with mutation_shapes, dependent_deletes, AI mutation policies, or mutation operation authorization
+ --> tests/ui/root_opt_out_dependent_deletes.rs:4:49
+  |
+4 | #[graphql_entity(table = "records", mutations = false, dependent_deletes)]
+  |                                                 ^^^^^

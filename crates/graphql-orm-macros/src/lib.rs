@@ -723,7 +723,10 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
     // "add GraphQLOperations" error from the entity derive.
     let witness = federation::federation_key_witness_impl(&input.attrs, &input.ident)
         .unwrap_or_else(|_| quote! {});
-    match operations::generate_graphql_operations(&input).and_then(schema_export::process) {
+    match operations::generate_graphql_operations(&input)
+        .and_then(schema_export::process)
+        .and_then(operations::standard_paths::use_standard_paths)
+    {
         Ok(tokens) => TokenStream::from(quote! { #witness #tokens }),
         Err(err) => {
             let error = err.to_compile_error();

@@ -13,6 +13,11 @@ supersedes: []
 Version 0.203.0 adds SQL Server prerequisites for durable AI stores. See the
 [SQL Server DDL reference](../../docs/reference/graphql-orm/mssql.md#introspection-and-rendered-ddl).
 
+Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
+subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+Generated mutations, entity getters, and relations return a curated field error
+when the schema lacks the database.
+
 Version 0.198.0 supports size checks for AI restore pages.
 See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
 

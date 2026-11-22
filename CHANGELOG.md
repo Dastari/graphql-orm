@@ -23,6 +23,25 @@ for historical context.
 - **No action.** Generated SQL Server entities can opt in to exact string
   equality and membership through `exact_string_filters = true` (#813).
 
+## Unreleased - ORM/macros 0.199.0
+
+- **Added (#677).** `GraphQLOperations` accepts `mutations = false` and
+  `subscriptions = false` on `graphql_entity`. Omitted roots do not appear
+  in the schema or catalogues. Repository and transaction writes remain available.
+- **No action (#677).** Default schemas keep the existing `MutationRoot` and
+  `SubscriptionRoot` tuple structs. The generated builder selects an empty
+  GraphQL root only when opt-outs leave that root with no fields. See the
+  [migration guide](MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots).
+- **Fixed (#542).** Generated writes, entity scalar getters, and relation
+  resolvers return a GraphQL field error when a hand-built schema is missing its
+  database.
+  Generated writes and Changed subscriptions qualify their Rust paths.
+  Mutation-shape conflicts point to the shape declaration, and implicit
+  update timestamps use the backend's identifier delimiters. Dependent
+  deletes use boundaries declared by the direct mutation emitters.
+- **Refactored (#723).** The create, upsert, update and delete families emit
+  their GraphQL resolvers from separate modules.
+
 ## Unreleased - ORM/macros 0.198.0
 
 - Check payload sizes for bounded SQLite and PostgreSQL restore pages before

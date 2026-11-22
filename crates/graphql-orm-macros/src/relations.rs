@@ -829,7 +829,7 @@ pub(crate) fn generate_graphql_relations(
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_multiple_guard
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                     ::graphql_orm::graphql::orm::ensure_rls_request_context::<#target_type, #backend_marker>(
                         ctx,
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -985,7 +985,7 @@ pub(crate) fn generate_graphql_relations(
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_single_guard
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                     ::graphql_orm::graphql::orm::ensure_rls_request_context::<#target_type, #backend_marker>(
                         ctx,
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),

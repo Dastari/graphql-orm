@@ -14,6 +14,11 @@ Version 0.203.0 adds SQL Server-only options to
 `backend_selected_graphql_entity` and opt-in exact string filters. See the
 [migration guide](../../MIGRATION.md#01980-to-02030-durable-ai-sql-server-prerequisites).
 
+Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
+subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+Generated mutations, entity getters, and relations return a curated field error
+when the schema lacks the database.
+
 Version 0.198.0 supports size checks for AI restore pages.
 See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
 
