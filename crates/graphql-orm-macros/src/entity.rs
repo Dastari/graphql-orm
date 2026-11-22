@@ -5917,17 +5917,21 @@ fn generate_entity_tokens(
                 // names, the column delimited as generated DDL and DML
                 // address it (#796).
                 let (bind_start, bind_types) = match &field_meta.mssql_type {
-                    Some(sql_type) => (
-                        quote! { let bind_start = values.len(); },
-                        quote! {
-                            for value in &mut values[bind_start..] {
-                                *value = ::std::mem::replace(
-                                    value, ::graphql_orm::graphql::orm::SqlValue::Null
-                                ).with_mssql_type(#sql_type);
-                            }
-                        },
-                    ),
-                    None => (quote! {}, quote! {}),
+                    Some(sql_type)
+                        if matches!(sql_type.as_str(), "TINYINT" | "SMALLINT" | "INT") =>
+                    {
+                        (
+                            quote! { let bind_start = values.len(); },
+                            quote! {
+                                for value in &mut values[bind_start..] {
+                                    *value = ::std::mem::replace(
+                                        value, ::graphql_orm::graphql::orm::SqlValue::Null
+                                    ).with_mssql_type(#sql_type);
+                                }
+                            },
+                        )
+                    }
+                    _ => (quote! {}, quote! {}),
                 };
                 filter_to_sql.push(quote! {
                     {
@@ -8270,6 +8274,7 @@ fn generate_filter_field(
             Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "string" => {
+            let sql_type = field_meta.mssql_type.as_deref().unwrap_or("");
             let input = quote! {
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
@@ -8277,7 +8282,7 @@ fn generate_filter_field(
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
                     ::graphql_orm::graphql::orm::__gom_render_string_filter(
-                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                        f, #backend_expr, #db_col, #sql_type, &mut conditions, &mut values,
                     );
                 }
             };

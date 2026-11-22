@@ -17,9 +17,10 @@ for historical context.
 ## Unreleased - ORM/macros 0.206.0
 
 - **Added (#522).** SQL Server pools can opt in to binding the SQL types
-  declared on generated fields. VARCHAR comparisons convert the parameter
-  rather than the indexed column. INT, SMALLINT and TINYINT parameters use
-  their native widths when the value fits. The default keeps the existing binds.
+  declared on generated fields. Eligible ASCII VARCHAR comparisons convert
+  the parameter. Policies, patterns and non-ASCII text retain Unicode binding.
+  INT, SMALLINT and TINYINT can use their native widths. Generated unsigned
+  values outside the declared SQL Server range return `INVALID_INPUT`.
 - **Fixed (#849).** SQL Server character column ALTER statements use the parsed
   column name when looking up collation, including literal brackets.
 

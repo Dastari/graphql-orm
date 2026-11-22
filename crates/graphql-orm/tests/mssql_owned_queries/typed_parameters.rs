@@ -23,6 +23,8 @@ struct ParameterItem {
     label: String,
     #[graphql_orm(mssql_type = "SMALLINT")]
     score: Option<i32>,
+    #[graphql_orm(mssql_type = "SMALLINT")]
+    attempts: Option<u64>,
 }
 
 #[tokio::test]
@@ -41,7 +43,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
                 id int NOT NULL PRIMARY KEY,
                 code varchar(32) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
                 label nvarchar(40) NOT NULL,
-                score smallint NULL
+                score smallint NULL,
+                attempts smallint NULL
              );
              WITH digits(n) AS (
                 SELECT n FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) d(n)
@@ -52,6 +55,9 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
                    FROM digits a CROSS JOIN digits b CROSS JOIN digits c CROSS JOIN digits d) nums;
              INSERT dbo.ParameterItems (id, code, label) VALUES (10000, N'café', N'東京 😀');
              INSERT dbo.ParameterItems (id, code, label) VALUES (10001, REPLICATE('y', 32), N'東京 😀');
+             INSERT dbo.ParameterItems (id, code, label) VALUES
+                (10003, '??', N'unrepresentable'), (10004, 'abc ', N'trailing blank'),
+                (10005, 'cafe', N'unaccented');
              CREATE UNIQUE INDEX IX_ParameterItems_code ON dbo.ParameterItems(code);",
         ),
     )
@@ -71,7 +77,7 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
             .await
             .unwrap();
 
-        let (conditions, binds) = code_filter("café").to_sql_conditions();
+        let (conditions, binds) = code_filter("item-42").to_sql_conditions();
         let marker = format!("/* {identifier}_parameter_plan */");
         let sql = format!(
             "SELECT id FROM dbo.ParameterItems WHERE {} {marker}",
@@ -79,7 +85,7 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         );
         let rows = pool.fetch_rows(&sql, &binds).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 10000);
+        assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 42);
         let plan = lookup_plan(&pool, &format!("%{marker}%")).await;
         assert!(
             plan.contains(&format!("PhysicalOp=\"{access_path}\"")),
@@ -119,6 +125,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
                 .is_empty()
         );
 
+        assert_unicode_predicates(&db).await;
+
         for (sql_type, input, parameter_type) in [
             ("INT", SqlValue::Int(42), "int"),
             ("SMALLINT", SqlValue::Int(-12), "smallint"),
@@ -150,6 +158,25 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
     let db = Database::<MssqlBackend>::builder(writable)
         .schema_policy(SchemaPolicy::ExternalWritable)
         .build();
+    let (_, comparison_binds) = code_filter("item-42").to_sql_conditions();
+    let bind_type = db
+        .transaction(TransactionMode::Default, |context| {
+            Box::pin(async move {
+                let rows = context
+                    .fetch_rows(
+                        "SELECT CONVERT(nvarchar(40), SQL_VARIANT_PROPERTY(@P1, 'BaseType')) AS bind_type",
+                        &comparison_binds,
+                    )
+                    .await?;
+                rows[0]
+                    .try_get::<String, _>("bind_type")
+                    .map_err(Into::into)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(bind_type, "nvarchar");
+
     let inserted = ParameterItem::insert(
         &db,
         CreateParameterItemInput {
@@ -157,6 +184,7 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
             code: "crème".into(),
             label: "雪 😀".into(),
             score: Some(-12),
+            attempts: Some(3),
         },
     )
     .await
@@ -178,6 +206,124 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
     .unwrap();
     assert_eq!(updated.code, "naïve");
     assert_eq!(updated.score, None);
+    let insert_error = ParameterItem::insert(
+        &db,
+        CreateParameterItemInput {
+            id: 10006,
+            code: "overflow".into(),
+            label: "overflow".into(),
+            score: None,
+            attempts: Some(u64::MAX),
+        },
+    )
+    .await
+    .err()
+    .expect("out-of-range insert");
+    assert_eq!(
+        graphql_orm::graphql::errors::OrmPublicError::from(insert_error).code,
+        graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+    );
+    let update_error = ParameterItem::update_by_id(
+        &db,
+        &inserted.id,
+        UpdateParameterItemInput {
+            attempts: Some(Some(u64::MAX)),
+            ..Default::default()
+        },
+    )
+    .await
+    .err()
+    .expect("out-of-range update");
+    assert_eq!(
+        graphql_orm::graphql::errors::OrmPublicError::from(update_error).code,
+        graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+    );
+    let rows = db
+        .pool()
+        .fetch_rows(
+            "SELECT attempts FROM dbo.ParameterItems WHERE id = 10002 OR id = 10006",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].try_get::<i16, _>("attempts").unwrap(), 3);
+}
+
+struct CodePolicy(&'static str);
+
+impl RowPolicy<MssqlBackend> for CodePolicy {
+    fn read_visibility<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<MssqlBackend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async {
+            ReadPredicate::from_filter::<MssqlBackend, _>(&code_filter(self.0))
+                .map(ReadVisibility::Complete)
+        })
+    }
+
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<MssqlBackend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<MssqlBackend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+async fn assert_unicode_predicates(db: &Database<MssqlBackend>) {
+    assert!(
+        ParameterItem::query(db)
+            .filter(code_filter("東京"))
+            .fetch_all()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        ParameterItem::query(db)
+            .filter(ParameterItemWhereInput {
+                code: Some(StringFilter {
+                    ends_with: Some("abc".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .fetch_all()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for (value, expected) in [("café", vec![10000]), ("東京", vec![])] {
+        let mut db = db.clone();
+        db.set_row_policy(CodePolicy(value));
+        let rows = ParameterItem::query(&db).fetch_all().await.unwrap();
+        assert_eq!(
+            rows.into_iter().map(|row| row.id).collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
 
 fn code_filter(code: &str) -> ParameterItemWhereInput {

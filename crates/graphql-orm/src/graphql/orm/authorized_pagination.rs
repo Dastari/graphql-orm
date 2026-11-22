@@ -323,7 +323,7 @@ impl RowBoundFilter {
             sql: RowBoundSql {
                 pieces: vec![RowPiece::Rendered(renderer)],
             },
-            values,
+            values: values.into_iter().map(SqlValue::into_policy_bind).collect(),
         })
     }
 }
@@ -1037,7 +1037,11 @@ fn handwritten_policy(
             *bound &= clause_bound;
             Policy::Sql {
                 sql,
-                values: values.clone(),
+                values: values
+                    .iter()
+                    .cloned()
+                    .map(SqlValue::into_policy_bind)
+                    .collect(),
             }
         }
         FilterExpression::And(children) => Policy::And(
@@ -2356,7 +2360,10 @@ impl ReadPredicate {
             entity,
             backend,
             table,
-            policy: Policy::Sql { sql, values },
+            policy: Policy::Sql {
+                sql,
+                values: values.into_iter().map(SqlValue::into_policy_bind).collect(),
+            },
             unbound: false,
             cost,
             negation: Negation::Sql,
@@ -4603,6 +4610,28 @@ mod predicate_tests {
             }
             FilterExpression::Or(children) => Policy::Or(children.iter().map(raw_policy).collect()),
         }
+    }
+
+    #[test]
+    fn generated_policy_drops_comparison_type_hints() {
+        let policy = RowBoundFilter::new(|row| {
+            (
+                vec![
+                    format!("{row}.[code] = @P1"),
+                    format!("{row}.[ordinal] = @P2"),
+                ],
+                vec![
+                    SqlValue::mssql_varchar_comparison("item-42".into(), "VARCHAR(32)"),
+                    SqlValue::Int(42).with_mssql_type("SMALLINT"),
+                ],
+            )
+        })
+        .policy(DatabaseBackend::Mssql)
+        .unwrap();
+        assert_eq!(
+            policy.flatten().1,
+            vec![SqlValue::String("item-42".into()), SqlValue::Int(42)]
+        );
     }
 
     const BACKENDS: [DatabaseBackend; 3] = [

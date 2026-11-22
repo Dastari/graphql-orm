@@ -16,10 +16,12 @@ supersedes: []
 existing Unicode string and BIGINT binds by default. To use each declared
 type, add the matching `mssql_type` field attribute and enable
 `MssqlPoolOptions::typed_parameters(true)` for the corresponding database.
-VARCHAR conversion uses the database's default code page, which can change
-comparisons and writes when characters cannot be represented. Review the
-database and column collations before enabling it. SQL Server ALTER COLUMN
-planning now parses the column identifier for its collation lookup.
+The attribute overrides generated DDL independently of the pool setting.
+Printable ASCII VARCHAR operands in ordinary comparison filters can use the
+declared type. Authorization predicates, patterns, and non-ASCII text retain
+Unicode binding. Generated unsigned operands outside their SQL Server range
+return `INVALID_INPUT`. SQL Server ALTER COLUMN planning parses the column
+identifier for its collation lookup.
 See [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
 
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)

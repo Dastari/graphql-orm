@@ -8,18 +8,26 @@ pub fn __gom_render_string_filter(
     f: &StringFilter,
     backend: DatabaseBackend,
     column: &str,
+    sql_type: &str,
     conditions: &mut Vec<String>,
     values: &mut Vec<SqlValue>,
 ) {
+    let comparison = |value: &String| {
+        if backend == DatabaseBackend::Mssql {
+            SqlValue::mssql_varchar_comparison(value.clone(), sql_type)
+        } else {
+            SqlValue::String(value.clone())
+        }
+    };
     if let Some(ref v) = f.eq {
         let placeholder = backend.placeholder(values.len() + 1);
         conditions.push(format!("{} = {}", column, placeholder));
-        values.push(super::SqlValue::String(v.clone()));
+        values.push(comparison(v));
     }
     if let Some(ref v) = f.ne {
         let placeholder = backend.placeholder(values.len() + 1);
         conditions.push(format!("{} != {}", column, placeholder));
-        values.push(super::SqlValue::String(v.clone()));
+        values.push(comparison(v));
     }
     if let Some(ref v) = f.contains {
         let placeholder = backend.placeholder(values.len() + 1);
@@ -46,7 +54,7 @@ pub fn __gom_render_string_filter(
                 .collect();
             conditions.push(format!("{} IN ({})", column, placeholders.join(", ")));
             for v in list {
-                values.push(super::SqlValue::String(v.clone()));
+                values.push(comparison(v));
             }
         }
     }
@@ -58,7 +66,7 @@ pub fn __gom_render_string_filter(
                 .collect();
             conditions.push(format!("{} NOT IN ({})", column, placeholders.join(", ")));
             for v in list {
-                values.push(super::SqlValue::String(v.clone()));
+                values.push(comparison(v));
             }
         }
     }

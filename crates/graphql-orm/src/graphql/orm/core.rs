@@ -79,6 +79,7 @@ pub(crate) enum MssqlParameterType {
     Int,
     SmallInt,
     TinyInt,
+    UnsignedOverflow,
 }
 
 impl MssqlTypedValue {
@@ -93,19 +94,10 @@ impl MssqlTypedValue {
 }
 
 impl SqlValue {
-    /// Carry a canonical SQL Server column declaration into the driver binder.
+    /// Carry a canonical SQL Server integer declaration into the driver binder.
     #[doc(hidden)]
     pub fn with_mssql_type(self, sql_type: &str) -> Self {
         let parameter_type = match &self {
-            Self::String(_) | Self::StringNull => match sql_type {
-                "VARCHAR(MAX)" => Some(MssqlParameterType::VarChar(None)),
-                _ => sql_type
-                    .strip_prefix("VARCHAR(")
-                    .and_then(|length| length.strip_suffix(')'))
-                    .and_then(|length| length.parse::<u16>().ok())
-                    .filter(|length| (1..=8000).contains(length))
-                    .map(|length| MssqlParameterType::VarChar(Some(length))),
-            },
             Self::Int(_) | Self::IntNull => match sql_type {
                 "INT" => Some(MssqlParameterType::Int),
                 "SMALLINT" => Some(MssqlParameterType::SmallInt),
@@ -120,6 +112,65 @@ impl SqlValue {
                 parameter_type,
             }),
             None => self,
+        }
+    }
+
+    // Limit VARCHAR conversion to printable ASCII, which round-trips
+    // through the SQL Server VARCHAR code pages without best-fit mapping.
+    pub(super) fn mssql_varchar_comparison(value: String, sql_type: &str) -> Self {
+        if value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            && let Some(length) = sql_type
+                .strip_prefix("VARCHAR(")
+                .and_then(|s| s.strip_suffix(')'))
+        {
+            let length = if length == "MAX" {
+                None
+            } else if let Ok(length) = length.parse::<u16>()
+                && (1..=8000).contains(&length)
+            {
+                Some(length)
+            } else {
+                return Self::String(value);
+            };
+            return Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value)),
+                parameter_type: MssqlParameterType::VarChar(length),
+            });
+        }
+        Self::String(value)
+    }
+
+    /// Convert an unsigned SQL Server operand without wrapping through BIGINT.
+    ///
+    /// Preserve an out-of-range value until the fallible SQL bind boundary, so
+    /// infallible generated key builders can carry the refusal to the caller.
+    #[doc(hidden)]
+    pub fn mssql_unsigned(value: u64, sql_type: &str) -> Self {
+        let maximum = match sql_type {
+            "TINYINT" => u64::from(u8::MAX),
+            "SMALLINT" => i16::MAX as u64,
+            "INT" => i32::MAX as u64,
+            _ => i64::MAX as u64,
+        };
+        match i64::try_from(value) {
+            Ok(signed) if value <= maximum => Self::Int(signed),
+            _ => Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value.to_string())),
+                parameter_type: MssqlParameterType::UnsignedOverflow,
+            }),
+        }
+    }
+
+    pub(crate) fn into_policy_bind(self) -> Self {
+        match self {
+            Self::MssqlTyped(typed)
+                if typed.parameter_type != MssqlParameterType::UnsignedOverflow =>
+            {
+                *typed.value
+            }
+            value => value,
         }
     }
 
