@@ -153,7 +153,7 @@ chrono paths. #768's mention of "AI timestamps" therefore needs no work.
   re-export. `tests/implicit_timestamp_defaults.rs:67,412,485` parse with
   chrono directly.
 - `tests/backup_date_time_and_self_cycles.rs:301` and
-  `tests/runtime_records_postgres.rs:380` cover chrono's range limits
+  `tests/postgres_runtime_repository/runtime_records_postgres.rs` cover chrono's range limits
   (comments name chrono). They remain the regression tests for the
   replacement.
 - Nested lockfiles that record chrono:
@@ -301,7 +301,7 @@ with either.
   after they pass.
 - Existing backup fixtures give identical `BackupValue` text and row hashes.
   `tests/backup_date_time_and_self_cycles.rs` and
-  `tests/runtime_records_postgres.rs` pass on the owned PostgreSQL lane, and
+  `tests/postgres_runtime_repository/runtime_records_postgres.rs` pass on the owned PostgreSQL lane, and
   the MSSQL date-time tests pass on the owned MSSQL lane.
 - `scripts/compare-generated-schema.sh` shows byte-identical SDL for
   existing entities in every stage.

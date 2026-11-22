@@ -10,10 +10,31 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.196.0 keeps SQL Server generated identifiers delimited and extends
+Version 0.197.0 keeps SQL Server generated identifiers delimited and extends
 the quoting cases shared with the runtime. The runtime's general SQL Server
 identifier renderer also supports bare temporary table and variable names.
-See the [migration guide](../../MIGRATION.md#01950-to-01960-database-binding-and-decoding).
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
+
+Version 0.196.0 lets hosts use generated entity keys and subscription
+authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
+
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
+In version 0.194.0, `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
+and semantic catalogue functions, and `GraphQLRelations` and
+`#[graphql_complex_object]` (with any options) record which generated
+relation resolvers an object mounts. `GraphQLOperations` supplies each entity's
+resolvable `@key` field sets and the roots whose static requirement its
+traversals and entity resolvers enforce. Generated SDL and resolvers are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110).
+
+Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
+`#[graphql_object_fields]`: handwritten resolver fields on the object
+`GraphQLEntity` generates, each behind the field read decision of a generated
+field. Entities that do not opt in generate the same output.
+See the [migration guide](../../MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
 Version 0.192.0 adds `propagate_change_action = "updated"` for upward relations.
 See the [relation attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
@@ -820,6 +841,7 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `RepositoryEntity` | typed repository CRUD and private projections with no GraphQL surface |
 | `GraphQLRelations` | batched single/composite-key relation resolvers |
 | `graphql_complex_object` | handwritten complex fields composed with generated relations |
+| `graphql_object_fields` | handwritten resolver fields added to the object `GraphQLEntity` generates, with `#[graphql_orm(object_fields)]` |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
 | `graphql_orm_custom_operations` | semantic metadata beside a handwritten root impl, plus its enforced authorization and assurance guards |

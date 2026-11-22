@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.196.0
+## Unreleased - ORM/macros 0.197.0
 
 - **Fixed (#541):** SQL Server's compatibility decoders select conversions
   from the wire type, preserve the source of decode failures, and return
@@ -24,6 +24,46 @@ for historical context.
 - **Fixed (#821):** runtime search qualifies collection columns and chooses
   distinct helper names, so colliding physical column names work in search
   projections, filters, ordering and cursor pagination.
+
+## Unreleased - ORM/macros 0.196.0
+
+- **Added (#842).** Trusted transaction writers can enqueue a typed computed-field
+  invalidation. An opted-in subscription releases the target ID and public topic
+  under a disclosure policy and current target authorization. Related-state
+  changes leave the target row, revision and ordinary Changed delivery intact.
+  [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+
+## Unreleased - ORM/macros 0.195.0
+
+- Consolidated selected PostgreSQL, SQL Server and SQLite integration test binaries.
+  See the [test lanes](docs/development/testing.md) for the grouped selectors.
+
+## Unreleased - ORM/macros 0.194.0, operation catalogue 0.11.0
+
+- **Added (operation catalogue, #544).** `GraphqlResolverCatalog` lists what has no root coordinate and so appears in no operation catalogue: every generated relationship field (owning type, field, target, cardinality, argument names, field-policy flag) and every entity with a resolvable Federation key (its `@key` field sets, including `NodeId`). It is a separate document, wire version 1, with its own fingerprint (`graphql-orm-resolver-catalog-rfc8785-sha256-v1`), bound to the semantic catalogue by fingerprint. `schema_roots!` emits `graphql_orm_resolver_catalog()`, which returns a `Result` and reads the served schema: a declared relation with no mounted generated resolver, and a key the schema does not resolve, are left out; handwritten relationship fields and entity resolvers are out of scope for this version, and a type is listed under its registered GraphQL name with its semantic catalogue name beside it when they differ. An authorization requirement is given only as a reference to an exposed generated root, never as scope names. Existing SDL, descriptors, wire formats and fingerprints are unchanged.
+- **Added (operation catalogue, #544).** `rfc8785_canonical_json` and `rfc8785_json_hash` encode JSON as RFC 8785 specifies and refuse an integer that is not exactly a double, including integers of any length under `serde_json/arbitrary_precision`. They are opt-in: `canonical_json_hash`, the semantic catalogue and the client metadata keep their encoding and bytes.
+- **Documented (#544).** The catalogue README states which encoding each fingerprint uses and where it differs from RFC 8785, that `exact_document_hash` hashes exact bytes without normalisation, and what each export discloses, including that a router descriptor carries scope names and scope templates.
+
+## Unreleased - ORM/macros 0.193.0
+
+- **Added:** a `GraphQLEntity`-generated object can host handwritten resolver
+  fields. Mark the entity `#[graphql_orm(object_fields)]` and put
+  `#[graphql_orm::graphql_object_fields]` on one inherent impl of it. The
+  generated column fields, descriptions, `RecordVersion` and `NodeId` are
+  unchanged; the handwritten fields follow them in the same object. Each
+  handwritten field runs the checks of a generated column field before its
+  body: the field read decision for its row, with the key it may declare with
+  `#[graphql_orm(read_policy = "…")]`. Generated read paths authorize the row
+  before the object exists; an object a host resolver builds itself is the
+  host's to authorize. A refused `Option<T>` field is an explicit `null` with
+  a path-specific error. The field is refused in generated `Changed`
+  subscriptions unless it declares `#[graphql_orm(subscribe)]`, which needs a
+  scalar or enum output, or an `Option` or list of those. The fields are listed by
+  `Entity::computed_object_fields()` and in the semantic catalogue as
+  selectable, never-exported fields with no filter, ordering, grouping or
+  aggregate. Entities that do not opt in generate exactly what they did
+  ([#808](https://github.com/Dastari/graphql-orm/issues/808)). See the
+  [migration guide](MIGRATION.md#01920-to-01930-handwritten-fields-on-generated-objects).
 
 ## Unreleased - ORM/macros 0.192.0
 

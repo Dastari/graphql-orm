@@ -191,7 +191,7 @@ class SupplyChainTests(unittest.TestCase):
             "authorized_pagination_postgres", "bounded_mutation_sentinels",
             "bulk_refusals", "delete_propagation", "denied_relations",
             "host_integer_key", "host_primary_keys", "postgres_constraint_index_idempotency",
-            "repository_only_postgres", "runtime_records_postgres", "runtime_relations_postgres",
+            "postgres_runtime_repository",
             "single_row_refusals",
         ):
             with self.subTest(target=target):
