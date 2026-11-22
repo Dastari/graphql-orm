@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.194.0, operation catalogue 0.11.0
+
+- **Added (operation catalogue, #544).** `GraphqlResolverCatalog` lists what has no root coordinate and so appears in no operation catalogue: every generated relationship field (owning type, field, target, cardinality, argument names, field-policy flag) and every entity with a resolvable Federation key (its `@key` field sets, including `NodeId`). It is a separate document, wire version 1, with its own fingerprint (`graphql-orm-resolver-catalog-rfc8785-sha256-v1`), bound to the semantic catalogue by fingerprint. `schema_roots!` emits `graphql_orm_resolver_catalog()`, which returns a `Result` and reads the served schema: a declared relation with no mounted generated resolver, and a key the schema does not resolve, are left out; handwritten relationship fields and entity resolvers are out of scope for this version, and a type is listed under its registered GraphQL name with its semantic catalogue name beside it when they differ. An authorization requirement is given only as a reference to an exposed generated root, never as scope names. Existing SDL, descriptors, wire formats and fingerprints are unchanged.
+- **Added (operation catalogue, #544).** `rfc8785_canonical_json` and `rfc8785_json_hash` encode JSON as RFC 8785 specifies and refuse an integer that is not exactly a double, including integers of any length under `serde_json/arbitrary_precision`. They are opt-in: `canonical_json_hash`, the semantic catalogue and the client metadata keep their encoding and bytes.
+- **Documented (#544).** The catalogue README states which encoding each fingerprint uses and where it differs from RFC 8785, that `exact_document_hash` hashes exact bytes without normalisation, and what each export discloses, including that a router descriptor carries scope names and scope templates.
+
 ## Unreleased - ORM/macros 0.193.0
 
 - **Added:** a `GraphQLEntity`-generated object can host handwritten resolver

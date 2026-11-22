@@ -558,6 +558,37 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         quote! {}
     };
 
+    // The generated wrapper is mounted above whatever the options are, so the
+    // resolver-mount witness is unconditional. It proves mounting only; the
+    // exposure witness above keeps its stricter eligibility. A relation that a
+    // `SimpleObject` getter of the same name may shadow is left out; an
+    // entity whose derive records no such relations shadows none.
+    let output_witness = quote! {
+        #output_witness
+        impl #self_ty {
+            #[doc(hidden)]
+            pub fn __gom_mounted_relation_fields() -> &'static [&'static str] {
+                #[allow(dead_code)]
+                trait ShadowFallback {
+                    fn __gom_shadowed_relation_fields() -> &'static [&'static str] {
+                        &[]
+                    }
+                }
+                impl<T> ShadowFallback for T {}
+                static MOUNTED: ::std::sync::OnceLock<::std::vec::Vec<&'static str>> =
+                    ::std::sync::OnceLock::new();
+                MOUNTED.get_or_init(|| {
+                    let shadowed = Self::__gom_shadowed_relation_fields();
+                    Self::__gom_generated_relation_fields()
+                        .iter()
+                        .copied()
+                        .filter(|field| !shadowed.contains(field))
+                        .collect()
+                })
+            }
+        }
+    };
+
     let attribute = if args.is_empty() {
         quote::quote! { #[::graphql_orm::async_graphql::ComplexObject] }
     } else {

@@ -776,6 +776,24 @@ mod tests {
             ))
     }
 
+    /// The semantic catalogue and client metadata hold no fraction, large
+    /// integer or non-ASCII key, so their existing canonical bytes are also
+    /// their RFC 8785 bytes. Neither encoding nor any fingerprint moved.
+    #[test]
+    fn existing_canonical_bytes_equal_their_rfc_8785_form() {
+        let catalog = catalog();
+        let metadata = GraphqlClientMetadata::compose(&catalog, [child_facts()]).unwrap();
+        for value in [
+            serde_json::to_value(&catalog).unwrap(),
+            serde_json::to_value(&metadata).unwrap(),
+        ] {
+            assert_eq!(
+                canonical_json_bytes(&value),
+                crate::rfc8785_canonical_json(&value).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn composes_canonically_and_round_trips() {
         let catalog = catalog();
