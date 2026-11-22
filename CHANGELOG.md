@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.192.0
+## Unreleased - ORM/macros 0.197.0
 
 - **Added (#677).** `GraphQLOperations` accepts `mutations = false` and
   `subscriptions = false` on `graphql_entity`. Omitted roots do not appear
@@ -27,6 +27,13 @@ for historical context.
   deletes use boundaries declared by the direct mutation emitters.
 - **Refactored (#723).** The create, upsert, update and delete families emit
   their GraphQL resolvers from separate modules.
+
+## Unreleased - ORM/macros 0.192.0
+
+- **Added (#812).** Set `propagate_change_action = "updated"` on an upward relation
+  to report child creates and deletes as `UPDATED` in the parent's `Changed`
+  subscription and action filter.
+  [Migration](MIGRATION.md#01910-to-01920-propagated-parent-actions)
 
 ## Unreleased - ORM/macros 0.191.0
 

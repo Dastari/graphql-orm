@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.191.0 to 0.192.0: generated mutation and subscription roots
+## 0.192.0 to 0.197.0: generated mutation and subscription roots
 
 **No action.** Upgrade ORM and macros together. Hand-built schemas missing the
 database now receive field errors from generated mutations and entity getters.
@@ -20,6 +20,13 @@ When you opt out with `mutations = false` or `subscriptions = false`, update
 clients and regenerate exported schema and catalogues for the removed fields.
 Repository inputs and repository and transaction writes still compile.
 See [omitting generated roots](docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+
+## 0.191.0 to 0.192.0: propagated parent actions
+
+**No action.** Relations continue to use the source mutation's action by
+default. To report child creates and deletes as `UPDATED` on a surviving
+parent, set `propagate_change_action = "updated"` on the relation alongside
+`propagate_change = "up"` and use `UPDATED` in the parent's subscription filter.
 
 ## 0.190.0 to 0.191.0: read snapshot transactions
 
