@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.200.0
+
+- **Changed (#778, part of #785).** Standalone closure policies can use fewer
+  target SQL copies and binds. Composed closures retain their existing SQL
+  and budget. The closure reference documents incomplete descendant walks
+  and non-unique-key fan-out.
+  [Migration](MIGRATION.md#01990-to-02000-closure-read-predicates)
+
 ## Unreleased - ORM/macros 0.199.0
 
 - **Added (#677).** `GraphQLOperations` accepts `mutations = false` and

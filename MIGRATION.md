@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.199.0 to 0.200.0: closure read predicates
+
+**No action** for policy definitions or stored data. Only standalone closure
+policies can render fewer SQL placeholders. Update assertions that compare
+their exact SQL or bind count. Composed closures keep their existing SQL
+and composition limits.
+See [closure read predicates](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
 ## 0.198.0 to 0.199.0: generated mutation and subscription roots
 
 **No action.** Default schemas retain their `MutationRoot` and

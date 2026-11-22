@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.199.0, `graphql-orm-macros` 0.199.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.153.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.200.0, `graphql-orm-macros` 0.200.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.153.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.200.0: standalone closure read predicates can use fewer target SQL copies, and the reference describes incomplete descendant walks and non-unique-key fan-out. [Migration](../../MIGRATION.md#01990-to-02000-closure-read-predicates)
 - **No action** — ORM/macros 0.199.0: derives can opt out of generated mutation and subscription fields. Default schemas keep their original Rust root structs (#677). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
 - **No action** — ORM/macros 0.199.0: generated writes, scalar getters, and relation resolvers return field errors when database context is missing (#542). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
 - **No action** — ORM/macros 0.199.0: generated writes and Changed subscriptions qualify standard paths, mutation shape errors point to the declaration, and implicit update timestamps use backend identifier quoting (#542). [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01990)

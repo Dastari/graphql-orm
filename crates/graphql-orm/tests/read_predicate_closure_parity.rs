@@ -395,8 +395,10 @@ async fn fixture() -> (Database, FixtureOwner) {
     #[cfg(feature = "mssql")]
     let (db, owner) = {
         let owner = FixtureOwner::start().await.unwrap();
-        let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
+        let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable_with(
             &owner.connection_string,
+            graphql_orm::db::mssql::MssqlPoolOptions::default()
+                .query_timeout(Some(std::time::Duration::from_secs(60))),
         )
         .await
         .unwrap();

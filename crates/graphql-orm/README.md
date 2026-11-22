@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.200.0 includes the
+[standalone closure rendering update](../../MIGRATION.md#01990-to-02000-closure-read-predicates).
+
 Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
 subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
 Generated mutations, entity getters, and relations return a curated field error
