@@ -14,6 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.197.0
+
+- **Fixed (#541):** SQL Server's compatibility decoders select conversions
+  from the wire type, preserve the source of decode failures, and return
+  an error for out-of-range column indexes. Missing-policy decisions share
+  one mode table. The documentation describes the typed NULL, legacy JSON
+  and SQL Server identifier contracts.
+- **Fixed (#821):** runtime search qualifies collection columns and chooses
+  distinct helper names, so colliding physical column names work in search
+  projections, filters, ordering and cursor pagination.
+
 ## Unreleased - ORM/macros 0.196.0
 
 - **Added (#842).** Trusted transaction writers can enqueue a typed computed-field

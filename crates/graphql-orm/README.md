@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.197.0 preserves SQL Server driver diagnostics when decoding rows
+and centralizes the decision for a missing authorization policy provider.
+For handwritten SQL, bind a typed NULL that matches the destination column.
+Runtime search supports collection columns named like its internal search
+key and score.
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
+
 Version 0.196.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
 when a committed related-state write should prompt an authorized client to
 refetch a computed value. The signal contains the target ID and a public topic.

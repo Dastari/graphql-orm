@@ -1845,6 +1845,10 @@ impl DatabaseBackend {
     /// letter or letter number (or, after the first character, a mark,
     /// decimal digit, connector or format character) in the Basic
     /// Multilingual Plane, so names such as `x²` or `x🦀` are bracketed.
+    /// SQL Server runtime rendering preserves bare `#` and `@` prefixes for
+    /// temporary tables and variables. The derive delimits declared names.
+    /// This renderer is infallible, so SQL Server enforces its name length limit
+    /// when executing the statement.
     /// SQLite never writes a name bare that starts with a byte-order mark. Reserved words such as `order`, `join` or `select`,
     /// and names with other characters, are delimited with
     /// [`SqlDialect::quote_identifier`]; input that is already exactly one
@@ -2141,7 +2145,9 @@ mod identifier_rendering_tests {
     #[test]
     fn macro_reserved_identifier_lists_match_the_runtime() {
         // The derive crate cannot depend on this crate, so it carries copies of
-        // the lists. Compare them when the workspace sources are present.
+        // the SQLite and PostgreSQL lists. The derive always delimits SQL
+        // Server names and therefore needs no reserved list for that backend.
+        // Compare the shared lists when the workspace sources are present.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../graphql-orm-macros/src/backend.rs"
