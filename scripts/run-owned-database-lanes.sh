@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
+  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -38,6 +38,11 @@ run_dependent_deletes() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test compile_ui dependent_delete_ui::
 }
 
+run_bounded_set_delete() {
+  cargo test -p graphql-orm --locked --no-default-features --features "$1" \
+    --test bounded_set_delete -- --test-threads=1
+}
+
 run_identifier_quoting() {
   cargo test -p graphql-orm --locked --no-default-features --features "$1" \
     --test identifier_quoting_properties --test qualified_read_predicates --test read_predicate_row_binding --test read_predicate_row_scopes \
@@ -45,6 +50,7 @@ run_identifier_quoting() {
 }
 
 run_sqlite() {
+  run_bounded_set_delete sqlite
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting sqlite
@@ -74,6 +80,7 @@ run_sqlite() {
 }
 
 run_postgres() {
+  run_bounded_set_delete postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test search_filter_binding -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
@@ -185,6 +192,7 @@ run_migration_journal() {
 }
 
 run_mssql() {
+  run_bounded_set_delete mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test search_filter_binding -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
@@ -336,6 +344,11 @@ case "${lane}" in
     for backend in sqlite postgres; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend},runtime-graphql" \
         --test runtime_search_graphql -- --test-threads=1
+    done
+    ;;
+  bounded-set-delete)
+    for backend in sqlite postgres mssql; do
+      run_bounded_set_delete "$backend"
     done
     ;;
   sqlite) run_sqlite ;;

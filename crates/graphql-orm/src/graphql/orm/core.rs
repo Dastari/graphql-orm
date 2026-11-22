@@ -3127,7 +3127,7 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
+pub(super) async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     db: &crate::db::Database<B>,
 ) -> crate::Result<()> {
     let metadata = T::metadata();

@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.210.0
+
+- **Added (#852).** Typed transactions can delete a bounded key set or scalar
+  filter match with one DELETE for opted-in mutable entities. The operation
+  checks row write authorization and exact cardinality, runs per-row delete
+  hooks and queues the generated change notifications.
+  [Migration](MIGRATION.md#02010-to-02100-bounded-set-based-deletes)
+
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
 - **Fixed (#829).** Repeated entity identities return a typed composition

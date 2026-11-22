@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.210.0 adds [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+to typed transactions on SQLite, PostgreSQL and writable SQL Server.
+
 Version 0.201.0 returns duplicate entity identities as errors from the
 generated resolver catalogue and fallible schema builders. See the
 [migration guide](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120).

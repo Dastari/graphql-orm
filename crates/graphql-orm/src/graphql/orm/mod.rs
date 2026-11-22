@@ -72,6 +72,10 @@ mod scalar_policy;
 mod schema_manager;
 mod schema_module;
 mod search;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod set_delete;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub use set_delete::{SetDeleteEntity, SetDeleteModel};
 #[cfg(feature = "sqlite")]
 pub mod spatial;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

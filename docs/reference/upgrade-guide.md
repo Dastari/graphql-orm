@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.201.0, `graphql-orm-macros` 0.201.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.153.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.210.0, `graphql-orm-macros` 0.210.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.153.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.210.0 add opt-in bounded set deletes to typed transactions (#852). [Migration](../../MIGRATION.md#02010-to-02100-bounded-set-based-deletes)
 - **No action** — ORM/macros 0.201.0 and operation catalogue 0.12.0 return an error for duplicate entity identities through the generated resolver catalogue and fallible schema builders (#829). [Migration](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120)
 - **No action** — ORM/macros 0.200.0: standalone closure read predicates can use fewer target SQL copies, and the reference describes incomplete descendant walks and non-unique-key fan-out. [Migration](../../MIGRATION.md#01990-to-02000-closure-read-predicates)
 
