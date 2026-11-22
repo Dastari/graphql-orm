@@ -1,0 +1,47 @@
+error[E0277]: a handwritten object field that declares `subscribe` must return a scalar, an enum, or an `Option` or list of those; `std::option::Option<Outcome>` is none of them
+  --> tests/ui/object_fields_subscribe_object.rs:49:39
+   |
+49 |     async fn outcome(&self) -> Result<Option<Outcome>> {
+   |                                       ^^^^^^^^^^^^^^^ not available in generated `Changed` subscriptions
+   |
+   = help: the trait `graphql_orm::prelude::SubscribableFieldOutput<_>` is not implemented for `std::option::Option<Outcome>`
+   = note: remove `#[graphql_orm(subscribe)]`: clients then refetch the field with an authorized query after a change event
+help: the trait `graphql_orm::prelude::SubscribableFieldOutput<graphql_orm::prelude::WrappedOutput<Kind>>` is implemented for `std::option::Option<T>`
+  --> src/graphql/orm/scalar_policy.rs
+   |
+   | / impl<Kind, T: SubscribableFieldOutput<Kind>> SubscribableFieldOutput<WrappedOutput<Kind>>
+   | |     for Option<T>
+   | |_________________^
+note: required by a bound in `<Record as graphql_orm::prelude::HandwrittenObjectFields>::FIELDS::{closure#3}::leaf`
+  --> tests/ui/object_fields_subscribe_object.rs:19:10
+   |
+19 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^ required by this bound in `leaf`
+...
+29 | #[graphql_object_fields]
+   | ------------------------ in this attribute macro expansion
+   = note: this error originates in the macro `::graphql_orm::__graphql_object_fields_wrap` which comes from the expansion of the attribute macro `graphql_object_fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: a handwritten object field that declares `subscribe` must return a scalar, an enum, or an `Option` or list of those; `Vec<Outcome>` is none of them
+  --> tests/ui/object_fields_subscribe_object.rs:54:40
+   |
+54 |     async fn outcomes(&self) -> Result<Vec<Outcome>> {
+   |                                        ^^^^^^^^^^^^ not available in generated `Changed` subscriptions
+   |
+   = help: the trait `graphql_orm::prelude::SubscribableFieldOutput<_>` is not implemented for `Vec<Outcome>`
+   = note: remove `#[graphql_orm(subscribe)]`: clients then refetch the field with an authorized query after a change event
+help: the trait `graphql_orm::prelude::SubscribableFieldOutput<graphql_orm::prelude::WrappedOutput<Kind>>` is implemented for `Vec<T>`
+  --> src/graphql/orm/scalar_policy.rs
+   |
+   | / impl<Kind, T: SubscribableFieldOutput<Kind>> SubscribableFieldOutput<WrappedOutput<Kind>>
+   | |     for Vec<T>
+   | |______________^
+note: required by a bound in `<Record as graphql_orm::prelude::HandwrittenObjectFields>::FIELDS::{closure#4}::leaf`
+  --> tests/ui/object_fields_subscribe_object.rs:19:10
+   |
+19 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^ required by this bound in `leaf`
+...
+29 | #[graphql_object_fields]
+   | ------------------------ in this attribute macro expansion
+   = note: this error originates in the macro `::graphql_orm::__graphql_object_fields_wrap` which comes from the expansion of the attribute macro `graphql_object_fields` (in Nightly builds, run with -Z macro-backtrace for more info)

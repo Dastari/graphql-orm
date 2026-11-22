@@ -169,6 +169,14 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
         &[]
     }
 
+    /// Handwritten resolver fields hosted by the generated GraphQL object,
+    /// declared with `#[graphql_orm(object_fields)]` and
+    /// `#[graphql_orm::graphql_object_fields]`. They are computed and
+    /// read-only: none is a column, a filter, an ordering or an aggregate.
+    fn computed_object_fields() -> &'static [super::ComputedObjectFieldDef] {
+        &[]
+    }
+
     /// Subscription availability and read policy for one public field identity.
     /// Unknown fields fail closed during event preflight. Derives also include
     /// relation availability and subscription-specific scalar restrictions.
