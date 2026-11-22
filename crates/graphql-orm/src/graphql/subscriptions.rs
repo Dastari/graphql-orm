@@ -10,6 +10,14 @@ use async_graphql::Context;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod computed_field;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub use computed_field::{
+    ComputedFieldInvalidation, ComputedFieldInvalidationStream, ComputedFieldInvalidationTarget,
+    ComputedFieldTopic, subscribe_computed_field,
+};
+
 /// A selected Changed payload prepared before the stream releases an item.
 ///
 /// A nullable scalar guard can fail after authorization preflight. Resolve the

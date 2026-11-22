@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.195.0 to 0.196.0: computed-field invalidations
+
+**No action.** Upgrade ORM and macros together. To opt in, declare a topic and
+its disclosure policy, register a subscription resolver and enqueue invalidations
+from the trusted writer's transaction. Existing schema surfaces and Changed
+streams require no configuration changes. [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+
 ## 0.194.0 to 0.195.0: integration test consolidation
 
 **No action** for application hosts. For individual integration tests in source

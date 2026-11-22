@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.196.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+when a committed related-state write should prompt an authorized client to
+refetch a computed value. The signal contains the target ID and a public topic.
+
 Version 0.195.0 groups selected ORM integration tests. The
 [testing guide](../../docs/development/testing.md) lists the grouped selectors.
 
