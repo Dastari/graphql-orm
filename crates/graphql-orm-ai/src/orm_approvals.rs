@@ -2725,11 +2725,8 @@ fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
         .expect("an existing OffsetDateTime timestamp remains representable")
 }
 
-fn map_protection(error: crate::ContentProtectionError) -> AiError {
-    match error {
-        crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
-        _ => AiError::PersistenceFailed,
-    }
+pub(super) fn map_protection(error: crate::ContentProtectionError) -> AiError {
+    crate::content_protection::map_orm_protection_error("approval", error)
 }
 
 #[cfg(all(test, feature = "sqlite"))]

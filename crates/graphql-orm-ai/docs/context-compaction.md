@@ -3,7 +3,7 @@ title: "Protected Context Compaction"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,10 +20,13 @@ only and never accepts a database URL or raw SQL.
 
 ## Security boundary
 
-Preparation requires a current running `AiRunLease`. It renews the complete
-run fence, rehydrates the durable principal reference, rechecks session and
-scope write access, verifies owner/tenant binding, and resolves a ready content-
-protection policy before opening any source.
+Preparation requires a current running `AiRunLease`. It rehydrates the durable
+principal reference, rechecks session and scope write access, verifies
+owner/tenant binding, resolves a ready content-protection policy, and renews
+the complete run fence before opening any source. The requested provider kind
+and model must exactly match the session's pinned execution selection. A
+legacy session must have a verified selection before its context can be
+compacted.
 
 One preparation covers a contiguous session prefix segment:
 
@@ -45,14 +48,31 @@ in logs, queues, frontend state, generic caches, or model-authored tool data.
 Use `AiPreparedContextCompaction::model_request()` as the exact request for an
 ordinary `AiProviderCallPlan`. The plan must contain exactly one model-
 inference manifest for the returned session, run, scope, provider, and model.
-Set its purpose to `context_compaction`, copy `egress_sources()` exactly, and
-use byte/token estimates at least as large as the prepared estimates.
+Set its purpose to `context_compaction`. Copy `provider_profile_id()` and
+`egress_sources()` exactly. Use byte and token estimates at least as large as
+the prepared estimates and use the prepared request's reasoning effort in the
+budget reservation.
 
-The source list is intentionally conservative. Message blocks and parent
-summaries are `Restricted`; user blocks are `UserProvided`, while assistant
-blocks and parent summaries are `ExternalUntrusted`. A deployment may deny
-that manifest or require a local provider. The compaction API cannot lower the
-classification.
+Register the adapter and stable profile together with
+`AiRuntimeBuilder::provider_with_compaction_admission` and the host's normal
+selection resolver. Implement `compaction_provider` on that resolver using
+the host's approved adapter registration. Install
+`OrmAiRunExecutionSelectionReader` on the executor with
+`with_context_compaction_selection_reader`. Immediately before
+dispatch, the executor reads the live run and session pin and re-admits the
+exact profile, model and effort. The runtime compares the approved adapter
+with the dispatch adapter by instance and checks the durable run fence again
+after the host resolver returns. Give an unrelated replacement adapter a
+different profile ID.
+An unpinnable legacy session requires a new chat for compaction.
+
+Validated entity-reference blocks contribute only their kind and identifier.
+These handles are `Confidential` because their identifiers can identify tenant
+or user records. Other message blocks and inherited summaries stay
+`Restricted` because their contents have no durable classification. User
+blocks are `UserProvided`. Assistant blocks and parent summaries are
+`ExternalUntrusted`. The host's egress policy still decides whether to allow
+this exact source manifest.
 
 Execute the plan only through `AiProviderCallExecutor`. That existing boundary
 provides fresh principal reauthorization, exact egress policy and durable
@@ -81,8 +101,8 @@ Pass the prepared value and the executor's private `AiProviderCallResult` to
 - fresh principal, access, and protection policy.
 
 Before insertion, one state-machine transaction revalidates the running lease,
-active session, latest parent, checkpoint lookahead bound, every message row,
-and every ordered block against the prepared snapshot. A retention pass,
+active session and pinned provider/model, latest parent, checkpoint lookahead
+bound, every message row, and every ordered block against the prepared snapshot. A retention pass,
 message change, competing checkpoint, lease change, or parent deletion causes
 a conflict and no summary is stored.
 

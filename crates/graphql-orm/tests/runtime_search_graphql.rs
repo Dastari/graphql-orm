@@ -794,3 +794,138 @@ async fn restored_rows_reset_readiness_until_a_backfill_completes() {
         ["2"]
     );
 }
+
+#[tokio::test]
+async fn runtime_search_projects_filters_and_pages_columns_named_like_helpers() {
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("runtime-search-helper-columns").unwrap();
+    #[cfg(feature = "postgres")]
+    let database = Database::<Backend>::connect_postgres(&owned.url)
+        .await
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    let database = Database::<Backend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+
+    let mut schema = definition();
+    let fields = &mut schema.collections[0].fields;
+    fields[2].physical_column = "__gom_search_key".into();
+    fields[3].physical_column = "__gom_search_score".into();
+    let schema = Arc::new(schema.validate().unwrap());
+    migrate_deferred(&database, "init", &schema).await;
+    graphql_orm::sqlx::query(
+        "INSERT INTO gql_search_records (id, tenant, __gom_search_key, __gom_search_score) VALUES
+         (1, 'north', 'bridge north', 'zinc'),
+         (2, 'north', 'bridge east', 'copper'),
+         (3, 'north', 'bridge west', 'brass'),
+         (4, 'south', 'bridge east', 'aluminum')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        database
+            .schema()
+            .backfill_runtime_search(
+                &schema,
+                &CollectionId::new("records").unwrap(),
+                Default::default(),
+            )
+            .await
+            .unwrap()
+            .ready
+    );
+
+    let collection = schema
+        .resolve_collection(&CollectionId::new("records").unwrap())
+        .unwrap();
+    let title = schema
+        .resolve_field(&collection, &fid("records.title"))
+        .unwrap();
+    let body = schema
+        .resolve_field(&collection, &fid("records.body"))
+        .unwrap();
+    let tenant = schema
+        .resolve_field(&collection, &fid("records.tenant"))
+        .unwrap();
+    let projection = schema
+        .resolve_projection(&collection, &[title.clone(), body.clone()])
+        .unwrap();
+    let limits = RuntimeQueryLimits::default();
+    let predicate = schema
+        .runtime_compare(
+            &collection,
+            &title,
+            RuntimeScalarOperator::Ne,
+            RuntimeValue::String("bridge west".into()),
+            limits,
+        )
+        .unwrap();
+    let tenant_filter = schema
+        .runtime_compare(
+            &collection,
+            &tenant,
+            RuntimeScalarOperator::Eq,
+            RuntimeValue::String("north".into()),
+            limits,
+        )
+        .unwrap();
+    let predicate = schema
+        .runtime_and(&collection, vec![predicate, tenant_filter], limits)
+        .unwrap();
+    let order = schema
+        .runtime_order(
+            &collection,
+            Some(vec![RuntimeOrderInput {
+                field: body.clone(),
+                direction: RuntimeOrderDirection::Asc,
+                nulls: RuntimeNullPlacement::Last,
+            }]),
+            limits,
+        )
+        .unwrap();
+
+    for rank in [false, true] {
+        let search = schema
+            .runtime_search_request(
+                &collection,
+                graphql_orm::graphql::filters::SearchInput {
+                    query: "bridge".into(),
+                    mode: None,
+                    min_score: Some(0.0),
+                },
+                rank,
+                RuntimeSearchLimits::default(),
+            )
+            .unwrap();
+        let mut after = None;
+        for (expected_title, expected_body, has_next_page) in [
+            ("bridge east", "copper", true),
+            ("bridge north", "zinc", false),
+        ] {
+            let request = schema
+                .runtime_read_request(
+                    &collection,
+                    &projection,
+                    Some(predicate.clone()),
+                    order.clone(),
+                    RuntimePageRequest::first(1, after),
+                    true,
+                    limits,
+                )
+                .unwrap()
+                .with_search(search.clone())
+                .unwrap();
+            let page = database.execute_runtime_read(&request, None).await.unwrap();
+            assert_eq!(page.total_count, Some(2));
+            assert_eq!(page.page_info.has_next_page, has_next_page);
+            assert_eq!(page.edges.len(), 1);
+            let edge = &page.edges[0];
+            assert_eq!(edge.node.string(&title).unwrap(), expected_title);
+            assert_eq!(edge.node.string(&body).unwrap(), expected_body);
+            assert!(edge.score.is_some());
+            after = page.page_info.end_cursor;
+        }
+    }
+}

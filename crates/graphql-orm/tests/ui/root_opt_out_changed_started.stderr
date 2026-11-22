@@ -1,0 +1,5 @@
+error: subscriptions = false conflicts with changed_started or subscription operation authorization
+ --> tests/ui/root_opt_out_changed_started.rs:4:53
+  |
+4 | #[graphql_entity(table = "records", subscriptions = false, changed_started = true)]
+  |                                                     ^^^^^

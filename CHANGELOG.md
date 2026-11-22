@@ -22,6 +22,50 @@ for historical context.
   existing error types. The error records the repeated identity and both Rust
   types.
 
+## Unreleased - ORM/macros 0.200.0
+
+- **Changed (#778, part of #785).** Standalone closure policies can use fewer
+  target SQL copies and binds. Composed closures retain their existing SQL
+  and budget. The closure reference documents incomplete descendant walks
+  and non-unique-key fan-out.
+  [Migration](MIGRATION.md#01990-to-02000-closure-read-predicates)
+
+## Unreleased - ORM/macros 0.199.0
+
+- **Added (#677).** `GraphQLOperations` accepts `mutations = false` and
+  `subscriptions = false` on `graphql_entity`. Omitted roots do not appear
+  in the schema or catalogues. Repository and transaction writes remain available.
+- **No action (#677).** Default schemas keep the existing `MutationRoot` and
+  `SubscriptionRoot` tuple structs. The generated builder selects an empty
+  GraphQL root only when opt-outs leave that root with no fields. See the
+  [migration guide](MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots).
+- **Fixed (#542).** Generated writes, entity scalar getters, and relation
+  resolvers return a GraphQL field error when a hand-built schema is missing its
+  database.
+  Generated writes and Changed subscriptions qualify their Rust paths.
+  Mutation-shape conflicts point to the shape declaration, and implicit
+  update timestamps use the backend's identifier delimiters. Dependent
+  deletes use boundaries declared by the direct mutation emitters.
+- **Refactored (#723).** The create, upsert, update and delete families emit
+  their GraphQL resolvers from separate modules.
+
+## Unreleased - ORM/macros 0.198.0
+
+- Check payload sizes for bounded SQLite and PostgreSQL restore pages before
+  loading rows. Preflight residual scans before decoding any candidates and
+  measure PostgreSQL spatial fields in their projected form (#532). [Migration](MIGRATION.md#01970-to-01980-restore-page-size-checks)
+
+## Unreleased - ORM/macros 0.197.0
+
+- **Fixed (#541):** SQL Server's compatibility decoders select conversions
+  from the wire type, preserve the source of decode failures, and return
+  an error for out-of-range column indexes. Missing-policy decisions share
+  one mode table. The documentation describes the typed NULL, legacy JSON
+  and SQL Server identifier contracts.
+- **Fixed (#821):** runtime search qualifies collection columns and chooses
+  distinct helper names, so colliding physical column names work in search
+  projections, filters, ordering and cursor pagination.
+
 ## Unreleased - ORM/macros 0.196.0
 
 - **Added (#842).** Trusted transaction writers can enqueue a typed computed-field

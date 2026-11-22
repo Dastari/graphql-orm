@@ -300,6 +300,22 @@ async fn postgis_spatial_fields_indexes_and_predicates_round_trip()
     assert_eq!(fetched_place.location["type"], "Point");
     assert_eq!(fetched_place.location["coordinates"][0].as_f64(), Some(0.0));
 
+    let sized_page = database
+        .transaction(
+            graphql_orm::graphql::orm::TransactionMode::StateMachine,
+            |tx| {
+                Box::pin(async move {
+                    tx.query::<Place>()
+                        .limit(1)
+                        .fetch_sql_page_with_byte_limit(4096)
+                        .await
+                        .map_err(graphql_orm::graphql::errors::OrmPublicError::from)
+                })
+            },
+        )
+        .await?;
+    assert_eq!(sized_page[0].location, fetched_place.location);
+
     let square = polygon_value(vec![
         [-1.0, -1.0],
         [1.0, -1.0],

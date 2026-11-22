@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.196.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
+## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
 **No action.** Upgrade ORM and macros together. The generated resolver
 catalogue and `try_schema_builder*` report duplicate entity identities as
@@ -18,6 +18,57 @@ errors. Use unique `stable_type_id` values or distinct default Rust type paths
 if you receive this error. Call `GraphqlOperationCatalog::try_compose` for
 fallible composition of descriptor groups. Existing SDL, catalogue exports
 and fingerprints are unchanged.
+
+## 0.199.0 to 0.200.0: closure read predicates
+
+**No action** for policy definitions or stored data. Only standalone closure
+policies can render fewer SQL placeholders. Update assertions that compare
+their exact SQL or bind count. Composed closures keep their existing SQL
+and composition limits.
+See [closure read predicates](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+## 0.198.0 to 0.199.0: generated mutation and subscription roots
+
+**No action.** Default schemas retain their `MutationRoot` and
+`SubscriptionRoot` Rust tuple structs, schema builder types, and SDL.
+
+**No action for missing database handling.** Hand-built schemas missing the
+database now receive field errors from generated mutations, entity getters,
+and relation resolvers.
+
+When you opt out with `mutations = false` or `subscriptions = false`, use
+`schema_builder(database)` to omit a root whose last field is disabled.
+For a manually assembled schema, pass async-graphql's `EmptyMutation` or
+`EmptySubscription` for that root. Update clients and regenerate exported
+schema and catalogues for the removed fields.
+Repository inputs and repository and transaction writes still compile.
+See [omitting generated roots](docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+
+## 0.197.0 to 0.198.0: restore page size checks
+
+**No action.** Upgrade ORM and macros together. The AI restore collector
+uses a size check before loading repository pages on SQLite and PostgreSQL.
+When row policy or predicates require Rust evaluation, the opt-in guard
+checks the whole candidate range through the scan ceiling or exhaustion
+before loading rows. Spatial fields are measured in their normal projected
+form. No data migration is needed.
+
+## 0.196.0 to 0.197.0: database binding and decoding
+
+**No action.** SQL Server selects compatible scalar conversions by wire type
+and preserves the driver error when a read fails. Out-of-range column indexes
+return an error. Boolean reads support `BIT`, `INT`, and `SMALLINT`. For
+integer columns, zero is false, any nonzero value is true, and an optional
+boolean reads SQL NULL as `None`.
+
+**No action.** For handwritten binds, use `SqlValue::UuidNull` and
+`SqlValue::BytesNull` for UUID and binary columns. `SqlValue::Null` binds
+as text. Legacy text-backed array fields still decode incompatible JSON
+as an empty list. Use explicit JSON storage for fallible decoding.
+
+**No action.** Runtime search accepts collection columns named
+`__gom_search_key` or `__gom_search_score`. Existing search cursors and
+indexes remain compatible.
 
 ## 0.195.0 to 0.196.0: computed-field invalidations
 

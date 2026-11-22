@@ -4,11 +4,14 @@
 
 use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Write};
 
 use graphql_orm::db::Database;
-use graphql_orm::graphql::errors::OrmPublicError;
+use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::filters::UuidFilter;
 use graphql_orm::graphql::orm::{
-    DefaultWriteBackend, OrderDirection, PaginationConfig, TransactionError, TransactionMode,
+    DefaultWriteBackend, Entity, FromSqlRow, MutationContext, MutationQuery, OrderDirection,
+    PaginationConfig, TransactionError, TransactionMode,
 };
 use graphql_orm_storage::validate_blob_key;
 use sha2::{Digest, Sha256};
@@ -19,9 +22,10 @@ use crate::persistence::{
     AiAttachmentArtifactRecordOrderByInput, AiAttachmentRecord, AiAttachmentRecordOrderByInput,
     AiAuditEventRecord, AiAuditEventRecordOrderByInput, AiAuditEventRecordWhereInput,
     AiBudgetPolicyRecord, AiBudgetPolicyRecordOrderByInput, AiEgressConsentRecord,
-    AiEgressConsentRecordOrderByInput, AiMessageRecord, AiPricingPolicyRecord,
-    AiPricingPolicyRecordOrderByInput, AiRunRecord, AiRunRecordOrderByInput, AiSessionRecord,
-    AiSubscriptionWaitAdoptionRecord, AiSubscriptionWaiterRecord,
+    AiEgressConsentRecordOrderByInput, AiMessageRecord, AiMessageRecordWhereInput,
+    AiPricingPolicyRecord, AiPricingPolicyRecordOrderByInput, AiRunRecord, AiRunRecordOrderByInput,
+    AiSessionRecord, AiSessionRecordWhereInput, AiSubscriptionWaitAdoptionRecord,
+    AiSubscriptionWaiterRecord,
 };
 use crate::{
     AiAttachmentServiceLimits, AiBudgetAmounts, AiBudgetPolicyManagementLimits,
@@ -31,7 +35,9 @@ use crate::{
     ProtectedContentEnvelope, valid_mime, valid_safe_reference, valid_sha256,
 };
 
-const MAXIMUM_COLLECTION_BOUND: usize = 1_000_000;
+const MAXIMUM_CONFIGURED_ROWS: usize = 1_000_000;
+const RESTORE_PAGE_ROWS: usize = 128;
+const MAXIMUM_RESTORE_ROW_BYTES: usize = 64 * 1024 * 1024;
 const ORM_BACKUP_REDACTED_VALUE: &str = "[graphql-orm:redacted]";
 /// Deployment-owned hard bounds for one restore fact collection pass.
 ///
@@ -58,7 +64,7 @@ impl AiRestoreCollectorLimits {
     ) -> Result<Self, AiError> {
         if [maximum_runs, maximum_approvals, maximum_egress_consents]
             .into_iter()
-            .any(|bound| !(1..=MAXIMUM_COLLECTION_BOUND).contains(&bound))
+            .any(|bound| !(1..=MAXIMUM_CONFIGURED_ROWS).contains(&bound))
         {
             return Err(AiError::InvalidConfiguration(
                 "invalid restore collector limits".to_owned(),
@@ -132,7 +138,7 @@ impl AiRestorePolicyAuditLimits {
             maximum_audit_events,
         ]
         .into_iter()
-        .any(|bound| !(1..=MAXIMUM_COLLECTION_BOUND).contains(&bound))
+        .any(|bound| !(1..=MAXIMUM_CONFIGURED_ROWS).contains(&bound))
         {
             return Err(AiError::InvalidConfiguration(
                 "invalid restore policy-audit limits".to_owned(),
@@ -200,7 +206,7 @@ impl AiRestoreAttachmentMetadataAuditLimits {
     ) -> Result<Self, AiError> {
         if [maximum_attachments, maximum_artifacts]
             .into_iter()
-            .any(|bound| !(1..=MAXIMUM_COLLECTION_BOUND).contains(&bound))
+            .any(|bound| !(1..=MAXIMUM_CONFIGURED_ROWS).contains(&bound))
         {
             return Err(AiError::InvalidConfiguration(
                 "invalid restore attachment metadata-audit limits".to_owned(),
@@ -344,7 +350,8 @@ impl OrmAiRestoreFactCollector {
     ///
     /// Returns [`AiError::InvalidInput`] for an empty or oversized module
     /// fingerprint and [`AiError::PersistenceFailed`] when the bounded ORM
-    /// snapshot cannot be read or deterministically hashed.
+    /// snapshot cannot be read or deterministically hashed, including when
+    /// its rows exceed the aggregate collection byte budget.
     pub async fn collect(
         &self,
         snapshot_module_fingerprint: impl Into<String>,
@@ -366,109 +373,118 @@ impl OrmAiRestoreFactCollector {
         let collected = database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    let runs = tx
-                        .query::<AiRunRecord>()
-                        .order_by(AiRunRecordOrderByInput {
+                    let mut row_budget = RestoreRowBudget(MAXIMUM_RESTORE_ROW_BYTES);
+                    let runs = collect_rows(tx, &mut row_budget, limits.maximum_runs, |tx| {
+                        tx.query::<AiRunRecord>().order_by(AiRunRecordOrderByInput {
                             created_at: Some(OrderDirection::Asc),
                             ..Default::default()
                         })
-                        .internal_limit(query_limit(limits.maximum_runs))
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let approvals = tx
-                        .query::<AiApprovalRecord>()
-                        .order_by(AiApprovalRecordOrderByInput {
-                            created_at: Some(OrderDirection::Asc),
+                    })
+                    .await?;
+                    let approvals =
+                        collect_rows(tx, &mut row_budget, limits.maximum_approvals, |tx| {
+                            tx.query::<AiApprovalRecord>()
+                                .order_by(AiApprovalRecordOrderByInput {
+                                    created_at: Some(OrderDirection::Asc),
+                                })
                         })
-                        .internal_limit(query_limit(limits.maximum_approvals))
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let egress_consents = tx
-                        .query::<AiEgressConsentRecord>()
-                        .order_by(AiEgressConsentRecordOrderByInput {
-                            granted_at: Some(OrderDirection::Asc),
+                        .await?;
+                    let egress_consents =
+                        collect_rows(tx, &mut row_budget, limits.maximum_egress_consents, |tx| {
+                            tx.query::<AiEgressConsentRecord>().order_by(
+                                AiEgressConsentRecordOrderByInput {
+                                    granted_at: Some(OrderDirection::Asc),
+                                },
+                            )
                         })
-                        .internal_limit(query_limit(limits.maximum_egress_consents))
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
+                        .await?;
                     // Portable backups redact opaque provider-session cursors.
                     // Any binding therefore blocks restore readiness in this
                     // release; reading one row is sufficient to prove the
                     // required empty-set contract failed.
-                    let provider_sessions = tx
-                        .query::<AiProviderSessionBindingRecord>()
-                        .default_order()
-                        .internal_limit(1)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
+                    let provider_sessions = collect_rows(tx, &mut row_budget, 0, |tx| {
+                        tx.query::<AiProviderSessionBindingRecord>().default_order()
+                    })
+                    .await?;
                     // Portable backup redacts live wait plans/cursors and
                     // unconsumed adopted outcomes. Read the bounded graph so
                     // terminal/consumed tombstones do not block readiness.
-                    let subscription_waiters = tx
-                        .query::<AiSubscriptionWaiterRecord>()
-                        .default_order()
-                        .internal_limit(query_limit(limits.maximum_runs))
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let subscription_wait_adoptions = tx
-                        .query::<AiSubscriptionWaitAdoptionRecord>()
-                        .default_order()
-                        .internal_limit(query_limit(limits.maximum_runs))
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
+                    let subscription_waiters =
+                        collect_rows(tx, &mut row_budget, limits.maximum_runs, |tx| {
+                            tx.query::<AiSubscriptionWaiterRecord>().default_order()
+                        })
+                        .await?;
+                    let subscription_wait_adoptions =
+                        collect_rows(tx, &mut row_budget, limits.maximum_runs, |tx| {
+                            tx.query::<AiSubscriptionWaitAdoptionRecord>()
+                                .default_order()
+                        })
+                        .await?;
                     let policies = if let Some(policy_limits) = policy_audit_limits {
-                        let budget_policies = tx
-                            .query::<AiBudgetPolicyRecord>()
-                            .order_by(AiBudgetPolicyRecordOrderByInput {
-                                updated_at: Some(OrderDirection::Asc),
-                            })
-                            .internal_limit(query_limit(policy_limits.maximum_budget_policies))
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        let pricing_policies = tx
-                            .query::<AiPricingPolicyRecord>()
-                            .order_by(AiPricingPolicyRecordOrderByInput {
-                                created_at: Some(OrderDirection::Asc),
-                            })
-                            .internal_limit(query_limit(policy_limits.maximum_pricing_policies))
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        let pricing_audits = tx
-                            .query::<AiAuditEventRecord>()
-                            .order_by(AiAuditEventRecordOrderByInput {
-                                created_at: Some(OrderDirection::Asc),
-                            })
-                            .internal_limit(query_limit(policy_limits.maximum_audit_events))
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
+                        let budget_policies = collect_rows(
+                            tx,
+                            &mut row_budget,
+                            policy_limits.maximum_budget_policies,
+                            |tx| {
+                                tx.query::<AiBudgetPolicyRecord>().order_by(
+                                    AiBudgetPolicyRecordOrderByInput {
+                                        updated_at: Some(OrderDirection::Asc),
+                                    },
+                                )
+                            },
+                        )
+                        .await?;
+                        let pricing_policies = collect_rows(
+                            tx,
+                            &mut row_budget,
+                            policy_limits.maximum_pricing_policies,
+                            |tx| {
+                                tx.query::<AiPricingPolicyRecord>().order_by(
+                                    AiPricingPolicyRecordOrderByInput {
+                                        created_at: Some(OrderDirection::Asc),
+                                    },
+                                )
+                            },
+                        )
+                        .await?;
+                        let pricing_audits = collect_rows(
+                            tx,
+                            &mut row_budget,
+                            policy_limits.maximum_audit_events,
+                            |tx| {
+                                tx.query::<AiAuditEventRecord>().order_by(
+                                    AiAuditEventRecordOrderByInput {
+                                        created_at: Some(OrderDirection::Asc),
+                                    },
+                                )
+                            },
+                        )
+                        .await?;
                         // Provisioning facts are collected by action, bounded by
                         // the budget-policy limit (one fact per provisioned row),
                         // independently of the global audit scan.
-                        let budget_provision_audits = tx
-                            .query::<AiAuditEventRecord>()
-                            .filter(AiAuditEventRecordWhereInput {
-                                action: Some(graphql_orm::graphql::filters::StringFilter {
-                                    eq: Some(crate::AI_DEPLOYMENT_BUDGET_POLICY_ACTION.to_owned()),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            })
-                            .order_by(AiAuditEventRecordOrderByInput {
-                                created_at: Some(OrderDirection::Asc),
-                            })
-                            .internal_limit(query_limit(policy_limits.maximum_budget_policies))
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
+                        let budget_provision_audits = collect_rows(
+                            tx,
+                            &mut row_budget,
+                            policy_limits.maximum_budget_policies,
+                            |tx| {
+                                tx.query::<AiAuditEventRecord>()
+                                    .filter(AiAuditEventRecordWhereInput {
+                                        action: Some(graphql_orm::graphql::filters::StringFilter {
+                                            eq: Some(
+                                                crate::AI_DEPLOYMENT_BUDGET_POLICY_ACTION
+                                                    .to_owned(),
+                                            ),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .order_by(AiAuditEventRecordOrderByInput {
+                                        created_at: Some(OrderDirection::Asc),
+                                    })
+                            },
+                        )
+                        .await?;
                         Some(CollectedPolicyRows {
                             limits: policy_limits,
                             budget_policies,
@@ -481,50 +497,75 @@ impl OrmAiRestoreFactCollector {
                     };
                     let attachments =
                         if let Some(attachment_limits) = attachment_metadata_audit_limits {
-                            let attachment_rows = tx
-                                .query::<AiAttachmentRecord>()
-                                .order_by(AiAttachmentRecordOrderByInput {
-                                    created_at: Some(OrderDirection::Asc),
-                                })
-                                .internal_limit(query_limit(attachment_limits.maximum_attachments))
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                            let artifact_rows = tx
-                                .query::<AiAttachmentArtifactRecord>()
-                                .order_by(AiAttachmentArtifactRecordOrderByInput {
-                                    created_at: Some(OrderDirection::Asc),
-                                })
-                                .internal_limit(query_limit(attachment_limits.maximum_artifacts))
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?;
+                            let attachment_rows = collect_rows(
+                                tx,
+                                &mut row_budget,
+                                attachment_limits.maximum_attachments,
+                                |tx| {
+                                    tx.query::<AiAttachmentRecord>().order_by(
+                                        AiAttachmentRecordOrderByInput {
+                                            created_at: Some(OrderDirection::Asc),
+                                        },
+                                    )
+                                },
+                            )
+                            .await?;
+                            let artifact_rows = collect_rows(
+                                tx,
+                                &mut row_budget,
+                                attachment_limits.maximum_artifacts,
+                                |tx| {
+                                    tx.query::<AiAttachmentArtifactRecord>().order_by(
+                                        AiAttachmentArtifactRecordOrderByInput {
+                                            created_at: Some(OrderDirection::Asc),
+                                        },
+                                    )
+                                },
+                            )
+                            .await?;
                             let mut sessions = BTreeMap::new();
                             let mut messages = BTreeMap::new();
                             if attachment_rows.len() <= attachment_limits.maximum_attachments
                                 && artifact_rows.len() <= attachment_limits.maximum_artifacts
                             {
-                                for attachment in &attachment_rows {
-                                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                                        sessions.entry(attachment.session_id)
-                                    {
-                                        let session = tx
-                                            .find_by_id::<AiSessionRecord>(&attachment.session_id)
-                                            .await
-                                            .map_err(OrmPublicError::from)?;
-                                        entry.insert(session);
-                                    }
-                                    if let Some(message_id) = attachment.message_id
-                                        && let std::collections::btree_map::Entry::Vacant(entry) =
-                                            messages.entry(message_id)
-                                    {
-                                        let message = tx
-                                            .find_by_id::<AiMessageRecord>(&message_id)
-                                            .await
-                                            .map_err(OrmPublicError::from)?;
-                                        entry.insert(message);
-                                    }
-                                }
+                                let session_ids = attachment_rows
+                                    .iter()
+                                    .map(|attachment| attachment.session_id)
+                                    .collect::<BTreeSet<_>>();
+                                let message_ids = attachment_rows
+                                    .iter()
+                                    .filter_map(|attachment| attachment.message_id)
+                                    .collect::<BTreeSet<_>>();
+                                sessions = collect_attachment_parents(
+                                    tx,
+                                    &mut row_budget,
+                                    session_ids,
+                                    |tx, id| {
+                                        tx.query::<AiSessionRecord>().filter(
+                                            AiSessionRecordWhereInput {
+                                                id: Some(id),
+                                                ..Default::default()
+                                            },
+                                        )
+                                    },
+                                    |row| row.id,
+                                )
+                                .await?;
+                                messages = collect_attachment_parents(
+                                    tx,
+                                    &mut row_budget,
+                                    message_ids,
+                                    |tx, id| {
+                                        tx.query::<AiMessageRecord>().filter(
+                                            AiMessageRecordWhereInput {
+                                                id: Some(id),
+                                                ..Default::default()
+                                            },
+                                        )
+                                    },
+                                    |row| row.id,
+                                )
+                                .await?;
                             }
                             Some(CollectedAttachmentMetadataRows {
                                 limits: attachment_limits,
@@ -801,7 +842,7 @@ impl CollectedRows {
             None
         };
 
-        let source_rows = serde_json::to_vec(&(
+        let source_rows_digest = serialized_digest(&(
             run_evidence,
             approval_evidence,
             consent_evidence,
@@ -810,8 +851,7 @@ impl CollectedRows {
             subscription_adoption_evidence,
             policy_evidence,
             attachment_metadata_evidence,
-        ))
-        .map_err(|_| AiError::PersistenceFailed)?;
+        ))?;
         AiCollectedRestoreFacts::new(
             AiRestoreSnapshotFacts {
                 module_fingerprint,
@@ -837,7 +877,7 @@ impl CollectedRows {
                 stream_gap_count: 0,
             },
             statuses,
-            hex::encode(Sha256::digest(source_rows)),
+            source_rows_digest,
         )
     }
 }
@@ -1748,12 +1788,111 @@ fn valid_pricing_creation_audit(
 }
 
 fn serialized_digest(value: &impl serde::Serialize) -> Result<String, AiError> {
-    let encoded = serde_json::to_vec(value).map_err(|_| AiError::PersistenceFailed)?;
-    Ok(hex::encode(Sha256::digest(encoded)))
+    let mut digest = Sha256::new();
+    serde_json::to_writer(&mut digest, value).map_err(|_| AiError::PersistenceFailed)?;
+    Ok(hex::encode(digest.finalize()))
 }
 
-const fn query_limit(maximum: usize) -> i64 {
-    maximum as i64 + 1
+// Charge retained rows without making a second copy of their protected fields.
+// The inline representation and serialized size approximate residency. Reads
+// check their database payload size before materializing any full rows.
+struct RestoreRowBudget(usize);
+
+impl RestoreRowBudget {
+    fn charge(&mut self, row: &impl serde::Serialize) -> Result<(), OrmPublicError> {
+        self.consume(std::mem::size_of_val(row))
+            .and_then(|()| serde_json::to_writer(self, row).map_err(io::Error::from))
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
+    }
+
+    fn consume(&mut self, bytes: usize) -> io::Result<()> {
+        self.0 = self
+            .0
+            .checked_sub(bytes)
+            .ok_or_else(|| io::Error::other("restore row collection byte budget exceeded"))?;
+        Ok(())
+    }
+}
+
+impl Write for RestoreRowBudget {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.consume(bytes.len())?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn collect_rows<'tx, T, F>(
+    tx: &mut MutationContext<'tx>,
+    budget: &mut RestoreRowBudget,
+    maximum: usize,
+    query: F,
+) -> Result<Vec<T>, OrmPublicError>
+where
+    T: Entity + FromSqlRow<DefaultWriteBackend> + serde::Serialize + Clone + Send + Sync + 'static,
+    F: for<'a> Fn(&'a mut MutationContext<'tx>) -> MutationQuery<'a, 'tx, T>,
+{
+    // The ORM appends a primary-key tie-breaker. All pages read the same
+    // writer-quiesced snapshot, and the last slot is the existing overflow
+    // sentinel even when the row ceiling lands on a page boundary.
+    let mut rows = Vec::new();
+    while rows.len() <= maximum {
+        let size = RESTORE_PAGE_ROWS.min(maximum + 1 - rows.len());
+        let page = query(tx)
+            .internal_limit(size as i64)
+            .offset(rows.len() as i64)
+            .fetch_sql_page_with_byte_limit(budget.0)
+            .await
+            .map_err(OrmPublicError::from)?;
+        let exhausted = page.len() < size;
+        for row in &page {
+            budget.charge(row)?;
+        }
+        rows.extend(page);
+        if exhausted {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+async fn collect_attachment_parents<'tx, T, F>(
+    tx: &mut MutationContext<'tx>,
+    budget: &mut RestoreRowBudget,
+    ids: BTreeSet<uuid::Uuid>,
+    query: F,
+    key: impl Fn(&T) -> uuid::Uuid,
+) -> Result<BTreeMap<uuid::Uuid, Option<T>>, OrmPublicError>
+where
+    T: Entity + FromSqlRow<DefaultWriteBackend> + serde::Serialize + Clone + Send + Sync + 'static,
+    F: for<'a> Fn(&'a mut MutationContext<'tx>, UuidFilter) -> MutationQuery<'a, 'tx, T>,
+{
+    let ids = ids.into_iter().collect::<Vec<_>>();
+    let mut parents = BTreeMap::new();
+    for batch in ids.chunks(RESTORE_PAGE_ROWS) {
+        // Keep missing parent keys in the evidence digest, as the point-read
+        // implementation did. A missing parent remains an audit failure.
+        parents.extend(batch.iter().map(|id| (*id, None)));
+        let rows = query(
+            tx,
+            UuidFilter {
+                in_list: Some(batch.to_vec()),
+                ..Default::default()
+            },
+        )
+        .internal_limit(batch.len() as i64)
+        .fetch_sql_page_with_byte_limit(budget.0)
+        .await
+        .map_err(OrmPublicError::from)?;
+        for row in rows {
+            budget.charge(&row)?;
+            parents.insert(key(&row), Some(row));
+        }
+    }
+    Ok(parents)
 }
 
 const fn audit_status(truncated: bool, invalid_count: u64) -> AiRestoreAuditStatus {
@@ -3193,6 +3332,159 @@ mod tests {
                 .get(&AiRestoreAuditKind::RunRecoveryClassification),
             Some(&AiRestoreAuditStatus::Complete)
         );
+    }
+
+    #[tokio::test]
+    async fn restore_reads_multiple_pages_and_fails_closed_at_the_row_budget() {
+        let database = database().await;
+        let count = RESTORE_PAGE_ROWS + 1;
+        for _ in 0..count {
+            seed_run(&database, AiRunState::Running.as_str(), 1_900_000_000).await;
+        }
+        let (complete, overflow, over_budget) = database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    let mut budget = RestoreRowBudget(MAXIMUM_RESTORE_ROW_BYTES);
+                    let rows = collect_rows(tx, &mut budget, count, |tx| {
+                        tx.query::<AiRunRecord>().default_order()
+                    })
+                    .await?;
+                    let overflow = collect_rows(tx, &mut budget, RESTORE_PAGE_ROWS, |tx| {
+                        tx.query::<AiRunRecord>().default_order()
+                    })
+                    .await?;
+                    let over_budget = collect_rows(tx, &mut RestoreRowBudget(1), count, |tx| {
+                        tx.query::<AiRunRecord>().default_order()
+                    })
+                    .await;
+                    Ok((rows, overflow, over_budget))
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(complete.len(), count);
+        assert_eq!(overflow, complete);
+        assert!(matches!(over_budget, Err(error) if error.code == OrmErrorCode::InternalError));
+    }
+
+    #[tokio::test]
+    async fn restore_budget_refuses_an_oversized_page_before_loading_any_row() {
+        use graphql_orm::futures::future::BoxFuture;
+        use graphql_orm::graphql::orm::{EntityAccessSurface, ReadVisibility, RowPolicy};
+        use std::any::Any;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct CountReads(Arc<AtomicUsize>);
+
+        impl RowPolicy<SqliteBackend> for CountReads {
+            fn read_visibility<'a>(
+                &'a self,
+                _: Option<&'a async_graphql::Context<'_>>,
+                _: &'a Database<SqliteBackend>,
+                _: &'static str,
+                _: Option<&'static str>,
+                _: EntityAccessSurface,
+            ) -> BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+                Box::pin(async { Ok(ReadVisibility::Unrestricted) })
+            }
+
+            fn can_read_row<'a>(
+                &'a self,
+                _: Option<&'a async_graphql::Context<'_>>,
+                _: &'a Database<SqliteBackend>,
+                _: &'static str,
+                _: Option<&'static str>,
+                _: EntityAccessSurface,
+                _: &'a (dyn Any + Send + Sync),
+            ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(true) })
+            }
+
+            fn can_write_row<'a>(
+                &'a self,
+                _: Option<&'a async_graphql::Context<'_>>,
+                _: &'a Database<SqliteBackend>,
+                _: &'static str,
+                _: Option<&'static str>,
+                _: EntityAccessSurface,
+                _: &'a (dyn Any + Send + Sync),
+            ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+                Box::pin(async { Ok(true) })
+            }
+        }
+
+        let mut database = database().await;
+        for _ in 0..3 {
+            let id = seed_run(&database, AiRunState::Running.as_str(), 1_900_000_000).await;
+            AiRunRecord::update_by_id(
+                &database,
+                &id,
+                crate::persistence::UpdateAiRunRecordInput {
+                    principal_reference: Some(serde_json::json!({"subject": "a".repeat(4 * 1024)})),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("seed individually small rows whose combined payload is over budget");
+        }
+        let observed = Arc::new(AtomicUsize::new(0));
+        database.set_row_policy(CountReads(observed.clone()));
+        let result = database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    collect_rows(tx, &mut RestoreRowBudget(8 * 1024), 3, |tx| {
+                        tx.query::<AiRunRecord>().default_order()
+                    })
+                    .await
+                })
+            })
+            .await;
+        assert!(
+            matches!(result, Err(error) if error.public_error().code == OrmErrorCode::InternalError)
+        );
+        assert_eq!(observed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn batched_attachment_parents_keep_missing_keys_after_the_first_page() {
+        let database = database().await;
+        let (session_id, _) = seed_attachment_session(&database).await;
+        let ids = (0..RESTORE_PAGE_ROWS)
+            .map(|index| Uuid::from_u128(index as u128))
+            .chain([session_id, Uuid::from_u128(u128::MAX)])
+            .collect::<BTreeSet<_>>();
+        let expected_len = ids.len();
+        let parents = database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    collect_attachment_parents(
+                        tx,
+                        &mut RestoreRowBudget(MAXIMUM_RESTORE_ROW_BYTES),
+                        ids,
+                        |tx, id| {
+                            tx.query::<AiSessionRecord>()
+                                .filter(AiSessionRecordWhereInput {
+                                    id: Some(id),
+                                    ..Default::default()
+                                })
+                        },
+                        |row| row.id,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(parents.len(), expected_len);
+        assert_eq!(
+            parents[&session_id].as_ref().map(|row| row.id),
+            Some(session_id)
+        );
+        assert_eq!(parents[&Uuid::from_u128(u128::MAX)], None);
     }
 
     #[tokio::test]

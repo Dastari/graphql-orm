@@ -1314,9 +1314,10 @@ mod protection_diagnostic_tests {
     use std::sync::{Arc, Mutex};
 
     type EventFields = Vec<(String, String)>;
+    type CapturedEvent = (&'static str, EventFields);
 
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<EventFields>>>);
+    struct Capture(Arc<Mutex<Vec<CapturedEvent>>>);
 
     impl tracing::Subscriber for Capture {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
@@ -1350,11 +1351,13 @@ mod protection_diagnostic_tests {
             }
 
             assert_eq!(*event.metadata().level(), tracing::Level::DEBUG);
-            assert_eq!(event.metadata().target(), "graphql_orm_ai::orm_skills");
             let mut fields = Fields::default();
             event.record(&mut fields);
             fields.0.sort_unstable();
-            self.0.lock().unwrap().push(fields.0);
+            self.0
+                .lock()
+                .unwrap()
+                .push((event.metadata().target(), fields.0));
         }
     }
 
@@ -1376,14 +1379,68 @@ mod protection_diagnostic_tests {
         });
 
         let expected = ["key_unavailable", "validation_failed", "unsupported"].map(|code| {
-            vec![
-                ("code".to_owned(), code.to_owned()),
-                (
-                    "message".to_owned(),
-                    "AI skill content protection failed".to_owned(),
-                ),
-            ]
+            (
+                "graphql_orm_ai::orm_skills",
+                vec![
+                    ("code".to_owned(), code.to_owned()),
+                    (
+                        "message".to_owned(),
+                        "AI skill content protection failed".to_owned(),
+                    ),
+                ],
+            )
         });
+        assert_eq!(*capture.0.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn remaining_protection_diagnostics_keep_only_fixed_codes() {
+        let capture = Capture::default();
+        let mappings = [
+            (
+                "approval",
+                crate::orm_approvals::map_protection as fn(_) -> _,
+            ),
+            ("attachment", crate::orm_attachments::map_protection),
+            (
+                "context_compaction",
+                crate::orm_context_compaction::map_protection,
+            ),
+        ];
+        tracing::subscriber::with_default(capture.clone(), || {
+            for (_, map) in mappings {
+                assert!(matches!(
+                    map(ContentProtectionError::PolicyNotReady),
+                    AiError::RuntimeNotReady
+                ));
+                for error in [
+                    ContentProtectionError::KeyUnavailable,
+                    ContentProtectionError::ValidationFailed,
+                    ContentProtectionError::Unsupported,
+                ] {
+                    assert!(matches!(map(error), AiError::PersistenceFailed));
+                }
+            }
+        });
+
+        let expected = mappings
+            .into_iter()
+            .flat_map(|(operation, _)| {
+                ["key_unavailable", "validation_failed", "unsupported"].map(|code| {
+                    (
+                        "graphql_orm_ai::content_protection",
+                        vec![
+                            ("code".to_owned(), code.to_owned()),
+                            (
+                                "message".to_owned(),
+                                "AI content protection failed".to_owned(),
+                            ),
+                            ("operation".to_owned(), operation.to_owned()),
+                        ],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         assert_eq!(*capture.0.lock().unwrap(), expected);
     }
 }
