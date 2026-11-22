@@ -10,8 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.194.0 supports size checks for AI restore pages.
-See the [migration guide](../../MIGRATION.md#01930-to-01940-restore-page-size-checks).
+Version 0.195.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01940-to-01950-restore-page-size-checks).
+
+In version 0.194.0, `schema_roots!` also emits `graphql_orm_resolver_catalog()`: the generated
+relationship fields and Federation entity resolvers of the schema, which no operation
+catalogue lists. It is descriptive, names only what the SDL publishes, and
+changes no existing catalogue or fingerprint. See
+[generated resolver operation metadata](../../docs/reference/graphql-orm/resolver-operation-metadata.md#relation-and-entity-resolvers).
 
 In version 0.193.0, the object `GraphQLEntity` generates can host handwritten
 resolver fields: declare `#[graphql_orm(object_fields)]` on the entity and put

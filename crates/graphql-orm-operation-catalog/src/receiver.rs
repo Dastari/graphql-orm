@@ -73,6 +73,11 @@ impl ReceiverPurposeV1 {
 }
 
 /// SHA-256 of exact document bytes; never parses or normalizes input.
+///
+/// Two documents that differ in whitespace, a comment, a line ending, field
+/// order or Unicode normalization form have different hashes, although a
+/// GraphQL server would execute them alike. This fails closed: an issuer must
+/// hash the same bytes the receiver has registered.
 pub fn exact_document_hash(document: &str) -> String {
     format!("{:x}", Sha256::digest(document.as_bytes()))
 }
@@ -80,6 +85,13 @@ pub fn exact_document_hash(document: &str) -> String {
 /// SHA-256 of compact JSON with recursively sorted object keys.
 /// This preserves the existing private-remote JSON binding format, including
 /// serde_json number encoding. It is not RFC 8785 and does not coerce values.
+///
+/// The issuer and the receiver must therefore both encode numbers as
+/// `serde_json` does. The bytes differ from RFC 8785 for a number with a
+/// fraction or exponent (`1.0` here, `1` there), for an integer above 2^53 in
+/// magnitude, and for object keys whose UTF-16 and UTF-8 orders differ.
+/// [`crate::rfc8785_json_hash`] is the RFC 8785 hash for new formats; this
+/// function's output never changes.
 pub fn canonical_json_hash(value: &Value) -> String {
     fn sorted(value: &Value) -> Value {
         match value {
@@ -153,5 +165,136 @@ mod tests {
         ];
         let hashes: std::collections::BTreeSet<_> = cases.iter().map(canonical_json_hash).collect();
         assert_eq!(hashes.len(), cases.len());
+    }
+
+    #[test]
+    fn document_hash_does_not_normalize() {
+        let documents = [
+            "query Read { item { id } }",
+            "query Read { item { id } }\n",
+            "query Read {item{id}}",
+            "query Read { item { id } } # note",
+            "query Read {\r\n  item { id }\r\n}",
+            "query Read {\n  item { id }\n}",
+        ];
+        let hashes: std::collections::BTreeSet<_> = documents
+            .iter()
+            .map(|document| exact_document_hash(document))
+            .collect();
+        assert_eq!(hashes.len(), documents.len());
+        // Composed and decomposed forms of one visible character differ too.
+        assert_ne!(
+            exact_document_hash("\u{e9}"),
+            exact_document_hash("e\u{301}")
+        );
+    }
+
+    /// The version 1 binding keeps `serde_json` number spelling. Where that
+    /// differs from RFC 8785 the two hashes differ, and where it does not
+    /// they agree.
+    #[test]
+    fn binding_hash_is_pinned_and_is_not_rfc_8785_for_fractional_numbers() {
+        let fractional = serde_json::json!({"limit": 1.0, "ratio": 2.5e-7});
+        assert_eq!(
+            canonical_json_hash(&fractional),
+            format!("{:x}", Sha256::digest(br#"{"limit":1.0,"ratio":2.5e-7}"#))
+        );
+        assert_eq!(
+            crate::rfc8785_json_hash(&fractional).unwrap(),
+            format!("{:x}", Sha256::digest(br#"{"limit":1,"ratio":2.5e-7}"#))
+        );
+        assert_ne!(
+            canonical_json_hash(&fractional),
+            crate::rfc8785_json_hash(&fractional).unwrap()
+        );
+        for same in [
+            serde_json::json!({"b": 2, "a": [1, "x", null, true]}),
+            serde_json::json!({"id": "7", "page": {"limit": 50}}),
+        ] {
+            assert_eq!(
+                canonical_json_hash(&same),
+                crate::rfc8785_json_hash(&same).unwrap()
+            );
+        }
+    }
+
+    /// The exact bytes the version 1 binding hashes for numbers. A
+    /// `serde_json` release that spells any of them differently changes every
+    /// binding that holds such a number, and must not be adopted silently.
+    #[test]
+    fn binding_number_spelling_is_pinned() {
+        let spelled = |value: serde_json::Value| serde_json::to_string(&value).unwrap();
+        let actual = [
+            spelled(serde_json::json!(0)),
+            spelled(serde_json::json!(-7)),
+            spelled(serde_json::json!(u64::MAX)),
+            spelled(serde_json::json!(i64::MIN)),
+            spelled(serde_json::json!(1.0)),
+            spelled(serde_json::json!(-0.0)),
+            spelled(serde_json::json!(0.1)),
+            spelled(serde_json::json!(2.5e-7)),
+            spelled(serde_json::json!(1e15)),
+            spelled(serde_json::json!(1e16)),
+            spelled(serde_json::json!(1e21)),
+            spelled(serde_json::json!(1.5e300)),
+            spelled(serde_json::json!(5e-324)),
+        ];
+        assert_eq!(
+            actual,
+            [
+                "0",
+                "-7",
+                "18446744073709551615",
+                "-9223372036854775808",
+                "1.0",
+                "-0.0",
+                "0.1",
+                "2.5e-7",
+                "1000000000000000.0",
+                "1e+16",
+                "1e+21",
+                "1.5e+300",
+                "5e-324",
+            ]
+        );
+    }
+
+    #[test]
+    fn purpose_binding_distinguishes_absent_null_and_reordered_values() {
+        let metadata = || ReceiverPurposeMetadata {
+            receiver: "receiver".into(),
+            target: "target".into(),
+            schema: "schema".into(),
+            capability: "capability".into(),
+            projection: "projection".into(),
+            disclosure: "disclosure".into(),
+            resource_type: "item".into(),
+            resource_id: "1".into(),
+        };
+        let bind = |variables: serde_json::Value| {
+            ReceiverPurposeV1::bind(
+                metadata(),
+                "Read",
+                "query Read { item }",
+                &variables,
+                &variables,
+            )
+        };
+        let base = bind(serde_json::json!({"a": 1, "b": [1, 2]}));
+        assert_eq!(base.version, 1);
+        assert_eq!(base.target_class, "private_direct");
+        assert_eq!(base, bind(serde_json::json!({"b": [1, 2], "a": 1})));
+        for other in [
+            serde_json::json!({"a": 1, "b": [2, 1]}),
+            serde_json::json!({"a": 1, "b": [1, 2], "c": null}),
+            serde_json::json!({"a": null, "b": [1, 2]}),
+            serde_json::json!({"a": "1", "b": [1, 2]}),
+        ] {
+            assert_ne!(base.variables_sha256, bind(other).variables_sha256);
+        }
+        // Unknown members and versions are for the receiver to refuse.
+        let mut encoded = serde_json::to_value(&base).unwrap();
+        encoded["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ReceiverPurposeV1>(encoded).is_err());
     }
 }
