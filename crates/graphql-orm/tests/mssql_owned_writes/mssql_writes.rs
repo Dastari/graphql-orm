@@ -1,17 +1,13 @@
-#![cfg(feature = "mssql")]
-
 use graphql_orm::prelude::*;
 #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
-#[path = "support/host_primary_key_contract.rs"]
+#[path = "../support/host_primary_key_contract.rs"]
 mod host_primary_key_contract;
 #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
-#[path = "support/host_primary_keys.rs"]
+#[path = "../support/host_primary_keys.rs"]
 mod host_primary_keys;
 
+use super::owned_mssql::{OwnedSqlServer, execute_batch};
 use std::sync::{Arc, Mutex};
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
-use owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[repository_entity(
@@ -847,7 +843,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     Ok(())
 }
 
-#[path = "support/authorized_pagination_parity.rs"]
+#[path = "../support/authorized_pagination_parity.rs"]
 mod pagination_parity;
 
 #[tokio::test]

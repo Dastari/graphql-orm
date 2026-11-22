@@ -1,12 +1,8 @@
-#![cfg(feature = "postgres")]
 //! Owned disposable PostgreSQL parity for repository-only entities.
 
 use graphql_orm::prelude::*;
 
-#[path = "support/owned_postgres.rs"]
-mod owned_postgres;
-
-use owned_postgres::OwnedPostgres;
+use super::owned_postgres::{OwnedPostgres, POSTGRES_16_IMAGE};
 
 #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[repository_entity(
@@ -56,7 +52,7 @@ impl EntityPolicy<PostgresBackend> for AllowEntities {
 #[ignore = "creates and owns a disposable Docker PostgreSQL container"]
 async fn repository_only_postgres_crud_projection_and_serializable_transaction()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start_postgres_16("repository-only")?;
+    let owned = OwnedPostgres::start_ready("repository-only", POSTGRES_16_IMAGE).await?;
     let mut database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
     database.set_authorization_mode(AuthorizationMode::ExplicitPolicyForAllExposedOperations);
     database.set_entity_policy(AllowEntities);

@@ -1,9 +1,4 @@
-#![cfg(feature = "mssql")]
-
-#[allow(dead_code)]
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
-
+use super::owned_mssql::OwnedSqlServer;
 use async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
@@ -170,7 +165,7 @@ async fn setup_database(connection_string: &str) -> Result<(), Box<dyn std::erro
 #[tokio::test]
 #[ignore = "requires test-owned SQL Server container"]
 async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn std::error::Error>> {
-    let owned = owned_mssql::OwnedSqlServer::start().await?;
+    let owned = OwnedSqlServer::start().await?;
     let connection_string = owned.connection_string.clone();
 
     setup_database(&connection_string).await?;

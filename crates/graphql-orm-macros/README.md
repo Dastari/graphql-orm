@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
 In version 0.194.0, `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
 and semantic catalogue functions, and `GraphQLRelations` and
 `#[graphql_complex_object]` (with any options) record which generated

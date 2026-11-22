@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RUSTC_WRAPPER: time only the fixture rustc; --run executes the measurement matrix."""
+"""RUSTC_WRAPPER: time fixture rustc or selected test crates; --run measures the fixture."""
 import os
 from pathlib import Path
 import subprocess
@@ -71,8 +71,15 @@ if len(sys.argv) > 1 and sys.argv[1] in ('--run', '--help', '-h'):
     sys.exit(0)
 
 args = sys.argv[1:]
-if '--crate-name' in args and args[args.index('--crate-name') + 1] == 'compile_memory_fixture':
+crate = args[args.index('--crate-name') + 1] if '--crate-name' in args else None
+test_crates = os.environ.get('COMPILE_MEMORY_TEST_CRATES', '').split(',')
+if crate in test_crates and '--test' in args:
+    output = Path(os.environ['COMPILE_MEMORY_LOG_DIR']) / f'{crate}.time'
+elif crate == 'compile_memory_fixture':
     output = Path(os.environ['COMPILE_MEMORY_LOG'])
+else:
+    output = None
+if output is not None:
     output.parent.mkdir(parents=True, exist_ok=True)
     args = ['/usr/bin/time', '-v', '-o', str(output), *args]
 sys.exit(subprocess.call(args, close_fds=False))

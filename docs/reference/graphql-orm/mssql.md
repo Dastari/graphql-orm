@@ -897,7 +897,7 @@ introspection round trips on the owned server; it is part of
 `scripts/run-owned-database-lanes.sh mssql`:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_correctness -- --ignored --test-threads=1
+cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_owned_queries -- --ignored mssql_correctness:: --test-threads=1
 ```
 
 Pure SQL rendering tests run with the default test suite:
@@ -1039,4 +1039,4 @@ and table creation. SQL Server requires sufficient available memory to start.
 
 Paginated batched relation reads preserve SQL expression projections, including
 the exact decimal cast used for `mssql_money`, when joining ranked keys back to
-full rows. SQL Server execution is covered by the owned `mssql_integration` test.
+full rows. SQL Server execution is covered by the owned `mssql_integration` module in `mssql_owned_queries`.

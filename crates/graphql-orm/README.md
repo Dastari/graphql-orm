@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
 In version 0.194.0, `schema_roots!` also emits `graphql_orm_resolver_catalog()`: the generated
 relationship fields and Federation entity resolvers of the schema, which no operation
 catalogue lists. It is descriptive, names only what the SDL publishes, and
