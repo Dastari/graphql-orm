@@ -991,7 +991,10 @@ fn select_schema_root(
         return (quote! {}, quote! { #root });
     }
 
-    let selected = quote::format_ident!("__GomSchema{name}Root", span = proc_macro2::Span::mixed_site());
+    let selected = quote::format_ident!(
+        "__GomSchema{name}Root",
+        span = proc_macro2::Span::mixed_site()
+    );
     let definition = quote! {
         type #selected = <::graphql_orm::graphql::orm::GeneratedRootSelection<
             {
