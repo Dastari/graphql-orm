@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
+
+- **Fixed (#829).** Repeated entity identities return a typed composition
+  error from `GraphqlOperationCatalog::try_compose`. The generated resolver
+  catalogue and fallible schema builders return that error through their
+  existing error types. The error records the repeated identity and both Rust
+  types.
+
 ## Unreleased - ORM/macros 0.196.0
 
 - **Added (#842).** Trusted transaction writers can enqueue a typed computed-field

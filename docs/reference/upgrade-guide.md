@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.196.0, `graphql-orm-macros` 0.196.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.201.0, `graphql-orm-macros` 0.201.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.152.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.201.0 and operation catalogue 0.12.0 return an error for duplicate entity identities through the generated resolver catalogue and fallible schema builders (#829). [Migration](../../MIGRATION.md#01960-to-02010-duplicate-entity-identities-operation-catalogue-0120)
 - **No action** — ORM/macros 0.196.0. Hosts can opt in to typed computed-field invalidations with commit-only publishing and an explicit disclosure policy (#842). [Migration](../../MIGRATION.md#01950-to-01960-computed-field-invalidations)
 - **No action** — ORM/macros 0.195.0 groups selected integration-test targets (#771). Application hosts can upgrade without configuration changes. [Migration](../../MIGRATION.md#01940-to-01950-integration-test-consolidation)
 - **No action** — ORM/macros 0.194.0, operation catalog 0.11.0: `schema_roots!` also emits `graphql_orm_resolver_catalog()`, a separate document listing the generated relationship fields and Federation entity resolvers a schema serves, and the catalogue adds an opt-in RFC 8785 encoder. Existing SDL, catalogues, fingerprints and receiver bindings are unchanged (#544). [Migration](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110)

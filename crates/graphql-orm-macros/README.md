@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.201.0 makes `schema_roots!` report duplicate entity identities
+through its fallible schema builders and resolver catalogue helper. Upgrade
+ORM and macros together. See the
+[migration guide](../../MIGRATION.md#01960-to-02010-duplicate-entity-identities-operation-catalogue-0120).
+
 Version 0.196.0 lets hosts use generated entity keys and subscription
 authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
 

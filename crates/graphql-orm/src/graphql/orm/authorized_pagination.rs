@@ -3258,9 +3258,12 @@ pub enum KeysetReadPolicyReason {
     /// the authorization mode is not `LegacyPermissive`, so every read of the
     /// entity defers to `can_read_row`. Refused at registration.
     MissingRowPolicy,
+    /// The schema's operation catalogue could not be composed.
+    OperationCatalog(GraphqlOperationCatalogError),
 }
 
-/// A generated Keyset root reported by the Keyset read-policy check.
+/// A generated Keyset root reported by the read-policy check, or an operation
+/// catalogue error returned before the check can run.
 ///
 /// A GraphQL Keyset request is served only when `RowPolicy::read_visibility`
 /// returns `Complete` or `Unrestricted`. See
@@ -3275,11 +3278,11 @@ pub struct KeysetReadPolicyError {
 }
 
 impl KeysetReadPolicyError {
-    /// The reported GraphQL root field.
+    /// The reported GraphQL root field, or the empty string for a catalogue error.
     pub const fn field_name(&self) -> &'static str {
         self.field_name
     }
-    /// The entity the root pages through.
+    /// The entity the root pages through, or the empty string for a catalogue error.
     pub const fn entity_name(&self) -> &'static str {
         self.entity_name
     }
@@ -3287,11 +3290,11 @@ impl KeysetReadPolicyError {
     pub const fn policy_key(&self) -> Option<&'static str> {
         self.policy_key
     }
-    /// Why the root was reported.
+    /// Why the root was reported or why the check could not run.
     pub const fn reason(&self) -> KeysetReadPolicyReason {
         self.reason
     }
-    /// Whether generated schema builders refuse the root for this reason.
+    /// Whether generated schema builders refuse registration for this reason.
     pub const fn refuses_registration(&self) -> bool {
         !matches!(self.reason, KeysetReadPolicyReason::UndeclaredCapability)
     }
@@ -3339,11 +3342,30 @@ impl std::fmt::Display for KeysetReadPolicyError {
                  entity metadata passed to the Keyset read-policy check; pass the metadata of \
                  every entity in the operation catalog"
             ),
+            KeysetReadPolicyReason::OperationCatalog(error) => error.fmt(f),
         }
     }
 }
 
-impl std::error::Error for KeysetReadPolicyError {}
+impl From<GraphqlOperationCatalogError> for KeysetReadPolicyError {
+    fn from(error: GraphqlOperationCatalogError) -> Self {
+        Self {
+            field_name: "",
+            entity_name: "",
+            policy_key: None,
+            reason: KeysetReadPolicyReason::OperationCatalog(error),
+        }
+    }
+}
+
+impl std::error::Error for KeysetReadPolicyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.reason {
+            KeysetReadPolicyReason::OperationCatalog(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Every exposed generated Keyset root the row policy cannot be shown to serve.
 pub(crate) fn keyset_read_policy_findings<B: OrmBackend>(

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.201.0 returns duplicate entity identities as errors from the
+generated resolver catalogue and fallible schema builders. See the
+[migration guide](../../MIGRATION.md#01960-to-02010-duplicate-entity-identities-operation-catalogue-0120).
+
 Version 0.196.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
 when a committed related-state write should prompt an authorized client to
 refetch a computed value. The signal contains the target ID and a public topic.

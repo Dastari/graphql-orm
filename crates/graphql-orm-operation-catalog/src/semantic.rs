@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationCatalog, GraphqlOperationKind};
+use crate::{
+    GeneratedGraphqlOperationCategory, GraphqlOperationCatalog, GraphqlOperationCatalogError,
+    GraphqlOperationKind,
+};
 
 mod client;
 pub use client::*;
@@ -34,11 +37,15 @@ pub const GRAPHQL_SEMANTIC_MAXIMUM_LABEL_FIELDS: usize = 4;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphqlSemanticError {
     message: &'static str,
+    operation_catalog_error: Option<GraphqlOperationCatalogError>,
 }
 
 impl GraphqlSemanticError {
     fn new(message: &'static str) -> Self {
-        Self { message }
+        Self {
+            message,
+            operation_catalog_error: None,
+        }
     }
 
     /// Returns a bounded, content-free diagnostic category.
@@ -53,7 +60,22 @@ impl std::fmt::Display for GraphqlSemanticError {
     }
 }
 
-impl std::error::Error for GraphqlSemanticError {}
+impl From<GraphqlOperationCatalogError> for GraphqlSemanticError {
+    fn from(error: GraphqlOperationCatalogError) -> Self {
+        Self {
+            message: "duplicate entity identity in operation catalogue",
+            operation_catalog_error: Some(error),
+        }
+    }
+}
+
+impl std::error::Error for GraphqlSemanticError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.operation_catalog_error
+            .as_ref()
+            .map(|error| error as &dyn std::error::Error)
+    }
+}
 
 /// Portable aggregate operator advertised by public field metadata.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]

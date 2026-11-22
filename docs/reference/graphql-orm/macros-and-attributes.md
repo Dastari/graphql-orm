@@ -1227,7 +1227,11 @@ Keyset root is exposed is a contradiction, so the generated builders refuse it:
   `KeysetReadPolicyError` naming the root, entity, policy key and fixes.
 - `schema_builder` and `schema_builder_with_limits` panic with the same message.
 
-They also refuse a Keyset root whose entity is missing from the entity
+The fallible builders use `KeysetReadPolicyReason::OperationCatalog` when
+operation catalogue composition fails. In this case the error identifies the
+repeated identity and both Rust types, and has no Keyset root or policy key.
+
+The builders also refuse a Keyset root whose entity is missing from the entity
 metadata. With no row policy installed, reads are `Unrestricted` and nothing
 else is refused. A schema built directly with `Schema::build` skips this check;
 call `Database::validate_keyset_read_policies(catalog, &entity_metadata)` for it.

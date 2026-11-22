@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.196.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
+
+**No action.** Upgrade ORM and macros together. The generated resolver
+catalogue and `try_schema_builder*` report duplicate entity identities as
+errors. Use unique `stable_type_id` values or distinct default Rust type paths
+if you receive this error. Call `GraphqlOperationCatalog::try_compose` for
+fallible composition of descriptor groups. Existing SDL, catalogue exports
+and fingerprints are unchanged.
+
 ## 0.195.0 to 0.196.0: computed-field invalidations
 
 **No action.** Upgrade ORM and macros together. To opt in, declare a topic and
