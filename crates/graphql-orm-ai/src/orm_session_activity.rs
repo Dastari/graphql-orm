@@ -186,6 +186,12 @@ pub(crate) async fn session_activity(
     if edges.is_empty() {
         return Ok(Vec::new());
     }
+    if AiOrmBackend::DIALECT == DatabaseBackend::Mssql {
+        return Err(AiError::InvalidConfiguration(
+            "SQL Server does not support the runtime relation batches required by the session activity list"
+                .to_owned(),
+        ));
+    }
     let schema = query_schema()?;
     let sessions = safe(schema.resolve_collection(&safe(CollectionId::new(SESSIONS))?))?;
     let events = safe(schema.resolve_collection(&safe(CollectionId::new(EVENTS))?))?;

@@ -1388,6 +1388,72 @@ async fn owned_database_runs_generated_migration_sessions_skills_rules_and_fenci
     assert!(matches!(runs.start(&claimed).await, Err(AiError::Conflict)));
     assert_eq!(running.run_id(), claimed.run_id());
 
+    let mut case_variant = owner.clone();
+    case_variant.user_id = owner.user_id.to_uppercase();
+    let case_variant = AuthPrincipal::User(case_variant);
+    let other_session = sessions
+        .create_session(
+            &case_variant,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: AiScopeInput {
+                    kind: "durable-parity".to_owned(),
+                    id: "scope-1".to_owned(),
+                    tenant_id: Some("durable-parity-tenant".to_owned()),
+                },
+                title: Some("Case-distinct owner".to_owned()),
+            },
+        )
+        .await
+        .expect("the case-distinct owner should have a session");
+    sessions
+        .send_message(
+            &case_variant,
+            SendAiMessageInput {
+                session_id: other_session.id,
+                text: "Case-distinct inbox entry".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
+            },
+        )
+        .await
+        .expect("case-distinct owners must coexist in the durable inbox");
+    for (reader, visible, hidden) in [
+        (&principal, session.id, other_session.id),
+        (&case_variant, other_session.id, session.id),
+    ] {
+        assert!(
+            sessions
+                .session(reader, AiSessionId(visible))
+                .await
+                .expect("the owner's persisted session should be readable")
+                .is_some()
+        );
+        assert!(
+            sessions
+                .session(reader, AiSessionId(hidden))
+                .await
+                .expect("an unauthorized session should be indistinguishable from a missing one")
+                .is_none()
+        );
+    }
+    #[cfg(feature = "mssql")]
+    assert!(matches!(
+        sessions
+            .sessions(
+                &case_variant,
+                KeysetConnectionInput {
+                    first: Some(10),
+                    ..Default::default()
+                }
+                .validate(10, 10)
+                .expect("bounded keyset should validate"),
+            )
+            .await,
+        Err(AiError::InvalidConfiguration(message)) if message.contains("runtime relation batches")
+    ));
+
     drop(sessions);
     drop(skills);
     drop(rules);

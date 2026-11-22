@@ -60,9 +60,10 @@ run a consumer migration, or authorize a provider/application action.
 
 - Provision the AI tables in `dbo` using the generated SQL Server migration
   plan and external change control. Use `dbo` as the default schema for both
-  the schema owner and runtime role. Use Unicode columns and a binary
-  `Latin1_General_100_BIN2` collation for indexed AI identity columns.
-  Generated AI string filters compare exact casing and trailing spaces.
+  the schema owner and runtime role. The generated plan gives indexed AI
+  string keys a Unicode type with `Latin1_General_100_BIN2` collation even
+  when the database default is case-insensitive. Generated AI string filters
+  compare exact casing and trailing spaces.
   SQL Server unique indexes still treat otherwise equal values that differ
   only by trailing spaces as duplicates. SQL Server also enforces its index
   key size limits. Such conflicts or size errors reject writes.
@@ -80,6 +81,9 @@ run a consumer migration, or authorize a provider/application action.
   reopening after collection and reconciliation. Automated portable backup
   apply remains closed. SQL Server provides no proof that native row filters
   are inactive, so recovery skips ambiguous missing-row cases.
+- Nonempty session activity lists return a configuration error because SQL
+  Server does not support the ORM runtime relation batches used to populate
+  them. Session point reads and durable subscription replay remain available.
 - Session-content retention returns a configuration error before mutation.
   The ORM can enforce append-only checkpoints with triggers but has no SQL
   Server implementation of the privileged, bounded checkpoint purge. Durable

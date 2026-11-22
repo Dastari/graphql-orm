@@ -1715,7 +1715,7 @@ impl DatabaseBackend {
 
     /// The name one path part denotes: the inside of a well-formed delimited
     /// identifier, or the part itself.
-    fn identifier_part_name(self, part: &str) -> String {
+    pub(super) fn identifier_part_name(self, part: &str) -> String {
         if !self.is_one_delimited_identifier(part) {
             return part.to_owned();
         }

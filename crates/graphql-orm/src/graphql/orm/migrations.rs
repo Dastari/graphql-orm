@@ -1901,6 +1901,20 @@ pub(super) fn postgres_overlong_identifier(
 
 /// PostgreSQL silently truncates identifiers longer than `NAMEDATALEN - 1`.
 const POSTGRES_MAX_IDENTIFIER_BYTES: usize = 63;
+const MSSQL_BIN2_TYPE_SUFFIX: &str = " COLLATE Latin1_General_100_BIN2";
+
+pub(super) fn mssql_column_types_match(current: &str, target: &str) -> bool {
+    // A declaration that omits collation adopts the live column's collation.
+    // A declaration that explicitly asks for BIN2 must match the catalog.
+    let current = if target.ends_with(MSSQL_BIN2_TYPE_SUFFIX) {
+        current
+    } else {
+        current
+            .strip_suffix(MSSQL_BIN2_TYPE_SUFFIX)
+            .unwrap_or(current)
+    };
+    current.eq_ignore_ascii_case(target)
+}
 
 pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
@@ -1929,12 +1943,17 @@ pub(super) fn column_changed_with(
         if backend == DatabaseBackend::Postgres {
             !postgres_types_equivalent(&before.sql_type, &after.sql_type)
         } else {
-            !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+            !mssql_column_types_match(&before.sql_type, &after.sql_type)
         }
     } else {
         before.sql_type != after.sql_type
     };
-    if before.name != after.name
+    let name_changed = if backend == DatabaseBackend::Mssql {
+        backend.identifier_part_name(&before.name) != backend.identifier_part_name(&after.name)
+    } else {
+        before.name != after.name
+    };
+    if name_changed
         || sql_type_changed
         || before.nullable != after.nullable
         || before.is_primary_key != after.is_primary_key
@@ -2173,15 +2192,22 @@ pub(super) fn diff_schema_views_with(
         }
 
         let target_table = target_tables[table_name];
+        let column_key = |column: &ColumnModel| {
+            if backend == DatabaseBackend::Mssql {
+                backend.identifier_part_name(&column.name)
+            } else {
+                column.name.clone()
+            }
+        };
         let current_columns = table
             .columns
             .iter()
-            .map(|column| (column.name.clone(), column))
+            .map(|column| (column_key(column), column))
             .collect::<std::collections::BTreeMap<_, _>>();
         let target_columns = target_table
             .columns
             .iter()
-            .map(|column| (column.name.clone(), column))
+            .map(|column| (column_key(column), column))
             .collect::<std::collections::BTreeMap<_, _>>();
 
         for (column_name, column) in &target_columns {
@@ -2197,7 +2223,7 @@ pub(super) fn diff_schema_views_with(
             if !target_columns.contains_key(column_name) {
                 steps.push(OwnedMigrationStep::DropColumn {
                     table_name: table_name.clone(),
-                    column_name: column_name.clone(),
+                    column_name: column.name.clone(),
                 });
                 continue;
             }
@@ -3290,6 +3316,16 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
     if column.is_empty() {
         return None;
     }
+    if tokens.len() == 4
+        && structural_ident(tokens.get(1), "is")
+        && structural_ident(tokens.get(2), "not")
+        && structural_ident(tokens.get(3), "null")
+    {
+        return Some(IndexPredicateModel {
+            column: column.clone(),
+            values: Vec::new(),
+        });
+    }
     let mut offset = 1;
     let is_in = structural_ident(tokens.get(offset), "in");
     if is_in {
@@ -3347,6 +3383,18 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
         column: column.clone(),
         values,
     })
+}
+
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[test]
+fn parses_non_null_index_predicate_without_accepting_other_conditions() {
+    for expression in [r#""ref" IS NOT NULL"#, "(ref IS NOT NULL)"] {
+        let predicate = parse_closed_set_index_predicate(expression).unwrap();
+        assert_eq!(predicate.column, "ref");
+        assert!(predicate.values.is_empty());
+    }
+    assert!(parse_closed_set_index_predicate("ref IS NULL").is_none());
+    assert!(parse_closed_set_index_predicate("ref IS NOT NULL OR id IS NOT NULL").is_none());
 }
 
 #[cfg(feature = "sqlite")]
@@ -4275,7 +4323,7 @@ fn render_mssql_alter_column(
         after.sql_type
     );
     let nullability = if after.nullable { "NULL" } else { "NOT NULL" };
-    if !mssql_character_type(&after.sql_type) {
+    if after.sql_type.ends_with(MSSQL_BIN2_TYPE_SUFFIX) || !mssql_character_type(&after.sql_type) {
         return format!("{head} {nullability}");
     }
     // `sp_executesql` gives the variables their own scope, so a plan that runs
@@ -6742,7 +6790,8 @@ pub async fn introspect_mssql_schema(
                             + CONVERT(varchar(10), NUMERIC_SCALE) + ')'
                         ELSE DATA_TYPE END AS data_type,
                     IS_NULLABLE AS is_nullable,
-                    COLUMN_DEFAULT AS column_default
+                    COLUMN_DEFAULT AS column_default,
+                    COLLATION_NAME AS collation_name
              FROM INFORMATION_SCHEMA.COLUMNS
              WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2
              ORDER BY ORDINAL_POSITION",
@@ -6884,11 +6933,18 @@ pub async fn introspect_mssql_schema(
             .map(|row| {
                 let raw_name = super::MssqlBackend::try_get_string(&row, "column_name")?;
                 let name = DatabaseBackend::Mssql.delimit_raw_identifier(&raw_name);
+                let mut sql_type = super::MssqlBackend::try_get_string(&row, "data_type")?;
+                let collation = row.try_get::<Option<String>, _>("collation_name")?;
+                if collation
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Latin1_General_100_BIN2"))
+                {
+                    sql_type.push_str(MSSQL_BIN2_TYPE_SUFFIX);
+                }
                 Ok(ColumnModel {
                     is_primary_key: primary_keys.iter().any(|column| column == &name),
                     is_unique: unique_columns.contains(&name),
                     name,
-                    sql_type: super::MssqlBackend::try_get_string(&row, "data_type")?,
+                    sql_type,
                     spatial: None,
                     nullable: super::MssqlBackend::try_get_string(&row, "is_nullable")? == "YES",
                     default: row.try_get::<Option<String>, _>("column_default")?,
@@ -7248,6 +7304,7 @@ mod mssql_index_predicate_tests {
                 vec!["new", "it's open"],
             ),
             ("([State] IN (N'a,b',N'c'))", "State", vec!["a,b", "c"]),
+            ("([Ref] IS NOT NULL)", "Ref", vec![]),
             // Non-ASCII and punctuation inside a bracketed column name (#782).
             ("([列]=N'新')", "列", vec!["新"]),
             ("([列] IN (N'新', N'旧'))", "列", vec!["新", "旧"]),
@@ -7273,7 +7330,6 @@ mod mssql_index_predicate_tests {
     #[test]
     fn other_filters_never_read_as_a_declared_predicate() {
         for filter in [
-            "([Ref] IS NOT NULL)",
             "([A]='x' OR [B]='y')",
             "([A]='x' AND [A]='y')",
             "([A]>(1))",

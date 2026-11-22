@@ -16,12 +16,18 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.203.0
 
-- **No action.** Add SQL Server support for bounded row-size preflights,
-  filtered unique indexes over non-null keys, and rendered append-only
-  triggers for externally managed schemas. Plans align catalog and declared
-  table names and omit implicit indexes on unindexable MAX columns (#813).
-- **No action.** Generated SQL Server entities can opt in to exact string
-  equality and membership through `exact_string_filters = true` (#813).
+- **Action needed.** Before applying a regenerated SQL Server plan, review
+  cleanup jobs and foreign-key cascades that touch `append_only = true`
+  tables. The plan now installs triggers that reject updates and deletes,
+  including cascaded deletes. There is no SQL Server trigger opt-out while
+  the entity remains append-only (#813).
+- **Action needed.** Replan SQL Server schemas and resolve any table
+  declarations that map to the same physical identifier. SQL Server
+  planning now refuses these collisions (#813).
+- **No action.** SQL Server supports bounded row-size preflights and filtered
+  unique indexes over non-null keys. Entities opting in to
+  `exact_string_filters = true` have length-sensitive string comparisons and
+  plans use BIN2 collation on generated Unicode string keys (#813).
 
 ## Unreleased - ORM/macros 0.199.0
 

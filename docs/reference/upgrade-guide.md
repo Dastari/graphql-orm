@@ -72,16 +72,10 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.203.0, `graphql-orm-macros` 0.203.0**; **`graphql-orm-operation-catalog` 0.11.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.154.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-- **Action needed** when adopting SQL Server with AI 0.154.0. Apply the
-  external schema plan, install the restore marker, and use an explicitly
-  writable pool (#813). Drain active workers before the module epoch rotates.
-  SQLite and PostgreSQL hosts need no data migration.
-  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
-- **No action** for existing ORM hosts upgrading to ORM/macros 0.203.0. SQL
-  Server plans can render append-only triggers and non-null filtered indexes,
-  and entities can opt in to exact string filters (#813).
-  [ORM migration](../../MIGRATION.md#01980-to-02030-durable-ai-sql-server-prerequisites)
-
+- **Action needed** when adopting SQL Server with AI 0.154.0. Install the restore marker, apply the external schema plan, and use an explicitly writable pool (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
+- **Action needed** for AI 0.154.0 on SQLite, PostgreSQL, and SQL Server. Drain active workers before the module epoch rotates and invalidates old leases. SQLite and PostgreSQL need no data migration (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
+- **Action needed** for ORM/macros 0.203.0 on SQL Server. Review cleanup jobs and cascaded deletes before applying new append-only triggers. There is no trigger opt-out for append-only entities (#813). [ORM migration](../../MIGRATION.md#01990-to-02030-durable-ai-sql-server-prerequisites)
+- **Action needed** for ORM/macros 0.203.0 on SQL Server. Replan and resolve declarations that map to the same physical table. SQL Server now refuses these conflicts (#813). [ORM migration](../../MIGRATION.md#01990-to-02030-durable-ai-sql-server-prerequisites)
 - **No action** — ORM/macros 0.199.0: derives can opt out of generated mutation and subscription fields. Default schemas keep their original Rust root structs (#677). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
 - **No action** — ORM/macros 0.199.0: generated writes, scalar getters, and relation resolvers return field errors when database context is missing (#542). [Migration](../../MIGRATION.md#01980-to-01990-generated-mutation-and-subscription-roots)
 - **No action** — ORM/macros 0.199.0: generated writes and Changed subscriptions qualify standard paths, mutation shape errors point to the declaration, and implicit update timestamps use backend identifier quoting (#542). [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01990)

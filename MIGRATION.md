@@ -10,13 +10,23 @@ supersedes: []
 
 # Migration Guide
 
-## 0.198.0 to 0.203.0: durable AI SQL Server prerequisites
+## 0.199.0 to 0.203.0: durable AI SQL Server prerequisites
 
-**No action** for existing ORM consumers. Update ORM and macros together.
-Opt in to binary, length-sensitive generated string comparisons with
-`exact_string_filters = true` on SQL Server. SQL Server DDL plans can render
-`IS NOT NULL` filtered indexes and append-only triggers. Hosts provision
-these changes externally. No general schema or data migration is needed.
+**Action needed** for SQL Server hosts with `append_only = true` entities.
+Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
+both operations. Before applying a plan, review cleanup jobs and foreign-key
+cascades that delete rows from these tables. Change or disable those paths
+and rehearse the migration on a copy. There is no trigger opt-out while an
+entity remains append-only. Remove `append_only = true` only if the entity
+should no longer have the append-only contract.
+
+**Action needed** for SQL Server hosts whose declarations can resolve to the
+same physical table. Regenerate the plan and resolve any identifier conflict
+before applying it. Use one declaration for each physical table, including
+when an unqualified name and a `dbo`-qualified name refer to the same object.
+
+**No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
+together. No physical schema or data migration is required on these backends.
 
 ## 0.198.0 to 0.199.0: generated mutation and subscription roots
 

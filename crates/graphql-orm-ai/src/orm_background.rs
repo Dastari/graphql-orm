@@ -1,6 +1,6 @@
 //! Fenced OpenAI background-response submission and durable binding.
 
-#![cfg(all(feature = "provider-openai-core"))]
+#![cfg(feature = "provider-openai-core")]
 
 use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;

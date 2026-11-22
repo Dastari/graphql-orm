@@ -1,6 +1,6 @@
 //! Durable idempotent intake for verified provider webhook envelopes.
 
-#![cfg(all(feature = "provider-openai-core"))]
+#![cfg(feature = "provider-openai-core")]
 
 use crate::AiOrmBackend;
 use crate::orm_support::map_transaction;

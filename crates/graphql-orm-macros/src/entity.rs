@@ -5607,6 +5607,9 @@ fn generate_entity_tokens(
             && mssql_key_fields.contains(&rust_name)
         {
             sql_type = MSSQL_INDEXABLE_STRING.to_string();
+            if entity_meta.exact_string_filters {
+                sql_type.push_str(" COLLATE Latin1_General_100_BIN2");
+            }
         }
         let decimal_tokens = field_meta
             .decimal
