@@ -14,6 +14,29 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.209.0, operation catalogue 0.13.0
+
+- **Added (#851).** `#[graphql_entity(update_expected_version = "required")]`
+  makes the generated update's `ExpectedVersion` non-null (`Int!`) in the SDL
+  and the operation catalogue. An omitted or null value is refused by
+  validation, a stale one with `CONFLICT`, and a matching one advances the
+  managed version once. Delete keeps its optional argument.
+- **Added (#851).** `#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]`
+  selects the generated update's assurance policy per request from the typed
+  patch and the locked row. The selection runs inside the write transaction,
+  after the row is locked and before any write. A refusal rolls back the
+  transaction with its related writes and commits no `Changed` event.
+  `UpdateAssuranceInput` and `enforce_selected_assurance` are new. Enforcement
+  fails closed with `AUTHORIZATION_MISCONFIGURED` for an undeclared level or a
+  schema without `AssuranceEnforcement`.
+- **Added (operation catalogue, #851).** `GraphqlConditionalAssurance` and
+  `conditional_assurance()` on generated and resolved descriptors list the
+  levels an operation may require and mark the selection as conditional. The
+  declaration is part of the operation and router-export fingerprints. Both
+  options require an entity that generates neither `update_many` nor `upsert`.
+  Entities that opt into neither keep byte-identical SDL, catalogues,
+  fingerprints and debug output.
+
 ## Unreleased - ORM/macros 0.203.0
 
 - **Action needed.** Before applying a regenerated SQL Server plan, review

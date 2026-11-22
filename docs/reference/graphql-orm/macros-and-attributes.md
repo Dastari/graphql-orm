@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -70,6 +70,8 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `changed_started` | boolean | `false`; adds the argument `Started: Boolean` to the `Changed` root for the [started signal](client-metadata.md#started-signal-on-changed-streams); the event gains the field `Started: Boolean!` and its `Action`, `ChangeKind`, `Id` and `Key` become nullable |
 | `aggregate_source` | boolean | `false`; requires `aggregate = true`; the aggregate root returns `<Entity>AggregateResultRow` with a [`SourceEntity` field](client-metadata.md#aggregate-source-entity) |
 | `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only entities and on float, nullable or read-policy primary-key fields |
+| `update_expected_version` | `"required"` | absent; the generated update's `ExpectedVersion` becomes `Int!`. Requires a managed version and no generated `update_many` or `upsert`. See [required `ExpectedVersion`](#required-expectedversion) |
+| `update_assurance` | `(select = "path::to::fn", levels = "policy,policy")` | absent; the generated update selects its assurance level per request. Requires no generated `update_many` or `upsert`. See [conditional update assurance](#conditional-update-assurance) |
 
 The bare `federation_key` keys on the primary key in declaration order.
 `fields` names exported GraphQL fields, which must be readable, non-null,
@@ -1460,7 +1462,8 @@ error and writes nothing, on every path and backend, including the update branch
 
 Generated GraphQL `Update` and `Delete` for a managed entity accept an optional `ExpectedVersion`
 (`Int`). When the current version differs, the mutation fails with `CONFLICT` and writes nothing.
-Repository callers use `compare_and_swap` for the same check.
+Repository callers use `compare_and_swap` for the same check. To make the update's argument
+mandatory, see [required `ExpectedVersion`](#required-expectedversion).
 
 Concurrent writers never lose an increment: every committed write advances the version exactly
 once. Generated writes read the row under a write lock and run serializably on PostgreSQL and
@@ -1507,6 +1510,102 @@ type Ticket {
 records both kinds of version in `GraphqlEntitySemanticMetadata::record_version`, which holds the
 declared field and a mode of `managed` or `cas`. It is omitted when the entity has no version
 field.
+
+### Required `ExpectedVersion`
+
+`#[graphql_entity(update_expected_version = "required")]` makes the generated single-row update
+of a managed-version entity a compare-and-swap on every call:
+
+```rust
+#[graphql_entity(
+    table = "reviews",
+    plural = "Reviews",
+    mutation_shapes = "create,update,delete",
+    update_expected_version = "required"
+)]
+struct Review {
+    #[primary_key]
+    id: String,
+    display_name: String,
+    state: String,
+    #[graphql_orm(version = "managed", default = "0")]
+    row_version: i64,
+}
+```
+
+- The SDL declares `ExpectedVersion: Int!` on the update. The operation catalogue argument has
+  GraphQL type `Int!` and Rust type `i64`, so the operation's fingerprint changes once.
+- An omitted or null value, including a null variable, is refused by GraphQL validation before the
+  resolver runs. The request carries no ORM code; a router reports it as
+  `GRAPHQL_VALIDATION_FAILED`. A stale value fails with `CONFLICT`. In every case nothing is
+  written and no `Changed` event is committed.
+- A matching value advances the version exactly once, as an optional `ExpectedVersion` does.
+- Delete keeps its optional argument. Repository and transaction writes are host writes and are
+  unaffected; use `compare_and_swap` for the same check there.
+- The derive refuses the option without a `version = "managed"` field, with `dependent_deletes`,
+  and when the entity generates `update_many` or `upsert`. Those roots rewrite existing rows
+  without a per-row `ExpectedVersion`. Select the remaining roots with
+  [`mutation_shapes`](#generated-mutation-shapes).
+
+Entities without the option keep their optional `ExpectedVersion`, SDL and catalogue.
+
+## Conditional update assurance
+
+`#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]` lets the generated
+single-row update choose the [operation assurance](../../architecture/operation-assurance.md)
+policy it requires from the typed patch and the locked row. The operation's registry
+classification is still checked before the row is read. The selected level is enforced as well.
+
+```rust
+#[graphql_entity(
+    table = "reviews",
+    plural = "Reviews",
+    mutation_shapes = "create,update,delete",
+    update_expected_version = "required",
+    update_assurance(select = "review_assurance", levels = "write,elevated")
+)]
+struct Review { /* as above */ }
+
+fn review_assurance(
+    input: graphql_orm::graphql::assurance::UpdateAssuranceInput<'_, Review, UpdateReviewInput>,
+) -> async_graphql::Result<&'static str> {
+    match &input.patch().state {
+        Some(state) if *state != input.current().state => Ok("elevated"),
+        _ => Ok("write"),
+    }
+}
+```
+
+Each level is an assurance policy ID: the identifier an evaluator receives. Levels must be valid
+policy IDs and must not repeat. The selector's path resolves where the entity is declared.
+
+The update runs these steps in its transaction:
+
+1. It locks the row, authorizes it and checks `ExpectedVersion`.
+2. It applies write transforms and field policies to produce the patch it will write.
+3. It calls the selector once with `current()` (the locked row) and `patch()`
+   (`Update<Entity>Input`), then calls `enforce_selected_assurance` with the returned level.
+4. It runs the `Before` mutation hook, the `UPDATE`, the `After` hook and the commit.
+
+A refusal or error at step 3 returns before any write. The transaction rolls back, and so does
+every related write in it. No `Changed` event is committed. A selector should be a pure function
+of the patch and the row.
+
+Enforcement fails closed. A level not in `levels` is refused with
+`AUTHORIZATION_MISCONFIGURED`, and so is every request when the schema has no
+`AssuranceEnforcement`. The evaluator decides the level for the operation's registered actor class,
+or interactive when the operation is not registered. It enforces the level even when the registry
+exempts the operation. The evaluator's own refusal, such as `FORBIDDEN` or `STEP_UP_REQUIRED`,
+passes through unchanged.
+
+The derive refuses the option with `dependent_deletes`, and when the entity generates `update_many`
+or `upsert`. A selector with the wrong signature is a type error at the generated call.
+
+The operation catalogue describes the selection with
+`conditional_assurance()`. It returns the sorted levels and reports `is_conditional()`.
+Callers and routers read it as advisory. They can prepare for the highest listed level, but only
+the owning service knows which one a request needs. See
+[conditional assurance](../../architecture/operation-assurance.md#conditional-assurance-on-generated-updates).
 
 ## Generated `Changed` subscriptions
 

@@ -1,0 +1,25 @@
+error[E0308]: mismatched types
+  --> tests/ui/update_assurance_selector_signature.rs:5:25
+   |
+ 5 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ expected `&Review`, found `UpdateAssuranceInput<'_, Review, ...>`
+...
+ 9 |     update_assurance(select = "select", levels = "write")
+   |                               -------- arguments to this function are incorrect
+   |
+   = note: expected reference `&Review`
+                 found struct `UpdateAssuranceInput<'_, Review, UpdateReviewInput>`
+note: function defined here
+  --> tests/ui/update_assurance_selector_signature.rs:19:4
+   |
+19 | fn select(_: &Review) -> &'static str {
+   |    ^^^^^^ ----------
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+ --> tests/ui/update_assurance_selector_signature.rs:5:25
+  |
+5 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+  |                         ^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `&str`
+  |
+  = help: the nightly-only, unstable trait `Try` is not implemented for `&str`

@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.209.0 adds two opt-in options for generated updates. One makes
+`ExpectedVersion` required. The other selects assurance per request from the
+typed patch and the locked row. Other entities are unchanged. See the
+[migration guide](../../MIGRATION.md#02030-to-02090-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+
 Version 0.203.0 adds SQL Server-only options to
 `backend_selected_graphql_entity` and opt-in exact string filters. See the
 [migration guide](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites).

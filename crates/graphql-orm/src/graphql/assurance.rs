@@ -872,6 +872,113 @@ pub(crate) fn enforce_check(check: &AssuranceCheck<'_>) -> async_graphql::Result
     }
 }
 
+/// What a conditional update-assurance selector decides from.
+///
+/// A generated update whose entity declares
+/// `#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]`
+/// calls `path(UpdateAssuranceInput<'_, Entity, UpdateEntityInput>)` once per
+/// request. The call happens inside the write transaction, after the target
+/// row is locked, authorized and version-checked, after write transforms and
+/// field policies have produced the patch the write applies, and before the
+/// `Before` mutation hook and the `UPDATE`. The selector returns one declared
+/// level, an assurance policy ID, which [`enforce_selected_assurance`] then
+/// enforces. A refusal or an error rolls back the transaction, including every
+/// related write a transform made, and no `Changed` event is committed.
+///
+/// A selector should be a pure function of the patch and the current row.
+#[derive(Clone, Copy)]
+pub struct UpdateAssuranceInput<'a, E, P> {
+    current: &'a E,
+    patch: &'a P,
+    field_name: &'a str,
+}
+
+impl<'a, E, P> UpdateAssuranceInput<'a, E, P> {
+    /// Constructs selector input. Public only for derive output.
+    #[doc(hidden)]
+    pub const fn new(current: &'a E, patch: &'a P, field_name: &'a str) -> Self {
+        Self {
+            current,
+            patch,
+            field_name,
+        }
+    }
+
+    /// The locked current row, as read inside the write transaction.
+    pub const fn current(&self) -> &'a E {
+        self.current
+    }
+
+    /// The typed field patch the write applies. A member left `None` does not
+    /// change its column.
+    pub const fn patch(&self) -> &'a P {
+        self.patch
+    }
+
+    /// Exact Mutation root field name of the update.
+    pub const fn field_name(&self) -> &'a str {
+        self.field_name
+    }
+}
+
+impl<E, P> fmt::Debug for UpdateAssuranceInput<'_, E, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateAssuranceInput")
+            .field("field_name", &self.field_name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Enforces the assurance level a conditional selector chose for a root.
+///
+/// Generated updates with `update_assurance(...)` call this after the
+/// selector returns, in addition to the operation's registry classification
+/// that [`enforce_resolver_assurance`] checked before the row was read.
+///
+/// It fails closed. A level outside `declared_levels` is refused, and so is
+/// every request when no [`AssuranceEnforcement`] is installed, both with
+/// `AUTHORIZATION_MISCONFIGURED`. Otherwise the installed evaluator decides
+/// `selected` for the operation's registered actor class (interactive when
+/// the operation is not registered). The selected level is enforced whatever
+/// the registry classification, an exemption included.
+pub fn enforce_selected_assurance(
+    ctx: &async_graphql::Context<'_>,
+    kind: GraphqlOperationKind,
+    field_name: &str,
+    declared_levels: &[&str],
+    selected: &str,
+) -> async_graphql::Result<()> {
+    let check = AssuranceCheck::from_field(ctx, kind, field_name);
+    enforce_selected_check(&check, declared_levels, selected)
+}
+
+fn enforce_selected_check(
+    check: &AssuranceCheck<'_>,
+    declared_levels: &[&str],
+    selected: &str,
+) -> async_graphql::Result<()> {
+    let (kind, field_name) = (check.kind, check.field_name);
+    if !declared_levels.contains(&selected) {
+        return Err(configuration_error(format!(
+            "assurance selector for {}.{field_name} chose an undeclared level",
+            kind.root_type()
+        )));
+    }
+    let Some(enforcement) = check.data_opt::<AssuranceEnforcement>() else {
+        return Err(configuration_error(format!(
+            "conditional assurance for {}.{field_name} requires installed AssuranceEnforcement",
+            kind.root_type()
+        )));
+    };
+    let actor_class = enforcement
+        .registry
+        .operation(kind, field_name)
+        .map_or(AssuranceActorClass::Interactive, |operation| {
+            operation.actor_class
+        });
+    enforcement.evaluator.enforce(check, actor_class, selected)
+}
+
 /// Async-GraphQL guard for custom resolver fields.
 #[derive(Clone, Copy, Debug)]
 pub struct DeclaredAssuranceGuard {

@@ -10,6 +10,24 @@ supersedes: []
 
 # Migration Guide
 
+## 0.203.0 to 0.209.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+
+**No action.** Both features are opt-in, and no data migration is needed.
+Entities that declare neither option generate byte-identical SDL, operation
+and semantic catalogues and fingerprints. Upgrade ORM and macros together.
+
+To opt in, restrict the entity's roots with `mutation_shapes` so it generates
+neither `update_many` nor `upsert`. Then add
+`update_expected_version = "required"`, `update_assurance(select, levels)` or
+both. The update's `ExpectedVersion` becomes `Int!`, so clients that omit it
+must send it. A declared selection changes the update's operation and
+router-export fingerprints. Regenerate exported SDL and catalogues, and
+re-approve any bindings to that operation. Install `AssuranceEnforcement`
+before you enable `update_assurance`: without it, every update of the entity
+is refused with `AUTHORIZATION_MISCONFIGURED`.
+See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
+and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
 ## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
 
 **Action needed** for SQL Server hosts with `append_only = true` entities.

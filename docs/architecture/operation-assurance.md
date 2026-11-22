@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -221,6 +221,54 @@ operation identity.
 The manifest is advisory client-codegen input. It can prepare step-up UX, but
 it cannot authorize an operation, extend a session deadline, or replace the
 server evaluator.
+
+## Conditional Assurance On Generated Updates
+
+A registry classification is fixed per operation and is decided before the
+resolver reads anything. Some writes need a level that depends on the change.
+For example, a rename might need ordinary write assurance while a state transition
+needs elevated assurance. An entity opts in with
+`update_assurance(select = "path", levels = "write,elevated")`. The derive
+contract is in the
+[macro reference](../reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+The owning service enforces the selection:
+
+- The registry classification of the update is enforced first, as for every
+  root, before any database work.
+- Inside the write transaction, after the row is locked, authorized and
+  version-checked, and after write transforms and field policies, the typed
+  selector receives the patch the write applies and the locked row. It returns
+  one declared level.
+- `enforce_selected_assurance` refuses an undeclared level and a schema
+  without `AssuranceEnforcement` with `AUTHORIZATION_MISCONFIGURED`. Otherwise
+  it asks the installed evaluator to enforce that policy ID for the operation's
+  actor class.
+- A refusal returns before the `Before` mutation hook and the `UPDATE`. The
+  transaction rolls back with every related write, and no `Changed` event is
+  committed.
+
+The operation catalogue describes the contract to callers and routers.
+`GeneratedGraphqlOperationDescriptor::conditional_assurance()` (and the resolved
+descriptor's accessor) returns a `GraphqlConditionalAssurance`. It lists every
+level a request may need, sorted, and reports `is_conditional()`. The
+declaration is part of the operation fingerprint and so of the router-export
+fingerprint. Operations without one keep their fingerprints and debug output.
+
+The description is advisory, as the manifest is:
+
+- A caller can prepare step-up UX for the highest listed level. Only the owning
+  service knows which level a request needs, because the selection reads the
+  locked row.
+- A router must not refuse or admit a request from the listed levels. It
+  forwards the request, and the subgraph returns the authoritative denial, such
+  as `STEP_UP_REQUIRED` or `FORBIDDEN`.
+- The registry manifest and the semantic catalogue are unchanged. The update's
+  manifest entry shows its baseline classification only.
+
+An entity with a conditional selection must not generate `update_many` or
+`upsert`, which would rewrite rows without a per-row selection. The derive
+refuses such an entity.
 
 ## Rollback
 
