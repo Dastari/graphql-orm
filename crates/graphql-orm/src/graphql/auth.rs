@@ -287,7 +287,9 @@ pub enum AuthorizationMode {
     DeclaredPoliciesRequired,
     /// Every exposed operation requires a registered entity policy decision.
     ///
-    /// Operations without a provider are denied.
+    /// A missing entity provider denies the operation. A missing row provider
+    /// denies rows for declared row policies. A declared field policy without a
+    /// field provider is a configuration error.
     ExplicitPolicyForAllExposedOperations,
 }
 

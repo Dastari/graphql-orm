@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.196.0 to 0.197.0: restore page size checks
+## 0.197.0 to 0.198.0: restore page size checks
 
 **No action.** Upgrade ORM and macros together. The AI restore collector
 uses a size check before loading repository pages on SQLite and PostgreSQL.
@@ -18,6 +18,30 @@ When row policy or predicates require Rust evaluation, the opt-in guard
 checks the whole candidate range through the scan ceiling or exhaustion
 before loading rows. Spatial fields are measured in their normal projected
 form. No data migration is needed.
+
+## 0.196.0 to 0.197.0: database binding and decoding
+
+**No action.** SQL Server selects compatible scalar conversions by wire type
+and preserves the driver error when a read fails. Out-of-range column indexes
+return an error. Boolean reads support `BIT`, `INT`, and `SMALLINT`. For
+integer columns, zero is false, any nonzero value is true, and an optional
+boolean reads SQL NULL as `None`.
+
+**No action.** For handwritten binds, use `SqlValue::UuidNull` and
+`SqlValue::BytesNull` for UUID and binary columns. `SqlValue::Null` binds
+as text. Legacy text-backed array fields still decode incompatible JSON
+as an empty list. Use explicit JSON storage for fallible decoding.
+
+**No action.** Runtime search accepts collection columns named
+`__gom_search_key` or `__gom_search_score`. Existing search cursors and
+indexes remain compatible.
+
+## 0.195.0 to 0.196.0: computed-field invalidations
+
+**No action.** Upgrade ORM and macros together. To opt in, declare a topic and
+its disclosure policy, register a subscription resolver and enqueue invalidations
+from the trusted writer's transaction. Existing schema surfaces and Changed
+streams require no configuration changes. [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
 
 ## 0.194.0 to 0.195.0: integration test consolidation
 

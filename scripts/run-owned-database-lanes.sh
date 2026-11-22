@@ -46,7 +46,7 @@ run_identifier_quoting() {
 
 run_sqlite() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
-    --test read_snapshot_transaction -- --include-ignored --test-threads=1
+    --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting sqlite
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test compile_ui dependent_delete_ui::
@@ -77,7 +77,7 @@ run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test search_filter_binding -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test read_snapshot_transaction -- --include-ignored --test-threads=1
+    --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test authorized_pagination_postgres --test bounded_mutation_sentinels \
@@ -200,7 +200,7 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib the_probe_reads_the_rows_the_filtered_index_covers -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
+    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test computed_field_invalidation --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
   # Closure rendering and depth refusals need no server.
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test read_predicate_closure
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
@@ -311,7 +311,7 @@ case "${lane}" in
   changed-subscriptions)
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
-        --test keyed_changed_subscriptions -- --include-ignored --test-threads=1
+        --test keyed_changed_subscriptions --test computed_field_invalidation -- --include-ignored --test-threads=1
     done
     ;;
   runtime-live)

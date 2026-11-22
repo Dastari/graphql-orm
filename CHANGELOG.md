@@ -14,11 +14,30 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.197.0
+## Unreleased - ORM/macros 0.198.0
 
 - Check payload sizes for bounded SQLite and PostgreSQL restore pages before
   loading rows. Preflight residual scans before decoding any candidates and
-  measure PostgreSQL spatial fields in their projected form (#532). [Migration](MIGRATION.md#01960-to-01970-restore-page-size-checks)
+  measure PostgreSQL spatial fields in their projected form (#532). [Migration](MIGRATION.md#01970-to-01980-restore-page-size-checks)
+
+## Unreleased - ORM/macros 0.197.0
+
+- **Fixed (#541):** SQL Server's compatibility decoders select conversions
+  from the wire type, preserve the source of decode failures, and return
+  an error for out-of-range column indexes. Missing-policy decisions share
+  one mode table. The documentation describes the typed NULL, legacy JSON
+  and SQL Server identifier contracts.
+- **Fixed (#821):** runtime search qualifies collection columns and chooses
+  distinct helper names, so colliding physical column names work in search
+  projections, filters, ordering and cursor pagination.
+
+## Unreleased - ORM/macros 0.196.0
+
+- **Added (#842).** Trusted transaction writers can enqueue a typed computed-field
+  invalidation. An opted-in subscription releases the target ID and public topic
+  under a disclosure policy and current target authorization. Related-state
+  changes leave the target row, revision and ordinary Changed delivery intact.
+  [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
 
 ## Unreleased - ORM/macros 0.195.0
 

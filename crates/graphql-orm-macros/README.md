@@ -10,8 +10,16 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.197.0 supports size checks for AI restore pages.
-See the [migration guide](../../MIGRATION.md#01960-to-01970-restore-page-size-checks).
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
+Version 0.197.0 keeps SQL Server generated identifiers delimited and extends
+the quoting cases shared with the runtime. The runtime's general SQL Server
+identifier renderer also supports bare temporary table and variable names.
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
+
+Version 0.196.0 lets hosts use generated entity keys and subscription
+authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
 
 Version 0.195.0 groups selected ORM integration tests. The
 [testing guide](../../docs/development/testing.md) lists the grouped selectors.

@@ -55,7 +55,10 @@ pub enum SqlValue {
     Bool(bool),
     /// Typed null for boolean values.
     BoolNull,
-    /// Untyped null used when a generated path has no more specific type.
+    /// Compatibility null that binds as text, including on PostgreSQL and SQL Server.
+    ///
+    /// Use the variant that matches the destination type when it is known, such
+    /// as [`Self::UuidNull`] for a UUID or [`Self::BytesNull`] for binary data.
     Null,
 }
 
@@ -1004,6 +1007,7 @@ impl MutationEvent {
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 trait DeferredEventEmitter<B: OrmBackend>: Send {
+    fn requires_commit(&self) -> bool;
     fn emit(self: Box<Self>, db: &crate::db::Database<B>);
 }
 
@@ -1016,7 +1020,7 @@ trait PostCommitActionRunner<B: OrmBackend>: Send {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-struct DeferredEvent<T>
+struct DeferredEvent<T, const COMMIT_ONLY: bool>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -1024,11 +1028,15 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-impl<T, B> DeferredEventEmitter<B> for DeferredEvent<T>
+impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, COMMIT_ONLY>
 where
     B: OrmBackend,
     T: Clone + Send + Sync + 'static,
 {
+    fn requires_commit(&self) -> bool {
+        COMMIT_ONLY
+    }
+
     fn emit(self: Box<Self>, db: &crate::db::Database<B>) {
         db.emit_event(self.event);
     }
@@ -1073,6 +1081,15 @@ struct TransactionExtensions(
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl TransactionExtensions {
+    fn get_or_insert_default<T: Default + Send + Sync + 'static>(&mut self) -> &mut T {
+        self.0
+            .get_or_insert_with(Default::default)
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(T::default()))
+            .downcast_mut::<T>()
+            .expect("transaction extensions are stored under their own type IDs")
+    }
+
     fn insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
         self.0
             .get_or_insert_with(Default::default)
@@ -1096,6 +1113,12 @@ impl TransactionExtensions {
             .map(|value| *value)
     }
 }
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Default)]
+struct CommitOnlyEventKeys(
+    std::collections::HashSet<(std::any::TypeId, crate::graphql::loaders::RelationKey)>,
+);
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
@@ -2247,10 +2270,30 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
-        if super::ensure_write_allowed().is_err() {
-            return;
+        if super::ensure_write_allowed().is_ok() {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, false> { event }));
         }
-        self.deferred_events.push(Box::new(DeferredEvent { event }));
+    }
+
+    /// Queue one event per type and key that an explicit drain holds until commit.
+    pub(crate) fn queue_commit_only_event<T>(
+        &mut self,
+        event: T,
+        key: crate::graphql::loaders::RelationKey,
+    ) where
+        T: Clone + Send + Sync + 'static,
+    {
+        if super::ensure_write_allowed().is_ok()
+            && self
+                .extensions
+                .get_or_insert_default::<CommitOnlyEventKeys>()
+                .0
+                .insert((std::any::TypeId::of::<T>(), key))
+        {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, true> { event }));
+        }
     }
 
     /// Register an action to run once, after this transaction commits.
@@ -2292,7 +2335,10 @@ where
     }
 
     pub fn emit_queued_events(&mut self) {
-        for event in self.deferred_events.drain(..) {
+        for event in self
+            .deferred_events
+            .extract_if(.., |event| !event.requires_commit())
+        {
             event.emit(self.db);
         }
     }
