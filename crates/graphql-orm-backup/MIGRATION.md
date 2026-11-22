@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.28.1 to 0.29.0: canonical PostgreSQL journal keys
+
+**No action** for the default. Upgrade ORM and backup together when enabling
+the optional PostgreSQL encoding. Follow the
+[database cutover procedure](../../MIGRATION.md#02010-to-02080-canonical-postgresql-journal-keys),
+then enable the `canonical-journal-keys` feature, configure
+`OrmBackupAdapter::with_canonical_change_journal_keys`, and take a fresh full
+backup. The feature enables exact JSON float decoding for restore. A canonical adapter refuses a legacy parent or a
+database in the other mode. Incremental hosts continue to supply their own
+change export and checkpoint handling.
+
 ## 0.28.0 to 0.28.1: read snapshot write refusal
 
 **No action.** Use backup 0.28.1 and ORM 0.191.0 from the same reviewed

@@ -872,7 +872,12 @@ fn ensure_extends_parent(
     } else if parent.database_backend != schema.backend {
         Some("database backend")
     } else if parent.graphql_orm_schema_hash != schema.schema_hash {
-        Some("schema hash")
+        return Err(BackupError::InvalidManifestChain {
+            reason: format!(
+                "incremental snapshot {} schema hash does not match parent {}; start a new full backup after a schema or change journal key encoding change",
+                request.snapshot_id, parent.snapshot_id
+            ),
+        });
     } else {
         None
     };

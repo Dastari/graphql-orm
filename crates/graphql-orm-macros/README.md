@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.208.0 stays aligned with the ORM's opt-in canonical PostgreSQL
+journal keys. Existing macro call sites require no changes. See the
+[migration guide](../../MIGRATION.md#02010-to-02080-canonical-postgresql-journal-keys).
+
 Version 0.201.0 makes `schema_roots!` report duplicate entity identities
 through its fallible schema builders and resolver catalogue helper. Upgrade
 ORM and macros together. See the

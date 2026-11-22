@@ -105,3 +105,287 @@ async fn mixed_case_backup_restore_round_trip() -> Result<(), Box<dyn std::error
     assert_eq!(title, "preserved");
     Ok(())
 }
+
+#[cfg(feature = "canonical-journal-keys")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL and graphql-orm/change-journal; run the backup-postgres owned lane"]
+async fn canonical_journal_keys_compact_and_restore_after_cutover()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{
+        BackupChangeAction as JournalAction, BackupValueKind, ChangeWindow,
+    };
+    use graphql_orm_backup::{
+        BackupChangeAction, BackupChangeExport, CompactChainRequest, IncrementalBackupRequest,
+        compact_chain, create_incremental_backup,
+    };
+
+    let pool = owned_postgres::OwnedPostgres::pool("backup-canonical-journal", 1).await?;
+    // The portable instant descriptor is shared with runtime backup. Bind it
+    // explicitly here so the fixture can use a native timestamp primary key.
+    let entities: Vec<&'static EntityMetadata> = [
+        ("canonical_float", BackupValueKind::Float),
+        ("canonical_time", BackupValueKind::DateTime),
+        ("canonical_text", BackupValueKind::String),
+        ("canonical_bytes", BackupValueKind::Bytes),
+    ]
+    .into_iter()
+    .map(|(table_name, logical_type)| {
+        let mut metadata = MixedBackupNote::metadata().clone();
+        metadata.table_name = table_name;
+        metadata.entity_name = table_name;
+        metadata
+            .fields
+            .iter_mut()
+            .find(|field| field.is_primary_key)
+            .unwrap()
+            .logical_type = logical_type;
+        &*Box::leak(Box::new(metadata))
+    })
+    .collect();
+    graphql_orm::sqlx::raw_sql(
+        "CREATE COLLATION canonical_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+         CREATE TABLE canonical_float (id double precision PRIMARY KEY, title text NOT NULL);
+         CREATE TABLE canonical_time (id timestamptz PRIMARY KEY, title text NOT NULL);
+         CREATE TABLE canonical_text (id text COLLATE canonical_ci PRIMARY KEY, title text NOT NULL);
+         CREATE TABLE canonical_bytes (id bytea PRIMARY KEY, title text NOT NULL);
+         SET DateStyle = 'ISO, MDY';
+         SET TimeZone = 'UTC';
+         SET extra_float_digits = 1;",
+    )
+    .execute(&pool)
+    .await?;
+    let db = Arc::new(graphql_orm::db::Database::new(pool.clone()));
+    db.ensure_change_journal_recorder(&entities).await?;
+    graphql_orm::sqlx::raw_sql(
+        "SET graphql_orm.change_journal = 'on';
+         INSERT INTO canonical_float VALUES (1.2345678901234567, 'retained'), (1.2345678901234569, 'deleted');
+         INSERT INTO canonical_time VALUES ('2026-11-09 12:34:56.123456+00', 'retained'), ('2026-11-09 12:34:57+00', 'deleted');
+         INSERT INTO canonical_text VALUES ('École', 'original');
+         INSERT INTO canonical_bytes VALUES (pg_catalog.decode('00ff', 'hex'), 'retained'), (pg_catalog.decode('00fe', 'hex'), 'deleted');",
+    )
+    .execute(&pool)
+    .await?;
+
+    let temp = TempDir::new()?;
+    let repo = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
+    let objects = NoJournalObjects;
+    let legacy = OrmBackupAdapter::new(db.clone(), entities.clone());
+    let full_request = |snapshot_id| FullBackupRequest {
+        snapshot_id,
+        created_at: 1,
+        app_id: "canonical-journal".into(),
+        app_version: "1.0".into(),
+    };
+    let legacy_id = Uuid::new_v4();
+    create_full_backup(&repo, &legacy, &objects, full_request(legacy_id)).await?;
+    let legacy_position = db
+        .export_changes(ChangeWindow {
+            after_sequence: None,
+            until: i64::MAX,
+        })
+        .await?
+        .last()
+        .unwrap()
+        .sequence;
+    let start = db.enable_canonical_change_journal_keys().await?;
+    let orm = OrmBackupAdapter::new(db.clone(), entities).with_canonical_change_journal_keys();
+    let incremental = |parent_snapshot_id| IncrementalBackupRequest {
+        snapshot_id: Uuid::new_v4(),
+        parent_snapshot_id,
+        created_at: 2,
+        app_id: "canonical-journal".into(),
+        app_version: "1.0".into(),
+    };
+    let error = create_incremental_backup(&repo, &orm, &objects, incremental(legacy_id))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, BackupError::InvalidManifestChain { .. }));
+    assert!(
+        error.to_string().contains("start a new full backup"),
+        "{error}"
+    );
+    let error = db
+        .export_changes(ChangeWindow {
+            after_sequence: Some(legacy_position),
+            until: i64::MAX,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("predates the canonical key cutover"),
+        "{error}"
+    );
+
+    let full_id = Uuid::new_v4();
+    create_full_backup(&repo, &orm, &objects, full_request(full_id)).await?;
+    let original = orm.export_full().await?;
+    graphql_orm::sqlx::raw_sql(
+        "SET DateStyle = 'SQL, DMY';
+         SET TimeZone = 'Asia/Tokyo';
+         SET extra_float_digits = -2;
+         SET bytea_output = 'escape';",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(original, orm.export_full().await?);
+    // Record under a different wire encoding, then return to UTF-8 so SQLx
+    // can read the application text.
+    graphql_orm::sqlx::raw_sql(
+        "SET client_encoding = 'LATIN1';
+         DELETE FROM canonical_float WHERE title = 'deleted';
+         DELETE FROM canonical_time WHERE title = 'deleted';
+         DELETE FROM canonical_bytes WHERE title = 'deleted';
+         UPDATE canonical_text SET id = pg_catalog.chr(233) || 'COLE', title = 'updated';
+         SET client_encoding = 'UTF8';",
+    )
+    .execute(&pool)
+    .await?;
+    let current = orm.export_full().await?;
+    let journal = db
+        .export_changes(ChangeWindow {
+            after_sequence: Some(start),
+            until: i64::MAX,
+        })
+        .await?;
+    assert_eq!(journal.len(), 5);
+    let changes = journal
+        .into_iter()
+        .map(|entry| {
+            let action = match entry.action {
+                JournalAction::Create => BackupChangeAction::Create,
+                JournalAction::Update => BackupChangeAction::Update,
+                JournalAction::Delete => BackupChangeAction::Delete,
+            };
+            let tables = if action == BackupChangeAction::Delete {
+                &original
+            } else {
+                &current
+            };
+            let row = tables
+                .iter()
+                .find(|table| table.table_name == entry.table_name)
+                .unwrap()
+                .rows
+                .iter()
+                .find(|row| row.primary_key == entry.primary_key)
+                .expect("journal key must match the exported identity")
+                .clone();
+            let row = (action != BackupChangeAction::Delete).then_some(row);
+            BackupChangeExport {
+                table_name: entry.table_name,
+                primary_key: entry.primary_key,
+                action,
+                row,
+                changed_at: entry.changed_at,
+            }
+        })
+        .collect();
+    let source = FixtureJournalSource { orm: &orm, changes };
+    let request = incremental(full_id);
+    let delta_id = request.snapshot_id;
+    create_incremental_backup(&repo, &source, &objects, request).await?;
+    let compacted_id = Uuid::new_v4();
+    let compacted = compact_chain(
+        &repo,
+        CompactChainRequest {
+            snapshot_id: compacted_id,
+            source_snapshot_id: delta_id,
+            created_at: 3,
+            app_id: "canonical-journal".into(),
+            app_version: "1.0".into(),
+        },
+    )
+    .await?;
+    assert_eq!(compacted.manifest.database.row_count, 4);
+
+    orm.clear_restore_target().await?;
+    restore_snapshot(&repo, &orm, compacted_id, RestoreContext::empty_database()).await?;
+    assert_eq!(orm.export_full().await?, current);
+    Ok(())
+}
+
+// The fixture freezes writers after the tested change batch, then supplies
+// the resulting row bodies and tombstones to the existing host contract.
+#[cfg(feature = "canonical-journal-keys")]
+struct FixtureJournalSource<'a> {
+    orm: &'a OrmBackupAdapter,
+    changes: Vec<graphql_orm_backup::BackupChangeExport>,
+}
+
+#[cfg(feature = "canonical-journal-keys")]
+#[async_trait]
+impl GraphqlOrmBackupAdapter for FixtureJournalSource<'_> {
+    async fn schema_snapshot(
+        &self,
+    ) -> Result<graphql_orm_backup::GraphqlOrmBackupSchema, BackupError> {
+        self.orm.schema_snapshot().await
+    }
+
+    async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError> {
+        self.orm.export_full().await
+    }
+
+    async fn export_incremental(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<graphql_orm_backup::BackupChangeExport>, BackupError> {
+        Ok(self.changes.clone())
+    }
+
+    async fn restore_full(
+        &self,
+        schema: graphql_orm_backup::GraphqlOrmBackupSchema,
+        rows: Vec<BackupTableExport>,
+        context: RestoreContext,
+    ) -> Result<(), BackupError> {
+        self.orm.restore_full(schema, rows, context).await
+    }
+
+    async fn restore_incremental(
+        &self,
+        changes: Vec<graphql_orm_backup::BackupChangeExport>,
+        context: RestoreContext,
+    ) -> Result<(), BackupError> {
+        self.orm.restore_incremental(changes, context).await
+    }
+}
+
+#[cfg(feature = "canonical-journal-keys")]
+struct NoJournalObjects;
+
+#[cfg(feature = "canonical-journal-keys")]
+#[async_trait]
+impl BackupObjectIndex for NoJournalObjects {
+    async fn objects_from_full_export(
+        &self,
+        _: &[BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Ok(Vec::new())
+    }
+
+    async fn objects_from_incremental_export(
+        &self,
+        _: Uuid,
+        _: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_objects_for_incremental_backup(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_object(&self, _: &BackupObjectRef) -> Result<Bytes, BackupError> {
+        unreachable!("fixture has no objects")
+    }
+}

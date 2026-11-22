@@ -10,6 +10,43 @@ supersedes: []
 
 # Migration Guide
 
+## 0.201.0 to 0.208.0: canonical PostgreSQL journal keys
+
+**No action** for the default. The legacy journal recorder and full backup
+key format stay as they were. The opt-in is PostgreSQL-only and requires the
+ORM `change-journal` feature.
+
+1. Upgrade all recorder installers, writers and backup workers to compatible
+   versions, including backup 0.29.0 if you use `OrmBackupAdapter`. Stop
+   writes, deployments and backup jobs for the cutover. Complete and retain
+   any legacy backups you need before changing the recorder.
+2. With the usual journal search path, as the schema owner, install the
+   recorder for all journaled entities using the schema target or
+   `Database::ensure_change_journal_recorder`. Call
+   `Database::enable_canonical_change_journal_keys().await?`. This reserves
+   a sequence boundary for the resolved journal. A retry returns the same
+   boundary. Legacy rows remain stored, and the old cursors are refused.
+3. Enable the backup crate's `canonical-journal-keys` feature, construct
+   `OrmBackupAdapter` with `with_canonical_change_journal_keys()`, and take a
+   new full backup before resuming writes. Record the returned
+   boundary as its initial journal checkpoint. If any canonical writes
+   occurred before this full backup, capture a fresh checkpoint under
+   quiescence at the full snapshot instead. Host incremental adapters must
+   use the same schema identity and the exported canonical keys, including
+   for tombstones. Never attach canonical changes to a legacy snapshot.
+4. Enable canonical mode on a canonical restore target before applying the
+   backup. Keep a legacy-configured target available for retained legacy
+   snapshots. After a restore, start a new incremental chain from a full
+   snapshot and a current checkpoint.
+
+Canonical keys use PostgreSQL's built-in scalar values directly, with UTF-8
+for text. Case or spelling changes under a nondeterministic collation still
+produce an old-key delete and a new-key create. Custom types and domains are
+refused. Full backup still requires portable column values and composite
+keys are full-only. Take a fresh full backup when changing a primary key's
+storage type. The cutover is one-way for the journal because the original
+value of a rounded legacy key cannot always be recovered.
+
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
 **No action.** Upgrade ORM and macros together. The generated resolver

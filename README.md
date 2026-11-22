@@ -89,6 +89,10 @@ to an existing database.
 | `graphql-orm-router-protocol` | Versioned project-neutral subgraph/router declarations | [package README](crates/graphql-orm-router-protocol/README.md) |
 | `graphql-orm-router` | Federated GraphQL router runtime | [package README](crates/graphql-orm-router/README.md) |
 
+PostgreSQL journal users can opt into canonical single-column keys shared by
+the recorder and full snapshots. The cutover starts a fresh incremental
+chain. See the [migration procedure](MIGRATION.md#02010-to-02080-canonical-postgresql-journal-keys).
+
 The packages remain independently consumable. Adding one does not enable the
 others as ORM features.
 

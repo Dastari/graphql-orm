@@ -219,6 +219,20 @@ pub struct BackupSnapshot {
 #[cfg(feature = "postgres")]
 pub struct BackupSnapshot {
     tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    canonical_key_start: Option<i64>,
+}
+
+impl BackupSnapshot {
+    /// The sequence reserved for canonical key cutover, if one is visible
+    /// in this snapshot. It is a lower bound, not the snapshot's checkpoint.
+    pub fn canonical_change_journal_start_sequence(&self) -> Option<i64> {
+        #[cfg(feature = "postgres")]
+        {
+            self.canonical_key_start
+        }
+        #[cfg(not(feature = "postgres"))]
+        None
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -397,9 +411,53 @@ impl crate::db::Database {
         }
     }
 
+    /// Switch the PostgreSQL journal resolved by this connection to canonical keys.
+    ///
+    /// First install the recorder as the owner, and stop writers, schema
+    /// changes, and backup workers. Take a new full snapshot before resuming
+    /// writes. Use the returned sequence as that snapshot's initial checkpoint
+    /// while writers remain stopped. Legacy entries stay in the journal.
+    /// Retrying a completed cutover returns the original sequence.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the change-journal feature, managed journal, owner privileges,
+    /// or a supported key column type is missing.
+    #[cfg(feature = "postgres")]
+    pub async fn enable_canonical_change_journal_keys(&self) -> crate::Result<i64> {
+        super::ensure_sql_write_allowed()?;
+        if !cfg!(feature = "change-journal") {
+            return Err(sqlx::Error::Protocol(
+                "canonical change journal keys require the graphql-orm change-journal feature"
+                    .into(),
+            ));
+        }
+        super::journal_key::enable(self.pool()).await
+    }
+
+    /// Read the PostgreSQL canonical key cutover sequence, if installed.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the database cannot be read or the canonical recorder is altered.
+    pub async fn canonical_change_journal_start_sequence(&self) -> crate::Result<Option<i64>> {
+        #[cfg(feature = "postgres")]
+        {
+            let tx = begin_consistent_snapshot(self.pool()).await?;
+            let start = tx.canonical_change_journal_start_sequence();
+            tx.tx.commit().await?;
+            Ok(start)
+        }
+        #[cfg(not(feature = "postgres"))]
+        Ok(None)
+    }
+
     /// Export the change journal entries in `window`, in journal order.
     ///
     /// Each entry carries its journal position in [`BackupChange::sequence`].
+    /// A canonical PostgreSQL journal requires an explicit cursor at or
+    /// after the cutover sequence. Start from a fresh full backup and its
+    /// checkpoint.
     /// To export incrementally, pass the last returned entry's position as
     /// the next window's [`ChangeWindow::after_sequence`]. Consecutive exports
     /// then return every entry exactly once: positions are assigned by the
@@ -659,7 +717,11 @@ async fn begin_consistent_snapshot(pool: &DbPool) -> crate::Result<BackupSnapsho
     sqlx::query("SET LOCAL row_security = off")
         .execute(&mut *tx)
         .await?;
-    Ok(BackupSnapshot { tx })
+    let canonical_key_start = super::journal_key::epoch(&mut tx).await?;
+    Ok(BackupSnapshot {
+        tx,
+        canonical_key_start,
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -1083,7 +1145,7 @@ where
           AND tr.tgname OPERATOR(pg_catalog.=) ? AND NOT tr.tgisinternal AND tr.tgenabled OPERATOR(pg_catalog.=) 'O'
           AND tr.tgtype OPERATOR(pg_catalog.=) ? AND tr.tgqual IS NULL AND tr.tgnargs OPERATOR(pg_catalog.=) 7
           AND pn.nspname OPERATOR(pg_catalog.=) 'graphql_orm' AND p.proname OPERATOR(pg_catalog.=) ? AND p.pronargs OPERATOR(pg_catalog.=) 0
-          AND p.prosecdef AND p.prosrc OPERATOR(pg_catalog.=) ? AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[?]::pg_catalog.text[]
+          AND p.prosecdef AND p.prosrc COLLATE pg_catalog.\"C\" OPERATOR(pg_catalog.=) ANY (ARRAY[?, ?]::pg_catalog.text[]) AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[?]::pg_catalog.text[]
           AND p.proowner OPERATOR(pg_catalog.=) t.relowner AND j.relowner OPERATOR(pg_catalog.=) p.proowner AND j.relkind OPERATOR(pg_catalog.=) 'r'
           AND pg_catalog.position(tr.tgargs, '\\x00'::pg_catalog.bytea) OPERATOR(pg_catalog.>) 1
           AND args.entry_arguments OPERATOR(pg_catalog.=) (pg_catalog.convert_to(tn.nspname::pg_catalog.text, 'UTF8') OPERATOR(pg_catalog.||) '\\x00'::pg_catalog.bytea
@@ -1114,6 +1176,7 @@ where
         SqlValue::Int(i64::from(super::rls::CHANGE_JOURNAL_TRIGGER_TYPE)),
         SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION.to_string()),
         SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_BODY.to_string()),
+        SqlValue::String(super::journal_key::recorder_body()),
         SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_CONFIG.to_string()),
         SqlValue::Bytes(expected_arguments),
         SqlValue::Bool(qualified),
@@ -1411,6 +1474,17 @@ async fn export_changes(
             return Err(missing_change_journal_sequence());
         }
     }
+    // Serialize epoch selection with cutover, without blocking journal writes.
+    sqlx::query(&format!("LOCK TABLE {journal} IN ACCESS SHARE MODE"))
+        .execute(&mut *tx)
+        .await?;
+    if let Some(start) = super::journal_key::epoch(&mut tx).await?
+        && window.after_sequence.unwrap_or(0) < start
+    {
+        return Err(sqlx::Error::Protocol(format!(
+            "change journal cursor predates the canonical key cutover at sequence {start}; start from a new full backup"
+        )));
+    }
     let after = window.after_sequence.unwrap_or(0);
     let high_water: Option<i64> = sqlx::query_scalar(&format!(
         "SELECT pg_catalog.max({CHANGE_JOURNAL_SEQUENCE_COLUMN}) FROM {journal}"
@@ -1475,12 +1549,27 @@ async fn export_table_rows(
     entity: &EntityBackupDescriptor,
 ) -> crate::Result<Vec<BackupRow>> {
     let export_columns = export_columns(entity);
-    let select_columns = export_columns
+    #[cfg_attr(not(feature = "postgres"), allow(unused_mut))]
+    let mut select_columns = export_columns
         .iter()
         .map(|column| quote_identifier(&column.column_name))
         .collect::<Vec<_>>()
         .join(", ");
     let key_columns = validated_key_columns(entity)?;
+    #[cfg(feature = "postgres")]
+    let canonical = snapshot.canonical_key_start.is_some() && key_columns.len() == 1;
+    #[cfg(feature = "postgres")]
+    if canonical {
+        let table = quote_table_identifier(&entity.table_name);
+        sqlx::query(&format!("LOCK TABLE {table} IN ACCESS SHARE MODE"))
+            .execute(&mut *snapshot.tx)
+            .await?;
+        super::journal_key::check_type(&mut snapshot.tx, &table, key_columns[0]).await?;
+        select_columns.push_str(", ");
+        select_columns.push_str(&super::journal_key::projection(&quote_identifier(
+            key_columns[0],
+        )));
+    }
     let sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
         select_columns,
@@ -1507,6 +1596,20 @@ async fn export_table_rows(
             values.insert(column.column_name.clone(), value);
         }
 
+        #[cfg(feature = "postgres")]
+        let primary_key = if canonical {
+            if matches!(values.get(key_columns[0]), Some(BackupValue::Float(value)) if !value.is_finite())
+            {
+                return Err(sqlx::Error::Protocol(format!(
+                    "backup cannot restore a non-finite float primary key in {}",
+                    entity.table_name
+                )));
+            }
+            row.try_get(export_columns.len())?
+        } else {
+            row_identity(entity, &key_columns, &values)?
+        };
+        #[cfg(not(feature = "postgres"))]
         let primary_key = row_identity(entity, &key_columns, &values)?;
         let row_hash = canonical_row_hash(&entity.table_name, &values);
         out.push(BackupRow {
@@ -1562,7 +1665,13 @@ async fn begin_restore_transaction(pool: &DbPool) -> crate::Result<BackupSnapsho
     ))
     .execute(&mut *tx)
     .await?;
-    Ok(BackupSnapshot { tx })
+    #[cfg(feature = "postgres")]
+    let canonical_key_start = super::journal_key::epoch(&mut tx).await?;
+    Ok(BackupSnapshot {
+        tx,
+        #[cfg(feature = "postgres")]
+        canonical_key_start,
+    })
 }
 
 /// Import one table's rows inside `restore` and check the stored rows against
@@ -1573,6 +1682,7 @@ async fn import_table_rows_on(
     entity: &EntityBackupDescriptor,
     rows: &[BackupRow],
 ) -> crate::Result<ImportReport> {
+    let canonical_keys = restore.canonical_change_journal_start_sequence().is_some();
     let tx = &mut restore.tx;
     let count = table_row_count_on(tx, &entity.table_name).await?;
     if count != 0 {
@@ -1600,7 +1710,7 @@ async fn import_table_rows_on(
         placeholder_sql
     );
 
-    let order = import_row_order(entity, rows)?;
+    let order = import_row_order(entity, rows, canonical_keys)?;
     let stored = |row: &BackupRow, column: &super::ColumnBackupDescriptor| {
         backup_value_to_sql_value(
             row.values.get(&column.column_name).ok_or_else(|| {
@@ -2147,6 +2257,7 @@ struct ImportRowOrder<'a> {
 fn import_row_order<'a>(
     entity: &'a EntityBackupDescriptor,
     rows: &'a [BackupRow],
+    canonical_keys: bool,
 ) -> crate::Result<ImportRowOrder<'a>> {
     // Self-references order rows by a single-column key; a composite-key table has none.
     let single_key = entity.primary_key_columns.is_empty();
@@ -2171,8 +2282,23 @@ fn import_row_order<'a>(
     let row_indexes = rows
         .iter()
         .enumerate()
-        .map(|(index, row)| (row.primary_key.as_str(), index))
-        .collect::<BTreeMap<_, _>>();
+        .map(|(index, row)| {
+            // Foreign keys are typed values. Canonical identities encode
+            // physical key bytes, so use the key value for dependency lookup.
+            let key = if canonical_keys {
+                let value = row.values.get(&entity.primary_key_column).ok_or_else(|| {
+                    sqlx::Error::Protocol(format!(
+                        "backup row {} for table {} is missing primary key column {}",
+                        row.primary_key, entity.table_name, entity.primary_key_column
+                    ))
+                })?;
+                std::borrow::Cow::Owned(value.primary_key_string())
+            } else {
+                std::borrow::Cow::Borrowed(row.primary_key.as_str())
+            };
+            Ok((key, index))
+        })
+        .collect::<crate::Result<BTreeMap<_, _>>>()?;
     let mut children = vec![Vec::new(); rows.len()];
     let mut indegrees = vec![0_usize; rows.len()];
 
@@ -2844,7 +2970,7 @@ mod tests {
             }],
         };
 
-        let order = import_row_order(&entity, &rows).expect("rows should order");
+        let order = import_row_order(&entity, &rows, false).expect("rows should order");
 
         assert!(order.deferred.is_empty());
         assert_eq!(order.ordered[0].primary_key, parent_id.to_string());
@@ -2892,7 +3018,8 @@ mod tests {
             }],
         };
 
-        let order = import_row_order(&entity, &rows).expect("cycles defer instead of failing");
+        let order =
+            import_row_order(&entity, &rows, false).expect("cycles defer instead of failing");
         let keys = |rows: &[&BackupRow]| {
             rows.iter()
                 .map(|row| row.primary_key.clone())

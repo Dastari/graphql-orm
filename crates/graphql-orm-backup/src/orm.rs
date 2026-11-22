@@ -52,6 +52,7 @@ pub struct OrmBackupAdapter {
     entities: Vec<&'static EntityMetadata>,
     migration_version: Option<String>,
     column_policy_overrides: Vec<ColumnPolicyOverride>,
+    canonical_journal_keys: bool,
 }
 
 struct ColumnPolicyOverride {
@@ -72,7 +73,29 @@ impl OrmBackupAdapter {
             entities,
             migration_version: None,
             column_policy_overrides: Vec::new(),
+            canonical_journal_keys: false,
         }
+    }
+
+    /// Uses the PostgreSQL canonical change journal key format for this adapter.
+    ///
+    /// Cut over the database with `Database::enable_canonical_change_journal_keys`
+    /// first. Start a new full snapshot and checkpoint before producing
+    /// incrementals. The adapter refuses a database in the other mode.
+    #[cfg(feature = "canonical-journal-keys")]
+    #[must_use]
+    pub fn with_canonical_change_journal_keys(mut self) -> Self {
+        self.canonical_journal_keys = true;
+        self
+    }
+
+    fn check_journal_key_mode(&self, canonical: bool) -> Result<(), BackupError> {
+        if self.canonical_journal_keys != canonical {
+            return Err(BackupError::Database {
+                message: "backup adapter and database use different change journal key encodings; configure the adapter to match the database and start a new full backup after cutover".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Overrides the migration version recorded in schema snapshots.
@@ -133,7 +156,19 @@ impl OrmBackupAdapter {
             &self.entities,
         );
         self.apply_column_policy_overrides(&mut snapshot.entities)?;
+        let canonical = self
+            .database
+            .canonical_change_journal_start_sequence()
+            .await
+            .map_err(database_error("read change journal key encoding"))?
+            .is_some();
+        self.check_journal_key_mode(canonical)?;
         snapshot.schema_hash = stable_schema_hash(&snapshot.entities);
+        if canonical {
+            // Part of the sealed manifest identity, even when the schema
+            // itself is unchanged. Leave every legacy hash byte intact.
+            snapshot.schema_hash.insert_str(0, "pg-canonical-keys-v1:");
+        }
         Ok(snapshot)
     }
 
@@ -373,6 +408,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
             .begin_consistent_snapshot()
             .await
             .map_err(database_error("begin export snapshot"))?;
+        self.check_journal_key_mode(snapshot.canonical_change_journal_start_sequence().is_some())?;
         let mut exports = Vec::with_capacity(descriptors.len());
         for descriptor in &descriptors {
             let rows = self
