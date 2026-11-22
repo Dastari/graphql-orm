@@ -556,8 +556,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 quote! { ::graphql_orm::async_graphql::MergedSubscription },
             )
         };
-        let subscription_schema_type = select_schema_root(
-            quote! { SubscriptionRoot },
+        let (subscription_selection, subscription_schema_type) = select_schema_root(
+            "Subscription",
             quote! { ::graphql_orm::async_graphql::EmptySubscription },
             &generated_subscriptions,
             &subscription_opt_outs,
@@ -571,6 +571,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
             pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
             #readonly_subscription_root
+            #subscription_selection
             pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, #subscription_schema_type>;
             type __GomSchemaBuilder = ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, #subscription_schema_type>;
 
@@ -721,15 +722,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! { ::graphql_orm::async_graphql::MergedSubscription },
         )
     };
-    let mutation_schema_type = select_schema_root(
-        quote! { MutationRoot },
+    let (mutation_selection, mutation_schema_type) = select_schema_root(
+        "Mutation",
         quote! { ::graphql_orm::async_graphql::EmptyMutation },
         &generated_mutations,
         &mutation_opt_outs,
         mutation_custom_ops.is_some(),
     );
-    let subscription_schema_type = select_schema_root(
-        quote! { SubscriptionRoot },
+    let (subscription_selection, subscription_schema_type) = select_schema_root(
+        "Subscription",
         quote! { ::graphql_orm::async_graphql::EmptySubscription },
         &generated_subscriptions,
         &subscription_opt_outs,
@@ -779,6 +780,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #query_root
         #mutation_root
         #subscription_root
+        #mutation_selection
+        #subscription_selection
         #operation_catalog_helper
         #root_field_collision_check
 
@@ -977,24 +980,27 @@ fn emit_chunked_merged(
 // schema uses the original struct when any field remains, or async-graphql's
 // empty root when the derives removed every generated field.
 fn select_schema_root(
-    root: proc_macro2::TokenStream,
+    name: &str,
     empty: proc_macro2::TokenStream,
     sources: &[proc_macro2::TokenStream],
     opt_outs: &[proc_macro2::TokenStream],
     has_custom_ops: bool,
-) -> proc_macro2::TokenStream {
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let root = quote::format_ident!("{name}Root", span = proc_macro2::Span::mixed_site());
     if has_custom_ops || sources.is_empty() {
-        return root;
+        return (quote! {}, quote! { #root });
     }
 
-    quote! {
-        <::graphql_orm::graphql::orm::GeneratedRootSelection<
+    let selected = quote::format_ident!("__GomSchema{name}Root", span = proc_macro2::Span::mixed_site());
+    let definition = quote! {
+        type #selected = <::graphql_orm::graphql::orm::GeneratedRootSelection<
             {
                 !(#(#opt_outs)||*)
                     || ::graphql_orm::graphql::orm::has_generated_root_fields(&[#(#sources),*])
             },
-        > as ::graphql_orm::graphql::orm::SelectGeneratedRoot<#root, #empty>>::Root
-    }
+        > as ::graphql_orm::graphql::orm::SelectGeneratedRoot<#root, #empty>>::Root;
+    };
+    (definition, quote! { #selected })
 }
 
 struct SchemaRootsArgs {

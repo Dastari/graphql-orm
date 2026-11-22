@@ -7831,19 +7831,15 @@ fn generate_graphql_operations_unfiltered(
     let mutations_opted_out = mutations_disabled.is_some();
     let subscriptions_opted_out = subscriptions_disabled.is_some();
     let operation_metadata_impl = quote! {
+        #[doc(hidden)]
         impl #struct_name {
-            #[doc(hidden)]
             pub const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] =
                 &[#(#query_root_fields),*];
-            #[doc(hidden)]
             pub const __GOM_MUTATION_ROOT_FIELDS: &'static [&'static str] =
                 &[#(#mutation_root_fields),*];
-            #[doc(hidden)]
             pub const __GOM_SUBSCRIPTION_ROOT_FIELDS: &'static [&'static str] =
                 &[#(#subscription_root_fields),*];
-            #[doc(hidden)]
             pub const __GOM_MUTATIONS_OPTED_OUT: bool = #mutations_opted_out;
-            #[doc(hidden)]
             pub const __GOM_SUBSCRIPTIONS_OPTED_OUT: bool = #subscriptions_opted_out;
         }
 
