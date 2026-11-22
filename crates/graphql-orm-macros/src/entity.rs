@@ -57,6 +57,9 @@ pub(crate) struct EntityMetadata {
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
     pub(crate) compose_complex_object: bool,
+    /// `object_fields`: the generated object also hosts the handwritten
+    /// resolvers of a `#[graphql_object_fields]` impl.
+    pub(crate) object_fields: Option<proc_macro2::Span>,
     /// Declared Apollo Federation v2 entity keys, in declaration order.
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
     /// `node_id`: generate the global `NodeId` field and its resolvable `@key`.
@@ -676,6 +679,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("compose_complex_object") {
                     metadata.compose_complex_object = true;
+                } else if meta.path.is_ident("object_fields") {
+                    metadata.object_fields = Some(meta.path.span());
                 } else if meta.path.is_ident("search") {
                     let mut search = SearchEntityMetadata::default();
                     meta.parse_nested_meta(|search_meta| {
@@ -4048,6 +4053,35 @@ fn generate_entity_tokens(
     // objects opt into complex or schema_only, so check those ownership modes.
     // Pure GraphQLSchemaEntity metadata does not own a GraphQL read contract.
     let externally_owned_object = legacy_graphql_complex || entity_meta.schema_only;
+    if let Some(span) = entity_meta.object_fields
+        && identity_names.is_none()
+    {
+        // Handwritten fields join the object this derive generates. An entity
+        // whose object is owned elsewhere has no such object to join.
+        let owner = if legacy_graphql_complex {
+            Some(
+                "`#[graphql(complex)]`: a `SimpleObject` entity composes handwritten fields with `#[graphql_orm(compose_complex_object)]` and `#[graphql_orm::graphql_complex_object]`",
+            )
+        } else if schema_only || has_repository_entity_attribute(&input.attrs) {
+            Some("an entity that has no generated GraphQL object")
+        } else {
+            None
+        };
+        if let Some(owner) = owner {
+            return Err(syn::Error::new(
+                span,
+                format!("`#[graphql_orm(object_fields)]` cannot be combined with {owner}"),
+            ));
+        }
+    }
+    let hosts_object_fields = entity_meta.object_fields.is_some();
+    // GraphQL names of the fields of the generated object, for the collision
+    // check of handwritten fields.
+    let mut object_field_names: Vec<String> = Vec::new();
+    // GraphQL names of every declared entity field, served by the object or
+    // not. Generated paths decide these names by the entity field's policy,
+    // so a handwritten field may take none of them.
+    let mut declared_field_names: Vec<String> = Vec::new();
     // A `graphql_policy_object` marker must come with the guard that attribute
     // installs; the attribute also implements this witness trait.
     let mut policy_object_witness = quote! {};
@@ -4403,6 +4437,7 @@ fn generate_entity_tokens(
             graphql_rename_fields,
             serde_rename_all,
         );
+        declared_field_names.push(subscription_api_name.clone());
         let subscription_allowed = !has_repository_entity_attribute(&input.attrs)
             && field_meta.graphql_readable()
             && (!field_meta.graphql_skip || field_meta.is_relation)
@@ -5938,6 +5973,7 @@ fn generate_entity_tokens(
                     quote! { Ok(self.#field_name.clone()) },
                 )
             };
+            object_field_names.push(graphql_name.clone());
             object_field_methods.push(quote! {
                 #[doc = #description]
                 #[graphql(name = #graphql_name)]
@@ -5968,6 +6004,7 @@ fn generate_entity_tokens(
                         #return_expr
                     }
                 };
+                object_field_names.push(RECORD_VERSION_FIELD.to_owned());
                 object_field_methods.push(method.clone());
                 identity_field_methods.push(method);
                 identity_field_names.push(RECORD_VERSION_FIELD);
@@ -6367,6 +6404,7 @@ fn generate_entity_tokens(
             &record,
             &parts,
         );
+        object_field_names.push("NodeId".to_owned());
         object_field_methods.push(method.clone());
         identity_field_methods.push(method);
         identity_field_names.push("NodeId");
@@ -6493,6 +6531,18 @@ fn generate_entity_tokens(
         }
     } else if schema_only || legacy_graphql_complex {
         quote! {}
+    } else if hosts_object_fields {
+        crate::object_fields::host_tokens(
+            struct_name,
+            &entity_description,
+            &entity_name_lit,
+            &backend_marker,
+            graphql_rename_fields,
+            serde_rename_all,
+            &object_field_names,
+            &declared_field_names,
+            &object_field_methods,
+        )
     } else {
         quote! {
             #[doc = #entity_description]
@@ -6503,6 +6553,24 @@ fn generate_entity_tokens(
         }
     };
 
+    // Not opted in, both stay exactly as they were.
+    let (semantic_fields, computed_object_fields_impl) = if hosts_object_fields && !schema_only {
+        (
+            quote! {
+                ::graphql_orm::graphql::orm::__gom_with_computed_fields::<Self>(
+                    vec![#(#semantic_field_defs),*],
+                    #entity_classification_tokens,
+                )
+            },
+            quote! {
+                fn computed_object_fields() -> &'static [::graphql_orm::graphql::orm::ComputedObjectFieldDef] {
+                    <Self as ::graphql_orm::graphql::orm::HandwrittenObjectFields>::FIELDS
+                }
+            },
+        )
+    } else {
+        (quote! { vec![#(#semantic_field_defs),*] }, quote! {})
+    };
     let persisted_field_names_impl = quote! {
         impl #struct_name {
             /// Rust names of the entity's persisted fields, for generated
@@ -7353,7 +7421,7 @@ fn generate_entity_tokens(
                         entity_name: ::std::string::ToString::to_string(#struct_name_str),
                         description: ::std::string::ToString::to_string(#entity_description),
                         default_classification: #entity_classification_tokens,
-                        fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
+                        fields: #semantic_fields.into_boxed_slice(),
                         label_fields: ::std::vec::Vec::new(),
                         record_version: #semantic_record_version,
                     }
@@ -7364,6 +7432,7 @@ fn generate_entity_tokens(
             fn subscription_field_policy(field: &str) -> Option<(&'static str, bool, Option<&'static str>)> {
                 match field { #(#subscription_field_policy_arms)* _ => None }
             }
+            #computed_object_fields_impl
 
             fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
                 static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[

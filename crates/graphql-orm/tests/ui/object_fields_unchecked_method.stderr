@@ -1,0 +1,19 @@
+error: expected `impl`
+  --> tests/ui/object_fields_unchecked_method.rs:19:5
+   |
+19 |     {
+   |     ^
+
+error[E0277]: `Record` declares `#[graphql_orm(object_fields)]`, but no `#[graphql_object_fields]` impl composes its GraphQL object
+  --> tests/ui/object_fields_unchecked_method.rs:7:10
+   |
+ 7 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^ this entity has no GraphQL object yet
+   |
+help: the trait `graphql_orm::prelude::HandwrittenObjectFields` is not implemented for `Record`
+  --> tests/ui/object_fields_unchecked_method.rs:10:1
+   |
+10 | struct Record {
+   | ^^^^^^^^^^^^^
+   = note: add `#[graphql_orm::graphql_object_fields] impl Record { ... }` in the entity's module, or remove `object_fields`
+   = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
