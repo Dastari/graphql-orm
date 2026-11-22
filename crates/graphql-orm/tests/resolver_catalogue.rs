@@ -1,4 +1,4 @@
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 //! The resolver catalogue (#544): relation fields and Federation entity
 //! resolvers, which have no root coordinate and so appear in no operation
 //! catalogue.
