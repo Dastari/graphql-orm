@@ -1647,3 +1647,30 @@ bare names, retain their spelling across modules/crates, and compare
 `catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
 or your catalogue accessor). See the
 [migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).
+
+
+## SQL Server parameter types
+
+On a SQL Server entity, describe the physical type of a persisted field with
+`#[graphql_orm(mssql_type = "VARCHAR(32)")]` or
+`#[graphql_orm(mssql_type = "INT")]`. String fields accept VARCHAR and NVARCHAR
+with a valid length or MAX. Integer fields accept TINYINT, SMALLINT, INT and
+BIGINT. Nullable fields accept the same declarations. The declaration also
+sets the type in schema metadata.
+
+Pass `MssqlPoolOptions::new().typed_parameters(true)` to
+`MssqlPool::connect_ado_with` or `MssqlPool::connect_ado_external_writable_with`
+and use that pool to construct your SQL Server `Database`. The default keeps
+the existing binds. When enabled, generated field binds use the declared
+types. NVARCHAR and BIGINT already use their native parameter families.
+Operands outside the range of a narrow integer column continue to bind as
+BIGINT, preserving range comparisons. VARCHAR conversion is on the parameter
+side, with enough space for the operand even when it exceeds the column's
+declared length. Case-insensitive pattern operations retain their existing
+case folding.
+
+SQL Server converts VARCHAR operands using the database default code page.
+Conversion can change comparisons or stored values if a character cannot be
+represented in that code page, even when the column uses a different code
+page that can store it. Check your collations and expected input before
+enabling the option.

@@ -4078,11 +4078,25 @@ where
         before: bool,
         inclusive: bool,
     ) -> async_graphql::Result<Self> {
-        let (mut clause, mut binds) = if before {
-            render_keyset_before(B::DIALECT, order, values, self.values.len() + 1)
+        let parameter_type = |column: &str| {
+            if B::DIALECT == DatabaseBackend::Mssql {
+                mssql_parameter_type::<T>(column)
+            } else {
+                None
+            }
+        };
+        let render = if before {
+            super::query::render_keyset_before_with_types
         } else {
-            render_keyset_after(B::DIALECT, order, values, self.values.len() + 1)
-        }
+            super::query::render_keyset_after_with_types
+        };
+        let (mut clause, mut binds) = render(
+            B::DIALECT,
+            order,
+            values,
+            self.values.len() + 1,
+            parameter_type,
+        )
         .map_err(|e| e.into_graphql_error())?;
         if inclusive {
             let mut equal = Vec::new();
@@ -4095,7 +4109,11 @@ where
                         column.column,
                         B::DIALECT.placeholder(self.values.len() + binds.len() + 1)
                     ));
-                    binds.push(super::keyset_sql_value(value).ok_or_else(input_error)?);
+                    binds.push(
+                        super::keyset_sql_value(value)
+                            .ok_or_else(input_error)?
+                            .with_mssql_type(parameter_type(column.column).unwrap_or("")),
+                    );
                 }
             }
             clause = format!("({clause}) OR ({})", equal.join(" AND "));

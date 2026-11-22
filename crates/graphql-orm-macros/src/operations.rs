@@ -1061,7 +1061,7 @@ fn push_create_input_sql_value_tokens(
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if meta.decimal.is_some() {
+    let push = if meta.decimal.is_some() {
         let definition = decimal_definition_tokens(meta);
         if is_option_type(field_type) {
             quote! {
@@ -1230,6 +1230,14 @@ fn push_create_input_sql_value_tokens(
         quote! {
             bind_values.push(#value_expr);
         }
+    };
+    match &meta.mssql_type {
+        Some(sql_type) => quote! {{
+            #push
+            let value = bind_values.pop().expect("one generated field bind");
+            bind_values.push(value.with_mssql_type(#sql_type));
+        }},
+        None => push,
     }
 }
 
@@ -3431,7 +3439,7 @@ fn generate_graphql_operations_unfiltered(
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
-            if meta.decimal.is_some() {
+            if meta.decimal.is_some() || meta.mssql_type.is_some() {
                 insert_binds_graphql.push(push_create_input_sql_value_tokens(
                     backend,
                     struct_name,
@@ -3632,6 +3640,8 @@ fn generate_graphql_operations_unfiltered(
         if !meta.is_primary_key && !is_timestamp && meta.write {
             // All update fields are wrapped in Option (even if already optional)
             // This allows distinguishing between "not provided" and "set to null"
+            let graphql_check_index = update_field_checks_graphql.len();
+            let repo_check_index = update_field_checks_repo.len();
             let is_already_optional = is_option_type(field_type);
             let update_type = quote! { ::std::option::Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
@@ -4100,6 +4110,24 @@ fn generate_graphql_operations_unfiltered(
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
                 update_field_checks_repo.push(update_tokens);
+            }
+            if let Some(sql_type) = &meta.mssql_type {
+                for checks in [
+                    &mut update_field_checks_graphql[graphql_check_index..],
+                    &mut update_field_checks_repo[repo_check_index..],
+                ] {
+                    for check in checks {
+                        *check = quote! {{
+                            let bind_start = values.len();
+                            #check
+                            for value in &mut values[bind_start..] {
+                                *value = ::std::mem::replace(
+                                    value, ::graphql_orm::graphql::orm::SqlValue::Null
+                                ).with_mssql_type(#sql_type);
+                            }
+                        }};
+                    }
+                }
             }
         }
     }

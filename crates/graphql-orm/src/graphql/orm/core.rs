@@ -55,11 +55,80 @@ pub enum SqlValue {
     Bool(bool),
     /// Typed null for boolean values.
     BoolNull,
+    /// Scalar with an explicitly declared SQL Server parameter type.
+    #[doc(hidden)]
+    MssqlTyped(MssqlTypedValue),
     /// Compatibility null that binds as text, including on PostgreSQL and SQL Server.
     ///
     /// Use the variant that matches the destination type when it is known, such
     /// as [`Self::UuidNull`] for a UUID or [`Self::BytesNull`] for binary data.
     Null,
+}
+
+/// A scalar together with its declared SQL Server type.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MssqlTypedValue {
+    value: Box<SqlValue>,
+    parameter_type: MssqlParameterType,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MssqlParameterType {
+    VarChar(Option<u16>),
+    Int,
+    SmallInt,
+    TinyInt,
+}
+
+impl MssqlTypedValue {
+    pub(crate) fn value(&self) -> &SqlValue {
+        &self.value
+    }
+
+    #[cfg(feature = "mssql")]
+    pub(crate) fn parameter_type(&self) -> MssqlParameterType {
+        self.parameter_type
+    }
+}
+
+impl SqlValue {
+    /// Carry a canonical SQL Server column declaration into the driver binder.
+    #[doc(hidden)]
+    pub fn with_mssql_type(self, sql_type: &str) -> Self {
+        let parameter_type = match &self {
+            Self::String(_) | Self::StringNull => match sql_type {
+                "VARCHAR(MAX)" => Some(MssqlParameterType::VarChar(None)),
+                _ => sql_type
+                    .strip_prefix("VARCHAR(")
+                    .and_then(|length| length.strip_suffix(')'))
+                    .and_then(|length| length.parse::<u16>().ok())
+                    .filter(|length| (1..=8000).contains(length))
+                    .map(|length| MssqlParameterType::VarChar(Some(length))),
+            },
+            Self::Int(_) | Self::IntNull => match sql_type {
+                "INT" => Some(MssqlParameterType::Int),
+                "SMALLINT" => Some(MssqlParameterType::SmallInt),
+                "TINYINT" => Some(MssqlParameterType::TinyInt),
+                _ => None,
+            },
+            _ => None,
+        };
+        match parameter_type {
+            Some(parameter_type) => Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(self),
+                parameter_type,
+            }),
+            None => self,
+        }
+    }
+
+    pub(crate) fn without_mssql_type(&self) -> &Self {
+        match self {
+            Self::MssqlTyped(typed) => typed.value(),
+            _ => self,
+        }
+    }
 }
 
 /// A temporal parameter with the text spelling used by compatibility binds.
@@ -223,6 +292,7 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
             | SqlValue::DecimalNull(_)
             | SqlValue::BoolNull
             | SqlValue::Null => "n".to_string(),
+            SqlValue::MssqlTyped(typed) => component(typed.value()),
         }
     }
 

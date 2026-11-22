@@ -51,7 +51,7 @@ impl RelationKey {
         use RelationValueType as Type;
         let types = values
             .iter()
-            .map(|value| match value {
+            .map(|value| match value.without_mssql_type() {
                 SqlValue::String(_) | SqlValue::Temporal(_) => (Type::String, false),
                 SqlValue::Uuid(_) => (Type::Uuid, false),
                 SqlValue::Int(_) => (Type::Int, false),
@@ -69,6 +69,7 @@ impl RelationKey {
                 SqlValue::BytesNull => (Type::Bytes, true),
                 SqlValue::JsonNull => (Type::Json, true),
                 SqlValue::Null => (Type::UntypedNull, true),
+                SqlValue::MssqlTyped(_) => unreachable!("type hint was removed"),
             })
             .collect();
         Self {
@@ -778,6 +779,7 @@ fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
         | crate::graphql::orm::SqlValue::DecimalNull(_)
         | crate::graphql::orm::SqlValue::BoolNull
         | crate::graphql::orm::SqlValue::Null => String::new(),
+        crate::graphql::orm::SqlValue::MssqlTyped(typed) => sql_value_key_part(typed.value()),
     }
 }
 
@@ -814,12 +816,36 @@ pub fn relation_key_filter(
     columns: &[&'static str],
     parent_values: &[Vec<crate::graphql::orm::SqlValue>],
 ) -> crate::graphql::orm::FilterExpression {
+    relation_key_filter_with_types(columns, parent_values, |_| None)
+}
+
+fn relation_parameter_type<T: RelationTarget<B>, B: OrmBackend>(
+    column: &str,
+) -> Option<&'static str> {
+    if B::DIALECT == DatabaseBackend::Mssql {
+        crate::graphql::orm::mssql_parameter_type::<T>(column)
+    } else {
+        None
+    }
+}
+
+fn relation_key_filter_with_types(
+    columns: &[&'static str],
+    parent_values: &[Vec<crate::graphql::orm::SqlValue>],
+    parameter_type: impl Fn(&str) -> Option<&'static str>,
+) -> crate::graphql::orm::FilterExpression {
     use crate::graphql::orm::{FilterExpression, SqlValue};
+
+    let sql_types = columns
+        .iter()
+        .map(|column| parameter_type(column).unwrap_or(""))
+        .collect::<Vec<_>>();
 
     if columns.len() == 1 {
         let values = parent_values
             .iter()
             .filter_map(|parts| parts.first().cloned())
+            .map(|value| value.with_mssql_type(sql_types[0]))
             .collect::<Vec<SqlValue>>();
         let placeholders = std::iter::repeat_n("?", values.len())
             .collect::<Vec<_>>()
@@ -834,7 +860,9 @@ pub fn relation_key_filter(
     let clauses = parent_values
         .iter()
         .map(|parts| {
-            values.extend(parts.iter().cloned());
+            values.extend(parts.iter().cloned().enumerate().map(|(index, value)| {
+                value.with_mssql_type(sql_types.get(index).copied().unwrap_or(""))
+            }));
             let predicates = columns
                 .iter()
                 .map(|column| format!("{column} = ?"))
@@ -1190,7 +1218,11 @@ where
         parent_key_order.push(key.parent_key.clone());
     }
 
-    let parent_filter = relation_key_filter(&sample.fk_columns, &parent_values);
+    let parent_filter = relation_key_filter_with_types(
+        &sample.fk_columns,
+        &parent_values,
+        relation_parameter_type::<T, B>,
+    );
     let filter = match sample.filter.clone() {
         Some(filter) => FilterExpression::And(vec![parent_filter, filter]),
         None => parent_filter,
@@ -1820,7 +1852,11 @@ where
         .iter()
         .map(|key| key.values.clone())
         .collect::<Vec<_>>();
-    let filter = relation_key_filter(&sample.columns, &representation_values);
+    let filter = relation_key_filter_with_types(
+        &sample.columns,
+        &representation_values,
+        relation_parameter_type::<T, B>,
+    );
 
     let key_columns = sample
         .columns

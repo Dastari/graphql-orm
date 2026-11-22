@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.201.0 to 0.206.0: SQL Server parameter types and column identifiers
+
+**No action.** Upgrade ORM and macros together. SQL Server keeps the
+existing Unicode string and BIGINT binds by default. To use each declared
+type, add the matching `mssql_type` field attribute and enable
+`MssqlPoolOptions::typed_parameters(true)` for the corresponding database.
+VARCHAR conversion uses the database's default code page, which can change
+comparisons and writes when characters cannot be represented. Review the
+database and column collations before enabling it. SQL Server ALTER COLUMN
+planning now parses the column identifier for its collation lookup.
+See [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
 **No action.** Upgrade ORM and macros together. The generated resolver

@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.206.0
+
+- **Added (#522).** SQL Server pools can opt in to binding the SQL types
+  declared on generated fields. VARCHAR comparisons convert the parameter
+  rather than the indexed column. INT, SMALLINT and TINYINT parameters use
+  their native widths when the value fits. The default keeps the existing binds.
+- **Fixed (#849).** SQL Server character column ALTER statements use the parsed
+  column name when looking up collation, including literal brackets.
+
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
 - **Fixed (#829).** Repeated entity identities return a typed composition

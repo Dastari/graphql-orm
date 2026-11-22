@@ -190,6 +190,8 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test read_snapshot_transaction -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --lib alter_column_looks_up_the_exact_catalogue_identifier
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib snapshot_start_preserves_3952_from_restore_gate -- --ignored --test-threads=1
   run_identifier_quoting mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \

@@ -27,7 +27,22 @@ pub trait DatabaseEntity {
     const SCHEMA_POLICY: Option<SchemaPolicy> = None;
     const DEFAULT_SORT: &'static str;
 
+    /// Explicit SQL Server column types keyed by rendered column name.
+    #[doc(hidden)]
+    const MSSQL_PARAMETER_TYPES: &'static [(&'static str, &'static str)] = &[];
+
     fn column_names() -> &'static [&'static str];
+}
+
+pub(crate) fn mssql_parameter_type<T: DatabaseEntity>(column: &str) -> Option<&'static str> {
+    if T::MSSQL_PARAMETER_TYPES.is_empty() {
+        return None;
+    }
+    let rendered = DatabaseBackend::Mssql.quote_identifier_path(column);
+    T::MSSQL_PARAMETER_TYPES
+        .iter()
+        .find(|(name, _)| *name == rendered)
+        .map(|(_, sql_type)| *sql_type)
 }
 
 pub trait DatabaseSchema {
@@ -2675,71 +2690,15 @@ pub fn render_keyset_after(
     cursor: &[crate::graphql::pagination::KeysetValue],
     start_index: usize,
 ) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
-    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-    use crate::graphql::pagination::KeysetValue;
-    if columns.len() != cursor.len() || columns.is_empty() {
-        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
-    }
-    let mut branches = Vec::new();
-    let mut values = Vec::new();
-    for index in 0..columns.len() {
-        let mut terms = Vec::new();
-        for prior in 0..index {
-            let column = columns[prior];
-            match &cursor[prior] {
-                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
-                value => {
-                    let value = keyset_sql_value(value)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
-                    terms.push(format!(
-                        "{} = {}",
-                        column.column,
-                        backend.placeholder(start_index + values.len())
-                    ));
-                    values.push(value);
-                }
-            }
-        }
-        let column = columns[index];
-        let comparison = match &cursor[index] {
-            KeysetValue::Null => match column.nulls {
-                KeysetNulls::First => format!("{} IS NOT NULL", column.column),
-                KeysetNulls::Last => "1 = 0".to_string(),
-            },
-            value => {
-                let value = keyset_sql_value(value)
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
-                let operator = match column.direction {
-                    KeysetDirection::Asc => ">",
-                    KeysetDirection::Desc => "<",
-                };
-                let scalar = format!(
-                    "{} {} {}",
-                    column.column,
-                    operator,
-                    backend.placeholder(start_index + values.len())
-                );
-                values.push(value);
-                match column.nulls {
-                    KeysetNulls::First => format!("({} IS NOT NULL AND {scalar})", column.column),
-                    KeysetNulls::Last => format!("({} IS NULL OR {scalar})", column.column),
-                }
-            }
-        };
-        terms.push(comparison);
-        branches.push(format!("({})", terms.join(" AND ")));
-    }
-    // Parenthesized as a whole, like the `before` form: the predicate stays
-    // one condition wherever a caller places it.
-    Ok((format!("({})", branches.join(" OR ")), values))
+    render_keyset_after_with_types(backend, columns, cursor, start_index, |_| None)
 }
 
-/// Render the lexicographic `before` predicate with explicit nullable ordering.
-pub fn render_keyset_before(
+pub(super) fn render_keyset_after_with_types(
     backend: DatabaseBackend,
     columns: &[KeysetOrderColumn],
     cursor: &[crate::graphql::pagination::KeysetValue],
     start_index: usize,
+    parameter_type: impl Fn(&str) -> Option<&'static str>,
 ) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
     use crate::graphql::pagination::KeysetValue;
@@ -2762,7 +2721,83 @@ pub fn render_keyset_before(
                         column.column,
                         backend.placeholder(start_index + values.len())
                     ));
-                    values.push(value);
+                    values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
+                }
+            }
+        }
+        let column = columns[index];
+        let comparison = match &cursor[index] {
+            KeysetValue::Null => match column.nulls {
+                KeysetNulls::First => format!("{} IS NOT NULL", column.column),
+                KeysetNulls::Last => "1 = 0".to_string(),
+            },
+            value => {
+                let value = keyset_sql_value(value)
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                let operator = match column.direction {
+                    KeysetDirection::Asc => ">",
+                    KeysetDirection::Desc => "<",
+                };
+                let scalar = format!(
+                    "{} {} {}",
+                    column.column,
+                    operator,
+                    backend.placeholder(start_index + values.len())
+                );
+                values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
+                match column.nulls {
+                    KeysetNulls::First => format!("({} IS NOT NULL AND {scalar})", column.column),
+                    KeysetNulls::Last => format!("({} IS NULL OR {scalar})", column.column),
+                }
+            }
+        };
+        terms.push(comparison);
+        branches.push(format!("({})", terms.join(" AND ")));
+    }
+    // Parenthesized as a whole, like the `before` form: the predicate stays
+    // one condition wherever a caller places it.
+    Ok((format!("({})", branches.join(" OR ")), values))
+}
+
+/// Render the lexicographic `before` predicate with explicit nullable ordering.
+pub fn render_keyset_before(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[crate::graphql::pagination::KeysetValue],
+    start_index: usize,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    render_keyset_before_with_types(backend, columns, cursor, start_index, |_| None)
+}
+
+pub(super) fn render_keyset_before_with_types(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[crate::graphql::pagination::KeysetValue],
+    start_index: usize,
+    parameter_type: impl Fn(&str) -> Option<&'static str>,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use crate::graphql::pagination::KeysetValue;
+    if columns.len() != cursor.len() || columns.is_empty() {
+        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
+    }
+    let mut branches = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..columns.len() {
+        let mut terms = Vec::new();
+        for prior in 0..index {
+            let column = columns[prior];
+            match &cursor[prior] {
+                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
+                value => {
+                    let value = keyset_sql_value(value)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                    terms.push(format!(
+                        "{} = {}",
+                        column.column,
+                        backend.placeholder(start_index + values.len())
+                    ));
+                    values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
                 }
             }
         }
@@ -2785,7 +2820,7 @@ pub fn render_keyset_before(
                     operator,
                     backend.placeholder(start_index + values.len())
                 );
-                values.push(value);
+                values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
                 match column.nulls {
                     KeysetNulls::First => {
                         format!("({} IS NULL OR {scalar})", column.column)
