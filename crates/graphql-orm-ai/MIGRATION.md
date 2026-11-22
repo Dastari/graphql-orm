@@ -10,6 +10,71 @@ supersedes: []
 
 # Migration Guide
 
+## Next breaking graphql-orm-ai release
+
+**Action needed** for hosts implementing `AiCodexAppServerRunProcess`.
+Switch all six `start_*_turn` methods to take a consuming
+`AiCodexAppServerTurnDispatch`. For example, the fresh-turn path changes as
+follows. The thread setup and response-stream methods in these excerpts are
+host code.
+
+**Before**
+
+```rust,ignore
+async fn start_fresh_turn(
+    &self,
+    input: AiCodexAppServerTurnInput,
+) -> Result<ProviderEventStream, ProviderError> {
+    let mut actor = self.actor.lock().await;
+    let thread_id = self.start_thread(&mut actor, &input).await?;
+    input.authorize_tool_source_delivery().await?;
+    let frame = actor.start_turn(&thread_id, &input)?;
+    self.write_frame(&frame).await?;
+    self.turn_events(&mut actor).await
+}
+```
+
+**After**
+
+```rust,ignore
+async fn start_fresh_turn(
+    &self,
+    dispatch: AiCodexAppServerTurnDispatch,
+) -> Result<ProviderEventStream, ProviderError> {
+    let mut actor = self.actor.lock().await;
+    let thread_id = self.start_thread(&mut actor, dispatch.turn_input()).await?;
+    actor.write_turn(&thread_id, dispatch, &self.writer).await?;
+    self.turn_events(&mut actor).await
+}
+```
+
+Wrap the exact process's outbound transport once with
+`AiCodexAppServerWriter::new`. Use that writer for all frames, including
+thread setup and interruption. Await `write_turn` inside the process method.
+The actor revalidates protected tool sources at this boundary. It checks
+the dispatch scope for both resolved and marker writes and registers the
+turn after a successful write and flush. Attempted writes consume their
+request ID. If a transport write fails or is cancelled after polling starts,
+retire the poisoned writer. A kill requested during the write cannot retract
+a frame already on the wire. The transport
+must discard bytes left buffered by a cancelled or failed write. A clone
+of `dispatch.turn_input()` carries markers and can still be used with
+`start_turn` for host-owned readiness probes.
+
+Read retained thread and turn snapshots as lifecycle metadata. Thread
+snapshots expose the thread ID and projected turns. Turn snapshots expose
+IDs, status, timing, and item identities. Thread previews, display names,
+historical message content, and raw turn errors are discarded. Use the
+live assistant message lifecycle and delta events for assistant text.
+
+Tool-free turns accept entity-reference blocks. Resolved delivery requires
+`AiCodexAppServerRegistration::with_resolved_entity_reference_delivery`.
+Review the thread's retention before enabling it. A later revocation
+prevents resending data and leaves earlier data in the provider-retained
+thread until deletion. See [entity reference delivery](docs/entity-references.md#adapters-for-a-local-process)
+for the deadline and frame-size fallback. No GraphQL SDL, schema-module,
+or data migration is needed.
+
 ## 0.151.2 to 0.152.0: opt-in entity references on local-process adapters
 
 No public signature changed, and there is no GraphQL SDL, persistent schema,

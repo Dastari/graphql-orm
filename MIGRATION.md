@@ -62,6 +62,14 @@ delimiter that belongs to the name. The derive reports an error at an
 ambiguous declaration so an upgrade cannot silently retarget a deployed column. A declaration that
 matches the existing physical name needs no data migration.
 
+### 4. Adopt the consuming Codex turn dispatch (#828)
+
+**Action needed** for Codex app-server process implementations. The next
+breaking graphql-orm-ai release moves all six turn methods to a consuming
+dispatch. Use the protocol actor's `write_turn` with the shared process writer.
+See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release).
+No data migration is needed.
+
 ## 0.192.0 to 0.193.0: handwritten fields on generated objects
 
 **No action.** Upgrade ORM and macros together. Nothing changes for an entity
