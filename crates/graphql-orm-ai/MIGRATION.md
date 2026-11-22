@@ -53,7 +53,10 @@ Wrap the exact process's outbound transport once with
 thread setup and interruption. Await `write_turn` inside the process method.
 The actor revalidates protected tool sources at this boundary. It checks
 the dispatch scope for both resolved and marker writes and registers the
-turn after a successful write and flush. The transport
+turn after a successful write and flush. Attempted writes consume their
+request ID. If a transport write fails or is cancelled after polling starts,
+retire the poisoned writer. A kill requested during the write cannot retract
+a frame already on the wire. The transport
 must discard bytes left buffered by a cancelled or failed write. A clone
 of `dispatch.turn_input()` carries markers and can still be used with
 `start_turn` for host-owned readiness probes.

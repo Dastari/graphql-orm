@@ -4031,7 +4031,7 @@ enum ThreadLifecycleOperation {
 /// Use it for all frames, including initialization, interruption and
 /// shutdown. The transport must discard buffered bytes on drop and on forced
 /// process termination. The writer never returns a resolved frame to the
-/// host, and refuses every write after an incomplete scoped turn write.
+/// host, and refuses every write after a failed or cancelled transport write.
 pub struct AiCodexAppServerWriter<W> {
     state: Mutex<CodexWriterState<W>>,
 }
@@ -4050,17 +4050,19 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-struct TurnWriteGuard<'a> {
+struct CodexWriteGuard<'a> {
     poisoned: &'a mut bool,
-    process: &'a AiCodexAppServerLaunchedProcess,
+    process: Option<&'a AiCodexAppServerLaunchedProcess>,
     armed: bool,
 }
 
-impl Drop for TurnWriteGuard<'_> {
+impl Drop for CodexWriteGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             *self.poisoned = true;
-            self.process.force_kill();
+            if let Some(process) = self.process {
+                process.force_kill();
+            }
         }
     }
 }
@@ -4088,10 +4090,30 @@ impl<W: AsyncWrite + Unpin + Send> AiCodexAppServerWriter<W> {
 
 impl<W: AsyncWrite + Unpin> CodexWriterState<W> {
     async fn write_frame(&mut self, frame: &[u8]) -> Result<(), ProviderError> {
+        self.write_guarded_frame(frame, None).await
+    }
+
+    async fn write_guarded_frame(
+        &mut self,
+        frame: &[u8],
+        process: Option<&AiCodexAppServerLaunchedProcess>,
+    ) -> Result<(), ProviderError> {
         if self.poisoned {
             return Err(ProviderError::Rejected);
         }
-        write_codex_frame(&mut self.writer, frame).await
+        let mut guard = CodexWriteGuard {
+            poisoned: &mut self.poisoned,
+            process,
+            armed: true,
+        };
+        write_codex_frame(&mut self.writer, frame).await?;
+        // If the kill raced an I/O poll that completed the flush, keep the
+        // writer poisoned and leave the actor unregistered.
+        if process.is_some_and(|process| process.kill_requested.load(Ordering::Acquire)) {
+            return Err(ProviderError::Rejected);
+        }
+        guard.armed = false;
+        Ok(())
     }
 
     async fn write_scoped_turn(
@@ -4119,17 +4141,7 @@ impl<W: AsyncWrite + Unpin> CodexWriterState<W> {
         ended: &mut oneshot::Receiver<()>,
         frame: &[u8],
     ) -> Result<(), ProviderError> {
-        let mut guard = TurnWriteGuard {
-            poisoned: &mut self.poisoned,
-            process,
-            armed: false,
-        };
-        let write = async {
-            guard.armed = true;
-            let result = write_codex_frame(&mut self.writer, frame).await;
-            guard.armed = result.is_err();
-            result
-        };
+        let write = self.write_guarded_frame(frame, Some(process));
         tokio::pin!(write);
         tokio::select! {
             biased;
@@ -4970,8 +4982,10 @@ impl AiCodexAppServerProtocolActor {
         thread_id: &str,
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
+        let id = self.next_id;
         let (frame, next_id) = self.prepare_turn(thread_id, input)?;
-        self.register_turn(thread_id, input, next_id);
+        self.next_id = next_id;
+        self.register_turn(thread_id, input, id);
         Ok(frame)
     }
 
@@ -5033,10 +5047,9 @@ impl AiCodexAppServerProtocolActor {
         Ok((frame, next_id))
     }
 
-    fn register_turn(&mut self, thread_id: &str, input: &AiCodexAppServerTurnInput, next_id: u64) {
-        let previous = self.pending.insert(self.next_id, ClientMethod::TurnStart);
+    fn register_turn(&mut self, thread_id: &str, input: &AiCodexAppServerTurnInput, id: u64) {
+        let previous = self.pending.insert(id, ClientMethod::TurnStart);
         debug_assert!(previous.is_none());
-        self.next_id = next_id;
         self.thread_lifecycle_operation = None;
         self.pending_turn_thread_id = Some(thread_id.to_owned());
         self.readiness_probe_tool_id = input.readiness_probe_tool_id.clone();
@@ -5052,10 +5065,14 @@ impl AiCodexAppServerProtocolActor {
     /// The marker frame is checked against this actor's full frame ceiling.
     /// Resolved data is written only once, inside the writer lock and within
     /// the dispatch's freshness bound. Otherwise the marker frame is written.
-    /// Both forms check the process and dispatch scope at the writer. The
-    /// actor registers the pending turn only after the write and flush succeed.
-    /// An incomplete scoped write poisons the writer and synchronously requests
-    /// process-tree termination.
+    /// Both scoped forms check the process and dispatch scope at the writer.
+    /// The actor retires the request ID before attempting transport and
+    /// registers the pending turn only after the write and flush succeed.
+    /// A failed or cancelled transport write poisons the writer, with
+    /// synchronous process-tree termination for scoped writes. A kill
+    /// requested during a write cannot retract bytes already on the wire.
+    /// If the write completes before the guard observes the kill, the frame
+    /// is registered in the same poll as the successful flush.
     ///
     /// # Errors
     ///
@@ -5092,6 +5109,7 @@ impl AiCodexAppServerProtocolActor {
             None if resolved.is_some() => return Err(ProviderError::Rejected),
             None => None,
         };
+        let id = self.next_id;
         let (marker, next_id) = self.prepare_turn(thread_id, &input)?;
         let resolved = resolved.and_then(|resolved| {
             let mut text = input.input().to_vec();
@@ -5103,7 +5121,7 @@ impl AiCodexAppServerProtocolActor {
             }
             let params = Self::turn_params(thread_id, &input, &text).ok()?;
             let frame = self
-                .encode(json!({"id": self.next_id, "method": "turn/start", "params": params}))
+                .encode(json!({"id": id, "method": "turn/start", "params": params}))
                 .ok()?;
             Some((resolved.deadline, frame))
         });
@@ -5111,6 +5129,7 @@ impl AiCodexAppServerProtocolActor {
         let _active_at_boundary = BEFORE_CODEX_TURN_WRITE
             .take()
             .and_then(|before_write| before_write());
+        self.next_id = next_id;
         if let Some((mut scope, process)) = scope {
             writer
                 .write_scoped_turn(&process, &mut scope.ended, &marker, resolved)
@@ -5118,7 +5137,7 @@ impl AiCodexAppServerProtocolActor {
         } else {
             writer.write_frame(&marker).await?;
         }
-        self.register_turn(thread_id, &input, next_id);
+        self.register_turn(thread_id, &input, id);
         Ok(())
     }
 
@@ -16895,6 +16914,103 @@ pub(crate) mod tests {
         (counters, process, actor, dispatch)
     }
 
+    struct CodexFlushProbe {
+        bytes: Vec<u8>,
+        process: Option<Arc<AiCodexAppServerLaunchedProcess>>,
+    }
+
+    impl AsyncWrite for CodexFlushProbe {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.bytes.extend_from_slice(bytes);
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            assert!(self.bytes.ends_with(b"\n"));
+            if let Some(process) = &self.process {
+                process.force_kill();
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+            }
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_unscoped_flush_failure_poisons_writer_and_retires_request_id() {
+        let (_, _, mut actor, dispatch) = reference_dispatch_fixture().await;
+        let marker = dispatch.turn_input().clone();
+        let writer = AiCodexAppServerWriter::new(CodexFlushProbe {
+            bytes: Vec::new(),
+            process: None,
+        });
+        assert!(matches!(
+            actor
+                .write_turn("thread-1", marker.clone().into(), &writer)
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        let stale_id = {
+            let state = writer.state.lock().await;
+            assert!(state.poisoned);
+            serde_json::from_slice::<Value>(&state.writer.bytes).unwrap()["id"].clone()
+        };
+        assert!(actor.pending.is_empty());
+        assert!(actor.pending_turn_thread_id.is_none());
+        assert!(matches!(
+            actor
+                .write_turn("thread-1", marker.clone().into(), &writer)
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        let retry = actor.start_turn("thread-1", &marker).unwrap();
+        let retry_id = serde_json::from_slice::<Value>(&retry).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert!(retry_id > stale_id.as_u64().unwrap());
+        let stale = json!({"id": stale_id, "result": {"turn": {"id": "stale"}}});
+        assert!(matches!(
+            actor.accept(stale.to_string().as_bytes()),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn codex_kill_during_flush_poisons_writer_and_leaves_no_pending_turn() {
+        let (counters, process, mut actor, dispatch) = reference_dispatch_fixture().await;
+        let writer = AiCodexAppServerWriter::new(CodexFlushProbe {
+            bytes: Vec::new(),
+            process: Some(process.clone()),
+        });
+        let result = process
+            .with_turn_dispatch(dispatch, |dispatch| async {
+                actor.write_turn("thread-1", dispatch, &writer).await?;
+                Ok(Box::pin(stream::empty()) as ProviderEventStream)
+            })
+            .await;
+        assert!(matches!(result, Err(ProviderError::Rejected)));
+        let state = writer.state.lock().await;
+        assert!(state.poisoned);
+        assert!(!state.writer.bytes.is_empty());
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 1);
+        assert!(actor.pending.is_empty());
+        assert!(actor.pending_turn_thread_id.is_none());
+    }
+
     #[tokio::test]
     async fn codex_rechecks_scope_and_kill_before_resolved_and_marker_writes() {
         use tokio::io::AsyncReadExt;
@@ -16925,7 +17041,7 @@ pub(crate) mod tests {
                 let writer = AiCodexAppServerWriter::new(transport);
                 let marker = dispatch.turn_input().clone();
                 let result = actor.write_turn("thread-1", dispatch, &writer).await;
-                assert_eq!(actor.next_id, 3, "expired={expired}, kill={kill}");
+                assert_eq!(actor.next_id, 4, "expired={expired}, kill={kill}");
                 assert!(actor.pending.is_empty());
                 assert!(actor.pending_turn_thread_id.is_none());
                 assert!(matches!(result, Err(ProviderError::Rejected)));

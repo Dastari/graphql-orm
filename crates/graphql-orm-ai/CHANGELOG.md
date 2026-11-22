@@ -21,7 +21,9 @@ supersedes: []
   Stale or oversized resolutions fall back to markers. An incomplete resolved
   write poisons the process writer and triggers a forced tree kill. Both
   forms check dispatch scope at transport, and pending turn registration
-  follows a successful write and flush.
+  follows a successful write and flush. Attempted writes retire their request
+  IDs, and a failed or cancelled transport write poisons even an unscoped
+  writer.
 - Tool-free turns accept entity-reference blocks. The protocol actor
   allowlists lifecycle metadata in thread and turn snapshots and user-message
   echoes. This excludes retained thread previews and display names. No data
