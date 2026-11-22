@@ -2176,9 +2176,6 @@ impl AiCodexAppServerLaunchedProcess {
     where
         F: Future<Output = Result<ProviderEventStream, ProviderError>>,
     {
-        if dispatch.resolved.is_none() {
-            return start(dispatch).await;
-        }
         let (active, ended) = oneshot::channel();
         dispatch.scope = Some(TurnWriteScope {
             ended,
@@ -4034,7 +4031,7 @@ enum ThreadLifecycleOperation {
 /// Use it for all frames, including initialization, interruption and
 /// shutdown. The transport must discard buffered bytes on drop and on forced
 /// process termination. The writer never returns a resolved frame to the
-/// host, and refuses every write after an incomplete resolved write.
+/// host, and refuses every write after an incomplete scoped turn write.
 pub struct AiCodexAppServerWriter<W> {
     state: Mutex<CodexWriterState<W>>,
 }
@@ -4044,13 +4041,22 @@ struct CodexWriterState<W> {
     poisoned: bool,
 }
 
-struct ResolvedWriteGuard<'a> {
+#[cfg(test)]
+type BeforeCodexTurnWrite = Box<dyn FnOnce() -> Option<oneshot::Sender<()>>>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_CODEX_TURN_WRITE: std::cell::RefCell<Option<BeforeCodexTurnWrite>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct TurnWriteGuard<'a> {
     poisoned: &'a mut bool,
     process: &'a AiCodexAppServerLaunchedProcess,
     armed: bool,
 }
 
-impl Drop for ResolvedWriteGuard<'_> {
+impl Drop for TurnWriteGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             *self.poisoned = true;
@@ -4088,31 +4094,53 @@ impl<W: AsyncWrite + Unpin> CodexWriterState<W> {
         write_codex_frame(&mut self.writer, frame).await
     }
 
-    async fn write_resolved_frame(
+    async fn write_scoped_turn(
         &mut self,
         process: &AiCodexAppServerLaunchedProcess,
-        deadline: std::time::Instant,
+        ended: &mut oneshot::Receiver<()>,
+        marker: &[u8],
+        resolved: Option<(std::time::Instant, Vec<u8>)>,
+    ) -> Result<(), ProviderError> {
+        if let Some((deadline, frame)) = resolved {
+            match write_resolved_before(deadline, self.write_scoped_frame(process, ended, &frame))
+                .await
+            {
+                ResolvedWrite::Completed(result) => return result,
+                ResolvedWrite::Abandoned => return Err(provider_timeout_error()),
+                ResolvedWrite::NotStarted => {}
+            }
+        }
+        self.write_scoped_frame(process, ended, marker).await
+    }
+
+    async fn write_scoped_frame(
+        &mut self,
+        process: &AiCodexAppServerLaunchedProcess,
         ended: &mut oneshot::Receiver<()>,
         frame: &[u8],
-    ) -> ResolvedWrite<Result<(), ProviderError>> {
-        let mut guard = ResolvedWriteGuard {
+    ) -> Result<(), ProviderError> {
+        let mut guard = TurnWriteGuard {
             poisoned: &mut self.poisoned,
             process,
             armed: false,
         };
-        write_resolved_before(deadline, async {
-            tokio::select! {
-                biased;
-                _ = ended => Err(ProviderError::Rejected),
-                result = async {
-                    guard.armed = true;
-                    let result = write_codex_frame(&mut self.writer, frame).await;
-                    guard.armed = result.is_err();
-                    result
-                } => result,
-            }
-        })
-        .await
+        let write = async {
+            guard.armed = true;
+            let result = write_codex_frame(&mut self.writer, frame).await;
+            guard.armed = result.is_err();
+            result
+        };
+        tokio::pin!(write);
+        tokio::select! {
+            biased;
+            _ = ended => Err(ProviderError::Rejected),
+            result = std::future::poll_fn(|cx| {
+                if process.kill_requested.load(Ordering::Acquire) {
+                    return std::task::Poll::Ready(Err(ProviderError::Rejected));
+                }
+                write.as_mut().poll(cx)
+            }) => result,
+        }
     }
 }
 
@@ -4942,6 +4970,16 @@ impl AiCodexAppServerProtocolActor {
         thread_id: &str,
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
+        let (frame, next_id) = self.prepare_turn(thread_id, input)?;
+        self.register_turn(thread_id, input, next_id);
+        Ok(frame)
+    }
+
+    fn prepare_turn(
+        &self,
+        thread_id: &str,
+        input: &AiCodexAppServerTurnInput,
+    ) -> Result<(Vec<u8>, u64), ProviderError> {
         input.validate()?;
         let input_instruction_fingerprint = input.instruction_fingerprint()?;
         let consumes_retained_resume_fallback = self.thread_lifecycle_phase
@@ -4985,8 +5023,20 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::InvalidRequest);
         }
+        let id = self.next_id;
+        let next_id = id.checked_add(1).ok_or(ProviderError::Rejected)?;
+        if self.pending.contains_key(&id) {
+            return Err(ProviderError::Rejected);
+        }
         let params = Self::turn_params(thread_id, input, input.input())?;
-        let frame = self.request(ClientMethod::TurnStart, "turn/start", params)?;
+        let frame = self.encode(json!({"id": id, "method": "turn/start", "params": params}))?;
+        Ok((frame, next_id))
+    }
+
+    fn register_turn(&mut self, thread_id: &str, input: &AiCodexAppServerTurnInput, next_id: u64) {
+        let previous = self.pending.insert(self.next_id, ClientMethod::TurnStart);
+        debug_assert!(previous.is_none());
+        self.next_id = next_id;
         self.thread_lifecycle_operation = None;
         self.pending_turn_thread_id = Some(thread_id.to_owned());
         self.readiness_probe_tool_id = input.readiness_probe_tool_id.clone();
@@ -4995,7 +5045,6 @@ impl AiCodexAppServerProtocolActor {
         self.active_web_search_maximum_calls =
             input.web_search().map(|search| search.maximum_calls());
         self.started_web_search_calls = 0;
-        Ok(frame)
     }
 
     /// Consumes a dispatch and writes one `turn/start` frame.
@@ -5003,8 +5052,10 @@ impl AiCodexAppServerProtocolActor {
     /// The marker frame is checked against this actor's full frame ceiling.
     /// Resolved data is written only once, inside the writer lock and within
     /// the dispatch's freshness bound. Otherwise the marker frame is written.
-    /// A resolved write abandoned after it begins poisons the writer and
-    /// synchronously requests process-tree termination.
+    /// Both forms check the process and dispatch scope at the writer. The
+    /// actor registers the pending turn only after the write and flush succeed.
+    /// An incomplete scoped write poisons the writer and synchronously requests
+    /// process-tree termination.
     ///
     /// # Errors
     ///
@@ -5026,9 +5077,8 @@ impl AiCodexAppServerProtocolActor {
             return Err(ProviderError::Rejected);
         }
         input.authorize_tool_source_delivery().await?;
-        let resolved = match resolved {
-            Some(resolved) => {
-                let mut scope = scope.ok_or(ProviderError::Rejected)?;
+        let scope = match scope {
+            Some(mut scope) => {
                 let process = scope.process.upgrade().ok_or(ProviderError::Rejected)?;
                 if !matches!(
                     scope.ended.try_recv(),
@@ -5037,37 +5087,39 @@ impl AiCodexAppServerProtocolActor {
                 {
                     return Err(ProviderError::Rejected);
                 }
-                Some((resolved, scope, process))
+                Some((scope, process))
             }
+            None if resolved.is_some() => return Err(ProviderError::Rejected),
             None => None,
         };
-        let id = self.next_id;
-        let marker = self.start_turn(thread_id, &input)?;
-        if let Some((resolved, mut scope, process)) = resolved {
+        let (marker, next_id) = self.prepare_turn(thread_id, &input)?;
+        let resolved = resolved.and_then(|resolved| {
             let mut text = input.input().to_vec();
             for (index, replacement) in resolved.replacements {
                 text[index] = replacement;
             }
-            let frame = input
-                .text_fits(&text)
-                .then(|| Self::turn_params(thread_id, &input, &text))
-                .and_then(Result::ok)
-                .and_then(|params| {
-                    self.encode(json!({"id": id, "method": "turn/start", "params": params}))
-                        .ok()
-                });
-            if let Some(frame) = frame {
-                match writer
-                    .write_resolved_frame(&process, resolved.deadline, &mut scope.ended, &frame)
-                    .await
-                {
-                    ResolvedWrite::Completed(result) => return result,
-                    ResolvedWrite::Abandoned => return Err(provider_timeout_error()),
-                    ResolvedWrite::NotStarted => {}
-                }
+            if !input.text_fits(&text) {
+                return None;
             }
+            let params = Self::turn_params(thread_id, &input, &text).ok()?;
+            let frame = self
+                .encode(json!({"id": self.next_id, "method": "turn/start", "params": params}))
+                .ok()?;
+            Some((resolved.deadline, frame))
+        });
+        #[cfg(test)]
+        let _active_at_boundary = BEFORE_CODEX_TURN_WRITE
+            .take()
+            .and_then(|before_write| before_write());
+        if let Some((mut scope, process)) = scope {
+            writer
+                .write_scoped_turn(&process, &mut scope.ended, &marker, resolved)
+                .await?;
+        } else {
+            writer.write_frame(&marker).await?;
         }
-        writer.write_frame(&marker).await
+        self.register_turn(thread_id, &input, next_id);
+        Ok(())
     }
 
     fn turn_params(
@@ -16841,6 +16893,52 @@ pub(crate) mod tests {
             scope: None,
         };
         (counters, process, actor, dispatch)
+    }
+
+    #[tokio::test]
+    async fn codex_rechecks_scope_and_kill_before_resolved_and_marker_writes() {
+        use tokio::io::AsyncReadExt;
+
+        for expired in [false, true] {
+            for kill in [false, true] {
+                let (_, process, mut actor, mut dispatch) = reference_dispatch_fixture().await;
+                let (active, ended) = oneshot::channel();
+                dispatch.scope = Some(TurnWriteScope {
+                    ended,
+                    process: Arc::downgrade(&process),
+                });
+                if expired {
+                    dispatch.resolved.as_mut().unwrap().deadline = std::time::Instant::now();
+                }
+                let launched = process.clone();
+                BEFORE_CODEX_TURN_WRITE.set(Some(Box::new(move || {
+                    if kill {
+                        launched.force_kill();
+                        Some(active)
+                    } else {
+                        drop(active);
+                        None
+                    }
+                })));
+                // Keep the scope open in the kill case so the kill check is exercised on its own.
+                let (transport, mut reader) = tokio::io::duplex(4096);
+                let writer = AiCodexAppServerWriter::new(transport);
+                let marker = dispatch.turn_input().clone();
+                let result = actor.write_turn("thread-1", dispatch, &writer).await;
+                assert_eq!(actor.next_id, 3, "expired={expired}, kill={kill}");
+                assert!(actor.pending.is_empty());
+                assert!(actor.pending_turn_thread_id.is_none());
+                assert!(matches!(result, Err(ProviderError::Rejected)));
+                assert!(!writer.state.lock().await.poisoned);
+                let mut byte = [0];
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), reader.read_exact(&mut byte))
+                        .await
+                        .is_err()
+                );
+                actor.start_turn("thread-1", &marker).unwrap();
+            }
+        }
     }
 
     #[tokio::test]

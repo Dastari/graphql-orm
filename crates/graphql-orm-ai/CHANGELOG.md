@@ -19,7 +19,9 @@ supersedes: []
 - **Added (off by default).** Codex registrations can opt in to a single
   resolved `turn/start` write with a freshness bound of up to 60 seconds.
   Stale or oversized resolutions fall back to markers. An incomplete resolved
-  write poisons the process writer and triggers a forced tree kill.
+  write poisons the process writer and triggers a forced tree kill. Both
+  forms check dispatch scope at transport, and pending turn registration
+  follows a successful write and flush.
 - Tool-free turns accept entity-reference blocks. The protocol actor
   allowlists lifecycle metadata in thread and turn snapshots and user-message
   echoes. This excludes retained thread previews and display names. No data

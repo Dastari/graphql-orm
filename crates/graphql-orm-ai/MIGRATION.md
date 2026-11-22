@@ -51,7 +51,9 @@ async fn start_fresh_turn(
 Wrap the exact process's outbound transport once with
 `AiCodexAppServerWriter::new`. Use that writer for all frames, including
 thread setup and interruption. Await `write_turn` inside the process method.
-The actor revalidates protected tool sources at this boundary. The transport
+The actor revalidates protected tool sources at this boundary. It checks
+the dispatch scope for both resolved and marker writes and registers the
+turn after a successful write and flush. The transport
 must discard bytes left buffered by a cancelled or failed write. A clone
 of `dispatch.turn_input()` carries markers and can still be used with
 `start_turn` for host-owned readiness probes.
