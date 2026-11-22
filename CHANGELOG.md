@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.202.0
+
+- Grouped additional SQLite GraphQL, owned database and consumer fixture tests.
+  See the [test lanes](docs/development/testing.md) for the selectors.
+- Documented the blocking filesystem operations in `write_migration_file`.
+
 ## Unreleased - ORM/macros 0.196.0
 
 - **Added (#842).** Trusted transaction writers can enqueue a typed computed-field

@@ -37,33 +37,47 @@ def tests_of(path):
     return [(name, "#[ignore" in attributes) for attributes, name in TEST_FN.findall(path.read_text())]
 
 
+def tests_of_binary(path):
+    yield from tests_of(path)
+    if path.name == "main.rs":
+        # Grouped integration targets declare sibling files with `mod name;`.
+        # Shared support files use #[path] and do not define fixture runner tests.
+        for module in re.findall(r"(?m)^mod ([a-z0-9_]+);$", path.read_text()):
+            source = path.with_name(f"{module}.rs")
+            if not source.is_file():
+                continue
+            for name, ignored in tests_of(source):
+                yield f"{module}::{name}", ignored
+
+
 def main():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     orm = job(workflow, "orm")
     fixtures = job(workflow, "orm-fixtures")
-    suite = re.search(r"cargo test -p graphql-orm -- --exact((?: --skip [a-z0-9_]+)+)\n", orm)
+    suite = re.search(r"cargo test -p graphql-orm -- --exact((?: --skip [a-z0-9_:]+)+)\n", orm)
     if not suite:
         fail("orm must run `cargo test -p graphql-orm -- --exact --skip ...`")
-    skipped = re.findall(r"--skip ([a-z0-9_]+)", suite[1])
+    skipped = re.findall(r"--skip ([a-z0-9_:]+)", suite[1])
     run = re.search(r"cargo test -p graphql-orm((?: --test [a-z0-9_]+)+)\n", fixtures)
     if not run:
         fail("orm-fixtures must run `cargo test -p graphql-orm --test ...`")
     binaries = re.findall(r"--test ([a-z0-9_]+)", run[1])
 
+    targets = {path.stem: path for path in TESTS.glob("*.rs")}
+    targets.update((path.parent.name, path) for path in TESTS.glob("*/main.rs"))
     expected = set()
     for binary in binaries:
-        path = TESTS / f"{binary}.rs"
-        if not path.is_file():
+        if binary not in targets:
             fail(f"orm-fixtures runs a missing test binary: {binary}")
-        expected |= {name for name, ignored in tests_of(path) if not ignored}
+        expected |= {name for name, ignored in tests_of_binary(targets[binary]) if not ignored}
     if len(skipped) != len(set(skipped)) or set(skipped) != expected:
         fail(f"orm skips {sorted(set(skipped) ^ expected)} differently from orm-fixtures")
-    for path in sorted(TESTS.glob("*.rs")):
-        if path.stem in binaries:
+    for binary, path in sorted(targets.items()):
+        if binary in binaries:
             continue
-        shared = {name for name, _ in tests_of(path)} & expected
+        shared = {name for name, _ in tests_of_binary(path)} & expected
         if shared:
-            fail(f"{path.name} defines skipped test names {sorted(shared)}")
+            fail(f"{binary} defines skipped test names {sorted(shared)}")
     print(f"CI orm split: {len(skipped)} fixture tests skipped by orm and run by orm-fixtures from {len(binaries)} binaries.")
 
 

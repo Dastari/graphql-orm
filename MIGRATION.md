@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.196.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
+
 ## 0.195.0 to 0.196.0: computed-field invalidations
 
 **No action.** Upgrade ORM and macros together. To opt in, declare a topic and

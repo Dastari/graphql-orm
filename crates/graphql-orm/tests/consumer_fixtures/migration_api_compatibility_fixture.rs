@@ -1,5 +1,4 @@
-#[path = "support/fixture_target.rs"]
-mod fixture_target;
+use super::fixture_target;
 
 #[test]
 fn external_legacy_migration_surface_compiles() {

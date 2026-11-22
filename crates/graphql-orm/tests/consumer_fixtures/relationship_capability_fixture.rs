@@ -1,7 +1,6 @@
 #![cfg(feature = "sqlite")]
 
-#[path = "support/fixture_target.rs"]
-mod fixture_target;
+use super::fixture_target;
 
 #[test]
 fn pascal_relationship_semantics_compile_as_a_complete_query_capability() {

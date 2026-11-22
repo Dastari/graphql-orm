@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.202.0 aligns with the ORM's
+[integration test consolidation](../../docs/development/testing.md).
+
 Version 0.196.0 lets hosts use generated entity keys and subscription
 authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
 

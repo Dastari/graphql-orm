@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.202.0 groups additional integration tests and documents the blocking
+migration file writer. See the [test selectors](../../docs/development/testing.md).
+
 Version 0.196.0 adds opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
 when a committed related-state write should prompt an authorized client to
 refetch a computed value. The signal contains the target ID and a public topic.
