@@ -18,6 +18,7 @@ mod federation_entity_keys_ui;
 mod final386_ui;
 mod generated_mutation_exposure_postgres_ui;
 mod generated_mutation_exposure_ui;
+mod generated_root_opt_out_ui;
 mod host_timestamp_ui;
 mod mssql_write_unavailable_ui;
 mod mutation_shapes_ui;

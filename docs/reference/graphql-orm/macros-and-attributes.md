@@ -1261,6 +1261,33 @@ still gets residual visibility is refused as above. Standalone repository Keyset
 helpers, which run without a request, keep their residual checks. See the
 [0.126.0 migration guide](../../../MIGRATION.md#keyset-read-visibility-declarations-and-diagnostics).
 
+## Omitting generated roots
+
+Entities that serve GraphQL reads can omit their generated write roots, Changed
+subscription, or both.
+
+```rust,ignore
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(table = "records", mutations = false, subscriptions = false)]
+struct Record { /* entity fields */ }
+```
+
+Both options default to `true`. The derive leaves out the opted-out resolvers
+and their GraphQL input and result types where those types have no repository
+use. Repository inputs, repository and transaction methods, and change-event
+records remain available. The existing `schema_roots!` entity list works with
+both opted-out and enabled entities. SDL, operation catalogues and Changed
+stream metadata omit the disabled fields.
+
+When an opt-out leaves a generated root with no fields, `schema_builder(database)`
+uses async-graphql's empty root type for that root. A manually assembled schema
+can pass `EmptyMutation` or `EmptySubscription` in the corresponding position.
+
+Remove stale declarations before opting out. `mutations = false` conflicts
+with `mutation_shapes`, dependent deletes, and GraphQL mutation authorization
+or AI policies. `subscriptions = false` conflicts with `changed_started`
+and subscription operation authorization.
+
 ## Generated mutation shapes
 
 `#[graphql_entity(mutation_shapes = "create,update")]` selects which generated
