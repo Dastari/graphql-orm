@@ -147,14 +147,20 @@ struct ReviewAudit {
     state: String,
 }
 
+/// Host text a failing selector returns; it must never reach a client.
+const SELECTOR_SECRET: &str = "selector-private-detail";
+
 /// The typed selector: a state transition needs `elevated`, anything else
 /// `write`. A display name of `__undeclared__` returns a level the entity
-/// does not declare, to pin the fail-closed check.
+/// does not declare, and `__selector_error__` fails with host text, to pin
+/// the fail-closed checks.
 fn select_review_assurance(
     input: UpdateAssuranceInput<'_, ReviewRecord, UpdateReviewRecordInput>,
 ) -> async_graphql::Result<&'static str> {
-    if input.patch().display_name.as_deref() == Some("__undeclared__") {
-        return Ok("undeclared");
+    match input.patch().display_name.as_deref() {
+        Some("__undeclared__") => return Ok("undeclared"),
+        Some("__selector_error__") => return Err(async_graphql::Error::new(SELECTOR_SECRET)),
+        _ => {}
     }
     match &input.patch().state {
         Some(state) if *state != input.current().state => Ok("elevated"),
@@ -256,6 +262,42 @@ impl MutationHook for AuditHook {
     }
 }
 
+/// Runs inside the update transaction before the selector. It reads through
+/// the transaction (no public write API exists at this point) and, for a
+/// display name of `__inject_state__`, turns a rename into a state
+/// transition, which the selector must see.
+#[derive(Clone, Default)]
+struct ReviewTransform(Arc<Mutex<usize>>);
+
+impl graphql_orm::graphql::orm::WriteInputTransform for ReviewTransform {
+    fn before_update_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut graphql_orm::graphql::orm::WriteInputContext<'_, '_>,
+        _existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            if write_ctx.entity_name() != "ReviewRecord" {
+                return Ok(());
+            }
+            // An in-transaction read: the transform runs inside the write.
+            write_ctx
+                .query::<ReviewAudit>()
+                .fetch_all()
+                .await
+                .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+            *self.0.lock().unwrap() += 1;
+            let input = input
+                .downcast_mut::<UpdateReviewRecordInput>()
+                .ok_or_else(|| async_graphql::Error::new("unexpected update input"))?;
+            if input.display_name.as_deref() == Some("__inject_state__") {
+                input.state = Some("approved".to_string());
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(not(feature = "sqlite"))]
 const TABLES: [&str; 2] = ["review_audits", "review_records"];
 
@@ -343,6 +385,7 @@ async fn reset(db: &Database) -> graphql_orm::Result<()> {
 struct Harness {
     db: Database,
     phases: Arc<Mutex<Vec<MutationPhase>>>,
+    transforms: Arc<Mutex<usize>>,
     evaluator: Arc<LevelEvaluator>,
 }
 
@@ -351,10 +394,14 @@ fn harness(db: &Database) -> Harness {
     let hook = AuditHook::default();
     let phases = hook.0.clone();
     db.set_mutation_hook(hook);
+    let transform = ReviewTransform::default();
+    let transforms = transform.0.clone();
+    db.set_write_input_transform(transform);
     db.set_entity_policy(AllowEntityPolicy);
     Harness {
         db,
         phases,
+        transforms,
         evaluator: Arc::new(LevelEvaluator::default()),
     }
 }
@@ -395,6 +442,10 @@ impl Harness {
 
     fn phases(&self) -> Vec<MutationPhase> {
         std::mem::take(&mut *self.phases.lock().unwrap())
+    }
+
+    fn transforms(&self) -> usize {
+        std::mem::take(&mut *self.transforms.lock().unwrap())
     }
 }
 
@@ -547,10 +598,10 @@ async fn omitted_null_and_stale_expected_version_refuse_the_write(db: &Database)
         assert!(!response.errors.is_empty(), "{expected:?}: {response:?}");
         assert!(!applied(&response));
     }
-    // A null variable is refused as well.
+    // A null value for a non-null variable is refused as well.
     let root = update_field();
     let query = format!(
-        r#"mutation($v: Int) {{ {root}({}: "r-1", {}: {{ {} }}, {}: $v) {{ {} }} }}"#,
+        r#"mutation($v: Int!) {{ {root}({}: "r-1", {}: {{ {} }}, {}: $v) {{ {} }} }}"#,
         argument_name("id"),
         argument_name("input"),
         rename("Renamed"),
@@ -568,6 +619,7 @@ async fn omitted_null_and_stale_expected_version_refuse_the_write(db: &Database)
     assert!(!response.errors.is_empty(), "{response:?}");
     // The omitted and null forms never reach the resolver.
     assert!(harness.policies().is_empty());
+    assert_eq!(harness.transforms(), 0);
 
     let stale = harness
         .run(
@@ -678,7 +730,37 @@ async fn a_state_transition_requires_elevated_assurance(db: &Database) -> TestRe
         "{refused:?}"
     );
     assert_eq!(harness.policies(), ["write", "elevated"]);
-    // The selection runs before the Before hook and every write.
+    // The transform ran inside the transaction; the selection then ran
+    // before the Before hook and every write.
+    assert_eq!(harness.transforms(), 1);
+    assert!(harness.phases().is_empty());
+    let stored = load(db, "r-1").await;
+    assert_eq!(
+        (
+            stored.display_name.as_str(),
+            stored.state.as_str(),
+            stored.row_version
+        ),
+        ("Draft", "open", 0)
+    );
+    assert_eq!(audit_count(db).await, 0);
+    assert!(events.try_recv().is_err(), "no Changed event is committed");
+
+    // The selector sees the patch the write applies: a rename the transform
+    // turns into a transition needs elevated assurance too.
+    let injected = harness
+        .run(
+            update("r-1", &rename("__inject_state__"), Some("0")),
+            Granted::Write,
+        )
+        .await;
+    assert_eq!(
+        error_code(&injected).as_deref(),
+        Some("FORBIDDEN"),
+        "{injected:?}"
+    );
+    assert_eq!(harness.policies(), ["write", "elevated"]);
+    assert_eq!(harness.transforms(), 1);
     assert!(harness.phases().is_empty());
     let stored = load(db, "r-1").await;
     assert_eq!(
@@ -763,6 +845,20 @@ async fn conditional_assurance_fails_closed_when_misconfigured(db: &Database) ->
         Some("AUTHORIZATION_MISCONFIGURED"),
         "{unenforced:?}"
     );
+    // The check precedes the selector: a selector that would fail is never
+    // called, so the refusal stays AUTHORIZATION_MISCONFIGURED.
+    let unenforced = schema_builder(harness.db.clone())
+        .finish()
+        .execute(
+            Request::new(update("r-1", &rename("__selector_error__"), Some("0")))
+                .data(Granted::Elevated),
+        )
+        .await;
+    assert_eq!(
+        error_code(&unenforced).as_deref(),
+        Some("AUTHORIZATION_MISCONFIGURED"),
+        "{unenforced:?}"
+    );
     // A selector returning an undeclared level is refused before evaluation.
     let undeclared = harness
         .run(
@@ -782,6 +878,62 @@ async fn conditional_assurance_fails_closed_when_misconfigured(db: &Database) ->
         ("Draft", 0)
     );
     assert_eq!(audit_count(db).await, 0);
+    Ok(())
+}
+
+async fn a_selector_error_is_sanitized(db: &Database) -> TestResult {
+    let harness = harness(db);
+    ReviewRecord::insert(db, create("r-1")).await?;
+    let response = harness
+        .run(
+            update("r-1", &rename("__selector_error__"), Some("0")),
+            Granted::Elevated,
+        )
+        .await;
+    assert_eq!(
+        error_code(&response).as_deref(),
+        Some("INTERNAL_ERROR"),
+        "{response:?}"
+    );
+    let json = serde_json::to_string(&response.errors)?;
+    assert!(!json.contains(SELECTOR_SECRET), "{json}");
+    // Only the registry requirement was evaluated; nothing was written.
+    assert_eq!(harness.policies(), ["write"]);
+    assert!(harness.phases().is_empty());
+    let stored = load(db, "r-1").await;
+    assert_eq!(
+        (stored.display_name.as_str(), stored.row_version),
+        ("Draft", 0)
+    );
+    Ok(())
+}
+
+async fn runtime_ir_conversion_refuses_guarded_entities(_db: &Database) -> TestResult {
+    use graphql_orm::graphql::orm::RuntimeSchema;
+    const MESSAGE: &str = "update_expected_version and update_assurance are not represented";
+    let refused =
+        |result: Result<RuntimeSchema, graphql_orm::graphql::orm::RuntimeSchemaDiagnostics>| {
+            result.err().is_some_and(|diagnostics| {
+                diagnostics
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(MESSAGE))
+            })
+        };
+    assert!(refused(RuntimeSchema::from_static_entities(&[
+        ReviewRecord::metadata()
+    ])));
+    assert!(refused(RuntimeSchema::from_static_entities_for_repository(
+        &[ReviewRecord::metadata()]
+    )));
+    // A copy of the metadata names the same table and is refused too.
+    let mut copy = ReviewRecord::metadata().clone();
+    copy.entity_name = "ReviewRecordCopy";
+    assert!(refused(RuntimeSchema::from_static_entities(&[&copy])));
+    // An unguarded entity is not refused for this reason.
+    assert!(!refused(RuntimeSchema::from_static_entities(&[
+        ReviewAudit::metadata()
+    ])));
     Ok(())
 }
 
@@ -843,5 +995,7 @@ scenarios![
     a_state_transition_requires_elevated_assurance,
     a_failed_invariant_rolls_back_the_transition_and_its_related_writes,
     conditional_assurance_fails_closed_when_misconfigured,
+    a_selector_error_is_sanitized,
+    runtime_ir_conversion_refuses_guarded_entities,
     repository_updates_are_host_writes_and_unaffected,
 ];

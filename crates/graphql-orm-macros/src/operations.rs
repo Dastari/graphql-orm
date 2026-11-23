@@ -4694,6 +4694,17 @@ fn generate_graphql_operations_unfiltered(
     // #851: a required ExpectedVersion and a conditional assurance selector
     // govern the single-row update only. Every other root that rewrites an
     // existing row would bypass them, so the entity must not generate one.
+    // A declared `set_null` relation lets the database (or a dependent-delete
+    // plan) rewrite the row when its parent is deleted, so it is refused too.
+    // `cascade` deletes the row instead, and deletes are not guarded.
+    let set_null_relation = fields.iter().find_map(|field| {
+        parse_field_metadata(field)
+            .ok()
+            .filter(|meta| {
+                meta.is_relation && meta.relation_on_delete.as_deref() == Some("set_null")
+            })
+            .and_then(|_| field.ident.as_ref().map(ToString::to_string))
+    });
     for (option, span) in [
         (
             "update_expected_version = \"required\"",
@@ -4726,6 +4737,10 @@ fn generate_graphql_operations_unfiltered(
             Some("requires mutation_shapes without upsert: an upsert rewrites an existing row without a per-row ExpectedVersion or assurance selection".to_owned())
         } else if entity_meta.dependent_deletes {
             Some("is not supported with dependent_deletes".to_owned())
+        } else if let Some(relation) = set_null_relation.as_deref() {
+            Some(format!(
+                "cannot be combined with relation `{relation}` declaring on_delete = \"set_null\": deleting the related row would rewrite this row without its ExpectedVersion or assurance selection. Use restrict or cascade"
+            ))
         } else if option.starts_with("update_expected_version") && managed_version_field.is_none() {
             Some("requires a #[graphql_orm(version = \"managed\")] field".to_owned())
         } else {

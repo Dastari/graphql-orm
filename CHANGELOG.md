@@ -27,13 +27,18 @@ for historical context.
   after the row is locked and before any write. A refusal rolls back the
   transaction with its related writes and commits no `Changed` event.
   `UpdateAssuranceInput` and `enforce_selected_assurance` are new. Enforcement
-  fails closed with `AUTHORIZATION_MISCONFIGURED` for an undeclared level or a
-  schema without `AssuranceEnforcement`.
+  fails closed with `AUTHORIZATION_MISCONFIGURED` for an undeclared level, or
+  for a schema without `AssuranceEnforcement`, which is checked before the
+  selector runs. A selector error reaches the client only as a fixed
+  `INTERNAL_ERROR`. The chosen level is observable to the caller, as the
+  reference documents.
 - **Added (operation catalogue, #851).** `GraphqlConditionalAssurance` and
   `conditional_assurance()` on generated and resolved descriptors list the
   levels an operation may require and mark the selection as conditional. The
   declaration is part of the operation and router-export fingerprints. Both
-  options require an entity that generates neither `update_many` nor `upsert`.
+  options require an entity that generates neither `update_many` nor `upsert`
+  and declares no `set_null` relation. `RuntimeSchema::from_static_entities*`
+  refuses such entities.
   Entities that opt into neither keep byte-identical SDL, catalogues,
   fingerprints and debug output.
 

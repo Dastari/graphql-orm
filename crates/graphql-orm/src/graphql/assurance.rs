@@ -882,10 +882,18 @@ pub(crate) fn enforce_check(check: &AssuranceCheck<'_>) -> async_graphql::Result
 /// field policies have produced the patch the write applies, and before the
 /// `Before` mutation hook and the `UPDATE`. The selector returns one declared
 /// level, an assurance policy ID, which [`enforce_selected_assurance`] then
-/// enforces. A refusal or an error rolls back the transaction, including every
-/// related write a transform made, and no `Changed` event is committed.
+/// enforces. A refusal or an error rolls back the transaction, and no
+/// `Changed` event is committed.
 ///
 /// A selector should be a pure function of the patch and the current row.
+///
+/// The row is the full locked preimage, read once the principal's write
+/// access to it is authorized. Read authorization is not re-checked for the
+/// selector. The selected level is observable to the caller, because the
+/// request either succeeds or is refused for step-up. A selector must
+/// therefore branch only on the patch and on fields the writing principal may
+/// read. A selector error never reaches the client: see
+/// [`enforce_selected_assurance`].
 #[derive(Clone, Copy)]
 pub struct UpdateAssuranceInput<'a, E, P> {
     current: &'a E,
@@ -929,47 +937,75 @@ impl<E, P> fmt::Debug for UpdateAssuranceInput<'_, E, P> {
     }
 }
 
-/// Enforces the assurance level a conditional selector chose for a root.
+/// Runs a conditional selector and enforces the level it chooses for a root.
 ///
-/// Generated updates with `update_assurance(...)` call this after the
-/// selector returns, in addition to the operation's registry classification
-/// that [`enforce_resolver_assurance`] checked before the row was read.
+/// Generated updates with `update_assurance(...)` call this inside the write
+/// transaction, after the row is locked, authorized and version-checked, and
+/// in addition to the registry classification that
+/// [`enforce_resolver_assurance`] checked before the row was read.
 ///
-/// It fails closed. A level outside `declared_levels` is refused, and so is
-/// every request when no [`AssuranceEnforcement`] is installed, both with
-/// `AUTHORIZATION_MISCONFIGURED`. Otherwise the installed evaluator decides
-/// `selected` for the operation's registered actor class (interactive when
-/// the operation is not registered). The selected level is enforced whatever
-/// the registry classification, an exemption included.
-pub fn enforce_selected_assurance(
+/// It fails closed, in this order:
+///
+/// 1. Without an installed [`AssuranceEnforcement`], it refuses with
+///    `AUTHORIZATION_MISCONFIGURED` and never calls `select`.
+/// 2. It calls `select` once. Any error it returns is replaced by one fixed
+///    `INTERNAL_ERROR` with the default message. The host's error text is
+///    logged server-side only and never reaches the client.
+/// 3. A level outside `declared_levels` is refused with
+///    `AUTHORIZATION_MISCONFIGURED`.
+/// 4. The installed evaluator decides the level for the operation's
+///    registered actor class (interactive when the operation is not
+///    registered). The level is enforced whatever the registry
+///    classification, an exemption included. The evaluator's own refusal is
+///    returned unchanged.
+///
+/// The selected level is observable to the caller: a request either succeeds
+/// or is refused with the evaluator's step-up or forbidden error. A selector
+/// therefore discloses whatever it branches on. It should branch only on the
+/// patch and on fields the writing principal may read.
+pub fn enforce_selected_assurance<'s, F>(
     ctx: &async_graphql::Context<'_>,
     kind: GraphqlOperationKind,
     field_name: &str,
     declared_levels: &[&str],
-    selected: &str,
-) -> async_graphql::Result<()> {
+    select: F,
+) -> async_graphql::Result<()>
+where
+    F: FnOnce() -> async_graphql::Result<&'s str>,
+{
     let check = AssuranceCheck::from_field(ctx, kind, field_name);
-    enforce_selected_check(&check, declared_levels, selected)
+    enforce_selected_check(&check, declared_levels, select)
 }
 
-fn enforce_selected_check(
+fn enforce_selected_check<'s>(
     check: &AssuranceCheck<'_>,
     declared_levels: &[&str],
-    selected: &str,
+    select: impl FnOnce() -> async_graphql::Result<&'s str>,
 ) -> async_graphql::Result<()> {
     let (kind, field_name) = (check.kind, check.field_name);
-    if !declared_levels.contains(&selected) {
-        return Err(configuration_error(format!(
-            "assurance selector for {}.{field_name} chose an undeclared level",
-            kind.root_type()
-        )));
-    }
     let Some(enforcement) = check.data_opt::<AssuranceEnforcement>() else {
         return Err(configuration_error(format!(
             "conditional assurance for {}.{field_name} requires installed AssuranceEnforcement",
             kind.root_type()
         )));
     };
+    let selected = select().map_err(|error| {
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::InternalError,
+        )
+        .with_internal(format!(
+            "assurance selector for {}.{field_name} failed: {}",
+            kind.root_type(),
+            error.message
+        ))
+        .into_graphql_error()
+    })?;
+    if !declared_levels.contains(&selected) {
+        return Err(configuration_error(format!(
+            "assurance selector for {}.{field_name} chose an undeclared level",
+            kind.root_type()
+        )));
+    }
     let actor_class = enforcement
         .registry
         .operation(kind, field_name)

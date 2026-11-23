@@ -25,6 +25,16 @@ router-export fingerprints. Regenerate exported SDL and catalogues, and
 re-approve any bindings to that operation. Install `AssuranceEnforcement`
 before you enable `update_assurance`: without it, every update of the entity
 is refused with `AUTHORIZATION_MISCONFIGURED`.
+
+The derive also refuses either option on an entity with a relation declaring
+`on_delete = "set_null"`. Use `restrict` or `cascade` instead. The runtime IR
+conversion (`RuntimeSchema::from_static_entities*`) refuses the entity. Do not
+declare database-only foreign keys that set the table's keys to null.
+
+The caller can observe the level a selector chooses, because the update either
+succeeds or is refused for step-up. Write selectors that branch only on the
+patch and on fields the writing principal may read. A selector error reaches
+the client only as `INTERNAL_ERROR`.
 See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
 and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
 

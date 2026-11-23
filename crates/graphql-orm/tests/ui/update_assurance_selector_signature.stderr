@@ -16,10 +16,15 @@ note: function defined here
    |    ^^^^^^ ----------
    = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: the `?` operator can only be applied to values that implement `Try`
+error[E0308]: mismatched types
  --> tests/ui/update_assurance_selector_signature.rs:5:25
   |
 5 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
-  |                         ^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `&str`
+  |                         ^^^^^^^^^^^^^^^^^
+  |                         |
+  |                         expected `Result<&str, Error>`, found `&str`
+  |                         expected `Result<&'static str, async_graphql::Error>` because of return type
   |
-  = help: the nightly-only, unstable trait `Try` is not implemented for `&str`
+  = note:   expected enum `Result<&'static str, async_graphql::Error>`
+          found reference `&'static str`
+  = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)

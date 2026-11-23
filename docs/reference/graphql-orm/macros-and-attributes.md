@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-22
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -1535,17 +1535,26 @@ struct Review {
 
 - The SDL declares `ExpectedVersion: Int!` on the update. The operation catalogue argument has
   GraphQL type `Int!` and Rust type `i64`, so the operation's fingerprint changes once.
-- An omitted or null value, including a null variable, is refused by GraphQL validation before the
-  resolver runs. The request carries no ORM code; a router reports it as
+- An omitted or null value, including null for a non-null variable, is refused by GraphQL
+  validation before the resolver runs. The request carries no ORM code; a router reports it as
   `GRAPHQL_VALIDATION_FAILED`. A stale value fails with `CONFLICT`. In every case nothing is
   written and no `Changed` event is committed.
 - A matching value advances the version exactly once, as an optional `ExpectedVersion` does.
 - Delete keeps its optional argument. Repository and transaction writes are host writes and are
   unaffected; use `compare_and_swap` for the same check there.
-- The derive refuses the option without a `version = "managed"` field, with `dependent_deletes`,
-  and when the entity generates `update_many` or `upsert`. Those roots rewrite existing rows
-  without a per-row `ExpectedVersion`. Select the remaining roots with
-  [`mutation_shapes`](#generated-mutation-shapes).
+- The derive refuses the option in these cases:
+  - without a `version = "managed"` field;
+  - without a generated update root (`mutations = false`, or `mutation_shapes` without `update`);
+  - with `dependent_deletes`;
+  - when the entity generates `update_many` or `upsert`. Select the remaining roots with
+    [`mutation_shapes`](#generated-mutation-shapes).
+  - with a relation declaring `on_delete = "set_null"`. Deleting the related row would clear this
+    row's key in the database, or in a dependent-delete plan, without the version check. Use
+    `restrict`, or `cascade`, which deletes the row instead. Deletes are not guarded.
+
+  Each of those paths rewrites existing rows without a per-row `ExpectedVersion`.
+
+See [paths these options do not cover](#paths-the-update-options-do-not-cover).
 
 Entities without the option keep their optional `ExpectedVersion`, SDL and catalogue.
 
@@ -1583,23 +1592,49 @@ The update runs these steps in its transaction:
 
 1. It locks the row, authorizes it and checks `ExpectedVersion`.
 2. It applies write transforms and field policies to produce the patch it will write.
-3. It calls the selector once with `current()` (the locked row) and `patch()`
-   (`Update<Entity>Input`), then calls `enforce_selected_assurance` with the returned level.
-4. It runs the `Before` mutation hook, the `UPDATE`, the `After` hook and the commit.
+3. It calls `enforce_selected_assurance`. Without an `AssuranceEnforcement` in the schema, this
+   refuses with `AUTHORIZATION_MISCONFIGURED` and the selector is never called.
+4. It calls the selector once with `current()` (the locked row) and `patch()`
+   (`Update<Entity>Input`). An undeclared level is refused with `AUTHORIZATION_MISCONFIGURED`.
+   The evaluator then decides the returned level.
+5. It runs the `Before` mutation hook, the `UPDATE`, the `After` hook and the commit.
 
-A refusal or error at step 3 returns before any write. The transaction rolls back, and so does
-every related write in it. No `Changed` event is committed. A selector should be a pure function
-of the patch and the row.
+A refusal or error at steps 3 or 4 returns before any write. The transaction rolls back and no
+`Changed` event is committed. Write transforms can only read through the transaction, and
+mutation hooks run after the selection. So no host code can have written anything in the
+transaction by then. A selector should be a pure function of the patch and the row.
 
-Enforcement fails closed. A level not in `levels` is refused with
-`AUTHORIZATION_MISCONFIGURED`, and so is every request when the schema has no
-`AssuranceEnforcement`. The evaluator decides the level for the operation's registered actor class,
-or interactive when the operation is not registered. It enforces the level even when the registry
-exempts the operation. The evaluator's own refusal, such as `FORBIDDEN` or `STEP_UP_REQUIRED`,
-passes through unchanged.
+If the selector returns an error, the client receives one fixed `INTERNAL_ERROR` with the default
+message. The host's error text is logged server-side only.
 
-The derive refuses the option with `dependent_deletes`, and when the entity generates `update_many`
-or `upsert`. A selector with the wrong signature is a type error at the generated call.
+The evaluator decides the level for the operation's registered actor class, or interactive when
+the operation is not registered. It enforces the level even when the registry exempts the
+operation. The evaluator's own refusal, such as `FORBIDDEN` or `STEP_UP_REQUIRED`, passes
+through unchanged.
+
+**The selected level is observable.** A request either succeeds or is refused for step-up, so the
+caller learns which level the selector chose. The selector receives the full locked row once the
+principal's write access is authorized. Read authorization is not re-checked for it. Branch only
+on the patch and on fields the writing principal may read.
+
+The derive refuses the option in the same cases as a required `ExpectedVersion`, except that it
+needs no managed version. A selector with the wrong signature is a type error at the generated
+call.
+
+### Paths the update options do not cover
+
+Both options guard the generated GraphQL update only.
+
+- Repository and transaction writes are trusted host writes.
+- A delete, including a declared `cascade`, removes the row and is not guarded.
+- `RuntimeSchema::from_static_entities` and `from_static_entities_for_repository` refuse an
+  entity with either option with `UnsupportedCapability`. The runtime IR represents neither
+  option, so a runtime update could otherwise rewrite the same table without them. The refusal
+  covers any metadata naming that table, including a copy.
+- A foreign key that exists only in the database, outside the entity declarations, cannot be
+  seen by the derive. If it sets this table's key to null when a parent is deleted, the row is
+  rewritten without the checks. Do not declare such keys on a guarded table. A runtime IR that a
+  host writes by hand for the same table is likewise outside these checks.
 
 The operation catalogue describes the selection with
 `conditional_assurance()`. It returns the sorted levels and reports `is_conditional()`.

@@ -129,22 +129,23 @@ pub(in crate::operations) fn update(
             let select = &selector.select;
             let levels = &selector.levels;
             quote! {
-                {
-                    let __gom_selected_assurance: &str = #select(
-                        ::graphql_orm::graphql::assurance::UpdateAssuranceInput::<#struct_name, #update_input>::new(
-                            &current_entity,
-                            &input,
-                            #update_mutation_name,
-                        ),
-                    )?;
-                    ::graphql_orm::graphql::assurance::enforce_selected_assurance(
-                        ctx,
-                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
-                        #update_mutation_name,
-                        &[#(#levels),*],
-                        __gom_selected_assurance,
-                    )?;
-                }
+                // Enforcement is checked first, so a schema without it is
+                // refused before the selector reads the row.
+                ::graphql_orm::graphql::assurance::enforce_selected_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                    #update_mutation_name,
+                    &[#(#levels),*],
+                    || -> ::graphql_orm::async_graphql::Result<&'static str> {
+                        #select(
+                            ::graphql_orm::graphql::assurance::UpdateAssuranceInput::<#struct_name, #update_input>::new(
+                                &current_entity,
+                                &input,
+                                #update_mutation_name,
+                            ),
+                        )
+                    },
+                )?;
             }
         }
         None => quote! {},

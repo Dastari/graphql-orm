@@ -12,4 +12,7 @@ fn update_expected_version_and_update_assurance_are_validated() {
     t.compile_fail("tests/ui/update_assurance_requires_no_upsert.rs");
     t.compile_fail("tests/ui/update_assurance_invalid_options.rs");
     t.compile_fail("tests/ui/update_assurance_selector_signature.rs");
+    t.compile_fail("tests/ui/update_assurance_unsupported_roots.rs");
+    t.compile_fail("tests/ui/update_assurance_set_null.rs");
+    t.pass("tests/ui/update_assurance_cascade_allowed.rs");
 }

@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-22
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -236,17 +236,24 @@ The owning service enforces the selection:
 
 - The registry classification of the update is enforced first, as for every
   root, before any database work.
-- Inside the write transaction, after the row is locked, authorized and
-  version-checked, and after write transforms and field policies, the typed
-  selector receives the patch the write applies and the locked row. It returns
-  one declared level.
-- `enforce_selected_assurance` refuses an undeclared level and a schema
-  without `AssuranceEnforcement` with `AUTHORIZATION_MISCONFIGURED`. Otherwise
-  it asks the installed evaluator to enforce that policy ID for the operation's
-  actor class.
+- Inside the write transaction, the row is first locked, authorized and
+  version-checked, then write transforms and field policies run.
+  `enforce_selected_assurance` then refuses a schema without
+  `AssuranceEnforcement` with `AUTHORIZATION_MISCONFIGURED`, before the
+  selector is called.
+- The typed selector receives the patch the write applies and the locked row,
+  and returns one declared level. A selector error becomes one fixed
+  `INTERNAL_ERROR`; its text is logged server-side only. An undeclared level is
+  refused with `AUTHORIZATION_MISCONFIGURED`. Otherwise the installed
+  evaluator enforces that policy ID for the operation's actor class.
 - A refusal returns before the `Before` mutation hook and the `UPDATE`. The
-  transaction rolls back with every related write, and no `Changed` event is
-  committed.
+  transaction rolls back, and no `Changed` event is committed.
+
+The selection is a disclosure channel. The caller sees success or a step-up
+refusal, and so learns which level the selector chose. The selector receives
+the full locked row once write access is authorized, and read authorization is
+not re-checked for it. A selector must branch only on the patch and on fields
+the writing principal may read.
 
 The operation catalogue describes the contract to callers and routers.
 `GeneratedGraphqlOperationDescriptor::conditional_assurance()` (and the resolved
@@ -267,8 +274,12 @@ The description is advisory, as the manifest is:
   manifest entry shows its baseline classification only.
 
 An entity with a conditional selection must not generate `update_many` or
-`upsert`, which would rewrite rows without a per-row selection. The derive
-refuses such an entity.
+`upsert`, or declare a `set_null` relation. Each would rewrite rows without a
+per-row selection, so the derive refuses the entity. The runtime IR conversion
+refuses the entity as well. A foreign key that exists only in the database is
+outside the derive's view. The
+[macro reference](../reference/graphql-orm/macros-and-attributes.md#paths-the-update-options-do-not-cover)
+lists these paths.
 
 ## Rollback
 
