@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.29.0
+
+- The ORM adapter and object index honor the database's external backup and
+  restore setting. Backup orchestration and restore, including dry runs,
+  refuse these databases before accessing the database or repository (follow-up
+  to #731).
+
 ## Unreleased - 0.28.1
 
 - The optional ORM adapter refuses target clears and restores from a read

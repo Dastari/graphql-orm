@@ -221,6 +221,13 @@ pub struct BackupSnapshot {
     tx: sqlx::Transaction<'static, sqlx::Postgres>,
 }
 
+/// Logical backup and restore operations for the runtime database.
+///
+/// A database configured with
+/// [`DatabaseBuilder::externally_managed_backup_restore`](crate::db::DatabaseBuilder::externally_managed_backup_restore)
+/// refuses snapshots, exports, and imports with
+/// [`BackupRestoreExternallyManaged`](super::BackupRestoreExternallyManaged).
+/// Metadata helpers remain available.
 #[allow(async_fn_in_trait)]
 pub trait GraphqlOrmBackupRuntime {
     async fn begin_consistent_snapshot(&self) -> crate::Result<BackupSnapshot>;
@@ -259,6 +266,7 @@ pub trait GraphqlOrmBackupRuntime {
 
 impl GraphqlOrmBackupRuntime for crate::db::Database {
     async fn begin_consistent_snapshot(&self) -> crate::Result<BackupSnapshot> {
+        self.ensure_backup_restore_allowed()?;
         begin_consistent_snapshot(self.pool()).await
     }
 
@@ -283,6 +291,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
         snapshot: &mut BackupSnapshot,
         entity: &EntityBackupDescriptor,
     ) -> crate::Result<Vec<BackupRow>> {
+        self.ensure_backup_restore_allowed()?;
         export_table_rows(snapshot, entity).await
     }
 
@@ -292,6 +301,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
         rows: &[BackupRow],
         context: &RestoreContext,
     ) -> crate::Result<ImportReport> {
+        self.ensure_backup_restore_allowed()?;
         super::ensure_sql_write_allowed()?;
         import_table_rows(self.pool(), entity, rows, context).await
     }
@@ -435,6 +445,7 @@ impl crate::db::Database {
         window: ChangeWindow,
         max_wait: std::time::Duration,
     ) -> crate::Result<Vec<BackupChange>> {
+        self.ensure_backup_restore_allowed()?;
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
                 "incremental backup export requires the graphql-orm change-journal feature"
@@ -473,6 +484,7 @@ pub async fn restore_backup_rows(
     rows_by_table: &BTreeMap<String, Vec<BackupRow>>,
     context: &RestoreContext,
 ) -> crate::Result<Vec<ImportReport>> {
+    database.ensure_backup_restore_allowed()?;
     super::ensure_sql_write_allowed()?;
     match compare_schema_snapshots(backup_snapshot, current_snapshot) {
         BackupCompatibility::Exact => {}

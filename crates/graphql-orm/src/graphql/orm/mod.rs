@@ -114,7 +114,8 @@ pub use point_read::*;
 pub use query::*;
 pub use read_authorization::*;
 pub use restore_marker::{
-    RESTORE_MARKER_TABLE, RestoreInProgress, RestoreStateUnavailable, RestoreStateUnavailableReason,
+    BackupRestoreExternallyManaged, RESTORE_MARKER_TABLE, RestoreInProgress,
+    RestoreStateUnavailable, RestoreStateUnavailableReason,
 };
 pub use rls::*;
 pub use root_fields::*;
