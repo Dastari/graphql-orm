@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.216.0, operation catalogue 0.13.0
+
+- **Fixed (#883).** Described roots returning a registered generated entity
+  use its schema-bound semantic metadata, including generated list
+  relationship page limits. When distinct Rust types claim the same GraphQL
+  name, catalogue composition reports both sources.
+  [Migration](MIGRATION.md#02070-to-02160-described-root-result-metadata)
+
 ## Unreleased - ORM/macros 0.207.0
 
 - **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite

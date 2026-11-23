@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.13.0 uses Rust type provenance to resolve described root
+results during static schema composition (#883).
+[Migration](../../MIGRATION.md#02070-to-02160-described-root-result-metadata)
+
 Version `0.11.0` adds two opt-in pieces and changes no existing descriptor,
 wire format or fingerprint. No data migration is needed.
 

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.216.0 uses schema-bound semantic metadata for described roots
+returning a registered generated entity (#883).
+[Migration](../../MIGRATION.md#02070-to-02160-described-root-result-metadata)
+
 Version 0.207.0 renders SQLite closure read predicates in the original form
 again (#876) and reduces SQL duplication for directly nested closure read
 predicates on PostgreSQL and SQL Server. See the [migration note](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).

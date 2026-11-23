@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.216.0 records the Rust type of described root results for
+schema catalogue composition (#883).
+[Migration](../../MIGRATION.md#02070-to-02160-described-root-result-metadata)
+
 Version 0.207.0 aligns with the ORM's
 [closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
 
