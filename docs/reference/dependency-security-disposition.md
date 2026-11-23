@@ -71,6 +71,12 @@ requirements prevent a complete lockfile-only fix.
 
 | Identity | Review by | Evidence |
 | --- | --- | --- |
+| [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html), `rsa 0.9.10` | 2026-12-23 | Fixed 0.10.0 requires Rust 1.87. Pinned agql-auth, JWT 10/11, the SMB SSPI stack and lock-only SQLx MySQL 0.8.6 still require 0.9.x. The deployed router and ORM paths use no RSA private key. The RSA operations section below distinguishes public-key verification, fixture signing, and external agql-auth signing paths. |
+| [RUSTSEC-2023-0089](https://rustsec.org/advisories/RUSTSEC-2023-0089.html), `atomic-polyfill 1.0.3` | 2027-02-23 | The archive notice has no patched release. Weak geo-types `serde` features retain rstar 0.9/0.10/0.11 and heapless 0.7.17 in the locks. The selected spatial path uses rstar 0.12 and heapless 0.8, which replaced atomic-polyfill with portable-atomic. Current geo-types retains the older rstar requirements. |
+| [RUSTSEC-2024-0449](https://rustsec.org/advisories/RUSTSEC-2024-0449.html), `unsafe-libyaml 0.2.11` | 2027-02-23 | The unmaintained notice has no patched release. Datadog/libdd and the VRL build use serde_yaml 0.9.34. Hive/VRL uses serde_yaml_ng 0.10.0 at runtime. Both require unsafe-libyaml. Newer VRL still uses serde_yaml_ng, and replacing either parser with serde-saphyr requires an owning migration. The typed router uses its own JSON configuration and supplies no Datadog exporter. |
+| [RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html), `quick-xml 0.39.4` | 2027-02-23 | The duplicate-attribute CPU fix starts at 0.41.0. object_store 0.14.1 and later accept it, but both pinned Hive 0.2.19 and Hive 0.3.19 require object_store `^0.13.2`. Router initialization supplies no Hive storage map and uses only local JSON when persisted documents are enabled. |
+| [RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195.html), `quick-xml 0.39.4` | 2027-02-23 | The `NsReader` namespace-allocation fix also starts at 0.41.0 and hits the same object_store requirement. The router's local JSON manifest path bypasses object_store and its S3 credential XML readers. |
+| [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html), `lru 0.16.3` | 2027-02-23 | The root and four nested locks reach the affected copy via async-graphql (`^0.16.2`) or Datadog and libdd-sampling (`^0.16.3`). Current owner releases still exclude fixed 0.18.2. Generated loaders use `NoCache` and the typed router supplies no Datadog exporter. The AWS-owned 0.18.5 copy is already fixed. |
 | [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html), `lru 0.16.4` | 2027-02-23 | Fixtures resolve through async-graphql 7.2.1 (`^0.16.2`) and, in federation-end-to-end, through Hive 0.2.19's Datadog and libdd sampling dependencies (`^0.16.3`). The fix starts at 0.18.2. Generated loaders use `DataLoader::new` with `NoCache`. The cross-crate fixture's custom cache uses `HashMapCache`. The typed Hive translation configures optional Prometheus metrics and supplies no Datadog exporter. The exception excludes host LRU caches with potentially panicking key destructors. |
 | [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html), `crypto-bigint 0.5.5` | 2026-12-23 | The JWT 10 and 11 paths still use elliptic-curve 0.13.8 (`crypto-bigint ^0.5`). JWT 12 adopts the newer curves but crosses both owners' requirements. Router JWT verification uses public keys and workspace signing fixtures use RSA or HS256. The owner acceptance retains the conditions below. |
 | [RUSTSEC-2026-0441](https://rustsec.org/advisories/RUSTSEC-2026-0441.html), `pin-utils 0.1.0` | 2027-02-23 | The unmaintained notice includes 0.1.1. aws-smithy-runtime 1.16.1 and wasmtimer 0.4.4 drop the dependency. The optional SMB path still resolves it because sspi 0.16.1 requires async-dnssd 0.5 on macOS and iOS, and that line retains pin-utils. |
@@ -180,7 +186,7 @@ in the protected-release review packet.
 | --- | --- | --- |
 | quick-xml [RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html) / [0195](https://rustsec.org/advisories/RUSTSEC-2026-0195.html) | Affected Hive/object_store reader remains selected. The project router's supported configuration excludes its credential XML initialization; standalone Hive and host extensions are outside this condition. | Router maintainers: seek an owning fixed object_store/quick-xml update; review storage, persisted documents, loaders, plugins and environment/configuration merging. |
 | lru [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html) | Unsound non-AWS copies remain. Generated loaders use NoCache; supported router telemetry does not initialize Datadog. Reviewed concrete libdd keys do not supply a panicking destructor. Public generic caches remain conditional host risk. | ORM/router maintainers: seek owning fixed LRU requirements; review custom caches, key destructors, unwind recovery and exporters. |
-| rsa [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) | No fixed release is listed in the reviewed advisory. No private-key-decryption oracle was found in reviewed JWT operations or the native SMB username/password NTLM path. This is not a general constant-time claim. | Auth/storage maintainers: monitor upstream; review key reuse, decryption APIs, crypto providers, credentials, mechanisms and unified features. |
+| rsa [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) | RustSec lists a fix in 0.10.0. The reviewed runtime paths either perform public verification or use symmetric credentials. The pinned 0.9 owners are listed in the current review above. | Auth/storage maintainers should review newer owners, key reuse, decryption APIs, providers, and authentication mechanisms. |
 
 ### Router XML initialization
 
@@ -190,8 +196,10 @@ directly deserializes it, exposes no raw Hive storage or plugin registry, and su
 no storage map. Its [file
 configuration](../../crates/graphql-orm-router/src/file_config.rs) rejects unknown
 fields; the CLI uses that project loader rather than Hive's overlay loader.
-Persisted-document options remain disabled through initialization and reload. Hive's
-empty StorageManager constructs no S3 runtime or credential reader.
+Persisted documents are disabled by default. When enabled, the router sends Hive
+a validated private local JSON snapshot as a `file` source, including on reload.
+Hive resolves remote storage only for its separate `storage` source. The empty
+StorageManager constructs no S3 runtime or credential reader.
 
 Generic Hive S3 WebIdentity/STS and S3 Express credentials have real XML response
 paths. object_store's serde reader constructs NsReader, so neither advisory is
@@ -234,10 +242,19 @@ gate](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a12
 
 ### RSA operations and credentials
 
-Reviewed auth paths parse public keys, verify signatures and sign through the
-selected jsonwebtoken randomized/blinded signing implementation. They do not
-provide a private-key-decryption endpoint. Reusing that signing key in another
-decryption service invalidates this reasoning.
+The deployed router verifies bearer tokens using public JWKS keys, either
+directly or through agql-auth's `AccessTokenValidator`. The ORM consumes
+already-validated principals. Neither runtime signs or decrypts with an RSA
+private key in the reviewed paths. Router tests and the dedicated fuzz build
+sign JWTs with synthetic RSA keys. The ORM's AuthService fixtures use HS256.
+
+The external agql-auth pin can use RSA private keys in two configured paths.
+`AuthService` signs an RS256 probe when validating a key pair and signs RS256
+tokens on issuance. `ClientJwtSigner` signs a probe at construction and uses
+RS256 or PS256 for OAuth/OIDC client assertions. These paths use jsonwebtoken's
+randomized, blinded RSA signing and are outside the router/ORM runtime paths
+reviewed here. Private-key decryption, reuse of a signing key for decryption,
+or adding host private-key operations requires a new review.
 
 The [native SMB provider](../../crates/graphql-orm-storage/src/smb.rs) passes
 username/password credentials. Its selected mechanism is restricted to
@@ -247,9 +264,10 @@ trace. SQLx MySQL is absent from the selected profiles and outside the advertise
 ORM backend set; lockfile presence is a separate observation.
 
 Primary sources: [auth
-signing](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L1456),
+signing](https://github.com/Dastari/agql-auth/blob/7d016f6a6bc3e697382e2e05865f596862189240/src/service.rs#L1761),
+[client assertion signing](https://github.com/Dastari/agql-auth/blob/7d016f6a6bc3e697382e2e05865f596862189240/src/client_auth.rs#L303),
 [JWKS public-key
-extraction](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L2271),
+extraction](https://github.com/Dastari/agql-auth/blob/7d016f6a6bc3e697382e2e05865f596862189240/src/service.rs#L2578),
 [selected JWT RSA
 implementation](https://docs.rs/crate/jsonwebtoken/10.4.0/source/src/crypto/rust_crypto/rsa.rs),
 [SMB
