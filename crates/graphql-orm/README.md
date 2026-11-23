@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.208.0 adds [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+to typed transactions on SQLite, PostgreSQL and writable SQL Server.
+
 Version 0.207.0 renders SQLite closure read predicates in the original form
 again (#876) and reduces SQL duplication for directly nested closure read
 predicates on PostgreSQL and SQL Server. See the [migration note](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
