@@ -4715,6 +4715,11 @@ impl EntityMetadata {
     where
         T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
     {
+        // #851: record a guarded table from every typed constructor, so a
+        // conversion refuses it whichever path built the metadata first.
+        if T::__gom_guarded_update() {
+            super::__register_guarded_update_table(T::TABLE_NAME);
+        }
         Self {
             entity_name,
             table_name: T::TABLE_NAME,

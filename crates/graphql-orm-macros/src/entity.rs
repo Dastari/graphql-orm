@@ -3923,15 +3923,17 @@ fn generate_entity_tokens(
     let identity_only = identity_names.is_some();
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
-    // #851: a table whose generated update requires ExpectedVersion or
-    // selects assurance is recorded, so conversions that would serve it
-    // without those checks (the runtime IR) refuse it. Other entities emit
-    // nothing.
-    let guarded_update_registration = if entity_meta.update_expected_version_required.is_some()
+    // #851: a guarded entity says so through `DatabaseSchema`, and every
+    // typed metadata constructor then records its table, so conversions that
+    // would serve it without the update checks (the runtime IR) refuse it.
+    // Other entities emit nothing.
+    let guarded_update_schema_method = if entity_meta.update_expected_version_required.is_some()
         || entity_meta.update_assurance.is_some()
     {
         quote::quote! {
-            ::graphql_orm::graphql::orm::__register_guarded_update_table(metadata.table_name);
+            fn __gom_guarded_update() -> bool {
+                true
+            }
         }
     } else {
         quote::quote! {}
@@ -6754,6 +6756,7 @@ fn generate_entity_tokens(
             }
 
             impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                #guarded_update_schema_method
                 fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
                     static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
                         #(#column_defs),*
@@ -7479,6 +7482,7 @@ fn generate_entity_tokens(
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                #guarded_update_schema_method
             fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
                 static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
                     #(#column_defs),*
@@ -7541,7 +7545,7 @@ fn generate_entity_tokens(
                 static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::EntityMetadata> =
                     ::std::sync::OnceLock::new();
                 METADATA.get_or_init(|| {
-                    let metadata = ::graphql_orm::graphql::orm::EntityMetadata::from_schema_with_retention::<Self>(
+                    ::graphql_orm::graphql::orm::EntityMetadata::from_schema_with_retention::<Self>(
                         #struct_name_str,
                         #backup_enabled,
                         #backup_export_order,
@@ -7550,9 +7554,7 @@ fn generate_entity_tokens(
                         #write_policy,
                         #append_only,
                         #retention_policy,
-                    );
-                    #guarded_update_registration
-                    metadata
+                    )
                 })
             }
 

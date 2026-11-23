@@ -159,7 +159,14 @@ fn select_review_assurance(
 ) -> async_graphql::Result<&'static str> {
     match input.patch().display_name.as_deref() {
         Some("__undeclared__") => return Ok("undeclared"),
-        Some("__selector_error__") => return Err(async_graphql::Error::new(SELECTOR_SECRET)),
+        // Message, source and extensions all carry host text.
+        Some("__selector_error__") => {
+            return Err(
+                async_graphql::Error::new_with_source(std::io::Error::other(SELECTOR_SECRET))
+                    .extend_with(|_, extensions| extensions.set("hostDetail", SELECTOR_SECRET)),
+            );
+        }
+        Some("__selector_panic__") => panic!("{SELECTOR_SECRET}"),
         _ => {}
     }
     match &input.patch().state {
@@ -881,29 +888,67 @@ async fn conditional_assurance_fails_closed_when_misconfigured(db: &Database) ->
     Ok(())
 }
 
-async fn a_selector_error_is_sanitized(db: &Database) -> TestResult {
+async fn a_selector_error_or_panic_is_sanitized(db: &Database) -> TestResult {
     let harness = harness(db);
     ReviewRecord::insert(db, create("r-1")).await?;
+    for trigger in ["__selector_error__", "__selector_panic__"] {
+        let response = harness
+            .run(update("r-1", &rename(trigger), Some("0")), Granted::Elevated)
+            .await;
+        assert_eq!(
+            error_code(&response).as_deref(),
+            Some("INTERNAL_ERROR"),
+            "{trigger}: {response:?}"
+        );
+        let json = serde_json::to_string(&response.errors)?;
+        assert!(!json.contains(SELECTOR_SECRET), "{trigger}: {json}");
+        assert!(!json.contains("hostDetail"), "{trigger}: {json}");
+        // Only the registry requirement was evaluated; nothing was written.
+        assert_eq!(harness.policies(), ["write"], "{trigger}");
+        assert!(harness.phases().is_empty(), "{trigger}");
+        let stored = load(db, "r-1").await;
+        assert_eq!(
+            (stored.display_name.as_str(), stored.row_version),
+            ("Draft", 0),
+            "{trigger}"
+        );
+    }
+    // The transaction rolled back cleanly: the next update applies.
+    let renamed = harness
+        .run(update("r-1", &rename("Renamed"), Some("0")), Granted::Write)
+        .await;
+    assert!(applied(&renamed), "{renamed:?}");
+    assert_eq!(load(db, "r-1").await.row_version, 1);
+    Ok(())
+}
+
+async fn a_row_that_cannot_advance_is_refused_before_selection(db: &Database) -> TestResult {
+    let harness = harness(db);
+    ReviewRecord::insert(db, create("r-1")).await?;
+    <DefaultBackend as WriteBackend>::execute_with_binds(
+        db.pool(),
+        &format!(
+            "UPDATE review_records SET row_version = {} WHERE id = 'r-1'",
+            i64::MAX
+        ),
+        &[],
+    )
+    .await?;
     let response = harness
         .run(
-            update("r-1", &rename("__selector_error__"), Some("0")),
+            update("r-1", &rename("Renamed"), Some(&i64::MAX.to_string())),
             Granted::Elevated,
         )
         .await;
-    assert_eq!(
-        error_code(&response).as_deref(),
-        Some("INTERNAL_ERROR"),
-        "{response:?}"
-    );
-    let json = serde_json::to_string(&response.errors)?;
-    assert!(!json.contains(SELECTOR_SECRET), "{json}");
-    // Only the registry requirement was evaluated; nothing was written.
+    assert!(!applied(&response), "{response:?}");
+    assert!(!response.errors.is_empty(), "{response:?}");
+    // The registry requirement ran; the selector and its level did not.
     assert_eq!(harness.policies(), ["write"]);
     assert!(harness.phases().is_empty());
     let stored = load(db, "r-1").await;
     assert_eq!(
         (stored.display_name.as_str(), stored.row_version),
-        ("Draft", 0)
+        ("Draft", i64::MAX)
     );
     Ok(())
 }
@@ -995,7 +1040,8 @@ scenarios![
     a_state_transition_requires_elevated_assurance,
     a_failed_invariant_rolls_back_the_transition_and_its_related_writes,
     conditional_assurance_fails_closed_when_misconfigured,
-    a_selector_error_is_sanitized,
+    a_selector_error_or_panic_is_sanitized,
+    a_row_that_cannot_advance_is_refused_before_selection,
     runtime_ir_conversion_refuses_guarded_entities,
     repository_updates_are_host_writes_and_unaffected,
 ];

@@ -62,7 +62,7 @@ run_sqlite() {
     --test runtime_many_to_many --test runtime_relation_bind_limit \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test managed_version --test update_assurance --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test page_limit_contract --test repository_explicit_limits \
+    --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test page_limit_contract --test repository_explicit_limits \
     --test bulk_write_filter_authority --test static_input_object_shape --test client_error_contract --test client_facing_metadata --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test read_predicate_statement_budget --locked
@@ -138,7 +138,7 @@ run_postgres_legacy() {
     --test lifecycle_related_writes \
     --test empty_filter_semantics --test keyed_changed_subscriptions \
     --test managed_version \
-    --test update_assurance \
+    --test update_assurance --test update_assurance_registry \
     --test mutation_context_reads \
     --test node_ids \
     --test nullable_update_clear \
@@ -201,7 +201,7 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib the_probe_reads_the_rows_the_filtered_index_covers -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test computed_field_invalidation --test managed_version --test update_assurance --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
+    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test computed_field_invalidation --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
   # Closure rendering and depth refusals need no server.
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test read_predicate_closure
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \

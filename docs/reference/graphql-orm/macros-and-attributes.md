@@ -1599,13 +1599,19 @@ The update runs these steps in its transaction:
    The evaluator then decides the returned level.
 5. It runs the `Before` mutation hook, the `UPDATE`, the `After` hook and the commit.
 
-A refusal or error at steps 3 or 4 returns before any write. The transaction rolls back and no
-`Changed` event is committed. Write transforms can only read through the transaction, and
-mutation hooks run after the selection. So no host code can have written anything in the
-transaction by then. A selector should be a pure function of the patch and the row.
+A refusal or error at steps 3 or 4 returns before any ORM write. The transaction rolls back and
+no `Changed` event is committed. No ORM write path runs before the selector: write transforms
+can only read through the transaction, and mutation hooks run after the selection. Host SQL in a
+`DatabaseFilter` or a policy predicate does run inside the same transaction. A side-effecting
+database function called from it could write before the selector, and that write rolls back on
+refusal too. A selector should be a pure function of the patch and the row.
 
-If the selector returns an error, the client receives one fixed `INTERNAL_ERROR` with the default
-message. The host's error text is logged server-side only.
+A managed version that cannot advance past `i64::MAX` is refused before step 3, so the selector
+does not run for such a row.
+
+If the selector returns an error or panics, the client receives one fixed `INTERNAL_ERROR` with
+the default message. Neither its message, extensions or source nor a panic payload reaches the
+client. The error message is logged server-side; a panic payload is not formatted.
 
 The evaluator decides the level for the operation's registered actor class, or interactive when
 the operation is not registered. It enforces the level even when the registry exempts the
@@ -1629,12 +1635,26 @@ Both options guard the generated GraphQL update only.
 - A delete, including a declared `cascade`, removes the row and is not guarded.
 - `RuntimeSchema::from_static_entities` and `from_static_entities_for_repository` refuse an
   entity with either option with `UnsupportedCapability`. The runtime IR represents neither
-  option, so a runtime update could otherwise rewrite the same table without them. The refusal
-  covers any metadata naming that table, including a copy.
-- A foreign key that exists only in the database, outside the entity declarations, cannot be
-  seen by the derive. If it sets this table's key to null when a parent is deleted, the row is
-  rewritten without the checks. Do not declare such keys on a guarded table. A runtime IR that a
-  host writes by hand for the same table is likewise outside these checks.
+  option, so a runtime update could otherwise rewrite the same table without them.
+  - The refusal covers any metadata naming that table, matched as a bare lowercase name with a
+    default schema (`public`, `dbo`, `main`) stripped. That includes a copy.
+  - The table is recorded whenever `EntityMetadata::from_schema::<E>` or
+    `from_schema_with_retention::<E>` builds metadata for the entity, including through the
+    generated `metadata()`.
+- **Host schema configuration must not bypass the checks.** The derive cannot see these cases,
+  so they are the host's responsibility:
+  - A foreign key that exists only in the database, outside the entity declarations. If it sets
+    the guarded table's key to null when a parent is deleted, the row is rewritten without the
+    checks.
+  - A second mapping of the same physical table through another entity, or through a separate
+    migration plan. It can install its own `SET NULL` foreign key or expose its own generated
+    update.
+
+  Do not map a guarded table through another entity or plan. Foreign keys into it must not use
+  `SET NULL`.
+- Runtime IR over a guarded table that the host writes by hand, deserializes, or builds from
+  reconstructed metadata is host-authored. It bypasses these protections. Keeping it consistent
+  with the guarded table is the host's responsibility.
 
 The operation catalogue describes the selection with
 `conditional_assurance()`. It returns the sorted levels and reports `is_conditional()`.

@@ -28,13 +28,23 @@ is refused with `AUTHORIZATION_MISCONFIGURED`.
 
 The derive also refuses either option on an entity with a relation declaring
 `on_delete = "set_null"`. Use `restrict` or `cascade` instead. The runtime IR
-conversion (`RuntimeSchema::from_static_entities*`) refuses the entity. Do not
-declare database-only foreign keys that set the table's keys to null.
+conversion (`RuntimeSchema::from_static_entities*`) refuses the entity.
+
+Some schema configuration bypasses the checks, and the derive cannot see it,
+so avoid it:
+
+- Do not declare database-only foreign keys that set the table's keys to null.
+- Do not map a guarded table through another entity or a separate migration
+  plan. It could install its own `SET NULL` key or expose its own update.
+- Do not use runtime IR over a guarded table that you write by hand or
+  deserialize. It bypasses these protections.
 
 The caller can observe the level a selector chooses, because the update either
 succeeds or is refused for step-up. Write selectors that branch only on the
-patch and on fields the writing principal may read. A selector error reaches
-the client only as `INTERNAL_ERROR`.
+patch and on fields the writing principal may read. A selector error or panic
+reaches the client only as `INTERNAL_ERROR`. No ORM write runs before the
+selector. Host SQL in a filter or policy predicate runs inside the same
+transaction, and any write it makes rolls back on refusal.
 See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
 and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
 

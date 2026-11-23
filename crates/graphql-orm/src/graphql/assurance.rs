@@ -948,9 +948,11 @@ impl<E, P> fmt::Debug for UpdateAssuranceInput<'_, E, P> {
 ///
 /// 1. Without an installed [`AssuranceEnforcement`], it refuses with
 ///    `AUTHORIZATION_MISCONFIGURED` and never calls `select`.
-/// 2. It calls `select` once. Any error it returns is replaced by one fixed
-///    `INTERNAL_ERROR` with the default message. The host's error text is
-///    logged server-side only and never reaches the client.
+/// 2. It calls `select` once. Any error it returns, including its
+///    extensions and source, and any panic, is replaced by one fixed
+///    `INTERNAL_ERROR` with the default message. The host's error message is
+///    logged server-side only; a panic payload is not formatted at all.
+///    Nothing of either reaches the client.
 /// 3. A level outside `declared_levels` is refused with
 ///    `AUTHORIZATION_MISCONFIGURED`.
 /// 4. The installed evaluator decides the level for the operation's
@@ -989,17 +991,31 @@ fn enforce_selected_check<'s>(
             kind.root_type()
         )));
     };
-    let selected = select().map_err(|error| {
+    let selector_failure = |internal: String| {
         crate::graphql::errors::OrmPublicError::new(
             crate::graphql::errors::OrmErrorCode::InternalError,
         )
-        .with_internal(format!(
-            "assurance selector for {}.{field_name} failed: {}",
-            kind.root_type(),
-            error.message
-        ))
+        .with_internal(internal)
         .into_graphql_error()
-    })?;
+    };
+    // A panic is contained here: the caller then returns before any write and
+    // its transaction rolls back. The payload is never formatted.
+    let selected = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(select)) {
+        Ok(Ok(selected)) => selected,
+        Ok(Err(error)) => {
+            return Err(selector_failure(format!(
+                "assurance selector for {}.{field_name} failed: {}",
+                kind.root_type(),
+                error.message
+            )));
+        }
+        Err(_) => {
+            return Err(selector_failure(format!(
+                "assurance selector for {}.{field_name} panicked",
+                kind.root_type()
+            )));
+        }
+    };
     if !declared_levels.contains(&selected) {
         return Err(configuration_error(format!(
             "assurance selector for {}.{field_name} chose an undeclared level",

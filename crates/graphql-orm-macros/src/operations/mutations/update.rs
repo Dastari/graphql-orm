@@ -288,9 +288,11 @@ pub(in crate::operations) fn update(
                 if set_clauses.is_empty() {
                     return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "No fields to update"));
                 }
-                #selected_assurance
+                // A row whose managed version cannot advance is refused before
+                // the assurance selection (#851).
                 #struct_name::__gom_require_managed_version_headroom(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                #selected_assurance
                 let before_state = #struct_name::__gom_capture_entity_state(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);

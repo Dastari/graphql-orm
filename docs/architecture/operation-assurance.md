@@ -246,8 +246,13 @@ The owning service enforces the selection:
   `INTERNAL_ERROR`; its text is logged server-side only. An undeclared level is
   refused with `AUTHORIZATION_MISCONFIGURED`. Otherwise the installed
   evaluator enforces that policy ID for the operation's actor class.
-- A refusal returns before the `Before` mutation hook and the `UPDATE`. The
-  transaction rolls back, and no `Changed` event is committed.
+- A refusal returns before the `Before` mutation hook and the `UPDATE`. No
+  ORM write path runs before the selector. Host SQL in a filter or policy
+  predicate runs inside the same transaction, and any write it makes rolls back
+  on refusal. No `Changed` event is committed.
+- A selector panic is caught and becomes the same fixed `INTERNAL_ERROR`, and
+  the transaction rolls back. A row whose managed version cannot advance is
+  refused before the selector runs.
 
 The selection is a disclosure channel. The caller sees success or a step-up
 refusal, and so learns which level the selector chose. The selector receives
@@ -276,8 +281,10 @@ The description is advisory, as the manifest is:
 An entity with a conditional selection must not generate `update_many` or
 `upsert`, or declare a `set_null` relation. Each would rewrite rows without a
 per-row selection, so the derive refuses the entity. The runtime IR conversion
-refuses the entity as well. A foreign key that exists only in the database is
-outside the derive's view. The
+refuses the entity as well, however its metadata was built. Some host schema
+configuration is outside the derive's view: a foreign key that exists only in
+the database, a second mapping of the same physical table, and runtime IR the
+host writes by hand. The
 [macro reference](../reference/graphql-orm/macros-and-attributes.md#paths-the-update-options-do-not-cover)
 lists these paths.
 
