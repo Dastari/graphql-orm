@@ -380,6 +380,45 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         })
     }
 
+    /// Check existing rows for repeated keys of unique indexes the plan creates.
+    ///
+    /// This read-only check is available to hosts that apply DDL externally,
+    /// including SQL Server hosts. It uses the same preflight as managed
+    /// migration application. See [`UniqueIndexDuplicates`](super::UniqueIndexDuplicates)
+    /// for coverage. Run it with a connection that can see every affected row
+    /// and prevent concurrent writes and schema changes through application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a repeated key, a plan for a different backend,
+    /// an unsupported backend or step, or a failed database read.
+    pub async fn preflight_unique_indexes(&self, plan: &PlannedMigration) -> crate::Result<()>
+    where
+        B: IntrospectionBackend,
+    {
+        if plan.backend != B::DIALECT.name() {
+            return Err(sqlx::Error::Protocol(format!(
+                "Migration {} is for {}, preflight uses {}",
+                plan.version,
+                plan.backend,
+                B::DIALECT.name()
+            )));
+        }
+        if B::DIALECT == super::DatabaseBackend::Mysql {
+            return Err(sqlx::Error::Protocol(
+                "Unique index preflight is unavailable on MySQL".to_owned(),
+            ));
+        }
+        validate_migration_step_capabilities(
+            B::DIALECT,
+            plan.steps.iter().map(|step| StepRef::from(&step.step)),
+        )?;
+        self.database
+            .check_restore_state_for_schema_validation()
+            .await?;
+        refuse_unique_index_duplicates::<B>(self.database.pool(), plan).await
+    }
+
     /// Apply a planned migration according to [`ApplyOptions`].
     ///
     /// This method is only available for backends that implement

@@ -10,6 +10,38 @@ supersedes: []
 
 # Migration Guide
 
+## 0.155.0 to 0.159.0
+
+**Action needed** when upgrading a store that still has the pre-0.83
+`idx_graphql_orm_ai_approvals_tool_call_id` lookup index. Quiesce writers
+and other migrations. Re-plan against the live store using a schema-owner
+connection with visibility of every affected row, then admit and apply the
+same plan. On SQLite and PostgreSQL:
+
+```rust,ignore
+let module = AiSchemaModule;
+let plan = database
+    .schema()
+    .plan_migration_to_entities(upgrade_version, "AI schema upgrade", module.entities())
+    .await?;
+let options = module
+    .admit_index_replacements_with_live_schema(&database, &plan, ApplyOptions::default())
+    .await?;
+database.schema().apply_migration(&plan, options).await?;
+```
+
+The experimental SQL Server schema profile from before 0.83.0 generated the
+same lookup index. If you provisioned it, run the same admission check and
+require `options.allow_destructive` before applying a reviewed replacement
+plan with your external transactional migration tool. Review other SQL Server
+schema changes separately.
+
+If the check returns `UniqueIndexDuplicates`, use the table and columns in
+the error to inspect the conflicting rows. Resolve them according to your
+approval retention rules, then plan and check again. The upgrade preserves
+existing approvals and requires no data backfill. AI schema module remains
+`0.84.0`.
+
 ## 0.154.0 to 0.155.0
 
 **No action.** The exported AI roots now implement `GraphqlRootFieldNames`,

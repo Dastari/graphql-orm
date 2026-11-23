@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.159.0 supports upgrading the pre-0.83 approval lookup index to the
+unique tool-call key with live schema verification and duplicate preflight.
+See the [migration guide](MIGRATION.md#01550-to-01590).
+
 AI 0.155.0 supports composing the exported AI roots directly through
 `schema_roots!` in camelCase and PascalCase. Compose `AiUsageQueryRoot` only
 when the schema omits `AiQueryRoot`, which already includes usage reporting.

@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.207.0 to 0.208.0: external migration preflight
+
+**No action.** Upgrade ORM and macros together. Hosts applying DDL externally
+can call `database.schema().preflight_unique_indexes(&plan).await?` before any
+migration statements. Use a connection that can read all affected rows and
+quiesce concurrent writes and schema changes through application. Repeated
+keys return `UniqueIndexDuplicates`. No data migration is needed for this API.
+
 ## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
 
 **No action.** SQLite renders every closure read predicate, single-level and
