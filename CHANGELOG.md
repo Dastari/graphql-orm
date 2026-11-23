@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.211.0
+
+- **No action.** Directly nested closure read predicates over built-in column
+  tests can reuse the inner closure's scalar result, reducing SQL and bind
+  duplication (#785).
+
 ## Unreleased - ORM/macros 0.203.0
 
 - **Action needed.** Before applying a regenerated SQL Server plan, review

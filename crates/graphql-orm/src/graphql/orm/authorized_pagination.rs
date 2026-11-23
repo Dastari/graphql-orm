@@ -336,12 +336,13 @@ enum Policy {
         sql: RowBoundSql,
         values: Vec<SqlValue>,
     },
-    /// Keep the original rendering and binds for composition. The alternate
-    /// form is used only when this closure is the entire root policy.
+    /// Keep the original rendering and binds for composition and budgets.
+    /// The compact scalar is NULL, 0 or 1. It can be used at the root, or
+    /// as a directly nested closure target built from column tests.
     Closure {
         sql: RowBoundSql,
         values: Vec<SqlValue>,
-        root: std::sync::Arc<(RowBoundSql, Vec<SqlValue>)>,
+        scalar: std::sync::Arc<(RowBoundSql, Vec<SqlValue>)>,
     },
     And(Vec<Policy>),
     Or(Vec<Policy>),
@@ -1255,6 +1256,11 @@ pub struct ReadPredicate {
     /// row qualifier. Such a predicate is refused wherever it would be
     /// evaluated in a correlated subquery.
     unbound: bool,
+    /// The predicate comes entirely from the built-in column comparisons
+    /// and NULL tests, optionally combined or wrapped in a closure. An
+    /// arbitrary SQL filter may contain volatile expressions: preserve its
+    /// original evaluation sites when it is composed.
+    column_tests_only: bool,
     cost: Cost,
     /// How [`Self::not`] renders the rows where the predicate is FALSE.
     negation: Negation,
@@ -2328,6 +2334,7 @@ impl ReadPredicate {
             table,
             policy,
             unbound: false,
+            column_tests_only: false,
             cost,
             negation: Negation::Sql,
         })
@@ -2358,6 +2365,7 @@ impl ReadPredicate {
             table,
             policy: Policy::Sql { sql, values },
             unbound: false,
+            column_tests_only: false,
             cost,
             negation: Negation::Sql,
         })
@@ -2367,9 +2375,12 @@ impl ReadPredicate {
     /// row is the entity's table, which is the row the statement reads.
     fn root_expression(&self) -> FilterExpression {
         let row = root_row(self.backend, self.table);
-        if let Policy::Closure { root, .. } = &self.policy {
-            let (sql, values) = root.as_ref();
-            return FilterExpression::trusted_fragment(sql.bind(&row), values.clone());
+        if let Policy::Closure { scalar, .. } = &self.policy {
+            let (sql, values) = scalar.as_ref();
+            return FilterExpression::trusted_fragment(
+                format!("{} = 1", sql.bind(&row)),
+                values.clone(),
+            );
         }
         self.policy.expression(&row)
     }
@@ -2412,6 +2423,10 @@ impl ReadPredicate {
             vec![value],
             0,
         )
+        .map(|predicate| Self {
+            column_tests_only: true,
+            ..predicate
+        })
     }
 
     /// `column IS NULL` on a validated persisted physical column.
@@ -2450,6 +2465,10 @@ impl ReadPredicate {
             Vec::new(),
             0,
         )
+        .map(|predicate| Self {
+            column_tests_only: true,
+            ..predicate
+        })
     }
 
     /// Negation: the rows where this predicate is FALSE.
@@ -2492,6 +2511,7 @@ impl ReadPredicate {
             table,
             policy,
             unbound,
+            column_tests_only,
             cost,
             negation,
         } = self;
@@ -2503,6 +2523,7 @@ impl ReadPredicate {
             table,
             policy: negated,
             unbound,
+            column_tests_only,
             cost: negated_cost,
             negation: Negation::Explicit(policy, cost),
         })
@@ -2631,6 +2652,7 @@ impl ReadPredicate {
                 values: relation.values,
             },
             unbound: false,
+            column_tests_only: false,
             cost,
             negation,
         })
@@ -2797,8 +2819,10 @@ impl ReadPredicate {
     /// pages, search and subscription delivery re-reads. A standalone
     /// closure can share the target SQL between the governed and reached rows
     /// on SQLite and SQL Server. PostgreSQL keeps one traversal join and can
-    /// use a single scalar truth test at each site. Composed policies use
-    /// the original separate renderings, including the explicit FALSE test.
+    /// use a single scalar truth test at each site. A root closure directly
+    /// wrapping a closure over built-in column tests can also reuse the inner
+    /// walk's scalar result. Other compositions keep the separate TRUE and
+    /// FALSE tests.
     /// SQLite and PostgreSQL render a
     /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
     /// common table expression inside a subquery, so there the walk is
@@ -2914,12 +2938,11 @@ impl ReadPredicate {
                 columns,
                 max_depth,
             )
-            .wrapped("", " = 1")
         };
 
         // Build and check exactly the original composition, including every
-        // copy of the TRUE and FALSE tests. Relations, negations, other
-        // closures and statement-level budgets always see this rendering.
+        // copy of the TRUE and FALSE tests. Relations, negations and
+        // statement-level budgets still use this rendering.
         let legacy_truth = truth(&relation.predicate, &false_rows);
         let mut legacy_values = relation.values.clone();
         legacy_values.extend(false_values);
@@ -2929,49 +2952,60 @@ impl ReadPredicate {
             TypeId::of::<T>(),
             dialect,
             Some(T::TABLE_NAME),
-            render(&legacy_truth, None),
+            render(&legacy_truth, None).wrapped("", " = 1"),
             values,
             closures + 1,
         )?;
         predicate.negation = negation;
-        if closures != 0 {
-            return Ok(predicate);
-        }
+        predicate.column_tests_only = target.column_tests_only;
 
-        // PostgreSQL retains the single traversal join. An extra join after
-        // the walk regressed nested queries, and is unnecessary when SQL can
-        // encode TRUE, FALSE and UNKNOWN directly at each evaluation site.
-        let (root_sql, root_values) = match dialect {
-            DatabaseBackend::Postgres if uses_native_truth => {
-                let native = relation
-                    .predicate
-                    .wrapped("COALESCE(2 * ((", ")::integer), 1)");
-                let mut values = relation.values;
-                values.extend_from_within(..);
-                (render(&native, None), values)
-            }
-            DatabaseBackend::Postgres => return Ok(predicate),
-            _ => {
-                let (truth, values) = if dialect == DatabaseBackend::Sqlite && uses_native_truth {
-                    (
-                        relation
-                            .predicate
-                            .wrapped("COALESCE(2 * (NOT NOT (", ")), 1)"),
-                        relation.values,
-                    )
+        let (compact_truth, mut compact_values) = match &target.policy {
+            Policy::Closure { scalar, .. } if target.column_tests_only => {
+                // A closure already returns nullable 0/1. Convert that
+                // scalar to the aggregate's 0/1/2 encoding without a
+                // second walk to find its FALSE rows. ISNULL avoids SQL
+                // Server rewriting COALESCE into a repeated subquery.
+                let (sql, values) = scalar.as_ref();
+                let prefix = if dialect == DatabaseBackend::Mssql {
+                    "ISNULL(2 * "
                 } else {
-                    (legacy_truth, legacy_values)
+                    "COALESCE(2 * "
                 };
-                let Some(columns) = closure_columns(dialect, &truth) else {
-                    return Ok(predicate);
-                };
-                (render(&truth, Some(&columns)), values)
+                (sql.wrapped(prefix, ", 1)"), values.clone())
             }
+            _ if closures != 0 => return Ok(predicate),
+            _ if dialect == DatabaseBackend::Postgres && uses_native_truth => (
+                relation
+                    .predicate
+                    .wrapped("COALESCE(2 * ((", ")::integer), 1)"),
+                relation.values,
+            ),
+            _ if dialect == DatabaseBackend::Postgres => return Ok(predicate),
+            _ if dialect == DatabaseBackend::Sqlite && uses_native_truth => (
+                relation
+                    .predicate
+                    .wrapped("COALESCE(2 * (NOT NOT (", ")), 1)"),
+                relation.values,
+            ),
+            _ => (legacy_truth, legacy_values),
+        };
+        let compact_sql = if dialect == DatabaseBackend::Postgres {
+            // PostgreSQL retains one traversal join and evaluates the
+            // scalar at the anchor and the recursive step in SQL order.
+            compact_values.extend_from_within(..);
+            render(&compact_truth, None)
+        } else {
+            let Some(columns) = closure_columns(dialect, &compact_truth) else {
+                return Ok(predicate);
+            };
+            render(&compact_truth, Some(&columns))
         };
         // The executable alternative must also meet the SQL parser limits.
         if Cost::of(
             dialect,
-            &root_sql.bind(&root_row(dialect, Some(T::TABLE_NAME))),
+            &compact_sql
+                .wrapped("", " = 1")
+                .bind(&root_row(dialect, Some(T::TABLE_NAME))),
         )
         .and_then(|cost| cost.check(dialect))
         .is_ok()
@@ -2980,7 +3014,7 @@ impl ReadPredicate {
             predicate.policy = Policy::Closure {
                 sql,
                 values,
-                root: std::sync::Arc::new((root_sql, root_values)),
+                scalar: std::sync::Arc::new((compact_sql, compact_values)),
             };
         }
         Ok(predicate)
@@ -3026,6 +3060,7 @@ impl ReadPredicate {
             backend,
             table,
             unbound,
+            column_tests_only: self.column_tests_only && other.column_tests_only,
             policy,
             cost: cost.check(backend)?,
             negation,
@@ -5359,6 +5394,7 @@ mod predicate_tests {
                 values: Vec::new(),
             },
             unbound,
+            column_tests_only: false,
             cost: Cost::default(),
             negation: Negation::Sql,
         };
@@ -5441,6 +5477,7 @@ mod predicate_tests {
                 table: None,
                 policy: raw_policy(&expression),
                 unbound: false,
+                column_tests_only: false,
                 cost: Cost::default(),
                 negation: Negation::Sql,
             };
@@ -5458,6 +5495,7 @@ mod predicate_tests {
                 values,
             },
             unbound: false,
+            column_tests_only: false,
             cost: Cost::of(DatabaseBackend::Sqlite, clause).unwrap(),
             negation: Negation::Sql,
         }
@@ -5710,6 +5748,7 @@ mod predicate_tests {
                 table: None,
                 policy: raw_policy(&expression),
                 unbound: false,
+                column_tests_only: false,
                 cost: Cost::default(),
                 negation: Negation::Sql,
             };

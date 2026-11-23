@@ -387,6 +387,14 @@ async fn fixture() -> (Database, FixtureOwner) {
         let owner = FixtureOwner::start("read-predicate-closure-parity").unwrap();
         let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    graphql_orm::sqlx::query("SET statement_timeout = '60s'")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(&owner.url)
             .await
             .unwrap();
@@ -492,5 +500,98 @@ async fn every_backend_admits_the_reference_sets() {
     // The cases are not vacuous: they admit and refuse rows in both forms.
     let admits = |target: &Target| target.truths(&rows).contains(&Some(true));
     assert!(cases.iter().filter(|(_, target)| admits(target)).count() > cases.len() / 2);
+    owner.cleanup().unwrap();
+}
+
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+async fn directly_nested_closures_agree_with_original_sql() {
+    use ReadPredicateQuantifier::{All, Any};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[derive(Clone, Default)]
+    struct SqlSize(Arc<Mutex<usize>>);
+
+    impl graphql_orm::graphql::orm::ReadQueryObserver for SqlSize {
+        fn on_read(&self, sql: &str, _: usize) {
+            *self.0.lock().unwrap() = sql.len();
+        }
+    }
+
+    let (db, mut owner) = fixture().await;
+    let size = SqlSize::default();
+    let db = db.with_read_query_observer(size.clone());
+    let query = |policy| {
+        EntityQuery::<Node>::new()
+            .with_read_visibility(&ReadVisibility::Complete(policy))
+            .unwrap()
+    };
+    let read = |query: EntityQuery<Node>| {
+        let db = &db;
+        let size = &size;
+        async move {
+            let start = Instant::now();
+            let rows = query.fetch_all(db).await.unwrap();
+            let elapsed = start.elapsed();
+            let bytes = *size.0.lock().unwrap();
+            let mut ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+            ids.sort_unstable();
+            (ids, bytes, elapsed)
+        }
+    };
+
+    for outer_keys in [Keys::Parent, Keys::Composite, Keys::FanOut] {
+        for inner_keys in [Keys::Parent, Keys::Composite, Keys::FanOut] {
+            for outer in [Any, All] {
+                for inner in [Any, All] {
+                    // Model three principals with different score thresholds.
+                    for minimum in [1, 5, 6] {
+                        let target = Closure(
+                            outer,
+                            outer_keys,
+                            Box::new(Closure(inner, inner_keys, Box::new(AtLeast(minimum)), 3)),
+                            3,
+                        );
+                        let candidate = target.predicate();
+                        // AND selects the original composition renderer. The fixture's
+                        // non-null primary key makes the additional check always true.
+                        let original = candidate
+                            .clone()
+                            .and(ReadPredicate::is_not_null::<B, Node>("id").unwrap())
+                            .unwrap();
+                        let original = query(original);
+                        let candidate = query(candidate);
+                        let (before, before_bytes, _) = read(original.clone()).await;
+                        let (after, after_bytes, _) = read(candidate.clone()).await;
+                        assert_eq!(before, after, "{target:?}");
+                        assert!(after_bytes + 64 < before_bytes, "{target:?}");
+                        if matches!(
+                            (outer_keys, inner_keys, outer, inner, minimum),
+                            (Keys::Parent, Keys::Parent, Any, All, 5)
+                        ) {
+                            let mut before_times = Vec::new();
+                            let mut after_times = Vec::new();
+                            for _ in 0..3 {
+                                before_times.push(read(original.clone()).await.2);
+                                after_times.push(read(candidate.clone()).await.2);
+                            }
+                            before_times.sort_unstable();
+                            after_times.sort_unstable();
+                            eprintln!(
+                                "{:?}: depth-3 any(all(score >= 5)), {before_bytes} -> {after_bytes} bytes, median {:?} -> {:?}",
+                                B::DIALECT,
+                                before_times[1],
+                                after_times[1],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     owner.cleanup().unwrap();
 }

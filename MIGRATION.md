@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.203.0 to 0.211.0: directly nested closure read predicates
+
+**No action.** A root closure whose target is itself a closure over built-in
+column tests and NULL checks can reuse the inner walk's three-valued result.
+The policy admits the same rows, with fewer SQL fragments and bind parameters.
+Composition limits still apply. Applications that snapshot generated policy
+SQL may need to refresh those snapshots.
+
 ## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
 
 **Action needed** for SQL Server hosts with `append_only = true` entities.

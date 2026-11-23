@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.211.0 reduces SQL duplication for directly nested closure read
+predicates. See the [migration note](../../MIGRATION.md#02030-to-02110-directly-nested-closure-read-predicates).
+
 Version 0.203.0 adds SQL Server prerequisites for durable AI stores. See the
 [SQL Server DDL reference](../../docs/reference/graphql-orm/mssql.md#introspection-and-rendered-ddl).
 

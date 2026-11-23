@@ -380,9 +380,13 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   search and subscription delivery re-reads. SQLite and SQL Server can
   project the governed and reached rows into one target expression for a
   standalone closure. PostgreSQL keeps the traversal join and can encode
-  scalar truth at each site with a single target expression. Composed
-  policies keep the original rendering with separate TRUE and FALSE tests.
-  Every test keeps the target's bind order. Nested closures get distinct
+  scalar truth at each site with a single target expression. When a root
+  closure directly wraps another closure over built-in column comparisons and
+  NULL tests, it can use the inner walk's nullable verdict as its target.
+  SQLite and SQL Server can share that verdict across the governed and reached
+  rows. PostgreSQL can use it once at each site. Other compositions use
+  separate TRUE and FALSE tests. Every test keeps the target's bind order.
+  Nested closures get distinct
   names. The database evaluates the closure per row. Unsupported backends
   are refused with `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.

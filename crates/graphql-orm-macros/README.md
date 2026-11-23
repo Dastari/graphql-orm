@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.211.0 aligns with the ORM's
+[nested closure rendering update](../../MIGRATION.md#02030-to-02110-directly-nested-closure-read-predicates).
+
 Version 0.203.0 adds SQL Server-only options to
 `backend_selected_graphql_entity` and opt-in exact string filters. See the
 [migration guide](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites).
