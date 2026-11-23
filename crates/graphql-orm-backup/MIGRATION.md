@@ -14,10 +14,13 @@ supersedes: []
 
 **No action** for the default. Upgrade ORM and backup together when enabling
 the optional PostgreSQL encoding. Follow the
-[database cutover procedure](../../MIGRATION.md#02020-to-02080-canonical-postgresql-journal-keys),
+[database cutover procedure](../../MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys),
 then enable the `canonical-journal-keys` feature, configure
 `OrmBackupAdapter::with_canonical_change_journal_keys`, and take a fresh full
-backup. The feature enables exact JSON float decoding for restore. A canonical adapter refuses a legacy parent or a
+backup. The feature enables exact JSON float decoding for restore and
+compaction. A build without it refuses to compact a canonical chain.
+Changing a live primary-key storage type or modifier requires a new full
+backup and checkpoint. A canonical adapter refuses a legacy parent or a
 database in the other mode. Incremental hosts continue to supply their own
 change export and checkpoint handling.
 

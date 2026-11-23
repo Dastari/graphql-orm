@@ -70,9 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.208.0, `graphql-orm-macros` 0.208.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.153.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.207.0, `graphql-orm-macros` 0.207.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.153.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-- **No action** — ORM/macros 0.208.0 and backup 0.29.0 keep legacy journal keys by default. PostgreSQL hosts can opt into canonical keys and start a new full backup chain (#592). [ORM migration](../../MIGRATION.md#02020-to-02080-canonical-postgresql-journal-keys) · [backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0281-to-0290-canonical-postgresql-journal-keys)
+- **No action** — ORM/macros 0.207.0 and backup 0.29.0 keep legacy journal keys by default. PostgreSQL hosts can opt into canonical keys and start a new full backup chain (#592). [ORM migration](../../MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys) · [backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0281-to-0290-canonical-postgresql-journal-keys)
 
 - **No action** — ORM/macros 0.202.0 groups additional integration tests. Source checkouts can use the grouped selectors to run individual tests. [Migration](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene)
 - **No action** — ORM/macros 0.202.0 documents the blocking filesystem operations in `write_migration_file`. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-02020)

@@ -14,7 +14,9 @@ supersedes: []
 
 - The optional PostgreSQL ORM adapter can use canonical change-journal keys
   (#592). Canonical snapshots have a distinct sealed schema identity, so
-  incrementals cannot extend a legacy chain. Existing hosts keep legacy keys
+  incrementals cannot extend a legacy chain or one with different live key
+  storage types. Compaction requires the canonical feature for exact float
+  decoding. Existing hosts keep legacy keys
   and hashes by default. [Migration](MIGRATION.md#0281-to-0290-canonical-postgresql-journal-keys)
 
 ## Unreleased - 0.28.1

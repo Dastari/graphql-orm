@@ -14,12 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.208.0
+## Unreleased - ORM/macros 0.207.0
 
 - PostgreSQL hosts can opt into canonical change-journal keys (#592). The
   recorder and full snapshot use the same encoding for single-column keys.
   The cutover retires legacy cursors and requires a new full backup.
-  [Migration](MIGRATION.md#02020-to-02080-canonical-postgresql-journal-keys)
+  [Migration](MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys)
 
 ## Unreleased - ORM/macros 0.202.0
 

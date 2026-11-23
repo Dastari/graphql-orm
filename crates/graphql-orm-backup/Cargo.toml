@@ -21,7 +21,7 @@ orm = ["dep:graphql-orm"]
 orm-sqlite = ["orm", "graphql-orm/sqlite"]
 orm-postgres = ["orm", "graphql-orm/postgres"]
 # Exact JSON float decoding preserves the binary identity across restore.
-canonical-journal-keys = ["orm", "serde_json/float_roundtrip"]
+canonical-journal-keys = ["serde_json/float_roundtrip"]
 
 [dependencies]
 async-trait = "0.1"

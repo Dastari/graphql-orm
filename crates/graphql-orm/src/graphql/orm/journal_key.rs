@@ -2,7 +2,7 @@
 
 use super::rls;
 #[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
-use sqlx::{PgConnection, Row};
+use sqlx::PgConnection;
 
 const EPOCH_PREFIX: &str = "graphql_orm_canonical_keys_v1_";
 pub(super) const ADMIN_LOCK: &str =
@@ -97,31 +97,59 @@ pub(super) fn recorder_install_sql() -> String {
     )
 }
 
-/// Refuse a cutover with an unsupported live column, even if the table
-/// currently has no rows. Use the same type check before projecting a key.
+/// Check the live key type when installing a trigger. The trigger DDL has
+/// already locked the target, so the column cannot change before commit.
+pub(super) fn install_type_check(key_literal: &str) -> String {
+    format!(
+        "IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conrelid OPERATOR(pg_catalog.=) journal AND {epoch}) \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid OPERATOR(pg_catalog.=) target \
+           AND a.attname::pg_catalog.text OPERATOR(pg_catalog.=) {key_literal} \
+           AND a.atttypid OPERATOR(pg_catalog.=) ANY ({KEY_TYPES}) AND NOT a.attisdropped) \
+         THEN RAISE EXCEPTION '{UNSUPPORTED_KEY}: %.%', target, {key_literal}; END IF;",
+        epoch = epoch_predicate(),
+    )
+}
+
+/// Read the type OID (which includes the width of fixed-width types) and the
+/// type modifier (e.g. numeric precision/scale) of a supported live key.
 #[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
-pub(super) async fn check_type(
+pub(super) async fn key_type(
     conn: &mut PgConnection,
     table: &str,
     column: &str,
-) -> crate::Result<()> {
-    let supported: bool = sqlx::query_scalar(&format!(
-        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+) -> crate::Result<(i64, i32)> {
+    sqlx::query_as(&format!(
+        "SELECT a.atttypid::pg_catalog.int8, a.atttypmod FROM pg_catalog.pg_attribute a
          WHERE a.attrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
            AND a.attname::pg_catalog.text OPERATOR(pg_catalog.=) $2
-           AND a.atttypid OPERATOR(pg_catalog.=) ANY ({KEY_TYPES}) AND NOT a.attisdropped)"
+           AND a.atttypid OPERATOR(pg_catalog.=) ANY ({KEY_TYPES}) AND NOT a.attisdropped"
     ))
     .bind(table)
     .bind(column)
-    .fetch_one(conn)
-    .await?;
-    if supported {
-        Ok(())
-    } else {
-        Err(sqlx::Error::Protocol(format!(
-            "{UNSUPPORTED_KEY}: {table}.{column}"
-        )))
-    }
+    .fetch_optional(conn)
+    .await?
+    .ok_or_else(|| sqlx::Error::Protocol(format!("{UNSUPPORTED_KEY}: {table}.{column}")))
+}
+
+#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+pub(super) async fn registered_tables(
+    conn: &mut PgConnection,
+) -> crate::Result<Vec<(String, String, String)>> {
+    sqlx::query_as(&format!(
+        "SELECT r.declared_table, pg_catalog.format('%I.%I', n.nspname, c.relname), r.key_column
+         FROM {registry} r
+         JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.relid::pg_catalog.oid
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+         WHERE r.journal_schema OPERATOR(pg_catalog.=) (
+            SELECT jn.nspname::pg_catalog.text FROM pg_catalog.pg_class j
+            JOIN pg_catalog.pg_namespace jn ON jn.oid OPERATOR(pg_catalog.=) j.relnamespace
+            WHERE j.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid)
+         ORDER BY c.oid",
+        registry = rls::CHANGE_JOURNAL_REGISTRY,
+    ))
+    .bind(JOURNAL)
+    .fetch_all(conn)
+    .await
 }
 
 #[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
@@ -215,28 +243,11 @@ pub(super) async fn enable(pool: &crate::DbPool) -> crate::Result<i64> {
     // Take the entity-table locks before the journal lock, in writer order.
     // Stop all writers and backup workers for the operational cutover, which
     // also needs to establish a fresh full snapshot and matching checkpoint.
-    let tables = sqlx::query(&format!(
-        "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) AS path, r.key_column
-         FROM {registry} r
-         JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.relid::pg_catalog.oid
-         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-         WHERE r.journal_schema OPERATOR(pg_catalog.=) (
-            SELECT jn.nspname::pg_catalog.text FROM pg_catalog.pg_class j
-            JOIN pg_catalog.pg_namespace jn ON jn.oid OPERATOR(pg_catalog.=) j.relnamespace
-            WHERE j.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid)
-         ORDER BY c.oid",
-        registry = rls::CHANGE_JOURNAL_REGISTRY,
-    ))
-    .bind(JOURNAL)
-    .fetch_all(&mut *tx)
-    .await?;
-    for table in tables {
-        let path: String = table.try_get("path")?;
-        let column: String = table.try_get("key_column")?;
+    for (_, path, column) in registered_tables(&mut tx).await? {
         sqlx::query(&format!("LOCK TABLE {path} IN SHARE MODE"))
             .execute(&mut *tx)
             .await?;
-        check_type(&mut tx, &path, &column).await?;
+        key_type(&mut tx, &path, &column).await?;
     }
     sqlx::query(&format!("LOCK TABLE {JOURNAL} IN ACCESS EXCLUSIVE MODE"))
         .execute(&mut *tx)

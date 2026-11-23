@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.202.0 to 0.208.0: canonical PostgreSQL journal keys
+## 0.202.0 to 0.207.0: canonical PostgreSQL journal keys
 
 **No action** for the default. The legacy journal recorder and full backup
 key format stay as they were. The opt-in is PostgreSQL-only and requires the
@@ -31,21 +31,38 @@ ORM `change-journal` feature.
    new full backup before resuming writes. Record the returned
    boundary as its initial journal checkpoint. If any canonical writes
    occurred before this full backup, capture a fresh checkpoint under
-   quiescence at the full snapshot instead. Host incremental adapters must
-   use the same schema identity and the exported canonical keys, including
-   for tombstones. Never attach canonical changes to a legacy snapshot.
+   quiescence at the full snapshot instead. Use the ORM adapter's
+   `schema_snapshot` for the chain's schema identity. To implement the host's
+   `export_incremental`, hold one read fence or stop writers and schema
+   changes across the journal read and row export. For example, while writes
+   are stopped, read `Database::export_changes` after the parent's sequence
+   through `i64::MAX`, then index `OrmBackupAdapter::export_full` by
+   `(table_name, primary_key)`. Keep the last action per exact key in
+   sequence order. Pass delete keys through as tombstones. For a final create
+   or update, use the matching exported row and fail if it is missing.
+   Include object metadata from that same export and advance the checkpoint
+   only after the incremental is committed.
 4. Enable canonical mode on a canonical restore target before applying the
    backup. Keep a legacy-configured target available for retained legacy
    snapshots. After a restore, start a new incremental chain from a full
    snapshot and a current checkpoint.
 
-Canonical keys use PostgreSQL's built-in scalar values directly, with UTF-8
-for text. Case or spelling changes under a nondeterministic collation still
-produce an old-key delete and a new-key create. Custom types and domains are
-refused. Full backup still requires portable column values and composite
-keys are full-only. Take a fresh full backup when changing a primary key's
-storage type. The cutover is one-way for the journal because the original
-value of a rounded legacy key cannot always be recovered.
+Canonical keys support PostgreSQL's built-in `boolean`, `smallint`,
+`integer`, `bigint`, `real`, `double precision`, `numeric`, `uuid`,
+`timestamp`, `timestamptz`, `date`, `text`, `varchar`, `bytea`, and
+`jsonb`. Other types, including `char(n)`, `citext`, `time`, `inet` and
+domains, are refused at cutover or when installing a recorder in canonical
+mode. Full export also checks single-key tables without recorders and still
+requires portable column values. Composite-key tables are full-only. A
+spelling change under a nondeterministic collation records an old-key delete
+and a new-key create.
+
+The backup schema identity includes live key types and type modifiers.
+Pause backup jobs during key DDL and take a new full backup and checkpoint
+after every key storage type change, including a change later reverted. The
+cutover is one-way because rounded legacy keys can lose the original value.
+Build every compaction tool that handles canonical chains with the backup
+crate's `canonical-journal-keys` feature for exact float decoding.
 
 ## 0.201.0 to 0.202.0: test and repository hygiene
 

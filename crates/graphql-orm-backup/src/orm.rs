@@ -156,18 +156,20 @@ impl OrmBackupAdapter {
             &self.entities,
         );
         self.apply_column_policy_overrides(&mut snapshot.entities)?;
-        let canonical = self
+        let storage = self
             .database
-            .canonical_change_journal_start_sequence()
+            .canonical_key_storage_identity(&snapshot.entities)
             .await
-            .map_err(database_error("read change journal key encoding"))?
-            .is_some();
-        self.check_journal_key_mode(canonical)?;
+            .map_err(database_error("read canonical key storage types"))?;
+        self.check_journal_key_mode(storage.is_some())?;
         snapshot.schema_hash = stable_schema_hash(&snapshot.entities);
-        if canonical {
-            // Part of the sealed manifest identity, even when the schema
-            // itself is unchanged. Leave every legacy hash byte intact.
-            snapshot.schema_hash.insert_str(0, "pg-canonical-keys-v1:");
+        if let Some(storage) = storage {
+            let mut hash = Sha256::new();
+            hash.update(snapshot.schema_hash.as_bytes());
+            hash.update([0]);
+            hash.update(storage.as_bytes());
+            let prefix = crate::database::CANONICAL_KEY_SCHEMA_PREFIX;
+            snapshot.schema_hash = format!("{prefix}{:x}", hash.finalize());
         }
         Ok(snapshot)
     }

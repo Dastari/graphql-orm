@@ -307,6 +307,108 @@ async fn canonical_journal_keys_compact_and_restore_after_cutover()
     Ok(())
 }
 
+#[cfg(feature = "canonical-journal-keys")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL and graphql-orm/change-journal; run the backup-postgres owned lane"]
+async fn canonical_chain_refuses_a_live_key_type_change() -> Result<(), Box<dyn std::error::Error>>
+{
+    use graphql_orm::graphql::orm::BackupValueKind;
+    use graphql_orm_backup::{
+        BackupChangeAction, BackupChangeExport, IncrementalBackupRequest, create_incremental_backup,
+    };
+
+    let pool = owned_postgres::OwnedPostgres::pool("backup-key-storage-change", 1).await?;
+    graphql_orm::sqlx::query(
+        "CREATE TABLE key_storage_change (id int4 PRIMARY KEY, title text NOT NULL)",
+    )
+    .execute(&pool)
+    .await?;
+    let mut metadata = MixedBackupNote::metadata().clone();
+    metadata.table_name = "key_storage_change";
+    metadata
+        .fields
+        .iter_mut()
+        .find(|field| field.is_primary_key)
+        .unwrap()
+        .logical_type = BackupValueKind::Integer;
+    let entities: Vec<&'static EntityMetadata> = vec![Box::leak(Box::new(metadata))];
+    let db = Arc::new(graphql_orm::db::Database::new(pool.clone()));
+    db.ensure_change_journal_recorder(&entities).await?;
+    db.enable_canonical_change_journal_keys().await?;
+    let adapter = OrmBackupAdapter::new(db, entities.clone()).with_canonical_change_journal_keys();
+    let directory = TempDir::new()?;
+    let repository = LocalBackupRepository::new(directory.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
+    let parent = Uuid::new_v4();
+    // The portable integer row decoder expects int8. An empty int4 table
+    // still contributes its storage type to the full backup's identity.
+    create_full_backup(
+        &repository,
+        &adapter,
+        &NoJournalObjects,
+        FullBackupRequest {
+            snapshot_id: parent,
+            created_at: 1,
+            app_id: "key-storage-change".into(),
+            app_version: "1".into(),
+        },
+    )
+    .await?;
+    graphql_orm::sqlx::raw_sql(
+        "ALTER TABLE key_storage_change ALTER COLUMN id TYPE int8;
+         SET graphql_orm.change_journal = 'on';
+         INSERT INTO key_storage_change VALUES (1, 'new row');",
+    )
+    .execute(&pool)
+    .await?;
+    // Reconnect after the DDL so a cached full-export SQL plan from the old
+    // column type cannot mask the manifest-chain check.
+    let reconnected = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await?;
+    let db = Arc::new(graphql_orm::db::Database::new(reconnected));
+    let adapter = OrmBackupAdapter::new(db, entities).with_canonical_change_journal_keys();
+    let row = adapter
+        .export_full()
+        .await?
+        .pop()
+        .unwrap()
+        .rows
+        .pop()
+        .unwrap();
+    let source = FixtureJournalSource {
+        orm: &adapter,
+        changes: vec![BackupChangeExport {
+            table_name: row.table_name.clone(),
+            primary_key: row.primary_key.clone(),
+            action: BackupChangeAction::Create,
+            row: Some(row),
+            changed_at: 2,
+        }],
+    };
+    let error = create_incremental_backup(
+        &repository,
+        &source,
+        &NoJournalObjects,
+        IncrementalBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            parent_snapshot_id: parent,
+            created_at: 2,
+            app_id: "key-storage-change".into(),
+            app_version: "1".into(),
+        },
+    )
+    .await
+    .expect_err("changing a live primary-key type must break the identity of the chain");
+    assert!(matches!(error, BackupError::InvalidManifestChain { .. }));
+    assert!(
+        error.to_string().contains("start a new full backup"),
+        "{error}"
+    );
+    Ok(())
+}
+
 // The fixture freezes writers after the tested change batch, then supplies
 // the resulting row bodies and tombstones to the existing host contract.
 #[cfg(feature = "canonical-journal-keys")]

@@ -790,3 +790,64 @@ async fn canonical_timestamp_and_float_journal_keys_ignore_session_settings()
     assert_eq!(changes[3].action, BackupChangeAction::Update);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn canonical_keys_refuse_unsupported_types_during_setup()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::Entity;
+
+    let pool = owned_postgres::OwnedPostgres::pool("postgres-canonical-unsupported-key", 1).await?;
+    sqlx::raw_sql(
+        "CREATE TABLE journalmixed (id text PRIMARY KEY, label text NOT NULL);
+         CREATE TABLE \"JournalUsers\" (id char(4) PRIMARY KEY, label text NOT NULL);",
+    )
+    .execute(&pool)
+    .await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let metadata = [
+        <JournalMixed as Entity>::metadata(),
+        <JournalQuoted as Entity>::metadata(),
+    ];
+    database.ensure_change_journal_recorder(&metadata).await?;
+    let cutover = database
+        .enable_canonical_change_journal_keys()
+        .await
+        .unwrap_err();
+    assert!(
+        cutover
+            .to_string()
+            .contains("supported PostgreSQL scalar primary-key type"),
+        "{cutover}"
+    );
+    assert_eq!(
+        database.canonical_change_journal_start_sequence().await?,
+        None
+    );
+
+    sqlx::query("DROP TABLE \"JournalUsers\"")
+        .execute(&pool)
+        .await?;
+    database.enable_canonical_change_journal_keys().await?;
+    sqlx::query("CREATE TABLE \"JournalUsers\" (id char(4) PRIMARY KEY, label text NOT NULL)")
+        .execute(&pool)
+        .await?;
+    let install = database
+        .ensure_change_journal_recorder(&metadata)
+        .await
+        .unwrap_err();
+    assert!(
+        install
+            .to_string()
+            .contains("supported PostgreSQL scalar primary-key type"),
+        "{install}"
+    );
+    let trigger_installed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger
+         WHERE tgrelid = '\"JournalUsers\"'::regclass AND tgname = 'graphql_orm_change_journal')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!trigger_installed);
+    Ok(())
+}

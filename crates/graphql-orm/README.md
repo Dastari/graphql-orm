@@ -10,10 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.208.0 adds an opt-in PostgreSQL journal key encoding shared with
+Version 0.207.0 adds an opt-in PostgreSQL journal key encoding shared with
 full backups. Call `Database::enable_canonical_change_journal_keys` as the
 schema owner and start a fresh incremental chain. The legacy encoding remains
-the default. See the [migration procedure](../../MIGRATION.md#02020-to-02080-canonical-postgresql-journal-keys).
+the default. See the [migration procedure](../../MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys).
 
 Version 0.202.0 groups additional integration tests and documents the blocking
 migration file writer. See the [test selectors](../../docs/development/testing.md).

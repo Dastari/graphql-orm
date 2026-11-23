@@ -233,6 +233,43 @@ impl BackupSnapshot {
         #[cfg(not(feature = "postgres"))]
         None
     }
+
+    // Returns opaque, ordered storage metadata for the canonical journal's
+    // registered keys and the snapshot's single-column keys. The metadata
+    // excludes relation OIDs, which can differ on a matching restore target.
+    #[cfg(feature = "postgres")]
+    async fn canonical_key_storage_identity(
+        &mut self,
+        entities: &[EntityBackupDescriptor],
+    ) -> crate::Result<Option<String>> {
+        if self.canonical_key_start.is_none() {
+            return Ok(None);
+        }
+        let mut keys = Vec::new();
+        for (declared, path, column) in super::journal_key::registered_tables(&mut self.tx).await? {
+            let storage = super::journal_key::key_type(&mut self.tx, &path, &column).await?;
+            keys.push((true, declared, column, storage));
+        }
+        for entity in entities
+            .iter()
+            .filter(|entity| entity.primary_key_columns.is_empty())
+        {
+            let path = quote_table_identifier(&entity.table_name);
+            let storage =
+                super::journal_key::key_type(&mut self.tx, &path, &entity.primary_key_column)
+                    .await?;
+            keys.push((
+                false,
+                entity.table_name.clone(),
+                entity.primary_key_column.clone(),
+                storage,
+            ));
+        }
+        keys.sort_unstable();
+        serde_json::to_string(&keys)
+            .map(Some)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -450,6 +487,32 @@ impl crate::db::Database {
         }
         #[cfg(not(feature = "postgres"))]
         Ok(None)
+    }
+
+    /// Read the live primary-key storage identity for a canonical chain.
+    ///
+    /// Bind this opaque identity to the backup schema hash. Returns `None`
+    /// for a legacy journal or on SQLite.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the canonical recorder or any live key cannot be validated.
+    pub async fn canonical_key_storage_identity(
+        &self,
+        entities: &[EntityBackupDescriptor],
+    ) -> crate::Result<Option<String>> {
+        #[cfg(feature = "postgres")]
+        {
+            let mut snapshot = begin_consistent_snapshot(self.pool()).await?;
+            let identity = snapshot.canonical_key_storage_identity(entities).await?;
+            snapshot.tx.commit().await?;
+            Ok(identity)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = entities;
+            Ok(None)
+        }
     }
 
     /// Export the change journal entries in `window`, in journal order.
@@ -1564,7 +1627,7 @@ async fn export_table_rows(
         sqlx::query(&format!("LOCK TABLE {table} IN ACCESS SHARE MODE"))
             .execute(&mut *snapshot.tx)
             .await?;
-        super::journal_key::check_type(&mut snapshot.tx, &table, key_columns[0]).await?;
+        super::journal_key::key_type(&mut snapshot.tx, &table, key_columns[0]).await?;
         select_columns.push_str(", ");
         select_columns.push_str(&super::journal_key::projection(&quote_identifier(
             key_columns[0],

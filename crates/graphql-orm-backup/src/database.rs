@@ -4,6 +4,10 @@ use uuid::Uuid;
 
 use crate::{BackupError, RestoreContext};
 
+// Tagged schema identities are persisted in authenticated manifests. Keep
+// the prefix recognisable even in builds that cannot compact these chains.
+pub(crate) const CANONICAL_KEY_SCHEMA_PREFIX: &str = "pg-canonical-keys-v1:";
+
 #[async_trait]
 /// Database integration contract used by backup and restore operations.
 pub trait GraphqlOrmBackupAdapter: Send + Sync {
@@ -105,6 +109,24 @@ pub struct GraphqlOrmBackupSchema {
     pub migration_version: String,
     /// Stable schema hash.
     pub schema_hash: String,
+}
+
+impl GraphqlOrmBackupSchema {
+    pub(crate) async fn ensure_canonical_identity_unchanged(
+        &self,
+        database: &dyn GraphqlOrmBackupAdapter,
+    ) -> Result<(), BackupError> {
+        if self.schema_hash.starts_with(CANONICAL_KEY_SCHEMA_PREFIX)
+            && database.schema_snapshot().await?.schema_hash != self.schema_hash
+        {
+            return Err(BackupError::InvalidManifestChain {
+                reason:
+                    "canonical key storage or schema changed during export; start a new full backup"
+                        .into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Full export for one table.

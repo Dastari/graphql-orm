@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.208.0 stays aligned with the ORM's opt-in canonical PostgreSQL
+Version 0.207.0 stays aligned with the ORM's opt-in canonical PostgreSQL
 journal keys. Existing macro call sites require no changes. See the
-[migration guide](../../MIGRATION.md#02020-to-02080-canonical-postgresql-journal-keys).
+[migration guide](../../MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys).
 
 Version 0.202.0 aligns with the ORM's
 [integration test consolidation](../../docs/development/testing.md).

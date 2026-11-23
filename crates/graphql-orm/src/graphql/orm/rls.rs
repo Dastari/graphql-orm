@@ -933,9 +933,11 @@ fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
          ON CONFLICT (journal_schema, declared_table) DO UPDATE SET entity_name = EXCLUDED.entity_name, key_column = EXCLUDED.key_column, relid = EXCLUDED.relid; \
          EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {trigger_name}, target); \
          EXECUTE pg_catalog.format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L, %L, %L)', {trigger_name}, target, journal_ns, target_ns, target_rel, {entity}, {table_name}, {key}, {encoding}); \
+         {canonical_type_check} \
          EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {truncate_trigger}, target); \
          EXECUTE pg_catalog.format('CREATE TRIGGER %I BEFORE TRUNCATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_TRUNCATE_FUNCTION}()', {truncate_trigger}, target); \
          END $graphql_orm$",
+        canonical_type_check = super::journal_key::install_type_check(&key),
         trigger_name = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
         truncate_trigger = sql_string_literal(CHANGE_JOURNAL_TRUNCATE_TRIGGER),
         base_literal = sql_string_literal(&base),

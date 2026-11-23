@@ -216,6 +216,49 @@ async fn compact_chain_refuses_changes_to_composite_key_tables() {
     );
 }
 
+#[cfg(not(feature = "canonical-journal-keys"))]
+#[tokio::test]
+async fn compaction_refuses_canonical_payloads_without_exact_float_decoding() {
+    let temp = TempDir::new().unwrap();
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
+    let mut manifest = create_full_backup(
+        &repository,
+        &MockDatabase::with_full(vec![]),
+        &MockObjectIndex,
+        full_request(),
+    )
+    .await
+    .unwrap()
+    .manifest;
+    repository
+        .delete_blob(&graphql_orm_backup::snapshot_manifest_key(
+            manifest.snapshot_id,
+        ))
+        .await
+        .unwrap();
+    manifest.graphql_orm_schema_hash = concat!("pg-canonical-keys-v1:", "fixture").into();
+    write_manifest(&repository, &mut manifest).await.unwrap();
+
+    let error = compact_chain(
+        &repository,
+        CompactChainRequest {
+            snapshot_id: compacted_id(),
+            source_snapshot_id: full_id(),
+            created_at: 1_775_174_402,
+            app_id: "example-app".into(),
+            app_version: "0.1.0".into(),
+        },
+    )
+    .await
+    .expect_err("compaction must refuse the canonical chain without exact float decoding");
+    assert!(
+        matches!(error, BackupError::UnsupportedOperation { operation }
+        if operation.contains("canonical-journal-keys"))
+    );
+    assert!(load_manifest(&repository, compacted_id()).await.is_err());
+}
+
 fn full_request() -> FullBackupRequest {
     FullBackupRequest {
         snapshot_id: full_id(),
