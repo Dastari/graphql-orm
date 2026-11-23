@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.154.0 to 0.157.0
+## 0.156.0 to 0.157.0
 
 **Action needed** on SQL Server. Generate the external schema plan for
 `AiSchemaModule` 0.85.0 through `Database::schema().plan_migration_to_entities`
@@ -20,28 +20,47 @@ with `AiSchemaModule.entities()`. Review the change to
 `idx_graphql_orm_ai_runs_claim_candidates` and
 `idx_graphql_orm_ai_runs_recovery_candidates` indexes.
 
-On an existing store, quiesce writers. Run the following check before any
-DDL and apply the reviewed plan in the same transaction with `XACT_ABORT ON`.
+Plan a maintenance window and quiesce writers. The `ALTER COLUMN` rewrites the
+run table under an exclusive schema modification lock. User-created statistics
+on `state` block the ALTER. Drop them after the preflight and before the ALTER,
+inside the same transaction. If the ALTER is blocked or any statement fails,
+the transaction rolls back cleanly, including any drops already performed.
+
+Replace the indicated comment with the reviewed plan statements. Run the whole
+batch on one connection.
 The check counts UTF-16 bytes, including trailing spaces and both code units
 of a supplementary character. SQL Server can silently trim trailing spaces
 when narrowing this column, even with `ANSI_WARNINGS ON`.
 
 ```sql
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
 IF EXISTS (
     SELECT 1
     FROM [dbo].[graphql_orm_ai_runs] WITH (TABLOCKX, HOLDLOCK)
     WHERE DATALENGTH([state]) > 900
 )
     THROW 50000, N'Cannot narrow graphql_orm_ai_runs.state to NVARCHAR(450): a stored value exceeds 900 bytes.', 1;
+
+-- Insert the reviewed plan statements here, including any required DROP STATISTICS before ALTER COLUMN.
+COMMIT;
 ```
 
-If validation refuses the upgrade, review the affected rows before retrying
-the plan. The migration keeps state values exactly as stored.
+No valid run state is that long. Repair or quarantine the corrupt rows before
+retrying the upgrade. The migration keeps values within the bound exactly as
+stored.
 
 **Action needed** on SQLite, PostgreSQL, and SQL Server. Drain active workers
 before opening the new schema-module epoch. Leases granted under the previous
 epoch no longer authorize work after the successor epoch opens. SQLite and
 PostgreSQL require no schema or data migration.
+
+## 0.154.0 to 0.155.0
+
+**No action.** The exported AI roots now implement `GraphqlRootFieldNames`,
+so existing `schema_roots!` declarations can compose them directly with their
+configured field names. No data migration is needed.
 
 ## 0.153.0 to 0.154.0
 

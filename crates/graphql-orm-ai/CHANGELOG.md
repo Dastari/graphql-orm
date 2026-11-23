@@ -12,12 +12,18 @@ supersedes: []
 
 ## Unreleased - 0.157.0
 
-- Make SQL Server claim and expired-lease recovery candidate reads seek on
+- **Action needed.** Make SQL Server claim and expired-lease recovery candidate reads seek on
   run state with binary-collated indexes on state and the eligibility
   timestamps (#848). The external schema upgrade narrows the state column
   after checking existing values.
-- Advance the AI schema module to 0.85.0. Drain workers before reopening on
+- **Action needed.** Advance the AI schema module to 0.85.0. Drain workers before reopening on
   the successor epoch.
+
+## Unreleased - 0.155.0
+
+- Exported AI query, mutation, and subscription roots declare their GraphQL
+  fields for composition through `schema_roots!`. The declarations follow
+  the resolver naming rules for camelCase and PascalCase (#858).
 
 ## Unreleased - 0.154.0
 
@@ -681,7 +687,6 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 - Align with published Auth 0.22.1 and ORM/macros 0.54.1 for finite signed
   role-catalogue capacity. No provider, AI runtime, public API or schema change.
 
-
 ## 0.107.3 - 2026-10-18
 
 - Allocate a new immutable package identity for maintained README guidance
@@ -819,7 +824,6 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 - Compatible `AuthenticatedGraphqlExecutor::execute_registered` hook and exact
   registered/remote refusal helpers for trusted execution-owner integrations.
-
 
 ### Added
 
@@ -1020,7 +1024,6 @@ is needed.
   invalid usage from generic provider rejection; none contains provider content.
   These reasons survive the executor into durable recovery outcomes, without
   changing uncertain accounting or admitting replay.
-
 
 ### Fixed
 
