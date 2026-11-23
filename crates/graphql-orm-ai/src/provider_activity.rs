@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use async_trait::async_trait;
 
 use crate::{
@@ -11,7 +10,6 @@ use crate::{
     ProviderCitation, ProviderEvent,
 };
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::{AiLiveDeltaPersistenceContext, AiRunLease};
 
 /// One ordered, browser-presentable provider activity payload.
@@ -96,7 +94,6 @@ impl AiProviderActivity {
 /// Implementations must validate the current run fence and principal, protect
 /// content, and commit to the authoritative session stream before returning.
 /// They must never widen a built-in or application-tool capability.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[async_trait]
 pub trait AiProviderActivitySink: Send + Sync {
     /// Persists one exact ordered activity.

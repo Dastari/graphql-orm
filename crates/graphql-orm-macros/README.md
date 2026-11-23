@@ -12,7 +12,18 @@ supersedes: []
 
 Version 0.205.0 reduces per-entity compile work for generated Changed
 subscriptions by sharing their stream implementation. See the
-[migration guide](../../MIGRATION.md#02010-to-02050-generated-changed-subscriptions).
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+
+Version 0.204.0 aligns with the ORM runtime's
+[external backup and restore setting](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
+
+Version 0.203.0 adds SQL Server-only options to
+`backend_selected_graphql_entity` and opt-in exact string filters. See the
+[migration guide](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites).
+
+Version 0.202.0 aligns with the ORM's
+[integration test consolidation](../../docs/development/testing.md).
+See the [migration guide](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene).
 
 Version 0.201.0 makes `schema_roots!` report duplicate entity identities
 through its fallible schema builders and resolver catalogue helper. Upgrade

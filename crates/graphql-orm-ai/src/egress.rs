@@ -248,7 +248,6 @@ pub trait AiEgressPolicy: Send + Sync {
     ///
     /// The default preserves ordinary existing text policy but refuses image or Restricted
     /// source disclosure until the host explicitly implements this current-source boundary.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn authorize_tool_sources(
         &self,
         principal: &ResolvedPrincipal,

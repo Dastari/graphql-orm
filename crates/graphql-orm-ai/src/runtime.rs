@@ -63,7 +63,6 @@ pub struct AiRuntimeReadinessProof {
 }
 
 impl AiRuntimeReadinessProof {
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) fn new(module_fingerprint: String, epoch_id: uuid::Uuid) -> Self {
         Self {
             module_fingerprint,
@@ -149,13 +148,11 @@ impl AiRuntimeStartGate {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 struct CompactionProviderAdmission {
     profile_id: String,
     resolver: Arc<dyn crate::AiSessionExecutionSelectionResolver>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[derive(Clone)]
 pub(crate) struct CompactionDispatchAdmission {
     pub(crate) provider: Arc<dyn AiProvider>,
@@ -165,7 +162,6 @@ pub(crate) struct CompactionDispatchAdmission {
     pub(crate) selection: crate::AiSessionExecutionSelection,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl std::fmt::Debug for CompactionDispatchAdmission {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -174,7 +170,6 @@ impl std::fmt::Debug for CompactionDispatchAdmission {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl CompactionDispatchAdmission {
     pub(crate) async fn verify(self, provider: &Arc<dyn AiProvider>) -> Result<(), ProviderError> {
         if !Arc::ptr_eq(provider, &self.provider) {
@@ -200,9 +195,7 @@ pub struct AiRuntime {
     tool_bridge: AuthenticatedToolBridge,
     egress_policy: Arc<dyn AiEgressPolicy>,
     deployment_egress: AiDeploymentEgressBoundary,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_egress_boundaries: Vec<crate::AiToolResultEgressBoundary>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: ToolMaturity,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
@@ -213,7 +206,6 @@ pub struct AiRuntime {
     content_protection_policy_resolver: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
     providers: BTreeMap<ProviderKind, Arc<dyn AiProvider>>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     compaction_admission: BTreeMap<ProviderKind, CompactionProviderAdmission>,
     entity_references: Option<crate::AiEntityReferenceRegistry>,
     start_gate: AiRuntimeStartGate,
@@ -370,7 +362,6 @@ impl AiRuntime {
     }
 
     /// Whether the exact registered provider freezes its retained-session tool surface.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn provider_freezes_session_tool_surface(
         &self,
         provider_kind: &ProviderKind,
@@ -452,7 +443,6 @@ impl AiRuntime {
         &self.content_protection_policy_resolver
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn resolve_current_principal(
         &self,
         reference: &PrincipalReference,
@@ -465,7 +455,6 @@ impl AiRuntime {
         .map_err(|_| AiError::ReauthorizationFailed)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn tool_media_resolver(
         &self,
         id: &str,
@@ -475,7 +464,6 @@ impl AiRuntime {
             .ok_or(AiError::Forbidden)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn preflight_tool_result_media(
         &self,
         descriptor: &AiToolDescriptor,
@@ -526,7 +514,6 @@ impl AiRuntime {
         Ok(self.egress_policy.authorize(&principal, manifest).await)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn authorize_tool_source_egress(
         &self,
         principal_reference: &PrincipalReference,
@@ -695,7 +682,6 @@ impl AiRuntime {
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn preauthorize_query_capability(
         &self,
         principal_reference: &PrincipalReference,
@@ -838,7 +824,6 @@ impl AiRuntime {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn preauthorize_compiled_subscription(
         &self,
         principal_reference: &PrincipalReference,
@@ -868,7 +853,6 @@ impl AiRuntime {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_compiled_subscription_event(
         &self,
         descriptor: &AiToolDescriptor,
@@ -1330,7 +1314,6 @@ impl AiRuntime {
     /// Builds the one value that may carry resolved reference data to a
     /// provider, for `principal`, now. Without a registry every reference
     /// becomes the unavailable marker.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) async fn resolve_dispatch_request(
         &self,
         principal: &agql_auth::AuthPrincipal,
@@ -1346,7 +1329,6 @@ impl AiRuntime {
         .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn admit_context_compaction(
         &self,
         principal: &agql_auth::AuthPrincipal,
@@ -1420,7 +1402,6 @@ impl AiRuntime {
             {
                 return Err(ProviderError::ToolSourceUnavailable);
             }
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             if context.tool_source_delivery_check().is_some()
                 && !provider.supports_tool_result_source_delivery()
             {
@@ -1512,7 +1493,6 @@ impl AiRuntime {
                     "provider registry kind mismatch".to_owned(),
                 ));
             }
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             for definition in &request.tools {
                 let id = AiToolId::parse(definition.tool_id.clone())
                     .map_err(|_| ProviderError::Rejected)?;
@@ -1532,7 +1512,6 @@ impl AiRuntime {
             {
                 return Err(ProviderError::ToolSourceUnavailable);
             }
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             if context.tool_source_delivery_check().is_some()
                 && !provider.supports_tool_result_source_delivery()
             {
@@ -1556,7 +1535,6 @@ impl AiRuntime {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn create_empty_provider_session(
         &self,
         provider_kind: &ProviderKind,
@@ -1584,7 +1562,6 @@ impl AiRuntime {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn discard_empty_provider_session(
         &self,
         provider_kind: &ProviderKind,
@@ -1935,7 +1912,6 @@ mod dependent_effect_guard_tests;
 #[cfg(test)]
 mod mutation_binding_tests {
     use serde_json::json;
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
@@ -1946,7 +1922,6 @@ mod mutation_binding_tests {
         GraphqlOperationContract,
     };
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     use crate::{AiApprovalGrant, AiApprovalId, AiApprovalState};
 
     const CAPABILITY_FINGERPRINT: &str =
@@ -2034,7 +2009,6 @@ mod mutation_binding_tests {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn consumed(binding: &AiApprovalBinding) -> ConsumedAiApproval {
         let now = OffsetDateTime::now_utc();
         let grant = AiApprovalGrant {
@@ -2090,7 +2064,6 @@ mod mutation_binding_tests {
     }
 
     #[test]
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
         let compiled_operation = operation("UpdateInventory");
         let prepared = prepared(compiled_operation.clone());
@@ -2161,9 +2134,7 @@ pub struct AiRuntimeBuilder {
     graphql_targets: Option<GraphqlExecutionTargetRegistry>,
     egress_policy: Option<Arc<dyn AiEgressPolicy>>,
     deployment_egress: Option<AiDeploymentEgressBoundary>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_egress_boundaries: Vec<crate::AiToolResultEgressBoundary>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: Option<ToolMaturity>,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
@@ -2174,7 +2145,6 @@ pub struct AiRuntimeBuilder {
     content_protection_policy_resolver: Option<Arc<dyn AiContentProtectionPolicyResolver>>,
     content_protector: Option<Arc<dyn AiContentProtector>>,
     providers: BTreeMap<ProviderKind, Arc<dyn AiProvider>>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     compaction_admission: BTreeMap<ProviderKind, CompactionProviderAdmission>,
     entity_references: Option<crate::AiEntityReferenceRegistry>,
 }
@@ -2250,7 +2220,6 @@ impl AiRuntimeBuilder {
     /// current principal/resource/grant permission and leaves general/user egress unchanged.
     /// Aggregate request byte/image budgets remain intersected; per-source policies cannot add
     /// together their ceilings. Build rejects unknown fingerprints and duplicate bindings.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn tool_result_egress_boundary(
         mut self,
         boundary: crate::AiToolResultEgressBoundary,
@@ -2264,7 +2233,6 @@ impl AiRuntimeBuilder {
     ///
     /// # Errors
     /// Returns a safe configuration error for duplicate or unsafe logical identities.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn tool_result_media_resolver(
         mut self,
         id: impl Into<String>,
@@ -2369,7 +2337,6 @@ impl AiRuntimeBuilder {
     /// # Errors
     ///
     /// Returns an error for an invalid profile ID or provider registration.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn provider_with_compaction_admission(
         self,
         provider: Arc<dyn AiProvider>,
@@ -2454,7 +2421,6 @@ impl AiRuntimeBuilder {
             graphql_targets,
         );
 
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         {
             let mut bindings = std::collections::BTreeSet::new();
             for boundary in &self.tool_result_egress_boundaries {
@@ -2495,9 +2461,7 @@ impl AiRuntimeBuilder {
             tool_bridge,
             egress_policy,
             deployment_egress,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_result_egress_boundaries: self.tool_result_egress_boundaries,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_result_media_resolvers: self.tool_result_media_resolvers,
             maximum_tool_maturity,
             generated_graphql_target_policy: self.generated_graphql_target_policy,
@@ -2508,7 +2472,6 @@ impl AiRuntimeBuilder {
             content_protection_policy_resolver,
             content_protector,
             providers: self.providers,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             compaction_admission: self.compaction_admission,
             entity_references: self.entity_references,
             start_gate: AiRuntimeStartGate::new(fingerprint),

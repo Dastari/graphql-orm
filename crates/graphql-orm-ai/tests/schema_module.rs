@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.83.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.84.0");
     assert_eq!(catalog.entities().len(), 50);
     // The stored-response ledger keeps its identifiers in backups so a
     // restored deletion debt is not lost.
@@ -54,15 +54,19 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
         .iter()
         .filter(|entity| entity.retention_policy.is_some())
         .collect::<Vec<_>>();
-    assert_eq!(retention_entities.len(), 1);
-    assert_eq!(
-        retention_entities[0].table_name,
-        "graphql_orm_ai_run_checkpoints"
-    );
-    assert_eq!(
-        retention_entities[0].retention_policy,
-        Some("graphql_orm_ai.run_checkpoint.retention_purge")
-    );
+    if cfg!(feature = "mssql") {
+        assert!(retention_entities.is_empty());
+    } else {
+        assert_eq!(retention_entities.len(), 1);
+        assert_eq!(
+            retention_entities[0].table_name,
+            "graphql_orm_ai_run_checkpoints"
+        );
+        assert_eq!(
+            retention_entities[0].retention_policy,
+            Some("graphql_orm_ai.run_checkpoint.retention_purge")
+        );
+    }
     assert_eq!(catalog.modules()[0].restore_hooks.len(), 4);
 
     let schema = catalog.schema_model();
@@ -428,7 +432,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
         .iter()
         .find(|table| table.table_name == "graphql_orm_ai_run_checkpoints")
         .expect("run checkpoint table should exist");
-    assert!(checkpoint.retention_purge);
+    assert_eq!(checkpoint.retention_purge, !cfg!(feature = "mssql"));
     assert!(
         checkpoint
             .columns

@@ -351,7 +351,6 @@ impl AiEntityReferenceRegistry {
         self.kinds.contains(kind)
     }
 
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     /// Checks shape, kinds, count and uniqueness before anything is resolved.
     ///
     /// The checks depend only on the submitted values and the static
@@ -515,7 +514,6 @@ impl std::fmt::Debug for AiEntityReferenceOutcome {
     }
 }
 
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 impl AiEntityReferenceOutcome {
     /// The notice a submission reports for this outcome, if any.
     pub(crate) const fn notice_code(&self) -> Option<AiEntityReferenceNoticeCode> {
@@ -531,7 +529,6 @@ impl AiEntityReferenceOutcome {
 ///
 /// Resolved data is deliberately absent. Storing it would keep disclosing
 /// what the sender could read at submission after that access is revoked.
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 pub(crate) fn stored_handle_content(reference: &AiEntityReferenceInput) -> Value {
     json!({"reference": {"kind": reference.kind, "id": reference.id}})
 }
@@ -540,7 +537,6 @@ pub(crate) fn stored_handle_content(reference: &AiEntityReferenceInput) -> Value
 ///
 /// Only the kind and identifier are taken. Any other member of the stored
 /// value is ignored, so nothing but a handle can leave a stored block.
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 pub(crate) fn stored_handle(content: &Value) -> Option<AiEntityReferenceInput> {
     let reference = content.get("reference")?.as_object()?;
     Some(AiEntityReferenceInput {
@@ -573,7 +569,6 @@ impl std::fmt::Debug for AiEntityReferenceUse {
 
 impl AiEntityReferenceUse {
     /// A reference that produced no data.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) const fn unavailable(reference: AiEntityReferenceInput) -> Self {
         Self {
             reference,
@@ -637,7 +632,6 @@ fn handle_model_block(reference: &AiEntityReferenceInput, reserved_bytes: u64) -
 
 /// A handle that reserves nothing, for a deployment without a registry. It
 /// can only ever be sent as the unavailable marker.
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 pub(crate) fn unreserved_handle_block(reference: &AiEntityReferenceInput) -> ModelInputBlock {
     handle_model_block(reference, 0)
 }
@@ -975,7 +969,6 @@ impl ModelDispatchRequest {
     /// its kind is not registered, the hook returns nothing or fails, it lies
     /// beyond the cap, or its data does not fit the limits or the bytes its
     /// block reserved in the sealed egress estimate.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) async fn resolve(
         registry: Option<&AiEntityReferenceRegistry>,
         principal: &AuthPrincipal,
@@ -1197,7 +1190,6 @@ pub struct AiMessageEntityReferenceInput {
 }
 
 /// Most blocks one user message can hold: its text plus every reference.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) const MAXIMUM_USER_MESSAGE_BLOCKS: i64 = MAXIMUM_ENTITY_REFERENCES as i64 + 1;
 
 /// Returns the text block of a stored user message.
@@ -1205,7 +1197,6 @@ pub(crate) const MAXIMUM_USER_MESSAGE_BLOCKS: i64 = MAXIMUM_ENTITY_REFERENCES as
 /// A user message is exactly one `text` block at index 0, followed only by
 /// entity-reference blocks at indices `1..block_count`. Anything else is
 /// malformed and yields `None`, so callers keep failing closed.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn user_message_text_block(
     blocks: &[crate::persistence::AiMessageBlockRecord],
     block_count: i64,

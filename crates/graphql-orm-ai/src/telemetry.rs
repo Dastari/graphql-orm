@@ -365,7 +365,6 @@ pub struct AiRunRecoveryTelemetry {
 
 impl AiRunRecoveryTelemetry {
     /// Builds an aggregate from one completed bounded recovery pass.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn from_report(
         operation_id: AiTelemetryOperationId,
         duration: Duration,

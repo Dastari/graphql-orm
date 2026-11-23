@@ -7,7 +7,6 @@ use agql_auth::AuthPrincipal;
 use async_graphql::{Context, Enum, ErrorExtensions, InputObject, Object, SimpleObject};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
@@ -639,7 +638,6 @@ impl AiRuleRunUsage {
         self.image_units
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn projected_provider_with_web_searches(
         self,
         estimated: crate::AiBudgetAmounts,
@@ -650,7 +648,6 @@ impl AiRuleRunUsage {
             .add_web_searches(maximum_web_search_calls, resolution)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn accept_provider_with_web_searches(
         self,
         actual: crate::AiBudgetAmounts,
@@ -661,7 +658,6 @@ impl AiRuleRunUsage {
             .add_web_searches(web_search_calls, resolution)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn accept_tool_calls(
         mut self,
         call_count: usize,
@@ -675,7 +671,6 @@ impl AiRuleRunUsage {
         self.validate(resolution)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate(mut self, resolution: &AiAgentRuleResolution) -> Result<Self, AiError> {
         self.ensure_identity(resolution)?;
         let constraints = resolution.rules().constraints();
@@ -711,7 +706,6 @@ impl AiRuleRunUsage {
         Ok(self)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn add_provider(
         mut self,
         amounts: crate::AiBudgetAmounts,
@@ -745,7 +739,6 @@ impl AiRuleRunUsage {
         self.validate(resolution)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn add_web_searches(
         mut self,
         calls: u64,
@@ -758,7 +751,6 @@ impl AiRuleRunUsage {
         self.validate(resolution)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn ensure_identity(&mut self, resolution: &AiAgentRuleResolution) -> Result<(), AiError> {
         let evaluated_at = resolution.evaluated_at().unix_timestamp();
         match self.started_at_unix {
@@ -861,7 +853,6 @@ impl AiResolvedRuleSet {
             && (!uses_byok || self.constraints.allow_byok)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         target_scope: AiScope,
         constraints: AiRuleConstraints,
@@ -880,7 +871,6 @@ impl AiResolvedRuleSet {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn validate_rule_scope(scope: &AiScope) -> Result<(), AiError> {
     let valid = |value: &str| {
         !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
@@ -899,7 +889,6 @@ pub(crate) fn validate_rule_scope(scope: &AiScope) -> Result<(), AiError> {
     Ok(())
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn validate_applied_rule_layers(
     target_scope: &AiScope,
     applied_layers: &[AiAppliedRuleLayer],
@@ -945,7 +934,6 @@ fn validate_applied_rule_layers(
     Ok(())
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn resolved_rule_fingerprint(
     target_scope: &AiScope,
     constraints: &AiRuleConstraints,
@@ -1017,7 +1005,6 @@ pub struct SetAiRulePolicyInput {
     pub expected_version: Option<i64>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl SetAiRulePolicyInput {
     pub(crate) fn into_scope_and_constraints(
         self,
@@ -1141,6 +1128,7 @@ pub trait AiRulePolicyService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiRuleQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -1165,6 +1153,7 @@ impl AiRuleQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiRuleMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -1251,7 +1240,6 @@ fn budget_is_no_broader(value: &AiRuleBudgetCeilings, ceiling: &AiRuleBudgetCeil
         && within(value.maximum_image_units, ceiling.maximum_image_units)
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn normalize_optional_set<T: Ord>(
     values: Option<Vec<T>>,
     field: &str,
@@ -1269,7 +1257,6 @@ fn normalize_optional_set<T: Ord>(
     Ok(Some(values))
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn normalize_optional_provider_kinds(
     values: Option<Vec<AiProviderKindInput>>,
 ) -> Result<Option<BTreeSet<ProviderKind>>, AiError> {
@@ -1292,7 +1279,6 @@ fn normalize_optional_provider_kinds(
     )
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn nonnegative(value: Option<i64>) -> Result<Option<u64>, AiError> {
     value
         .map(|value| {
@@ -1302,7 +1288,7 @@ fn nonnegative(value: Option<i64>) -> Result<Option<u64>, AiError> {
         .transpose()
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

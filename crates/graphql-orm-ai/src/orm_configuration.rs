@@ -1,7 +1,6 @@
 //! ORM-backed GraphQL-managed AI configuration service.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_orm, map_transaction, principal_kind};
 use std::sync::Arc;
@@ -11,9 +10,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionMode,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, OrderDirection, TransactionMode};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -169,9 +166,9 @@ const UNRESOLVED_RESERVATION_STATES: [&str; 2] = ["reserved", "uncertain"];
 /// secret-reference saga. Secret plaintext never enters an ORM input.
 #[derive(Clone)]
 pub struct OrmAiConfigurationService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiConfigurationAccessPolicy>,
     endpoint_policy: Arc<dyn AiProviderEndpointPolicy>,
     recent_mfa_policy: RecentMfaPolicy,
@@ -184,7 +181,7 @@ pub struct OrmAiConfigurationService {
 impl OrmAiConfigurationService {
     /// Creates a fail-closed configuration service.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiConfigurationAccessPolicy>,
         endpoint_policy: Arc<dyn AiProviderEndpointPolicy>,
         recent_mfa_policy: RecentMfaPolicy,
@@ -235,7 +232,7 @@ impl OrmAiConfigurationService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -1715,7 +1712,7 @@ impl AiContentProtectionPolicyResolver for OrmAiConfigurationService {
 }
 
 async fn load_content_policy(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     scope: &AiScope,
 ) -> Result<Option<AiContentProtectionPolicyRecord>, AiError> {
     let scope_hash = scope_key(scope);
@@ -1747,7 +1744,7 @@ async fn load_content_policy(
 }
 
 async fn load_retention_policy(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     scope: &AiScope,
 ) -> Result<Option<AiRetentionPolicyRecord>, AiError> {
     let scope_hash = scope_key(scope);
@@ -1796,7 +1793,7 @@ pub(crate) struct AuditFact<'a> {
 }
 
 pub(crate) async fn insert_audit(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     fact: AuditFact<'_>,
 ) -> Result<(), OrmPublicError> {
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {

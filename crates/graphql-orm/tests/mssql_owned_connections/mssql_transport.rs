@@ -1,4 +1,3 @@
-#![cfg(feature = "mssql")]
 //! SQL Server transport security, pooled session state and pool bounds.
 //!
 //! The owned tests start a disposable loopback SQL Server whose certificate is
@@ -10,8 +9,7 @@ use graphql_orm::graphql::orm::{TransactionMode, WriteBackend};
 use graphql_orm::prelude::*;
 use std::time::{Duration, Instant};
 
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
+use super::owned_mssql;
 use owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]

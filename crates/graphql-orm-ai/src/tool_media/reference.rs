@@ -1,6 +1,4 @@
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::AiToolImageFieldBindings;
-#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 use crate::{AiError, AiToolResultMediaLimits};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -21,7 +19,6 @@ pub struct AiToolImageReference {
     action_expires_at_ms: Option<i64>,
 }
 impl AiToolImageReference {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn source_prefix(&self, original: &str) -> String {
         format!(
             "v1:{original}:{}:{}:{}:{}:{}:{}:{}:{}:",
@@ -35,7 +32,6 @@ impl AiToolImageReference {
             self.action_expires_at_ms.unwrap_or(0)
         )
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn egress_source(
         &self,
         context: &crate::AiToolResultDisclosureContext,
@@ -48,7 +44,6 @@ impl AiToolImageReference {
             trust: context.source_trust(),
         }
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn matches_egress_source(
         &self,
         original: &str,
@@ -101,7 +96,6 @@ impl AiToolImageReference {
                 .action_expires_at_ms
                 .is_some_and(|expires| now_ms < expires)
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_output(
         value: &serde_json::Value,
         fields: &AiToolImageFieldBindings,
@@ -152,7 +146,6 @@ impl AiToolImageReference {
         image.validate_at(limits, now_ms)?;
         Ok(Some(image))
     }
-    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_at(
         &self,
         limits: AiToolResultMediaLimits,
@@ -191,7 +184,6 @@ impl AiToolImageReference {
 
 /// Applies the immutable complete-result aggregate count and decoded-pixel ceiling. Reference
 /// shape remains descriptive; actual codecs/digests/resources are independently verified.
-#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 pub(crate) fn validate_image_reference_batch(
     images: &[AiToolImageReference],
     limits: AiToolResultMediaLimits,

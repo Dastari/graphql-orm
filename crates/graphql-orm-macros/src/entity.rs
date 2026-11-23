@@ -18,6 +18,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) description: Option<String>,
     pub(crate) classification: String,
     pub(crate) default_sort: Option<String>,
+    pub(crate) exact_string_filters: bool,
     pub(crate) order_expressions: Vec<OrderExpressionMetadata>,
     pub(crate) schema_policy: Option<String>,
     pub(crate) auth: Option<String>,
@@ -142,6 +143,7 @@ pub(crate) struct ConditionalIndexMetadata {
     pub(crate) unique: bool,
     pub(crate) predicate_field: Option<String>,
     pub(crate) predicate_values: Vec<String>,
+    pub(crate) predicate_not_null: bool,
 }
 
 #[derive(Clone)]
@@ -278,6 +280,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         return Err(meta.error("mutation_error_codes may only be declared once"));
                     }
                     metadata.mutation_error_codes = true;
+                } else if meta.path.is_ident("exact_string_filters") {
+                    let value: syn::LitBool = meta.value()?.parse()?;
+                    metadata.exact_string_filters = value.value;
                 } else if meta.path.is_ident("retention_purge") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -826,6 +831,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                             let value = option.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             index.predicate_field = Some(lit.value());
+                        } else if option.path.is_ident("predicate_not_null") {
+                            let value: syn::LitBool = option.value()?.parse()?;
+                            index.predicate_not_null = value.value;
                         } else if option.path.is_ident("predicate_values") {
                             let value = option.value()?;
                             index.predicate_values = parse_string_array_expr(
@@ -842,11 +850,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     })?;
                     if index.columns.is_empty()
                         || index.predicate_field.is_none()
-                        || index.predicate_values.is_empty()
+                        || index.predicate_not_null != index.predicate_values.is_empty()
                     {
                         return Err(syn::Error::new(
                             meta.path.span(),
-                            "conditional_index requires columns, predicate_field, and predicate_values",
+                            "conditional_index requires columns, predicate_field, and either predicate_values or predicate_not_null = true",
                         ));
                     }
                     metadata.conditional_indexes.push(index);
@@ -4219,10 +4227,16 @@ fn generate_entity_tokens(
     }
 
     for conditional in &entity_meta.conditional_indexes {
-        if backend == BackendKind::Mssql {
+        if backend != BackendKind::Mssql && conditional.predicate_not_null {
             return Err(syn::Error::new_spanned(
                 struct_name,
-                "conditional indexes are supported only for sqlite and postgres",
+                "predicate_not_null is currently supported on SQL Server only",
+            ));
+        }
+        if backend == BackendKind::Mssql && !conditional.predicate_not_null {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "SQL Server conditional indexes require predicate_not_null = true",
             ));
         }
         let mut db_columns = Vec::new();
@@ -4267,10 +4281,17 @@ fn generate_entity_tokens(
             })?;
         let predicate_meta = parse_field_metadata(predicate_field)?;
         let predicate_type = option_inner_type(&predicate_field.ty).unwrap_or(&predicate_field.ty);
-        if predicate_meta.is_relation || predicate_meta.skip_db || !is_string_type(predicate_type) {
+        if predicate_meta.is_relation
+            || predicate_meta.skip_db
+            || (!conditional.predicate_not_null && !is_string_type(predicate_type))
+        {
             return Err(syn::Error::new_spanned(
                 predicate_field,
-                "conditional_index predicate_field must be a persisted String or Option<String>",
+                if conditional.predicate_not_null {
+                    "conditional_index predicate_field must be persisted"
+                } else {
+                    "conditional_index predicate_field must be a persisted String or Option<String>"
+                },
             ));
         }
         let predicate_column = predicate_meta
@@ -4307,7 +4328,11 @@ fn generate_entity_tokens(
         } else {
             quote! { ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#columns),*]) }
         };
-        index_defs.push(quote! { #base.where_in(#predicate_column, &[#(#values),*]) });
+        index_defs.push(if conditional.predicate_not_null {
+            quote! { #base.where_not_null(#predicate_column) }
+        } else {
+            quote! { #base.where_in(#predicate_column, &[#(#values),*]) }
+        });
     }
 
     // Collect field info
@@ -5582,6 +5607,9 @@ fn generate_entity_tokens(
             && mssql_key_fields.contains(&rust_name)
         {
             sql_type = MSSQL_INDEXABLE_STRING.to_string();
+            if entity_meta.exact_string_filters {
+                sql_type.push_str(" COLLATE Latin1_General_100_BIN2");
+            }
         }
         let decimal_tokens = field_meta
             .decimal
@@ -5864,6 +5892,7 @@ fn generate_entity_tokens(
                     &quote! { __gom_column },
                     filter_type,
                     &field_meta,
+                    entity_meta.exact_string_filters,
                 )?;
                 where_input_fields.push(input_field);
                 // Unqualified, or `row.<column>` for the row `_gom_table`
@@ -7911,6 +7940,7 @@ fn generate_filter_field(
     db_col: &proc_macro2::TokenStream,
     filter_type: &str,
     field_meta: &FieldMetadata,
+    exact_string_filters: bool,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
@@ -8200,11 +8230,14 @@ fn generate_filter_field(
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
             };
+            let render = if backend == BackendKind::Mssql && exact_string_filters {
+                quote! { ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter }
+            } else {
+                quote! { ::graphql_orm::graphql::orm::__gom_render_string_filter }
+            };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    ::graphql_orm::graphql::orm::__gom_render_string_filter(
-                        f, #backend_expr, #db_col, &mut conditions, &mut values,
-                    );
+                    #render(f, #backend_expr, #db_col, &mut conditions, &mut values);
                 }
             };
             let value_expr = if is_option_type(field_type) {
@@ -9046,6 +9079,9 @@ fn mssql_indexed_fields(
         }
     }
     for index in &entity_meta.indexes {
+        names.extend(index.columns.iter().cloned());
+    }
+    for index in &entity_meta.conditional_indexes {
         names.extend(index.columns.iter().cloned());
     }
     // Composite unique members may name a field or its column.

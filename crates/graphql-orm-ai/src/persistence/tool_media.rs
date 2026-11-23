@@ -6,14 +6,12 @@ use super::*;
     table = "graphql_orm_ai_tool_result_sources",
     plural = "GraphqlOrmAiToolResultSources",
     default_sort = "created_at ASC",
-    index(name = "idx_graphql_orm_ai_tool_sources_cursor", columns = ["session_id", "provider_session_binding_id", "provider_cursor_fingerprint", "provider_kind", "provider_profile_id", "provider_model", "created_at"], directions = ["asc", "asc", "asc", "asc", "asc", "asc", "asc"])
+    index(name = "idx_graphql_orm_ai_tool_sources_cursor", columns = ["session_id", "provider_session_binding_id", "provider_cursor_fingerprint", "provider_kind", "provider_profile_id", "provider_model", "created_at"], directions = ["asc", "asc", "asc", "asc", "asc", "asc", "asc"]),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiToolResultSourceRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]

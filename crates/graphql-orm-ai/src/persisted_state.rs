@@ -1,7 +1,5 @@
 //! Typed representations of text stored by AI lifecycle records.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 macro_rules! persisted_state {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]

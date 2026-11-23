@@ -10,6 +10,38 @@ supersedes: []
 
 # Migration Guide
 
+## 0.154.0 to 0.155.0
+
+**No action.** The exported AI roots now implement `GraphqlRootFieldNames`,
+so existing `schema_roots!` declarations can compose them directly with their
+configured field names. No data migration is needed.
+
+## 0.153.0 to 0.154.0
+
+**Action needed.** When adopting SQL Server, install the ORM restore marker with
+the schema owner, then generate the external schema plan for `AiSchemaModule`
+0.84.0 with `Database::schema().plan_migration_to_entities` and
+`AiSchemaModule.entities()`. Review and apply the statements with your own
+migration tooling. Use a verified TLS connection and an explicitly writable
+runtime pool. Rehearse readiness and restore on an owned copy. If a schema-only
+deployment already created the AI tables, replace the nullable provider response
+UNIQUE constraint and the message client-ID index with the planned filtered
+indexes. Apply the planned BIN2 collation to generated string keys, dropping
+and recreating dependent indexes as needed before enabling writers. Install
+the append-only triggers before enabling writers. Existing responses keep
+their values. Nonempty session activity lists return a configuration error on
+SQL Server. Session point reads and durable subscription replay are available.
+See the
+[SQL Server capability matrix](docs/backend-capability-matrix.md#sql-server-deployment).
+
+**No action.** For SQLite and PostgreSQL, the module version advances
+to 0.84.0 without a physical schema or data migration on these backends.
+
+**Action needed.** On SQLite, PostgreSQL, and SQL Server, quiesce new claims
+and drain current runs before reopening on the upgraded module. The
+successor epoch invalidates leases from the previous module. Let ordinary
+lease recovery classify any work that did not drain.
+
 ## 0.152.0 to 0.153.0
 
 **Action needed** for direct checkpoint adoption callers. Start each claimed

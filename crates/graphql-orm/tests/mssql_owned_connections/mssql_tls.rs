@@ -1,7 +1,4 @@
-#![cfg(feature = "mssql")]
-
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
+use super::owned_mssql;
 
 use graphql_orm::db::mssql::MssqlPool;
 

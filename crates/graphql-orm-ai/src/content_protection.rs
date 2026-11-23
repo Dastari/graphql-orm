@@ -106,7 +106,6 @@ pub enum ContentProtectionError {
     Unsupported,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn map_orm_protection_error(
     operation: &'static str,
     error: ContentProtectionError,

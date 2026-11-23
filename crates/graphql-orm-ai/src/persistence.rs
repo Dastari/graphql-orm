@@ -22,14 +22,12 @@ pub(crate) use tool_media::*;
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_scope_policies",
     plural = "GraphqlOrmAiScopePolicies",
-    default_sort = "updated_at DESC"
+    default_sort = "updated_at DESC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiScopePolicyRecord {
     /// Policy ID.
     #[primary_key]
@@ -61,14 +59,12 @@ pub(crate) struct AiScopePolicyRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_provider_profiles",
     plural = "GraphqlOrmAiProviderProfiles",
-    default_sort = "display_name ASC"
+    default_sort = "display_name ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiProviderProfileRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -105,14 +101,12 @@ pub(crate) struct AiProviderProfileRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_model_routes",
     plural = "GraphqlOrmAiModelRoutes",
-    default_sort = "priority ASC"
+    default_sort = "priority ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiModelRouteRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -144,14 +138,12 @@ pub(crate) struct AiModelRouteRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_content_protection_policies",
     plural = "GraphqlOrmAiContentProtectionPolicies",
-    default_sort = "effective_at DESC"
+    default_sort = "effective_at DESC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiContentProtectionPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -180,14 +172,12 @@ pub(crate) struct AiContentProtectionPolicyRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_egress_policies",
     plural = "GraphqlOrmAiEgressPolicies",
-    default_sort = "updated_at DESC"
+    default_sort = "updated_at DESC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiEgressPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -215,14 +205,12 @@ pub(crate) struct AiEgressPolicyRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_egress_consents",
     plural = "GraphqlOrmAiEgressConsents",
-    default_sort = "granted_at DESC"
+    default_sort = "granted_at DESC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiEgressConsentRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -250,14 +238,12 @@ pub(crate) struct AiEgressConsentRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_tool_policies",
     plural = "GraphqlOrmAiToolPolicies",
-    default_sort = "updated_at DESC"
+    default_sort = "updated_at DESC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiToolPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -287,14 +273,12 @@ pub(crate) struct AiToolPolicyRecord {
     table = "graphql_orm_ai_retention_policies",
     plural = "GraphqlOrmAiRetentionPolicies",
     default_sort = "updated_at DESC",
-    unique_index = "scope_key"
+    unique_index = "scope_key",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRetentionPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -326,14 +310,12 @@ pub(crate) struct AiRetentionPolicyRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_budget_policies",
     plural = "GraphqlOrmAiBudgetPolicies",
-    default_sort = "updated_at DESC"
+    default_sort = "updated_at DESC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiBudgetPolicyRecord {
     /// Random for interactive policies; derived from the deployment actor and
     /// exact identity for provisioned ones.
@@ -374,14 +356,12 @@ pub(crate) struct AiBudgetPolicyRecord {
     plural = "GraphqlOrmAiPricingPolicies",
     default_sort = "created_at DESC",
     append_only = true,
-    keyset = "created_at desc, id desc"
+    keyset = "created_at desc, id desc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiPricingPolicyRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -421,14 +401,12 @@ pub(crate) struct AiPricingPolicyRecord {
     plural = "GraphqlOrmAiBudgetCounters",
     default_sort = "period_started_at DESC",
     unique_composite = "budget_policy_id, period_key",
-    upsert = "budget_policy_id, period_key"
+    upsert = "budget_policy_id, period_key",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiBudgetCounterRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -468,14 +446,12 @@ pub(crate) struct AiBudgetCounterRecord {
         name = "idx_graphql_orm_ai_budget_reservations_scope_state",
         columns = ["scope_kind", "scope_id", "tenant_id", "state", "expires_at"],
         directions = ["asc", "asc", "asc", "asc", "asc"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiBudgetReservationRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -541,14 +517,12 @@ pub(crate) struct AiBudgetReservationRecord {
     table = "graphql_orm_ai_sessions",
     plural = "GraphqlOrmAiSessions",
     default_sort = "last_activity_at DESC",
-    keyset = "last_activity_at desc, id desc"
+    keyset = "last_activity_at desc, id desc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionRecord {
     /// Canonical versioned immutable execution selection; NULL is legacy unbound.
     pub execution_selection: Option<String>,
@@ -607,14 +581,12 @@ pub(crate) struct AiSessionRecord {
         name = "idx_graphql_orm_ai_session_title_mutations_session",
         columns = ["session_id", "created_at", "id"],
         directions = ["asc", "asc", "asc"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionTitleMutationRecord {
     /// Client mutation UUID and globally unique idempotency identity.
     #[primary_key]
@@ -648,14 +620,12 @@ pub(crate) struct AiSessionTitleMutationRecord {
         name = "idx_graphql_orm_ai_session_title_work_expired_lease",
         columns = ["state", "lease_expires_at", "created_at", "id"],
         directions = ["asc", "asc", "asc", "asc"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionTitleWorkRecord {
     /// Work identity. The first-message producer uses the session UUID.
     #[primary_key]
@@ -705,14 +675,12 @@ pub(crate) struct AiSessionTitleWorkRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_session_participants",
     plural = "GraphqlOrmAiSessionParticipants",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionParticipantRecord {
     /// Participant record ID.
     #[primary_key]
@@ -743,14 +711,12 @@ pub(crate) struct AiSessionParticipantRecord {
     table = "graphql_orm_ai_session_events",
     plural = "GraphqlOrmAiSessionEvents",
     default_sort = "sequence ASC",
-    keyset = "sequence asc, id asc"
+    keyset = "sequence asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionEventRecord {
     /// Event ID.
     #[primary_key]
@@ -787,14 +753,12 @@ pub(crate) struct AiSessionEventRecord {
     table = "graphql_orm_ai_inbox_streams",
     plural = "GraphqlOrmAiInboxStreams",
     default_sort = "last_event_at ASC",
-    unique_composite = "principal_kind, principal_subject"
+    unique_composite = "principal_kind, principal_subject",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiInboxStreamRecord {
     /// Deterministic principal-stream identifier.
     #[primary_key]
@@ -825,14 +789,12 @@ pub(crate) struct AiInboxStreamRecord {
     plural = "GraphqlOrmAiInboxEvents",
     default_sort = "sequence ASC",
     keyset = "sequence asc, id asc",
-    unique_composite = "principal_kind, principal_subject, sequence"
+    unique_composite = "principal_kind, principal_subject, sequence",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiInboxEventRecord {
     /// Event ID.
     #[primary_key]
@@ -879,19 +841,50 @@ pub(crate) struct AiInboxEventRecord {
 }
 
 /// Bounded message metadata; large content lives in block rows.
-#[backend_selected_graphql_entity(
-    table = "graphql_orm_ai_messages",
-    plural = "GraphqlOrmAiMessages",
-    default_sort = "sequence ASC",
-    keyset = "sequence asc, id asc",
-    unique_index = "session_id, client_message_id"
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "graphql_orm_ai_messages",
+        plural = "GraphqlOrmAiMessages",
+        default_sort = "sequence ASC",
+        keyset = "sequence asc, id asc",
+        unique_index = "session_id, client_message_id"
+    )
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "graphql_orm_ai_messages",
+        plural = "GraphqlOrmAiMessages",
+        default_sort = "sequence ASC",
+        keyset = "sequence asc, id asc",
+        unique_index = "session_id, client_message_id"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "graphql_orm_ai_messages",
+        plural = "GraphqlOrmAiMessages",
+        default_sort = "sequence ASC",
+        keyset = "sequence asc, id asc",
+        schema_policy = "external_writable",
+        exact_string_filters = true
+    )
+)]
+#[cfg_attr(feature = "mssql", graphql_orm(conditional_index(
+    name = "idx_graphql_orm_ai_messages_session_id_client_message_id",
+    columns = ["session_id", "client_message_id"],
+    unique = true,
+    predicate_field = "client_message_id",
+    predicate_not_null = true
+)))]
 pub(crate) struct AiMessageRecord {
     /// Message ID.
     #[primary_key]
@@ -950,14 +943,12 @@ pub(crate) struct AiMessageRecord {
     table = "graphql_orm_ai_message_blocks",
     plural = "GraphqlOrmAiMessageBlocks",
     default_sort = "block_index ASC",
-    keyset = "block_index asc, id asc"
+    keyset = "block_index asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiMessageBlockRecord {
     /// Block ID.
     #[primary_key]
@@ -989,14 +980,12 @@ pub(crate) struct AiMessageBlockRecord {
     table = "graphql_orm_ai_attachments",
     plural = "GraphqlOrmAiAttachments",
     default_sort = "created_at DESC",
-    keyset = "created_at desc, id desc"
+    keyset = "created_at desc, id desc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiAttachmentRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -1057,14 +1046,12 @@ pub(crate) struct AiAttachmentRecord {
     table = "graphql_orm_ai_attachment_artifacts",
     plural = "GraphqlOrmAiAttachmentArtifacts",
     default_sort = "created_at ASC, id ASC",
-    keyset = "created_at asc, id asc"
+    keyset = "created_at asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiAttachmentArtifactRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -1113,14 +1100,12 @@ pub(crate) struct AiAttachmentArtifactRecord {
     table = "graphql_orm_ai_runs",
     plural = "GraphqlOrmAiRuns",
     default_sort = "created_at ASC",
-    keyset = "recovery_examined_at asc, created_at asc, id asc"
+    keyset = "recovery_examined_at asc, created_at asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunRecord {
     /// Canonical versioned immutable execution selection; NULL is legacy unbound.
     pub execution_selection: Option<String>,
@@ -1187,14 +1172,12 @@ pub(crate) struct AiRunRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_run_cancellation_requests",
     plural = "GraphqlOrmAiRunCancellationRequests",
-    default_sort = "requested_at ASC"
+    default_sort = "requested_at ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunCancellationRequestRecord {
     /// Client-generated idempotency key.
     #[primary_key]
@@ -1233,14 +1216,12 @@ pub(crate) struct AiRunCancellationRequestRecord {
         name = "idx_graphql_orm_ai_run_failure_dispositions_session",
         columns = ["session_id", "decided_at", "id"],
         directions = ["asc", "asc", "asc"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunFailureDispositionRecord {
     /// Client-generated idempotency key.
     #[primary_key]
@@ -1297,14 +1278,12 @@ pub(crate) struct AiRunFailureDispositionRecord {
         name = "idx_graphql_orm_ai_subscription_waiters_expiry",
         columns = ["state", "expires_at", "id"],
         directions = ["asc", "asc", "asc"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSubscriptionWaiterRecord {
     /// Waiter identity.
     #[primary_key]
@@ -1437,14 +1416,12 @@ pub(crate) struct AiSubscriptionWaiterRecord {
     table = "graphql_orm_ai_subscription_wait_adoptions",
     plural = "GraphqlOrmAiSubscriptionWaitAdoptions",
     default_sort = "queued_at ASC, id ASC",
-    unique_index = "waiter_id"
+    unique_index = "waiter_id",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSubscriptionWaitAdoptionRecord {
     /// Adoption identity.
     #[primary_key]
@@ -1500,14 +1477,12 @@ pub(crate) struct AiSubscriptionWaitAdoptionRecord {
     default_sort = "claimed_at ASC",
     append_only = true,
     // One attempt per fencing generation of a run.
-    unique_index = "run_id, lease_generation"
+    unique_index = "run_id, lease_generation",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunAttemptRecord {
     /// Attempt ID.
     #[primary_key]
@@ -1543,14 +1518,12 @@ pub(crate) struct AiRunAttemptRecord {
     table = "graphql_orm_ai_run_attempt_outcomes",
     plural = "GraphqlOrmAiRunAttemptOutcomes",
     default_sort = "finished_at ASC",
-    append_only = true
+    append_only = true,
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunAttemptOutcomeRecord {
     /// Outcome fact ID.
     #[primary_key]
@@ -1582,14 +1555,12 @@ pub(crate) struct AiRunAttemptOutcomeRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_run_steps",
     plural = "GraphqlOrmAiRunSteps",
-    default_sort = "step_index ASC"
+    default_sort = "step_index ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunStepRecord {
     /// Step ID.
     #[primary_key]
@@ -1622,15 +1593,10 @@ pub(crate) struct AiRunStepRecord {
 
 /// Immutable fenced coordinator checkpoint containing redacted recovery
 /// metadata and, when present, a protected exact resumable payload.
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    graphql_orm(projection(
+#[graphql_orm(projection(
         name = "AiRunCheckpointRetentionProjection",
         fields = [
             id,
@@ -1645,8 +1611,7 @@ pub(crate) struct AiRunStepRecord {
             created_at
         ],
         private = true
-    ))
-)]
+))]
 #[cfg_attr(
     feature = "sqlite",
     graphql_entity(
@@ -1673,6 +1638,8 @@ pub(crate) struct AiRunStepRecord {
     feature = "mssql",
     graphql_entity(
         backend = "mssql",
+        schema_policy = "external_writable",
+        exact_string_filters = true,
         table = "graphql_orm_ai_run_checkpoints",
         plural = "GraphqlOrmAiRunCheckpoints",
         default_sort = "created_at ASC, id ASC",
@@ -1719,14 +1686,12 @@ pub(crate) struct AiRunCheckpointRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_tool_calls",
     plural = "GraphqlOrmAiToolCalls",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiToolCallRecord {
     /// Tool-call ID.
     #[primary_key]
@@ -1821,14 +1786,12 @@ pub(crate) struct AiToolCallRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_native_approval_candidates",
     plural = "GraphqlOrmAiNativeApprovalCandidates",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 pub(crate) struct AiNativeApprovalCandidateRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -1880,14 +1843,12 @@ impl std::fmt::Debug for AiNativeApprovalCandidateRecord {
     default_sort = "created_at ASC",
     keyset = "created_at asc, id asc",
     // One approval per tool call.
-    unique_index = "tool_call_id"
+    unique_index = "tool_call_id",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiApprovalRecord {
     /// Approval ID.
     #[primary_key]
@@ -1970,14 +1931,12 @@ pub(crate) struct AiApprovalRecord {
     table = "graphql_orm_ai_proposals",
     plural = "GraphqlOrmAiProposals",
     default_sort = "created_at DESC",
-    keyset = "created_at desc, id desc"
+    keyset = "created_at desc, id desc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiProposalRecord {
     /// Proposal ID.
     #[primary_key]
@@ -2036,14 +1995,12 @@ pub(crate) struct AiProposalRecord {
     table = "graphql_orm_ai_proposal_items",
     plural = "GraphqlOrmAiProposalItems",
     default_sort = "item_index ASC",
-    keyset = "item_index asc, id asc"
+    keyset = "item_index asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiProposalItemRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2075,14 +2032,12 @@ pub(crate) struct AiProposalItemRecord {
     default_sort = "through_sequence DESC",
     keyset = "through_sequence desc, id desc",
     // One checkpoint per compacted session position.
-    unique_index = "session_id, through_sequence"
+    unique_index = "session_id, through_sequence",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiContextCheckpointRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2108,14 +2063,12 @@ pub(crate) struct AiContextCheckpointRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_skills",
     plural = "GraphqlOrmAiSkills",
-    default_sort = "name ASC"
+    default_sort = "name ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSkillRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -2144,14 +2097,12 @@ pub(crate) struct AiSkillRecord {
     table = "graphql_orm_ai_skill_versions",
     plural = "GraphqlOrmAiSkillVersions",
     default_sort = "created_at DESC",
-    append_only = true
+    append_only = true,
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSkillVersionRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2187,14 +2138,12 @@ pub(crate) struct AiSkillVersionRecord {
     plural = "GraphqlOrmAiUsageEntries",
     default_sort = "created_at DESC",
     append_only = true,
-    keyset = "created_at desc, id desc"
+    keyset = "created_at desc, id desc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiUsageEntryRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2235,13 +2184,17 @@ pub(crate) struct AiUsageEntryRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_provider_background_submissions",
     plural = "GraphqlOrmAiProviderBackgroundSubmissions",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
-)]
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[cfg_attr(feature = "mssql", graphql_orm(conditional_index(
+    name = "uidx_ai_background_provider_response",
+    columns = ["provider_response_id"],
+    unique = true,
+    predicate_field = "provider_response_id",
+    predicate_not_null = true
+)))]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiProviderBackgroundSubmissionRecord {
     /// Opaque deterministic submission identity embedded in provider metadata.
@@ -2285,7 +2238,7 @@ pub(crate) struct AiProviderBackgroundSubmissionRecord {
     /// Exact redacted model-inference manifest hash.
     pub egress_manifest_hash: String,
     /// Provider response reference returned by a successful create call.
-    #[unique]
+    #[cfg_attr(not(feature = "mssql"), unique)]
     pub provider_response_id: Option<String>,
     /// Bounded provider status observed in the create acknowledgement.
     pub provider_status: Option<String>,
@@ -2337,14 +2290,12 @@ pub(crate) struct AiProviderBackgroundSubmissionRecord {
     plural = "GraphqlOrmAiProviderWebhookReceipts",
     default_sort = "received_at DESC",
     index = "provider_kind,provider_profile_id,provider_response_id,state",
-    repository_mutations = true
+    repository_mutations = true,
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiProviderWebhookReceiptRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2386,14 +2337,12 @@ pub(crate) struct AiProviderWebhookReceiptRecord {
     plural = "GraphqlOrmAiAuditEvents",
     default_sort = "created_at DESC",
     append_only = true,
-    keyset = "created_at desc, id desc"
+    keyset = "created_at desc, id desc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiAuditEventRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
@@ -2427,14 +2376,12 @@ pub(crate) struct AiAuditEventRecord {
     table = "graphql_orm_ai_stored_provider_responses",
     plural = "GraphqlOrmAiStoredProviderResponses",
     default_sort = "created_at ASC",
-    keyset = "created_at asc, id asc"
+    keyset = "created_at asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiStoredProviderResponseRecord {
     /// Deterministic identity of the provider kind, profile and response.
     #[primary_key]
@@ -2477,14 +2424,12 @@ pub(crate) struct AiStoredProviderResponseRecord {
     table = "graphql_orm_ai_secret_cleanup",
     plural = "GraphqlOrmAiSecretCleanup",
     default_sort = "created_at ASC",
-    keyset = "created_at asc, id asc"
+    keyset = "created_at asc, id asc",
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSecretCleanupRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2514,14 +2459,12 @@ pub(crate) struct AiSecretCleanupRecord {
     table = "graphql_orm_ai_egress_events",
     plural = "GraphqlOrmAiEgressEvents",
     default_sort = "created_at ASC",
-    append_only = true
+    append_only = true,
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiEgressEventRecord {
     /// Decision ID.
     #[primary_key]
@@ -2574,14 +2517,12 @@ pub(crate) struct AiEgressEventRecord {
     unique_index(
         name = "graphql_orm_ai_runtime_recovery_epoch_sequence",
         columns = ["epoch_sequence"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRuntimeRecoveryRecord {
     /// Recovery epoch ID.
     #[primary_key]
@@ -2634,7 +2575,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.83.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.84.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

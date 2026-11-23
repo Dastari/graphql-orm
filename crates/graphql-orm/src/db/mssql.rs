@@ -10,7 +10,7 @@ pub use notifications::{
 };
 pub use transport::MssqlTransportPolicy;
 
-use crate::graphql::orm::{SqlValue, TemporalKind, TemporalValue};
+use crate::graphql::orm::{BackupRestoreExternallyManaged, SqlValue, TemporalKind, TemporalValue};
 use chrono::{Datelike, Timelike};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -346,6 +346,9 @@ impl sqlx::error::DatabaseError for MssqlServerError {
 #[derive(Clone)]
 pub struct MssqlPool {
     inner: Arc<MssqlPoolInner>,
+    // The policy travels with the Database's pool handle. Other handles may
+    // share the connection pool without inheriting a change to their policy.
+    pub(super) externally_managed_backup_restore: bool,
 }
 
 struct MssqlPoolInner {
@@ -518,6 +521,7 @@ impl MssqlPool {
             ..options
         };
         Self {
+            externally_managed_backup_restore: false,
             inner: Arc::new(MssqlPoolInner {
                 config,
                 access_mode,
@@ -538,11 +542,14 @@ impl MssqlPool {
         &self.inner.options
     }
 
-    /// Fetch rows in autocommit. The statement holds the shared restore lock
-    /// while it runs and is refused with
+    /// Fetch rows in autocommit. With restore fencing enabled, the statement holds
+    /// the shared restore lock while it runs and is refused with
     /// [`RestoreInProgress`](crate::graphql::orm::RestoreInProgress) during a
     /// host-run restore; see [`MssqlRestore`].
     pub async fn fetch_rows(&self, sql: &str, values: &[SqlValue]) -> crate::Result<Vec<MssqlRow>> {
+        if self.externally_managed_backup_restore {
+            return self.fetch_rows_ungated(sql, values).await;
+        }
         let result = self
             .fetch_rows_ungated(&restore_gated(sql, true), values)
             .await;
@@ -577,17 +584,22 @@ impl MssqlPool {
         // The statement must be the last of its batch: its row count is the
         // batch's last one. The shared lock is therefore released by a
         // control batch that follows it, before the connection is reused.
-        let gated = restore_gated(sql, false);
+        let statement = if self.externally_managed_backup_restore {
+            Cow::Borrowed(sql)
+        } else {
+            Cow::Owned(restore_gated(sql, false))
+        };
         let mut lease = self.acquire().await?;
         let result = self
             .bounded(execute_with_client(
                 &mut lease.client,
-                &gated,
+                &statement,
                 values,
                 self.options().typed_temporal_parameters,
             ))
             .await;
-        if result.is_ok()
+        if !self.externally_managed_backup_restore
+            && result.is_ok()
             && let Err(failure) = self
                 .bounded(execute_control_statement(
                     &mut lease.client,
@@ -612,6 +624,9 @@ impl MssqlPool {
     /// [`RestoreStateUnavailable`](crate::graphql::orm::RestoreStateUnavailable)
     /// when the gate could not read the marker at all.
     async fn typed_restore_refusal<T>(&self, result: crate::Result<T>) -> crate::Result<T> {
+        if self.externally_managed_backup_restore {
+            return result;
+        }
         match result {
             Err(error) => match restore_refusal(&error) {
                 Some(RestoreRefusal::InProgress) => Err(self.restore_in_progress_error().await),
@@ -652,7 +667,10 @@ impl MssqlPool {
     /// than at runtime.
     ///
     /// Needs a pool built with the explicit external-writable constructor.
+    /// Returns [`BackupRestoreExternallyManaged`] for an externally managed
+    /// backup and restore configuration, before acquiring a connection.
     pub async fn install_restore_marker(&self) -> crate::Result<()> {
+        BackupRestoreExternallyManaged::ensure_allowed(self.externally_managed_backup_restore)?;
         self.require_external_writable()?;
         let mut lease = self.acquire().await?;
         let result = self
@@ -670,6 +688,7 @@ impl MssqlPool {
     /// closed with [`RestoreStateUnavailable`](crate::graphql::orm::RestoreStateUnavailable),
     /// which says why.
     pub(crate) async fn read_restore_marker(&self) -> crate::Result<Option<(String, i64)>> {
+        BackupRestoreExternallyManaged::ensure_allowed(self.externally_managed_backup_restore)?;
         let rows = self
             .fetch_rows_ungated(READ_RESTORE_MARKER, &[])
             .await
@@ -693,6 +712,7 @@ impl MssqlPool {
         wait: Duration,
         resume: bool,
     ) -> crate::Result<MssqlRestore> {
+        BackupRestoreExternallyManaged::ensure_allowed(self.externally_managed_backup_restore)?;
         self.require_external_writable()?;
         let mut lease = self.acquire().await?;
         let wait_ms = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
@@ -807,14 +827,18 @@ impl MssqlPool {
         // The transaction takes the shared restore lock in the batch that
         // begins it and holds it until it ends, so a restore cannot start
         // under it and it cannot start under a restore.
-        let begin = format!(
-            "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
-             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION; {}",
+        let gate = if self.externally_managed_backup_restore {
+            String::new()
+        } else {
             restore_gate(
                 "Transaction",
                 "ROLLBACK TRANSACTION;",
-                isolation == "SNAPSHOT"
+                isolation == "SNAPSHOT",
             )
+        };
+        let begin = format!(
+            "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION; {gate}",
         );
         // A failed begin may have changed the isolation level; never reuse it.
         let begun = self

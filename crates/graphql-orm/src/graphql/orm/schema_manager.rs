@@ -78,7 +78,9 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         B: IntrospectionBackend,
     {
         // A partly restored database must not pass a start-up validation.
-        super::restore_marker::refuse_while_restoring::<B>(self.database.pool()).await?;
+        self.database
+            .check_restore_state_for_schema_validation()
+            .await?;
         let target = SchemaModel::from_entities(entities);
         let current =
             B::introspect_schema_including(self.database.pool(), &declared_tables([&target]))
@@ -120,7 +122,9 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         B: IntrospectionBackend + RlsIntrospectionBackend,
     {
         // A partly restored database must not pass a start-up validation.
-        super::restore_marker::refuse_while_restoring::<B>(self.database.pool()).await?;
+        self.database
+            .check_restore_state_for_schema_validation()
+            .await?;
         let current = B::introspect_schema_including(
             self.database.pool(),
             &declared_tables([&target.schema]),
@@ -759,10 +763,17 @@ pub(super) fn validate_schema_views(
                 ));
                 continue;
             };
-            if !current_column
-                .sql_type
-                .eq_ignore_ascii_case(&target_column.sql_type)
-            {
+            let type_matches = if backend == "mssql" {
+                super::migrations::mssql_column_types_match(
+                    &current_column.sql_type,
+                    &target_column.sql_type,
+                )
+            } else {
+                current_column
+                    .sql_type
+                    .eq_ignore_ascii_case(&target_column.sql_type)
+            };
+            if !type_matches {
                 diagnostics.push(diagnostic(
                     SchemaDiagnosticSeverity::Error,
                     SchemaDiagnosticKind::TypeMismatch,

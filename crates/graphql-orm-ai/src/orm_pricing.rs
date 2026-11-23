@@ -1,7 +1,6 @@
 //! ORM-backed immutable pricing catalog and authoritative token accounting.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_transaction, pricing_scope as record_scope};
 use std::sync::Arc;
@@ -11,7 +10,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
-use graphql_orm::graphql::orm::{DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::TransactionMode;
 use uuid::Uuid;
 
 use crate::persistence::*;
@@ -103,7 +102,7 @@ impl AiPricingCatalogManagementLimits {
 /// token plus supported built-in settlement for that exact version.
 #[derive(Clone)]
 pub struct OrmAiPricingService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiConfigurationAccessPolicy>,
     recent_mfa_policy: RecentMfaPolicy,
     clock: Arc<dyn Clock>,
@@ -113,7 +112,7 @@ pub struct OrmAiPricingService {
 impl OrmAiPricingService {
     /// Creates an immutable pricing service under deployment hard bounds.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiConfigurationAccessPolicy>,
         recent_mfa_policy: RecentMfaPolicy,
         clock: Arc<dyn Clock>,

@@ -103,14 +103,6 @@ pub trait AiProviderEndpointPolicy: Send + Sync {
     }
 }
 
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core"
-))]
 #[derive(Clone, Copy)]
 pub(crate) enum ProviderEndpointError {
     InvalidUrl,
@@ -120,14 +112,6 @@ pub(crate) enum ProviderEndpointError {
 /// Parses the endpoint shape shared by every configurable provider: `http`
 /// or `https`, a host, and no user information, query or fragment. Path rules
 /// stay with each caller.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core"
-))]
 pub(crate) fn parse_provider_endpoint(value: &str) -> Result<url::Url, ProviderEndpointError> {
     let mut url = url::Url::parse(value).map_err(|_| ProviderEndpointError::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
@@ -145,16 +129,6 @@ pub(crate) fn parse_provider_endpoint(value: &str) -> Result<url::Url, ProviderE
 }
 
 /// Returns whether an endpoint names a loopback host.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core",
-    feature = "provider-openai-core",
-    feature = "provider-xai-core"
-))]
 pub(crate) fn provider_endpoint_is_loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(address)) => address.is_loopback(),
@@ -172,14 +146,6 @@ pub(crate) fn provider_endpoint_is_loopback(url: &url::Url) -> bool {
 /// Applies the transport rule and then the deployment policy to one parsed
 /// endpoint. Used at configuration time, at provider construction and
 /// before every provider request.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core"
-))]
 pub(crate) fn provider_endpoint_permitted(
     policy: &dyn AiProviderEndpointPolicy,
     provider_kind: AiProviderKindInput,
@@ -851,6 +817,7 @@ pub trait AiConfigurationService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiConfigurationQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -967,6 +934,7 @@ impl AiConfigurationQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiConfigurationMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

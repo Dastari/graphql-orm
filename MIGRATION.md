@@ -10,12 +10,46 @@ supersedes: []
 
 # Migration Guide
 
-## 0.201.0 to 0.205.0: generated Changed subscriptions
+## 0.204.0 to 0.205.0: generated Changed subscriptions
 
 **No action.** Upgrade ORM and macros together. Generated Changed
 subscriptions use shared stream code. SDL, operation catalogues,
 fingerprints, and the subscription authorization and delivery rules stay
 the same.
+
+## 0.203.0 to 0.204.0: externally managed backup and restore
+
+**No action.** The default backup and restore behavior stays the same. No
+data migration is needed. For a database whose backup and restore are owned
+by another product, opt in with
+`DatabaseBuilder::externally_managed_backup_restore(true)` on every handle.
+Backup, restore, and explicit restore-fencing operations return
+`BACKUP_RESTORE_EXTERNALLY_MANAGED`. Use the same reviewed workspace revision
+for ORM and backup 0.29.0 if you use its ORM adapter.
+See [backup ownership](docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore).
+
+## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
+
+**Action needed** for SQL Server hosts with `append_only = true` entities.
+Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
+both operations. Before applying a plan, review cleanup jobs and foreign-key
+cascades that delete rows from these tables. Change or disable those paths
+and rehearse the migration on a copy. There is no trigger opt-out while an
+entity remains append-only. Remove `append_only = true` only if the entity
+should no longer have the append-only contract.
+
+**Action needed** for SQL Server hosts whose declarations can resolve to the
+same physical table. Regenerate the plan and resolve any identifier conflict
+before applying it. Use one declaration for each physical table, including
+when an unqualified name and a `dbo`-qualified name refer to the same object.
+
+**No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
+together. No physical schema or data migration is required on these backends.
+
+## 0.201.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
 
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 
