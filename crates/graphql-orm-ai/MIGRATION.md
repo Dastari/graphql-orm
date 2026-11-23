@@ -15,9 +15,11 @@ supersedes: []
 **No action.** Resolved reference delivery to Codex app-server requires a
 registration opt-in and a process implementation that passes the dispatch to
 the protocol actor's consuming write. Existing process implementations keep
-receiving markers. Codex inbound user-message lifecycle events expose only
-item metadata, including in echoed thread and turn data. No data migration
-is needed. See [per-message entity references](docs/entity-references.md#adapters-for-a-local-process).
+receiving markers. The actor filters echoed `userMessage` items and sets
+existing thread `preview` values to the empty string for every host,
+regardless of opt-in. Hosts that display these previews will receive empty
+strings. No data migration is needed. See
+[per-message entity references](docs/entity-references.md#adapters-for-a-local-process).
 
 ## 0.154.0 to 0.155.0
 

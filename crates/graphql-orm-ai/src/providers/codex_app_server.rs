@@ -1963,11 +1963,12 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     /// The default delegates to the existing process method for the session's
     /// activation and responder, using marker-only input. An override must
     /// preserve the same thread, tool, source reauthorization and event guards.
-    /// Use [`AiCodexAppServerProtocolActor::write_dispatch_turn`] with the exclusive
-    /// process writer after setup and any queueing. Pending writes on that
-    /// transport must also honor process termination. Await the write before
-    /// returning the event stream. Treat raw inbound frames as protected until
-    /// the actor projects them.
+    /// Use [`AiCodexAppServerProtocolActor::write_dispatch_turn`] with exclusive
+    /// access to the child's stdin after setup and any queueing. Pending
+    /// writes on that transport must honor process termination. Await the
+    /// write before returning the event stream. Treat raw inbound frames as
+    /// protected. The actor only filters known user-message echoes and thread
+    /// previews.
     ///
     /// # Errors
     ///
@@ -4931,12 +4932,13 @@ impl AiCodexAppServerProtocolActor {
 
     /// Consumes one dispatch and writes its single `turn/start` frame.
     ///
-    /// Acquire the exclusive process writer before calling. This method
-    /// reauthorizes historical tool sources before writing. The writer must be
-    /// the child transport and must discard any buffered remainder if the
-    /// process is killed. The marker frame is used if the resolved frame
+    /// Acquire exclusive access to the child's stdin before calling. This method
+    /// reauthorizes historical tool sources before writing. The freshness
+    /// deadline and kill on an abandoned resolved write apply to the supplied
+    /// writer. A queueing writer can complete before the actual pipe write.
+    /// The host process and writer are trusted to discard buffered bytes on
+    /// process termination. The marker frame is used if the resolved frame
     /// cannot fit or its freshness deadline passes before the write.
-    /// Resolved frame bytes are never returned.
     ///
     /// # Errors
     ///

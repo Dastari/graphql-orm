@@ -24,6 +24,7 @@ struct Child {
     shutdowns: AtomicUsize,
     frame_limit: Option<usize>,
     dynamic_tools: bool,
+    legacy: bool,
     stall_write: AtomicBool,
     partial_writes: AtomicUsize,
     delay_before_write: std::time::Duration,
@@ -83,11 +84,17 @@ impl AiCodexAppServerRunProcessFactory for Factory {
         };
         respond(&mut actor, &initialize, json!({}));
         let child = self.0.clone();
+        let process = Process {
+            actor: Mutex::new(actor),
+            child: child.clone(),
+        };
+        let process: Arc<dyn AiCodexAppServerRunProcess> = if child.legacy {
+            Arc::new(LegacyProcess(process))
+        } else {
+            Arc::new(process)
+        };
         Ok(AiCodexAppServerLaunchedProcess::new(
-            Arc::new(Process {
-                actor: Mutex::new(actor),
-                child: child.clone(),
-            }),
+            process,
             Arc::new(move || {
                 child.killed.fetch_add(1, Ordering::SeqCst);
             }),
@@ -196,39 +203,8 @@ impl AiCodexAppServerRunProcess for Process {
         actor
             .write_dispatch_turn(THREAD, dispatch, &mut wire)
             .await?;
-        let frame: Value = serde_json::from_slice(&wire).unwrap();
-        self.child.writes.lock().unwrap().push(frame.clone());
         assert!(actor.start_turn(THREAD, &cloned_input).is_err());
-
-        let item =
-            json!({"type":"userMessage", "id":"user-2", "content":[frame["params"]["input"][1]]});
-        let turn = json!({"id":"turn-2", "items":[item]});
-        respond(&mut actor, &wire, json!({"turn": turn}));
-        accept(
-            &mut actor,
-            json!({"method":"turn/started","params":{"threadId":THREAD,"turn":turn}}),
-        );
-        for (method, timestamp) in [
-            ("item/started", "startedAtMs"),
-            ("item/completed", "completedAtMs"),
-        ] {
-            accept(
-                &mut actor,
-                json!({"method":method,"params":{
-                    "threadId":THREAD,"turnId":"turn-2","item":item,(timestamp):1
-                }}),
-            );
-        }
-        accept(
-            &mut actor,
-            json!({"method":"turn/completed","params":{
-                "threadId":THREAD,"turn":{"id":"turn-2","items":[item],"status":"completed"}
-            }}),
-        );
-        assert_handles_only("the actor debug", &format!("{actor:?}"));
-        Ok(Box::pin(futures::stream::iter(
-            text_turn().into_iter().map(Ok),
-        )))
+        self.finish_turn(&mut actor, &wire)
     }
 
     async fn interrupt(&self) -> Result<(), ProviderError> {
@@ -238,6 +214,73 @@ impl AiCodexAppServerRunProcess for Process {
     async fn shutdown(&self, _reason: AiProviderRunCloseReason) -> Result<(), ProviderError> {
         self.child.shutdowns.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+impl Process {
+    fn finish_turn(
+        &self,
+        actor: &mut AiCodexAppServerProtocolActor,
+        wire: &[u8],
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let frame: Value = serde_json::from_slice(wire).unwrap();
+        self.child.writes.lock().unwrap().push(frame.clone());
+
+        let item =
+            json!({"type":"userMessage", "id":"user-2", "content":[frame["params"]["input"][1]]});
+        let turn = json!({"id":"turn-2", "items":[item]});
+        respond(actor, wire, json!({"turn": turn}));
+        accept(
+            actor,
+            json!({"method":"turn/started","params":{"threadId":THREAD,"turn":turn}}),
+        );
+        for (method, timestamp) in [
+            ("item/started", "startedAtMs"),
+            ("item/completed", "completedAtMs"),
+        ] {
+            accept(
+                actor,
+                json!({"method":method,"params":{
+                    "threadId":THREAD,"turnId":"turn-2","item":item,(timestamp):1
+                }}),
+            );
+        }
+        accept(
+            actor,
+            json!({"method":"turn/completed","params":{
+                "threadId":THREAD,"turn":{"id":"turn-2","items":[item],"status":"completed"}
+            }}),
+        );
+        assert_handles_only("the actor debug", &format!("{actor:?}"));
+        Ok(Box::pin(futures::stream::iter(
+            text_turn().into_iter().map(Ok),
+        )))
+    }
+}
+
+struct LegacyProcess(Process);
+
+#[async_trait]
+impl AiCodexAppServerRunProcess for LegacyProcess {
+    async fn start_fresh_turn(
+        &self,
+        input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        assert_handles_only("legacy turn input", &format!("{input:?}"));
+        assert_unavailable(&input.input().join("\n"));
+        let mut actor = self.0.actor.lock().await;
+        let thread = actor.start_fresh_thread(&input)?;
+        bind_thread(&mut actor, &thread, json!({"id": THREAD}));
+        let wire = actor.start_turn(THREAD, &input)?;
+        self.0.finish_turn(&mut actor, &wire)
+    }
+
+    async fn interrupt(&self) -> Result<(), ProviderError> {
+        self.0.interrupt().await
+    }
+
+    async fn shutdown(&self, reason: AiProviderRunCloseReason) -> Result<(), ProviderError> {
+        self.0.shutdown(reason).await
     }
 }
 
@@ -280,6 +323,99 @@ async fn codex(
 fn wire_text(frame: &Value) -> &str {
     assert_eq!(frame["method"], "turn/start");
     frame["params"]["input"][1]["text"].as_str().unwrap()
+}
+
+async fn execute_fresh_turn(references: &References, child: &Child) -> String {
+    let fixture = &references.fixture;
+    let mut plan = for_local_process(with_reference(plan(fixture), &references.registry));
+    plan.request.continuation_mode = ModelContinuationMode::StatelessReplay;
+    assert_handles_only("the plan", &format!("{plan:?}"));
+    let result = executor(fixture)
+        .execute(&fixture.lease, plan)
+        .await
+        .expect("the fresh turn should complete");
+    assert_handles_only("the result", &format!("{result:?}"));
+    assert_handles_only("persisted state", &persisted_state(fixture).await);
+    let frames = child.writes.lock().unwrap();
+    assert_eq!(frames.len(), 1);
+    wire_text(&frames[0]).to_owned()
+}
+
+#[tokio::test]
+async fn a_codex_process_without_a_dispatch_override_receives_the_marker() {
+    let child = Arc::new(Child {
+        legacy: true,
+        ..Child::default()
+    });
+    let (references, _) = codex(Some(FRESH), child.clone()).await;
+    assert_unavailable(&execute_fresh_turn(&references, &child).await);
+    assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_fresh_codex_turn_sends_resolved_data_without_persisting_it() {
+    let child = Arc::new(Child::default());
+    let (references, _) = codex(Some(FRESH), child.clone()).await;
+    assert_resolved(&execute_fresh_turn(&references, &child).await);
+    assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn codex_writes_identical_markers_for_missing_failed_and_denied_references() {
+    enum Outcome {
+        Missing,
+        Failed,
+        Denied,
+    }
+
+    struct UnavailableReference {
+        outcome: Outcome,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::AiEntityReferenceResolver for UnavailableReference {
+        async fn resolve(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            reference_input: &crate::AiEntityReferenceInput,
+        ) -> Result<Option<crate::AiResolvedEntityReference>, AiError> {
+            assert_eq!(reference_input, &reference());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.outcome {
+                Outcome::Missing => Ok(None),
+                Outcome::Failed => Err(AiError::PersistenceFailed),
+                Outcome::Denied => Err(AiError::Forbidden),
+            }
+        }
+    }
+
+    let mut markers = Vec::new();
+    for outcome in [Outcome::Missing, Outcome::Failed, Outcome::Denied] {
+        let child = Arc::new(Child::default());
+        let (mut references, _) = codex(Some(FRESH), child.clone()).await;
+        let registry = crate::AiEntityReferenceRegistry::new(
+            ["record"],
+            Arc::new(UnavailableReference {
+                outcome,
+                calls: references.calls.clone(),
+            }),
+        )
+        .unwrap()
+        .with_limits(references.registry.limits());
+        Arc::get_mut(&mut references.fixture.runtime)
+            .expect("the fixture owns its runtime")
+            .install_entity_references_for_test(registry.clone());
+        references.registry = registry;
+
+        let marker = execute_fresh_turn(&references, &child).await;
+        assert_unavailable(&marker);
+        assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+        markers.push(marker.into_bytes());
+    }
+    assert_eq!(markers[0], markers[1]);
+    assert_eq!(markers[0], markers[2]);
 }
 
 #[tokio::test]

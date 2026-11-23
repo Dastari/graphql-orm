@@ -20,10 +20,10 @@ is never treated as an instruction.
 
 ## The rule: store the handle, resolve at every use
 
-Only the handle (`kind` and `id`) is stored, cloned, logged or retried. What a
-reference resolves to is never stored by this crate: not in the message, a
-summary, a continuation, a checkpoint, a provider-call plan, a call result, an
-audit record or a background-submission record.
+The crate keeps only the handle (`kind` and `id`) when it stores, clones,
+logs or retries a structured reference. If the model repeats resolved data
+in its output, the crate stores that output under the usual assistant-content
+rules.
 
 Every time a reference is used, the host hook is called again with the
 principal that is acting at that moment, and the answer is used once:
@@ -192,12 +192,11 @@ before it, the executor:
 3. builds a `ModelDispatchRequest`: the handle-only request plus a
    `ModelDispatchReferences` table of what each handle resolved to.
 
-`ModelDispatchRequest` and `ModelDispatchReferences` are the only values that
-hold resolved data on the way to a provider. They are not `Clone` and not
-`Serialize`, their `Debug` output prints the handle-only request and a count,
-and they are moved into the adapter and dropped when the call ends. A retry
-or a continuation cannot reuse one: it runs the step again and asks the hook
-again.
+The executor moves the scoped `ModelDispatchRequest` and its
+`ModelDispatchReferences` into the adapter. Neither type implements `Clone`
+or `Serialize`, and their `Debug` output shows only the handle-only request
+or a count. The adapter consumes the resolution for the current call.
+A retry or continuation runs the resolution step again.
 
 What a provider receives for a resolved reference is
 
@@ -240,15 +239,15 @@ the data may begin. It must be greater than zero and at most
 part of any registration identity or session fingerprint, so changing it does
 not rebind sessions.
 
-With the opt-in, an adapter sends resolved data in exactly one write, the one
-that delivers the turn. Everything the adapter validates, queues, compares,
-clones or logs holds the unavailable marker.
+An adapter that supports consuming dispatch can send resolved data in one
+write per turn. The adapter validates, queues, compares, clones and logs the
+marker-only form.
 
 | Adapter | The one write | How resolved data reaches it |
 | --- | --- | --- |
 | Local harness (`AiJsonLinesLocalHarnessDriver`) | the stdin request frame | `AiLocalHarnessProvider` moves the `ModelDispatchRequest` to `AiLocalHarnessDriver::stream_dispatch`. The driver admits the request on its all-marker frame, launches the process, and only then encodes the resolved frame through `wire_json` and writes it once. |
 | Grok ACP (`AiGrokAcpWireProcess`) | the `session/prompt` frame | `AiGrokAcpProvider` admits the request in marker form and moves an `AiGrokAcpPromptInput` to `AiGrokAcpRunProcess::prompt_dispatch`. The value is not `Clone` or `Serialize`, prints a block count in `Debug`, and gives up its resolved text only by being consumed, when the session is ready and the frame is built. |
-| Codex app-server (`AiCodexAppServerProtocolActor`) | the `turn/start` frame | The run pool passes a scoped `AiCodexAppServerDispatchTurn` to the process's `start_dispatch_turn`. After thread setup or resume and exclusive writer admission, the actor consumes it with `write_dispatch_turn`. The actor returns no frame bytes. |
+| Codex app-server (`AiCodexAppServerProtocolActor`) | the `turn/start` frame | The host's `start_dispatch_turn` override calls `write_dispatch_turn` after thread setup or resume. The actor consumes the dispatch and writes to the host-supplied writer. The host process and writer are inside the trust boundary. |
 
 The same rules apply to all three adapters.
 
@@ -262,9 +261,9 @@ The same rules apply to all three adapters.
   for Grok and Codex the hook, launch admission, process launch, session resume and
   frame encoding.
   - The adapter compares the bound with the clock after the frame is encoded
-    and immediately before the write starts. Grok and Codex check the bound
-    after acquiring the child writer. If the bound has passed, the adapter
-    sends markers.
+    and immediately before the write starts. Grok checks after acquiring its
+    child writer. Codex checks after the host supplies the writer. If the
+    bound has passed, the adapter sends markers.
   - A write that has started may complete, so a write in progress when the
     bound passes can still deliver its frame.
   - If a started write has not completed when the bound passes, the adapter
@@ -298,18 +297,40 @@ following adapter hook:
   marker text;
 - an `AiCodexAppServerRunProcess` that uses the default `start_dispatch_turn`
   receives the marker-only `AiCodexAppServerTurnInput` through its existing
-  process methods. An override uses `dispatch.input()` for thread setup and
-  passes the dispatch to the actor with the exclusive child writer. The actor
-  reauthorizes historical tool sources before writing. The override awaits
-  the write before returning the event stream. The actor projects out echoed user content, including user-message
-  items nested in thread and turn responses and notifications, and clears
-  thread previews. The host must treat raw child frames as protected before
-  passing them to the actor.
+  process methods, even when its registration opts in. An override uses
+  `dispatch.input()` for thread setup and passes the dispatch to
+  `write_dispatch_turn`. The actor reauthorizes historical tool sources
+  before writing. The override awaits the write before returning the event
+  stream.
 
 Custom harness and Grok overrides apply the freshness bound themselves with
 `ModelDispatchReferences::write_deadline` or the deadline
-`AiGrokAcpPromptInput::into_wire_text` returns. The Codex actor applies it
-inside `write_dispatch_turn`.
+`AiGrokAcpPromptInput::into_wire_text` returns.
+
+The crate ships no Codex process. The host's process implementation and
+writer are inside the trust boundary. The actor accepts any compatible
+`AsyncWrite`, and its freshness bound and kill on an abandoned resolved write
+apply to that writer. Pass the child's stdin directly and hold exclusive
+access for the duration of the call. A writer that queues bytes to another
+task can finish `write_all` on enqueue and report completion before the pipe
+write. In that case the later pipe write falls outside both safeguards.
+
+**Codex echo projection.** The actor applies this best-effort
+defence-in-depth filter for every host, regardless of opt-in.
+
+- It inspects `item` in `item/started` and `item/completed` notifications.
+- It inspects `turn.items[]` in `turn/start` responses and in `turn/started` and
+  `turn/completed` notifications.
+- It sets existing `thread.preview` fields to the empty string and inspects
+  `thread.turns[].items[]` in `thread/start` and `thread/resume` responses
+  and in `thread/started` notifications.
+
+At each of those item locations, the filter keeps only `type`, `id`,
+`startedAtMs`, `completedAtMs` and `content` on items of type `userMessage`,
+and replaces existing `content` with an empty array. The filter passes
+through other fields on thread and turn objects and leaves other item types
+untouched. Treat raw child frames as protected. Model output that quotes
+resolved data can still be stored as assistant content.
 
 **What the process keeps.** This is the reason the opt-in exists. Once written,
 reference data is outside the crate:
@@ -318,6 +339,8 @@ reference data is outside the crate:
   prompt sent in its session files. Later turns can continue from it.
   Revocation stops future disclosure by the crate. Deleting the provider
   session removes its retained data.
+- Fresh Codex threads are ephemeral and stay in the pooled Codex process's
+  memory until that process exits.
 - A harness process is launched per request and the crate keeps nothing, but
   whatever the harness executable logs or writes in its sandbox is the
   host's to bound and clean up.
@@ -443,9 +466,9 @@ handle list.
 
 ## Backup and restore
 
-Because only handles are stored, a backup contains no resolved reference data,
-and a restored session resolves each handle again, under the restored
-deployment's current policy, the first time it is used.
+Backup stores structured references as handles. It can include assistant
+or tool content that repeats resolved data. A restored session resolves each
+handle under the restored deployment's current policy when it is used.
 
 ## Limits
 

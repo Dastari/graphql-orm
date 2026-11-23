@@ -12,11 +12,16 @@ supersedes: []
 
 ## Unreleased - 0.158.0
 
-- Codex app-server registrations can opt into freshness-bounded resolved
-  entity-reference delivery. A consuming protocol actor writes the frame
-  directly to the child and projects echoed user content out of inbound
-  events. Tool-free Codex turns also accept reference markers. Direct runtime
-  calls permanently send markers (#721).
+- Codex app-server registrations can opt into resolved entity-reference
+  delivery when the host process overrides `start_dispatch_turn`. The host
+  process implementation and its writer are inside the trust boundary. The
+  freshness bound and kill on an abandoned resolved write apply to the writer
+  passed to the protocol actor. Pass the child's stdin directly. A queueing
+  writer can acknowledge the frame before the actual pipe write.
+- For all Codex hosts, the protocol actor filters known user-message echoes
+  and empties thread previews as a best-effort defence-in-depth measure.
+  Tool-free Codex turns also accept entity references. Direct runtime calls
+  permanently send markers (#721).
 
 ## Unreleased - 0.155.0
 

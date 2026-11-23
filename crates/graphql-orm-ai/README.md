@@ -10,11 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
-Local-harness, Grok ACP and Codex app-server registrations can opt into
-[freshness-bounded entity reference delivery](docs/entity-references.md#adapters-for-a-local-process).
-Codex support starts with AI 0.158.0 and requires the process's consuming
-dispatch hook. Direct runtime dispatch methods always send unavailable
-markers. Review local process retention before opting in. See the
+AI 0.158.0 adds opt-in resolved entity-reference delivery for Codex app-server.
+The host process must implement the consuming dispatch hook. Direct runtime
+dispatch methods always send unavailable markers. Review local process
+retention before opting in. See the
 [migration guide](MIGRATION.md#01570-to-01580).
 
 AI 0.155.0 supports composing the exported AI roots directly through
@@ -25,6 +24,12 @@ See the [migration guide](MIGRATION.md#01540-to-01550).
 AI 0.153.0 binds compaction to the session's pinned provider and model, checks
 the lease before adopting tool checkpoints, and reads restore facts in bounded
 pages. See [migration guidance](MIGRATION.md#01520-to-01530).
+
+AI 0.152.0 added opt-in resolved [entity references](docs/entity-references.md#adapters-for-a-local-process)
+for the local-harness and Grok ACP adapters. Hosts opt in per registration
+with `with_resolved_entity_reference_delivery` and a freshness bound.
+Review local process retention before enabling delivery. See the
+[migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters).
 
 Version 0.151.2 emits fixed skill content-protection reason codes in debug
 tracing and reuses compiled proposal validators.
