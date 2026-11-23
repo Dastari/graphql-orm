@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+
 Version 0.204.0 aligns with the ORM runtime's
 [external backup and restore setting](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
 

@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
+
 ## 0.203.0 to 0.204.0: externally managed backup and restore
 
 **No action.** The default backup and restore behavior stays the same. No
