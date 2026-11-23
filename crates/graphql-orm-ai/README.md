@@ -353,8 +353,9 @@ lockfile and verify that it resolves one Auth source. The workspace release
 manifest records the locked Auth commit.
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
-or `mssql`. MSSQL currently has schema/compile support only where ORM write
-parity is incomplete. This unpublished crate has no docs.rs page; package docs
+or `mssql`. AI 0.154.0 adds durable services for externally provisioned SQL
+Server schemas. Review the [deployment requirements and capability
+matrix](docs/backend-capability-matrix.md#sql-server-deployment). Package docs
 and rustdoc are available from the pinned repository revision.
 Upgrade deliberately: review all pinned companions' migration guides and
 changelogs, update them to one reviewed revision, and run recovery-path tests
@@ -659,7 +660,7 @@ See the [session reliability adoption contract](docs/session-reliability-adoptio
 | --- | --- | --- |
 | `sqlite` | Yes | Managed schema and runtime lane. |
 | `postgres` | No | PostgreSQL lane. |
-| `mssql` | No | Schema/compile lane; check the capability matrix. |
+| `mssql` | No | Durable runtime on an externally provisioned SQL Server schema. |
 | `provider-*` | No | Opt-in OpenAI, Anthropic, xAI, Ollama, or managed OpenAI-compatible adapters. |
 | `local-harness` | No | Installed sandboxed JSON-lines v2 driver; not a generic subprocess launcher. |
 | `provider-codex-app-server` | No | Experimental local adapter; deployment owns sandboxing, credentials, and network policy. |

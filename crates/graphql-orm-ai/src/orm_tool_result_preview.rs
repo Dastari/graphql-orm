@@ -1,7 +1,6 @@
 //! ORM-backed current-owner application-tool result preview service.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_support::{map_orm, principal_identity, record_scope};
 use std::sync::Arc;
 
@@ -9,7 +8,6 @@ use agql_auth::AuthPrincipal;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::OrmPublicError;
-use graphql_orm::graphql::orm::DefaultWriteBackend;
 
 use crate::orm_sessions::map_protection;
 use crate::persistence::{AiRunRecord, AiSessionRecord, AiToolCallRecord};
@@ -28,7 +26,7 @@ const MAXIMUM_BROWSER_ARGUMENT_BYTES: usize = 64 * 1024;
 /// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
 /// such a credential would yield the full user behind it.
 pub struct OrmAiToolCallResultPreviewService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     runtime: Arc<crate::AiRuntime>,
     authorizer: Arc<dyn AiToolResultPreviewAuthorizer>,
     principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
@@ -38,7 +36,7 @@ impl OrmAiToolCallResultPreviewService {
     /// Creates a default-deny preview service around one closed runtime and
     /// mandatory host row/field authorization seam.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         runtime: Arc<crate::AiRuntime>,
         authorizer: Arc<dyn AiToolResultPreviewAuthorizer>,
     ) -> Self {

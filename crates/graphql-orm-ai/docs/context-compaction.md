@@ -14,9 +14,8 @@ Context checkpoints are trusted-backend storage for bounded, untrusted model
 summaries. They reduce the verbatim history sent to later model turns without
 turning a summary, provider response ID, or source hash into authorization.
 
-`OrmAiContextCompactionService` is available for SQLite and PostgreSQL write
-backends. MSSQL remains schema-only. The service uses generated ORM operations
-only and never accepts a database URL or raw SQL.
+`OrmAiContextCompactionService` uses generated ORM operations on SQLite,
+PostgreSQL, and [externally provisioned SQL Server](backend-capability-matrix.md#sql-server-deployment).
 
 ## Security boundary
 

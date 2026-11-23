@@ -12,7 +12,8 @@ pub struct IndexPredicateModel {
     /// Physical column. SQL Server introspection uses an empty column to mark
     /// an opaque catalog filter that cannot be expressed as a closed set.
     pub column: String,
-    /// Literal values, quoted by the database dialect. For an opaque SQL Server
+    /// Literal values, quoted by the database dialect. An empty list represents
+    /// `IS NOT NULL`. For an opaque SQL Server
     /// filter this contains one entry, the verbatim catalog predicate.
     pub values: Vec<String>,
 }
@@ -976,7 +977,13 @@ impl From<&EntityMetadata> for OwnedTableModel {
         table.check_constraints.sort();
 
         for field in &value.fields {
-            if field.is_filterable && field.spatial.is_none() {
+            // SQL Server cannot use a MAX column as an index key. Keep these
+            // fields queryable and leave their storage width intact. Declared
+            // string indexes use an indexable column type in the derive.
+            if field.is_filterable
+                && field.spatial.is_none()
+                && !matches!(field.sql_type, "NVARCHAR(MAX)" | "VARBINARY(MAX)")
+            {
                 add_owned_generated_index(&mut table, &[field.name]);
             }
         }

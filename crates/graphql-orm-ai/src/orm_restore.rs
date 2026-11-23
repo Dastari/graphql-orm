@@ -1,7 +1,6 @@
 //! Bounded database-derived restore fact collection.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
@@ -10,8 +9,8 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::UuidFilter;
 use graphql_orm::graphql::orm::{
-    DefaultWriteBackend, Entity, FromSqlRow, MutationContext, MutationQuery, OrderDirection,
-    PaginationConfig, TransactionError, TransactionMode,
+    Entity, FromSqlRow, MutationContext, MutationQuery, OrderDirection, PaginationConfig,
+    TransactionError, TransactionMode,
 };
 use graphql_orm_storage::validate_blob_key;
 use sha2::{Digest, Sha256};
@@ -244,9 +243,9 @@ impl AiRestoreAttachmentMetadataAuditLimits {
 /// closure; the facts alone only build a plan.
 #[derive(Clone)]
 pub struct OrmAiRestoreFactCollector {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     limits: AiRestoreCollectorLimits,
     policy_audit_limits: Option<AiRestorePolicyAuditLimits>,
     attachment_metadata_audit_limits: Option<AiRestoreAttachmentMetadataAuditLimits>,
@@ -254,7 +253,7 @@ pub struct OrmAiRestoreFactCollector {
 
 impl OrmAiRestoreFactCollector {
     /// Creates a collector with conservative default bounds.
-    pub fn new(database: Database<DefaultWriteBackend>) -> Self {
+    pub fn new(database: Database<AiOrmBackend>) -> Self {
         let host_database = database.clone();
         let database = crate::custody_field_policy::custody_database(database);
         Self {
@@ -302,7 +301,7 @@ impl OrmAiRestoreFactCollector {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -312,7 +311,7 @@ impl OrmAiRestoreFactCollector {
     }
 
     /// Returns the same audit configuration bound to another database handle.
-    pub(crate) fn rebind(&self, database: Database<DefaultWriteBackend>) -> Self {
+    pub(crate) fn rebind(&self, database: Database<AiOrmBackend>) -> Self {
         let host_database = database.clone();
         let database = crate::custody_field_policy::custody_database(database);
         Self {
@@ -1826,14 +1825,16 @@ impl Write for RestoreRowBudget {
 }
 
 async fn collect_rows<'tx, T, F>(
-    tx: &mut MutationContext<'tx>,
+    tx: &mut MutationContext<'tx, AiOrmBackend>,
     budget: &mut RestoreRowBudget,
     maximum: usize,
     query: F,
 ) -> Result<Vec<T>, OrmPublicError>
 where
-    T: Entity + FromSqlRow<DefaultWriteBackend> + serde::Serialize + Clone + Send + Sync + 'static,
-    F: for<'a> Fn(&'a mut MutationContext<'tx>) -> MutationQuery<'a, 'tx, T>,
+    T: Entity + FromSqlRow<AiOrmBackend> + serde::Serialize + Clone + Send + Sync + 'static,
+    F: for<'a> Fn(
+        &'a mut MutationContext<'tx, AiOrmBackend>,
+    ) -> MutationQuery<'a, 'tx, T, AiOrmBackend>,
 {
     // The ORM appends a primary-key tie-breaker. All pages read the same
     // writer-quiesced snapshot, and the last slot is the existing overflow
@@ -1860,15 +1861,18 @@ where
 }
 
 async fn collect_attachment_parents<'tx, T, F>(
-    tx: &mut MutationContext<'tx>,
+    tx: &mut MutationContext<'tx, AiOrmBackend>,
     budget: &mut RestoreRowBudget,
     ids: BTreeSet<uuid::Uuid>,
     query: F,
     key: impl Fn(&T) -> uuid::Uuid,
 ) -> Result<BTreeMap<uuid::Uuid, Option<T>>, OrmPublicError>
 where
-    T: Entity + FromSqlRow<DefaultWriteBackend> + serde::Serialize + Clone + Send + Sync + 'static,
-    F: for<'a> Fn(&'a mut MutationContext<'tx>, UuidFilter) -> MutationQuery<'a, 'tx, T>,
+    T: Entity + FromSqlRow<AiOrmBackend> + serde::Serialize + Clone + Send + Sync + 'static,
+    F: for<'a> Fn(
+        &'a mut MutationContext<'tx, AiOrmBackend>,
+        UuidFilter,
+    ) -> MutationQuery<'a, 'tx, T, AiOrmBackend>,
 {
     let ids = ids.into_iter().collect::<Vec<_>>();
     let mut parents = BTreeMap::new();

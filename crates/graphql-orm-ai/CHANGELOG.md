@@ -31,6 +31,20 @@ definition or fingerprint change, and no AI schema module change. See the
   with the index on every broker call. Describe and `describe_type` no longer
   regenerate a capability's compact schema on every call.
 
+## Unreleased - 0.154.0
+
+- **Action needed.** To adopt SQL Server, enable durable AI ORM services
+  on externally provisioned SQL Server schemas. The owned parity lane
+  exercises session and run persistence, lease fencing and retries, durable
+  replay, checkpoints, context compaction, and bounded restore reconciliation.
+- **Action needed.** Drain active workers on SQLite, PostgreSQL, and SQL Server
+  before switching to AI schema module 0.84.0. The change rotates the runtime
+  epoch and invalidates earlier leases on every backend.
+- **No action.** SQLite and PostgreSQL keep their existing physical schema.
+  AI schema module 0.84.0 declares binary SQL Server string keys and filtered unique indexes for
+  provider responses and client message IDs. The SQL Server session-content
+  retention worker refuses changes because checkpoint purge is unavailable.
+
 ## Unreleased - 0.153.0
 
 - Emit fixed, content-free debug codes for the approval, attachment, and

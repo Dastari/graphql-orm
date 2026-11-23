@@ -1,10 +1,8 @@
 //! Durable idempotent intake for verified provider webhook envelopes.
 
-#![cfg(all(
-    any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai-core"
-))]
+#![cfg(feature = "provider-openai-core")]
 
+use crate::AiOrmBackend;
 use crate::orm_support::map_transaction;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -13,8 +11,8 @@ use std::sync::Arc;
 use crate::persistence::*;
 use crate::{AiError, OpenAiVerifiedWebhookEvent, OpenAiWebhookEventKind};
 use graphql_orm::graphql::orm::{
-    DefaultWriteBackend, EntityAccessKind, EntityAccessSurface, EntityPolicy,
-    InsertIfAbsentOutcome, TransactionError, TransactionMode,
+    EntityAccessKind, EntityAccessSurface, EntityPolicy, InsertIfAbsentOutcome, TransactionError,
+    TransactionMode,
 };
 
 const MAXIMUM_TRANSACTION_RETRIES: u8 = 4;
@@ -67,23 +65,23 @@ pub enum AiTrustedWorkerEntityFallback {
 /// an entity policy opts in with [`Self::with_entity_fallback`].
 #[derive(Clone)]
 pub struct OrmAiProviderWebhookReceiptService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
-    worker_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
+    worker_database: Database<AiOrmBackend>,
 }
 
 #[derive(Clone)]
 struct ProviderWebhookReceiptEntityPolicy {
-    delegate: Option<Arc<dyn EntityPolicy<DefaultWriteBackend>>>,
+    delegate: Option<Arc<dyn EntityPolicy<AiOrmBackend>>>,
     fallback: AiTrustedWorkerEntityFallback,
 }
 
-impl EntityPolicy<DefaultWriteBackend> for ProviderWebhookReceiptEntityPolicy {
+impl EntityPolicy<AiOrmBackend> for ProviderWebhookReceiptEntityPolicy {
     fn can_access_entity<'a>(
         &'a self,
         context: Option<&'a async_graphql::Context<'_>>,
-        database: &'a Database<DefaultWriteBackend>,
+        database: &'a Database<AiOrmBackend>,
         entity_name: &'static str,
         policy_key: Option<&'static str>,
         kind: EntityAccessKind,
@@ -116,7 +114,7 @@ impl OrmAiProviderWebhookReceiptService {
     ///
     /// Outside its receipt rows the service uses the host entity policy, or
     /// refuses access when the database has none.
-    pub fn new(database: Database<DefaultWriteBackend>) -> Self {
+    pub fn new(database: Database<AiOrmBackend>) -> Self {
         let host_database = database.clone();
         let database = crate::custody_field_policy::custody_database(database);
         Self {
@@ -146,7 +144,7 @@ impl OrmAiProviderWebhookReceiptService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub const fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub const fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -292,9 +290,9 @@ impl OrmAiProviderWebhookReceiptService {
 }
 
 pub(crate) fn with_provider_webhook_receipt_policy(
-    mut database: Database<DefaultWriteBackend>,
+    mut database: Database<AiOrmBackend>,
     fallback: AiTrustedWorkerEntityFallback,
-) -> Database<DefaultWriteBackend> {
+) -> Database<AiOrmBackend> {
     let delegate = database.entity_policy().cloned();
     database.set_entity_policy(ProviderWebhookReceiptEntityPolicy { delegate, fallback });
     database

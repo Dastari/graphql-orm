@@ -6,8 +6,6 @@
 //! adapter or host, while this module describes the durable, protected binding
 //! needed to resume provider state without weakening run fencing.
 
-#![cfg_attr(feature = "mssql", allow(dead_code))]
-
 use std::fmt;
 
 use agql_auth::PrincipalReference;
@@ -17,7 +15,6 @@ use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::AiRunLease;
 use crate::{AiError, AiRunId, AiScope, AiSessionId, ProviderError, ProviderKind};
 
@@ -1251,7 +1248,6 @@ impl AiProviderSessionCommit {
 /// host can recompute from message content alone. Hosts echo the stored
 /// fingerprint from the binding view into the next turn plan exactly as they
 /// do after an ordinary commit.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn interrupted_turn_transcript_fingerprint(
     previous_transcript_fingerprint: &str,
     session_id: AiSessionId,
@@ -1414,7 +1410,6 @@ pub trait AiProviderSessionDeletionService: Send + Sync {
 /// authority. Provider transport still requires current rules, egress,
 /// budgets, and coordinator fencing.
 #[async_trait]
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub trait AiProviderSessionService: Send + Sync {
     /// Fences the exact old cursor into cleanup for one verified native continuation offering.
     ///

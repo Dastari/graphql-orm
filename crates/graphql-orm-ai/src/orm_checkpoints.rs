@@ -1,7 +1,5 @@
 //! Protected fenced checkpoints for replay-safe coordinator phases.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_support::map_orm;
 use crate::persisted_state::ToolCallState;
 use std::collections::{BTreeMap, BTreeSet};

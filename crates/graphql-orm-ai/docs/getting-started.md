@@ -25,8 +25,8 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<r
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
-or `mssql`. MSSQL is schema/compile support until ORM write parity lands; use
-the [capability matrix](backend-capability-matrix.md) before selecting it.
+or `mssql`. SQL Server requires [external schema provisioning and an
+explicitly writable pool](backend-capability-matrix.md#sql-server-deployment).
 For upgrades, review every companion package's migration guide and changelog,
 move the complete dependency universe to one reviewed revision, and test
 recovery paths before production adoption.

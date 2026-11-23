@@ -1,7 +1,5 @@
 //! Shared conversions for the durable AI services.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use agql_auth::AuthPrincipal;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::orm::TransactionError;

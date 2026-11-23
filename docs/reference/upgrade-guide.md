@@ -70,9 +70,15 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.201.0, `graphql-orm-macros` 0.201.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.203.0, `graphql-orm-macros` 0.203.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **No action** — AI 0.156.0 and AI tool profiles 0.28.0: a model-context benchmark for the fixed capability broker, and broker calls whose cost no longer grows with the index for a host that supplies one index; describe and `describe_type` no longer regenerate compact schemas (#551). No binding, fingerprint or schema change. [AI](../../crates/graphql-orm-ai/MIGRATION.md#01550-to-01560-capability-model-context-benchmark) · [tool profiles](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0280-index-set-and-signature-reuse)
+- **Action needed** when adopting SQL Server with AI 0.154.0. Install the restore marker, apply the external schema plan, and use an explicitly writable pool (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
+- **Action needed** for AI 0.154.0 on SQLite, PostgreSQL, and SQL Server. Drain active workers before the module epoch rotates and invalidates old leases. SQLite and PostgreSQL need no data migration (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
+- **Action needed** for ORM/macros 0.203.0 on SQL Server. Review cleanup jobs and cascaded deletes before applying new append-only triggers. There is no trigger opt-out for append-only entities (#813). [ORM migration](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites)
+- **Action needed** for ORM/macros 0.203.0 on SQL Server. Replan and resolve declarations that map to the same physical table. SQL Server now refuses these conflicts (#813). [ORM migration](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites)
+- **No action** — ORM/macros 0.202.0 groups additional integration tests. Source checkouts can use the grouped selectors to run individual tests. [Migration](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene)
+- **No action** — ORM/macros 0.202.0 documents the blocking filesystem operations in `write_migration_file`. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-02020)
 - **No action** — ORM/macros 0.201.0 and operation catalogue 0.12.0 return an error for duplicate entity identities through the generated resolver catalogue and fallible schema builders (#829). [Migration](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120)
 - **No action** — ORM/macros 0.200.0: standalone closure read predicates can use fewer target SQL copies, and the reference describes incomplete descendant walks and non-unique-key fan-out. [Migration](../../MIGRATION.md#01990-to-02000-closure-read-predicates)
 

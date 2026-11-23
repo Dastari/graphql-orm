@@ -951,7 +951,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use futures::StreamExt;

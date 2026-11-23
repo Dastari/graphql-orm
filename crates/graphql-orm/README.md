@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.203.0 adds SQL Server prerequisites for durable AI stores. See the
+[SQL Server DDL reference](../../docs/reference/graphql-orm/mssql.md#introspection-and-rendered-ddl).
+
+Version 0.202.0 groups additional integration tests and documents the blocking
+migration file writer. See the [test selectors](../../docs/development/testing.md).
+See the [migration guide](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene).
+
 Version 0.201.0 returns duplicate entity identities as errors from the
 generated resolver catalogue and fallible schema builders. See the
 [migration guide](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120).

@@ -1687,6 +1687,23 @@ impl DatabaseBackend {
         }
     }
 
+    pub(super) fn mssql_schema_and_table(self, path: &str) -> Option<(String, String)> {
+        debug_assert_eq!(self, Self::Mssql);
+        let parts = identifier_path_parts(self, path).collect::<Vec<_>>();
+        let (schema, table) = match parts.as_slice() {
+            [table] => ("dbo", *table),
+            [schema, table] => (*schema, *table),
+            _ => return None,
+        };
+        if schema.is_empty() || table.is_empty() {
+            return None;
+        }
+        Some((
+            self.identifier_part_name(schema),
+            self.identifier_part_name(table),
+        ))
+    }
+
     /// The name a table path's last part denotes, undelimited.
     pub(crate) fn table_name_part(self, table: &str) -> String {
         let part = identifier_path_parts(self, table)
@@ -1698,7 +1715,7 @@ impl DatabaseBackend {
 
     /// The name one path part denotes: the inside of a well-formed delimited
     /// identifier, or the part itself.
-    fn identifier_part_name(self, part: &str) -> String {
+    pub(super) fn identifier_part_name(self, part: &str) -> String {
         if !self.is_one_delimited_identifier(part) {
             return part.to_owned();
         }
