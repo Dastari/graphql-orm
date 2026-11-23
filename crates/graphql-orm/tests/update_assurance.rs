@@ -147,6 +147,15 @@ struct ReviewAudit {
     state: String,
 }
 
+/// A panic payload whose destructor panics too.
+struct PanicOnDrop;
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("{SELECTOR_SECRET} from a payload destructor");
+    }
+}
+
 /// Host text a failing selector returns; it must never reach a client.
 const SELECTOR_SECRET: &str = "selector-private-detail";
 
@@ -167,6 +176,8 @@ fn select_review_assurance(
             .extend_with(|_, extensions| extensions.set("hostDetail", SELECTOR_SECRET)));
         }
         Some("__selector_panic__") => panic!("{SELECTOR_SECRET}"),
+        // The payload's destructor panics as well.
+        Some("__selector_panic_drop__") => std::panic::panic_any(PanicOnDrop),
         _ => {}
     }
     match &input.patch().state {
@@ -891,7 +902,11 @@ async fn conditional_assurance_fails_closed_when_misconfigured(db: &Database) ->
 async fn a_selector_error_or_panic_is_sanitized(db: &Database) -> TestResult {
     let harness = harness(db);
     ReviewRecord::insert(db, create("r-1")).await?;
-    for trigger in ["__selector_error__", "__selector_panic__"] {
+    for trigger in [
+        "__selector_error__",
+        "__selector_panic__",
+        "__selector_panic_drop__",
+    ] {
         let response = harness
             .run(
                 update("r-1", &rename(trigger), Some("0")),

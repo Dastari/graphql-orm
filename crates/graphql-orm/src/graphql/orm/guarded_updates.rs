@@ -9,6 +9,13 @@
 //! conversion fails closed for any metadata naming a recorded table,
 //! including a copy, whichever spelling of the table it uses.
 //!
+//! Tables are matched on their bare table component in any schema. An
+//! unqualified name can resolve to a table in another schema (PostgreSQL's
+//! `search_path`, for example), so a guarded `other.t` refuses a runtime `t`
+//! and a guarded `t` refuses a runtime `other.t`. An unrelated table with the
+//! same bare name in another schema is refused too; that false refusal is
+//! deliberate.
+//!
 //! Metadata or runtime IR that a host writes by hand, deserializes or
 //! reconstructs without a typed constructor is host-authored and outside
 //! this registry.
@@ -20,22 +27,17 @@ fn guarded_tables() -> &'static Mutex<BTreeSet<String>> {
     TABLES.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
-/// Normalizes a table path to its bare lowercase name: identifier delimiters
-/// are removed, ASCII letters are lowercased, and a default schema
-/// (`public`, `dbo` or `main`) is stripped.
+/// Normalizes a table path to its bare table component: the last
+/// dot-separated part, with identifier delimiters removed and ASCII letters
+/// lowercased. Any schema, default or not, is dropped.
 fn normalized(table_name: &str) -> String {
-    let parts = table_name
-        .split('.')
-        .map(|part| {
-            part.trim()
-                .trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
-                .to_ascii_lowercase()
-        })
-        .collect::<Vec<_>>();
-    match parts.as_slice() {
-        [schema, table] if matches!(schema.as_str(), "public" | "dbo" | "main") => table.clone(),
-        _ => parts.join("."),
-    }
+    table_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(table_name)
+        .trim()
+        .trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
+        .to_ascii_lowercase()
 }
 
 /// Records a table whose generated update requires `ExpectedVersion` or
@@ -48,8 +50,8 @@ pub fn __register_guarded_update_table(table_name: &str) {
         .insert(normalized(table_name));
 }
 
-/// Whether a typed constructor recorded `table_name`, in any equivalent
-/// spelling, as guarded.
+/// Whether a typed constructor recorded a table with the same bare table
+/// component as `table_name`, in any schema, as guarded.
 pub(crate) fn is_guarded_update_table(table_name: &str) -> bool {
     guarded_tables()
         .lock()
@@ -59,7 +61,7 @@ pub(crate) fn is_guarded_update_table(table_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::normalized;
+    use super::{__register_guarded_update_table, is_guarded_update_table, normalized};
 
     #[test]
     fn equivalent_spellings_normalize_to_one_bare_name() {
@@ -72,9 +74,25 @@ mod tests {
             "dbo.review_records",
             "[dbo].[REVIEW_RECORDS]",
             "main.review_records",
+            "audit.review_records",
         ] {
             assert_eq!(normalized(spelling), "review_records", "{spelling}");
         }
-        assert_eq!(normalized("audit.review_records"), "audit.review_records");
+    }
+
+    #[test]
+    fn a_guarded_table_matches_its_bare_name_in_any_schema() {
+        // A guarded table in a non-default schema refuses the bare name,
+        // which search_path can resolve to it.
+        __register_guarded_update_table("other.guarded_in_other_schema");
+        assert!(is_guarded_update_table("guarded_in_other_schema"));
+        assert!(is_guarded_update_table("public.guarded_in_other_schema"));
+        // A guarded bare table refuses the same name in another schema.
+        __register_guarded_update_table("guarded_bare_table");
+        assert!(is_guarded_update_table("other.guarded_bare_table"));
+        assert!(is_guarded_update_table("\"Other\".\"Guarded_Bare_Table\""));
+        // Unrelated names pass.
+        assert!(!is_guarded_update_table("unrelated_table"));
+        assert!(!is_guarded_update_table("other.unrelated_table"));
     }
 }

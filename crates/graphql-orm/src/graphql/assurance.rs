@@ -1009,7 +1009,15 @@ fn enforce_selected_check<'s>(
                 error.message
             )));
         }
-        Err(_) => {
+        Err(payload) => {
+            // Dropping the payload runs its destructor, which is host code and
+            // can panic again. Contain that too. A second payload is leaked:
+            // a bounded leak on a host bug beats unwinding out of the request.
+            if let Err(second) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+            {
+                std::mem::forget(second);
+            }
             return Err(selector_failure(format!(
                 "assurance selector for {}.{field_name} panicked",
                 kind.root_type()

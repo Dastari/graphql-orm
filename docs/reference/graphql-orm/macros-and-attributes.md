@@ -1636,8 +1636,10 @@ Both options guard the generated GraphQL update only.
 - `RuntimeSchema::from_static_entities` and `from_static_entities_for_repository` refuse an
   entity with either option with `UnsupportedCapability`. The runtime IR represents neither
   option, so a runtime update could otherwise rewrite the same table without them.
-  - The refusal covers any metadata naming that table, matched as a bare lowercase name with a
-    default schema (`public`, `dbo`, `main`) stripped. That includes a copy.
+  - The refusal covers any metadata naming that table, including a copy. Tables are matched on
+    their bare lowercase table name in any schema, because an unqualified name can resolve to
+    another schema through `search_path`. An unrelated table with the same name in another
+    schema is therefore refused too.
   - The table is recorded whenever `EntityMetadata::from_schema::<E>` or
     `from_schema_with_retention::<E>` builds metadata for the entity, including through the
     generated `metadata()`.
