@@ -811,7 +811,7 @@ pub fn relation_key_projection(
 
 #[doc(hidden)]
 pub fn relation_key_filter(
-    columns: &[&'static str],
+    columns: &[&str],
     parent_values: &[Vec<crate::graphql::orm::SqlValue>],
 ) -> crate::graphql::orm::FilterExpression {
     use crate::graphql::orm::{FilterExpression, SqlValue};

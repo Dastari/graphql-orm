@@ -7052,6 +7052,45 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
 
+    let set_delete_model_impl = if (generates_standard_write_surface
+        || composite_repository_mutations)
+        && !entity_meta.dependent_deletes
+    {
+        let event_id = if has_composite_primary_key {
+            quote! { Self::__gom_event_id(&Self::__gom_entity_key(entity)) }
+        } else {
+            pk_id_for_entity.clone()
+        };
+        quote! {
+            impl ::graphql_orm::graphql::orm::SetDeleteModel<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                type WhereInput = #where_input;
+
+                fn set_delete_validate_filter(filter: &Self::WhereInput) -> ::graphql_orm::Result<()> {
+                    filter.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)
+                }
+                fn set_delete_key_values(key: &Self::Key) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                    Self::__gom_key_values(key)
+                }
+                fn set_delete_row_key_values(&self) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                    Self::__gom_subscription_key_values(self)
+                }
+                fn set_delete_event_id(&self) -> ::std::string::String {
+                    let entity = self;
+                    #event_id
+                }
+                fn set_delete_queue_change<'a>(
+                    &'a self,
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
+                    ::std::boxed::Box::pin(Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Deleted, ::std::option::Option::Some(self)))
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let single_bounded_helper_methods = if !has_composite_primary_key
         && !schema_policy_read_only
         && !entity_meta.append_only
@@ -7963,6 +8002,7 @@ fn generate_graphql_operations_unfiltered(
             #append_only_surface
             #retention_surface
             #composite_mutation_surface
+            #set_delete_model_impl
             #composite_write_stubs
             #readonly_composite_changed
             #computed_field_invalidation_target
@@ -9952,6 +9992,7 @@ fn generate_graphql_operations_unfiltered(
 
         #upsert_trait_impl
         #single_bounded_trait_impls
+        #set_delete_model_impl
         #retention_surface
         #cas_trait_impl
         #keyset_trait_impl

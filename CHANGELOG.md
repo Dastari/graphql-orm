@@ -20,6 +20,14 @@ for historical context.
   check to hosts using external migration tools, including SQL Server (#878).
   [Migration](MIGRATION.md#02080-to-02090-external-migration-preflight)
 
+## Unreleased - ORM/macros 0.208.0
+
+- **Added (#852).** Typed transactions can delete a bounded key set or scalar
+  filter match with one DELETE for opted-in mutable entities. The operation
+  checks row write authorization and exact cardinality, runs per-row delete
+  hooks and queues the generated change notifications.
+  [Migration](MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
+
 ## Unreleased - ORM/macros 0.207.0
 
 - **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite
