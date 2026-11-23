@@ -96,7 +96,7 @@ impl EntityPolicy for AllowEntityPolicy {
 /// - a GraphQL request may write any row;
 /// - `admin` may write any row;
 /// - `zone-a` may write only rows whose zone is `a`;
-/// - a mutation hook's originating request whose subject holds `zone:c` may
+/// - a mutation hook's originating request whose subject holds `zone.c` may
 ///   write only rows whose zone is `c` (#291);
 /// - a repository call with no access may write nothing.
 struct ZoneRows;
@@ -119,7 +119,7 @@ impl ZoneRows {
                 authority
                     .hook_request()
                     .and_then(HookRequestAuthority::subject)
-                    .is_some_and(|subject| subject.has_scope("zone:c"))
+                    .is_some_and(|subject| subject.has_scope("zone.c"))
                     && row.zone == "c"
             }
         }
@@ -608,18 +608,18 @@ async fn a_hook_write_is_authorized_from_the_originating_request_when_opted_in()
     let seeded = pairs(&[("r1", "a"), ("r2", "a")]);
 
     // Without the opt-in the nested writes present nothing, as before.
-    assert!(!create(&db, "h0", "c", &["zone:c"]).await);
+    assert!(!create(&db, "h0", "c", &["zone.c"]).await);
     assert_eq!(stored(&db).await, seeded);
 
     let opted_in = db.clone().with_request_authority_propagated_to_hooks(true);
     // The caller's request does not hold the scope the policy asks for.
-    assert!(!create(&opted_in, "h1", "c", &["zone:x"]).await);
+    assert!(!create(&opted_in, "h1", "c", &["zone.x"]).await);
     // It holds the scope, but for another zone than the rows written.
-    assert!(!create(&opted_in, "h2", "b", &["zone:c"]).await);
+    assert!(!create(&opted_in, "h2", "b", &["zone.c"]).await);
     assert_eq!(stored(&db).await, seeded);
 
     // Opted in, and the caller holds the authority for these rows.
-    assert!(create(&opted_in, "h3", "c", &["zone:c"]).await);
+    assert!(create(&opted_in, "h3", "c", &["zone.c"]).await);
     assert_eq!(
         stored(&db).await,
         pairs(&[("h3", "c"), ("nested-h3", "c"), ("r1", "a"), ("r2", "a")])

@@ -260,14 +260,14 @@ impl Explicit {
         );
         let (label, allowed) = if let Some(access) = authority.system() {
             (
-                format!("system:{}", access.name),
+                format!("system={}", access.name),
                 access.name == "billing-worker",
             )
         } else if let Some(request) = authority.hook_request() {
             let subject = request.subject();
             (
                 format!(
-                    "hook:{}",
+                    "hook={}",
                     subject.map_or("anonymous", |subject| subject.id.as_str())
                 ),
                 subject.is_some_and(|subject| subject.has_scope("lines.write")),
@@ -595,13 +595,13 @@ async fn entity_row_and_field_policies_receive_the_hooks_originating_request() {
     ] {
         assert!(
             asked.iter().any(|(asked_callback, asked_entity, label)| {
-                *asked_callback == callback && *asked_entity == entity && label == "hook:user-1"
+                *asked_callback == callback && *asked_entity == entity && label == "hook=user-1"
             }),
             "{callback} {entity}: {asked:?}"
         );
     }
     // Every nested check presented the request: none presented nothing.
-    assert!(asked.iter().all(|(_, _, label)| label == "hook:user-1"));
+    assert!(asked.iter().all(|(_, _, label)| label == "hook=user-1"));
 }
 
 #[tokio::test]
@@ -618,7 +618,7 @@ async fn the_originating_request_is_held_to_the_policys_own_requirement() {
             .lock()
             .unwrap()
             .iter()
-            .any(|(_, entity, label)| *entity == "HookLine" && label == "hook:user-1")
+            .any(|(_, entity, label)| *entity == "HookLine" && label == "hook=user-1")
     );
 }
 
@@ -690,7 +690,7 @@ async fn a_worker_presents_a_named_system_access_to_entity_and_row_policies() {
         for callback in ["entity", "row-write", "field-write"] {
             assert!(
                 asked.iter().any(|(asked_callback, _, label)| {
-                    *asked_callback == callback && label == "system:billing-worker"
+                    *asked_callback == callback && label == "system=billing-worker"
                 }),
                 "{callback}: {asked:?}"
             );
@@ -698,7 +698,7 @@ async fn a_worker_presents_a_named_system_access_to_entity_and_row_policies() {
         assert!(
             asked
                 .iter()
-                .all(|(_, _, label)| label == "system:billing-worker")
+                .all(|(_, _, label)| label == "system=billing-worker")
         );
     }
     assert_eq!(count(db, "hook_lines").await, 5);
@@ -796,7 +796,7 @@ async fn a_repository_write_gives_its_hook_no_request_authority() {
             .lock()
             .unwrap()
             .iter()
-            .all(|(_, _, label)| !label.starts_with("hook:"))
+            .all(|(_, _, label)| !label.starts_with("hook="))
     );
 }
 
