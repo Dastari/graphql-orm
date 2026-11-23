@@ -1,5 +1,6 @@
 //! Durable session-selection reads and exact legacy evidence checks.
 
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_transaction, principal_identity, record_scope};
 use agql_auth::{Clock, CurrentPrincipalResolver};
@@ -7,7 +8,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{DefaultWriteBackend, MutationContext, TransactionMode};
+use graphql_orm::graphql::orm::{MutationContext, TransactionMode};
 use std::sync::Arc;
 
 use crate::orm_runs::load_and_validate_active_lease;
@@ -21,7 +22,7 @@ use crate::{
 /// Reads immutable enqueue-time choices under the existing durable lease fence.
 /// This is routing metadata only; ordinary per-egress/tool authorization remains mandatory.
 pub struct OrmAiRunExecutionSelectionReader {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     clock: Arc<dyn Clock>,
@@ -31,7 +32,7 @@ impl OrmAiRunExecutionSelectionReader {
     /// Creates a reader. Resolved principals must match the recorded reference,
     /// remain unexpired and be less than 30 seconds old at the final fenced read.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         principal_resolver: Arc<dyn CurrentPrincipalResolver>,
         access_policy: Arc<dyn AiAccessPolicy>,
         clock: Arc<dyn Clock>,
@@ -195,7 +196,7 @@ impl AiRunExecutionSelectionReader for OrmAiRunExecutionSelectionReader {
 
 /// Checks bounded historical evidence inside the same transaction as the pin.
 pub(crate) async fn prove_legacy_selection(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     session: &AiSessionRecord,
     selection: &AiSessionExecutionSelection,
     descriptor: &crate::AiProviderSessionDescriptor,
@@ -310,7 +311,7 @@ pub(crate) async fn prove_legacy_selection(
 }
 
 pub(crate) async fn legacy_binding(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     session_id: uuid::Uuid,
 ) -> Result<crate::orm_provider_session::AiProviderSessionBindingRecord, AiError> {
     use crate::orm_provider_session::{

@@ -434,7 +434,7 @@ impl AiGrokAcpUsage {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

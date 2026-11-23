@@ -10,6 +10,24 @@ supersedes: []
 
 # Migration Guide
 
+## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
+
+**Action needed** for SQL Server hosts with `append_only = true` entities.
+Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
+both operations. Before applying a plan, review cleanup jobs and foreign-key
+cascades that delete rows from these tables. Change or disable those paths
+and rehearse the migration on a copy. There is no trigger opt-out while an
+entity remains append-only. Remove `append_only = true` only if the entity
+should no longer have the append-only contract.
+
+**Action needed** for SQL Server hosts whose declarations can resolve to the
+same physical table. Regenerate the plan and resolve any identifier conflict
+before applying it. Use one declaration for each physical table, including
+when an unqualified name and a `dbo`-qualified name refer to the same object.
+
+**No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
+together. No physical schema or data migration is required on these backends.
+
 ## 0.201.0 to 0.202.0: test and repository hygiene
 
 **No action.** Upgrade ORM and macros together. Source checkouts can use the

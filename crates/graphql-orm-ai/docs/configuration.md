@@ -22,7 +22,7 @@ authority.
 | --- | --- | --- |
 | `sqlite` | Yes | Initial managed schema and runtime lane. |
 | `postgres` | No | PostgreSQL schema and runtime lane. |
-| `mssql` | No | Schema/compile support; see [capability matrix](backend-capability-matrix.md). |
+| `mssql` | No | Durable AI services on an [externally provisioned SQL Server schema](backend-capability-matrix.md#sql-server-deployment). |
 | `provider-openai`, `provider-anthropic`, `provider-xai`, `provider-ollama`, `provider-openai-compatible`, `provider-chat-completions` | No | Explicit provider adapters with the rustls/aws-lc-rs TLS stack; each still needs host egress, secret, and budget policy. |
 | `provider-openai-core`, `provider-anthropic-core`, `provider-xai-core`, `provider-ollama-core`, `provider-openai-compatible-core`, `provider-chat-completions-core` | No | The same adapters without a TLS stack; combine with exactly one `provider-tls-*` feature. |
 | `provider-tls-aws-lc`, `provider-tls-ring`, `provider-tls-native` | No | Provider HTTP TLS stack: rustls with aws-lc-rs, rustls with an explicit `ring` provider and the platform verifier, or the platform's native TLS. Exactly one is required by any adapter. |

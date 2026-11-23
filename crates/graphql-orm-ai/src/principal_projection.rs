@@ -9,7 +9,6 @@
 
 use crate::AiError;
 use agql_auth::{AuthPrincipal, PrincipalReference, PrincipalReferenceKind};
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use agql_auth::{Clock, CurrentPrincipalResolver};
 use std::fmt;
 use std::sync::Arc;
@@ -242,7 +241,6 @@ pub(crate) async fn resolve_current_reference(
     resolver.resolve_current_reference(reference).await
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// Refuses a request credential that must not act as the user behind it.
 ///
 /// Current-principal resolution maps a session-bound delegation to the parent
@@ -266,7 +264,6 @@ pub(crate) fn refuse_delegated_request(principal: &AuthPrincipal) -> Result<(), 
     Ok(())
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// The reference a request root resolves for its caller, after
 /// `refuse_delegated_request`.
 pub(crate) fn request_admission_reference(
@@ -277,7 +274,6 @@ pub(crate) fn request_admission_reference(
     admission_reference(projection, principal)
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// The reference an admitting service persists or resolves for a caller.
 pub(crate) fn admission_reference(
     projection: Option<&AiPrincipalProjection>,
@@ -289,7 +285,6 @@ pub(crate) fn admission_reference(
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// Admits a durable stream. Delegated and sessionless credentials are refused
 /// because the stream refreshes its principal through the resolver. Without a
 /// projection the caller's own principal
@@ -323,13 +318,11 @@ pub(crate) async fn admit_stream(
     Ok((reference, resolved.into_principal()))
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 const MAXIMUM_STREAM_RESOLUTION_SKEW: time::Duration = time::Duration::seconds(5);
 
 /// Whether a resolution is for exactly the requested reference and keeps its
 /// principal kind and subject. Periodic stream reauthorization applies it so a
 /// resolver cannot switch the principal mid-stream.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn resolved_identity_matches(
     resolved: &agql_auth::ResolvedPrincipal,
     reference: &PrincipalReference,
@@ -340,7 +333,6 @@ pub(crate) fn resolved_identity_matches(
         && current.subject == reference.subject
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// Opt-in strict resolution of a new submission's reference before any write.
 #[derive(Clone)]
 pub(crate) struct AiSubmissionAdmission {
@@ -348,7 +340,6 @@ pub(crate) struct AiSubmissionAdmission {
     clock: Arc<dyn Clock>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl AiSubmissionAdmission {
     pub(crate) fn new(resolver: Arc<dyn CurrentPrincipalResolver>, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -513,7 +504,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn default_admission_is_the_unprojected_reference() {
         let principal = user("tenant");
         assert_eq!(
@@ -522,7 +512,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     #[test]
     fn delegated_or_narrowed_request_credentials_are_refused() {
         let refused = |principal: &AuthPrincipal| {

@@ -1528,34 +1528,22 @@ impl AiProviderCallPlan {
             })
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn provider_kind_ref(&self) -> &ProviderKind {
         &self.provider_kind
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn request_ref(&self) -> &ModelRequest {
         &self.request
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn budget_request(&self) -> &AiBudgetReservationRequest {
         &self.budget
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn transfers(&self) -> &[AiEgressManifest] {
         &self.transfers
     }
@@ -1833,7 +1821,7 @@ impl AiProviderCallPlan {
         self.request.continuation.is_some()
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_plan(lease: &AiRunLease, scope: crate::AiScope, continuation: bool) -> Self {
         let model = "coordinator-test-model".to_owned();
         Self {
@@ -2008,7 +1996,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_supervised_plan(
         lease: &AiRunLease,
         scope: crate::AiScope,
@@ -2036,7 +2024,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_automatic_mutation_plan(
         lease: &AiRunLease,
         scope: crate::AiScope,
@@ -2215,10 +2203,7 @@ pub struct AiProviderUsageObservation {
 }
 
 impl AiProviderUsageObservation {
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn for_background_response(
         scope: AiScope,
         model: impl Into<String>,
@@ -3346,7 +3331,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_result(
         lease: &AiRunLease,
         previous_response_id: Option<String>,
@@ -3443,7 +3428,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_with_provider_session_claim(
         mut self,
         claim: crate::AiProviderSessionClaim,
@@ -3544,7 +3529,7 @@ impl AiProviderCallResult {
         }
     }
 
-    #[cfg(all(test, feature = "sqlite"))]
+    #[cfg(test)]
     pub(crate) fn test_context_compaction_result(
         lease: &AiRunLease,
         provider_kind: ProviderKind,
@@ -3601,7 +3586,7 @@ impl AiProviderCallResult {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 fn test_model_inference_manifest(lease: &AiRunLease, model: &str) -> AiEgressManifest {
     AiEgressManifest {
         provider_profile_id: "test-profile".to_owned(),
@@ -14746,13 +14731,11 @@ mod tests {
     /// Hides tool call index 0 from every read.
     struct HideFirstToolCall;
 
-    impl graphql_orm::graphql::orm::RowPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
-        for HideFirstToolCall
-    {
+    impl graphql_orm::graphql::orm::RowPolicy<crate::AiOrmBackend> for HideFirstToolCall {
         fn can_read_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _db: &'a Database<crate::AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -14767,7 +14750,7 @@ mod tests {
         fn can_write_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _db: &'a Database<crate::AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -14781,13 +14764,11 @@ mod tests {
     #[derive(Clone)]
     struct RefuseCandidateReads;
 
-    impl graphql_orm::graphql::orm::EntityPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
-        for RefuseCandidateReads
-    {
+    impl graphql_orm::graphql::orm::EntityPolicy<crate::AiOrmBackend> for RefuseCandidateReads {
         fn can_access_entity<'a>(
             &'a self,
             _context: Option<&'a async_graphql::Context<'_>>,
-            _database: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _database: &'a Database<crate::AiOrmBackend>,
             entity_name: &'static str,
             _policy_key: Option<&'static str>,
             kind: graphql_orm::graphql::orm::EntityAccessKind,

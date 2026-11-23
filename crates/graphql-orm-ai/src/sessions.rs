@@ -369,7 +369,6 @@ pub enum AiSessionTitleActor {
 }
 
 impl AiSessionTitleActor {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",

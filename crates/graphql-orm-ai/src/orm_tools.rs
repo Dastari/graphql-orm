@@ -1,7 +1,5 @@
 //! Fenced, protected execution of explicitly registered application tools.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 mod media;
 mod native_preflight;
 mod task_context;

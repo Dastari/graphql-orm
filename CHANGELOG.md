@@ -14,6 +14,28 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.203.0
+
+- **Action needed.** Before applying a regenerated SQL Server plan, review
+  cleanup jobs and foreign-key cascades that touch `append_only = true`
+  tables. The plan now installs triggers that reject updates and deletes,
+  including cascaded deletes. There is no SQL Server trigger opt-out while
+  the entity remains append-only (#813).
+- **Action needed.** Replan SQL Server schemas and resolve any table
+  declarations that map to the same physical identifier. SQL Server
+  planning now refuses these collisions (#813).
+- **No action.** SQL Server supports bounded row-size preflights and filtered
+  unique indexes over non-null keys.
+- **Action needed, only when opting in.** Entities opting in to
+  `exact_string_filters = true` get length-sensitive string comparisons, and
+  SQL Server plans give their generated Unicode string keys (primary keys,
+  unique columns, relation foreign-key sources and index members)
+  `COLLATE Latin1_General_100_BIN2`. Opt in both sides of a string foreign key
+  together, because SQL Server requires matching collations. On an existing
+  table, the generated `ALTER COLUMN … COLLATE` fails on indexed or constrained
+  columns: drop and recreate the dependent indexes and constraints around it.
+  Removing the option later leaves the live BIN2 collation in place (#813).
+
 ## Unreleased - ORM/macros 0.202.0
 
 - Grouped additional SQLite GraphQL, owned database and consumer fixture tests.
