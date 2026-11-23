@@ -32,11 +32,13 @@ ORM `change-journal` feature.
    boundary as its initial journal checkpoint. If any canonical writes
    occurred before this full backup, capture a fresh checkpoint under
    quiescence at the full snapshot instead. Use the ORM adapter's
-   `schema_snapshot` for the chain's schema identity. To implement the host's
-   `export_incremental`, hold one read fence or stop writers and schema
-   changes across the journal read and row export. For example, while writes
-   are stopped, read `Database::export_changes` after the parent's sequence
-   through `i64::MAX`, then index `OrmBackupAdapter::export_full` by
+   `schema_snapshot` for the chain's schema identity. Delegate every host
+   `schema_snapshot` call live to the ORM adapter so the after-export recheck
+   sees key storage changes. To implement `export_incremental`, hold one read
+   fence or stop writers and schema changes across the journal read and row
+   export. While writes are stopped, call `Database::export_changes` with
+   `ChangeWindow { after_sequence: Some(<parent checkpoint>), until: i64::MAX }`
+   (`until` is a Unix timestamp in seconds), then index `OrmBackupAdapter::export_full` by
    `(table_name, primary_key)`. Keep the last action per exact key in
    sequence order. Pass delete keys through as tombstones. For a final create
    or update, use the matching exported row and fail if it is missing.
@@ -57,7 +59,10 @@ requires portable column values. Composite-key tables are full-only. A
 spelling change under a nondeterministic collation records an old-key delete
 and a new-key create.
 
-The backup schema identity includes live key types and type modifiers.
+The backup schema identity includes live key types and type modifiers for
+the adapter's single-key backup entities. Tables outside the backup do not
+affect restore compatibility. The underlying error for a key storage
+mismatch names the affected table and column.
 Pause backup jobs during key DDL and take a new full backup and checkpoint
 after every key storage type change, including a change later reverted. The
 cutover is one-way because rounded legacy keys can lose the original value.

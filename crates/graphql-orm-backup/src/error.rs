@@ -111,6 +111,13 @@ pub enum BackupError {
         target_schema_hash: String,
     },
 
+    /// A canonical snapshot and its target disagree on a live key's storage type.
+    #[error("canonical key storage differs at table {table_name:?}, column {column_name:?}")]
+    CanonicalKeyStorageMismatch {
+        table_name: String,
+        column_name: String,
+    },
+
     #[error("invalid column backup policy override for {table_name}.{column_name}: {reason}")]
     InvalidColumnBackupPolicyOverride {
         table_name: String,

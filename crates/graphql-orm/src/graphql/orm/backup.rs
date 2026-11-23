@@ -234,8 +234,8 @@ impl BackupSnapshot {
         None
     }
 
-    // Returns opaque, ordered storage metadata for the canonical journal's
-    // registered keys and the snapshot's single-column keys. The metadata
+    // Returns ordered storage metadata for the snapshot's single-column
+    // keys. The metadata
     // excludes relation OIDs, which can differ on a matching restore target.
     #[cfg(feature = "postgres")]
     async fn canonical_key_storage_identity(
@@ -246,10 +246,6 @@ impl BackupSnapshot {
             return Ok(None);
         }
         let mut keys = Vec::new();
-        for (declared, path, column) in super::journal_key::registered_tables(&mut self.tx).await? {
-            let storage = super::journal_key::key_type(&mut self.tx, &path, &column).await?;
-            keys.push((true, declared, column, storage));
-        }
         for entity in entities
             .iter()
             .filter(|entity| entity.primary_key_columns.is_empty())
@@ -259,7 +255,6 @@ impl BackupSnapshot {
                 super::journal_key::key_type(&mut self.tx, &path, &entity.primary_key_column)
                     .await?;
             keys.push((
-                false,
                 entity.table_name.clone(),
                 entity.primary_key_column.clone(),
                 storage,

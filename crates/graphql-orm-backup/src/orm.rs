@@ -169,7 +169,7 @@ impl OrmBackupAdapter {
             hash.update([0]);
             hash.update(storage.as_bytes());
             let prefix = crate::database::CANONICAL_KEY_SCHEMA_PREFIX;
-            snapshot.schema_hash = format!("{prefix}{:x}", hash.finalize());
+            snapshot.schema_hash = format!("{prefix}{:x}:{storage}", hash.finalize());
         }
         Ok(snapshot)
     }
@@ -451,16 +451,8 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         ensure_sql_write_allowed().map_err(database_error("restore rows"))?;
         let context = orm_restore_context(&context)?;
         let current_snapshot = self.current_schema_snapshot().await?;
-        if backup_schema.backend != current_snapshot.backend
-            || backup_schema.schema_hash != current_snapshot.schema_hash
-        {
-            return Err(BackupError::RestoreSchemaMismatch {
-                backup_backend: backup_schema.backend,
-                backup_schema_hash: backup_schema.schema_hash,
-                target_backend: current_snapshot.backend,
-                target_schema_hash: current_snapshot.schema_hash,
-            });
-        }
+        backup_schema
+            .ensure_restore_compatible(&current_snapshot.backend, &current_snapshot.schema_hash)?;
         let mut backup_snapshot = current_snapshot.clone();
         backup_snapshot.backend = backup_schema.backend;
         backup_snapshot.migration_version = backup_schema.migration_version;

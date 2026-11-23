@@ -283,7 +283,11 @@ async fn canonical_journal_keys_compact_and_restore_after_cutover()
             }
         })
         .collect();
-    let source = FixtureJournalSource { orm: &orm, changes };
+    let source = FixtureJournalSource {
+        orm: &orm,
+        changes,
+        retype_during_export: None,
+    };
     let request = incremental(full_id);
     let delta_id = request.snapshot_id;
     create_incremental_backup(&repo, &source, &objects, request).await?;
@@ -354,9 +358,38 @@ async fn canonical_chain_refuses_a_live_key_type_change() -> Result<(), Box<dyn 
         },
     )
     .await?;
+    let during_export = FixtureJournalSource {
+        orm: &adapter,
+        changes: vec![],
+        retype_during_export: Some(&pool),
+    };
+    let attempted = Uuid::new_v4();
+    let error = create_incremental_backup(
+        &repository,
+        &during_export,
+        &NoJournalObjects,
+        IncrementalBackupRequest {
+            snapshot_id: attempted,
+            parent_snapshot_id: parent,
+            created_at: 2,
+            app_id: "key-storage-change".into(),
+            app_version: "1".into(),
+        },
+    )
+    .await
+    .expect_err("the post-export recheck must detect key DDL");
+    assert!(
+        error.to_string().contains("changed during export"),
+        "{error}"
+    );
+    assert!(
+        graphql_orm_backup::load_manifest(&repository, attempted)
+            .await
+            .is_err()
+    );
+
     graphql_orm::sqlx::raw_sql(
-        "ALTER TABLE key_storage_change ALTER COLUMN id TYPE int8;
-         SET graphql_orm.change_journal = 'on';
+        "SET graphql_orm.change_journal = 'on';
          INSERT INTO key_storage_change VALUES (1, 'new row');",
     )
     .execute(&pool)
@@ -379,6 +412,7 @@ async fn canonical_chain_refuses_a_live_key_type_change() -> Result<(), Box<dyn 
         .unwrap();
     let source = FixtureJournalSource {
         orm: &adapter,
+        retype_during_export: None,
         changes: vec![BackupChangeExport {
             table_name: row.table_name.clone(),
             primary_key: row.primary_key.clone(),
@@ -409,12 +443,112 @@ async fn canonical_chain_refuses_a_live_key_type_change() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[cfg(feature = "canonical-journal-keys")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL and graphql-orm/change-journal; run the backup-postgres owned lane"]
+async fn canonical_restore_ignores_registrations_outside_the_backup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = owned_postgres::OwnedPostgres::pool("canonical-restore-source", 1).await?;
+    let target = owned_postgres::OwnedPostgres::pool("canonical-restore-target", 1).await?;
+    let entity = MixedBackupNote::metadata();
+    let mut extra = entity.clone();
+    extra.table_name = "retired_notes";
+    extra.entity_name = "RetiredNote";
+    let extra = Box::leak(Box::new(extra));
+    for pool in [&source, &target] {
+        graphql_orm::sqlx::query(
+            "CREATE TABLE MixedBackupNotes (id text PRIMARY KEY, title text NOT NULL)",
+        )
+        .execute(pool)
+        .await?;
+    }
+    graphql_orm::sqlx::raw_sql(
+        "CREATE TABLE retired_notes (id text PRIMARY KEY, title text NOT NULL);
+         INSERT INTO MixedBackupNotes VALUES ('note', 'restored');",
+    )
+    .execute(&source)
+    .await?;
+    let source = Arc::new(graphql_orm::db::Database::new(source));
+    let target_db = Arc::new(graphql_orm::db::Database::new(target.clone()));
+    source
+        .ensure_change_journal_recorder(&[entity, extra])
+        .await?;
+    target_db.ensure_change_journal_recorder(&[entity]).await?;
+    source.enable_canonical_change_journal_keys().await?;
+    target_db.enable_canonical_change_journal_keys().await?;
+    let source = OrmBackupAdapter::new(source, vec![entity]).with_canonical_change_journal_keys();
+    let target_adapter =
+        OrmBackupAdapter::new(target_db, vec![entity]).with_canonical_change_journal_keys();
+
+    let directory = TempDir::new()?;
+    let repository = LocalBackupRepository::new(directory.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
+    let snapshot_id = Uuid::new_v4();
+    create_full_backup(
+        &repository,
+        &source,
+        &NoJournalObjects,
+        FullBackupRequest {
+            snapshot_id,
+            created_at: 1,
+            app_id: "canonical-restore".into(),
+            app_version: "1".into(),
+        },
+    )
+    .await?;
+    restore_snapshot(
+        &repository,
+        &target_adapter,
+        snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect("an unrelated recorder must not affect restore");
+    assert_eq!(
+        source.export_full().await?,
+        target_adapter.export_full().await?
+    );
+
+    graphql_orm::sqlx::query("ALTER TABLE MixedBackupNotes ALTER COLUMN id TYPE varchar(12)")
+        .execute(&target)
+        .await?;
+    let mismatch = restore_snapshot(
+        &repository,
+        &target_adapter,
+        snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .unwrap_err();
+    let mismatch = std::error::Error::source(&mismatch).unwrap().to_string();
+    assert!(
+        mismatch.contains("MixedBackupNotes") && mismatch.contains("column \"id\""),
+        "{mismatch}"
+    );
+    assert!(!mismatch.contains("restored"), "{mismatch}");
+
+    graphql_orm::sqlx::query("ALTER TABLE MixedBackupNotes RENAME COLUMN id TO old_id")
+        .execute(&target)
+        .await?;
+    let missing = target_adapter
+        .schema_snapshot()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing.contains("table or column not found") && missing.contains("mixedbackupnotes"),
+        "{missing}"
+    );
+    Ok(())
+}
+
 // The fixture freezes writers after the tested change batch, then supplies
 // the resulting row bodies and tombstones to the existing host contract.
 #[cfg(feature = "canonical-journal-keys")]
 struct FixtureJournalSource<'a> {
     orm: &'a OrmBackupAdapter,
     changes: Vec<graphql_orm_backup::BackupChangeExport>,
+    retype_during_export: Option<&'a graphql_orm::sqlx::PgPool>,
 }
 
 #[cfg(feature = "canonical-journal-keys")]
@@ -434,6 +568,14 @@ impl GraphqlOrmBackupAdapter for FixtureJournalSource<'_> {
         &self,
         _: Uuid,
     ) -> Result<Vec<graphql_orm_backup::BackupChangeExport>, BackupError> {
+        if let Some(pool) = self.retype_during_export {
+            graphql_orm::sqlx::query("ALTER TABLE key_storage_change ALTER COLUMN id TYPE int8")
+                .execute(pool)
+                .await
+                .map_err(|error| BackupError::Database {
+                    message: error.to_string(),
+                })?;
+        }
         Ok(self.changes.clone())
     }
 

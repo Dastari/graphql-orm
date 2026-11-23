@@ -111,19 +111,84 @@ pub struct GraphqlOrmBackupSchema {
     pub schema_hash: String,
 }
 
+// This layout is part of the authenticated schema identity string. It
+// contains schema identifiers and type metadata only, never key values.
+fn canonical_schema_parts(identity: &str) -> Option<(&str, &str)> {
+    identity
+        .strip_prefix(CANONICAL_KEY_SCHEMA_PREFIX)?
+        .split_once(':')
+}
+
+pub(crate) fn canonical_key_storage_mismatch(expected: &str, actual: &str) -> Option<BackupError> {
+    type KeyLayout = Vec<(String, String, (i64, i32))>;
+    let parse = |identity| {
+        let (_, layout) = canonical_schema_parts(identity)?;
+        let keys = serde_json::from_str::<KeyLayout>(layout).ok()?;
+        Some(
+            keys.into_iter()
+                .map(|(table, column, storage)| ((table, column), storage))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+    };
+    let expected = parse(expected)?;
+    let actual = parse(actual)?;
+    let (table_name, column_name) = expected
+        .keys()
+        .chain(actual.keys())
+        .find(|key| expected.get(*key) != actual.get(*key))?
+        .clone();
+    Some(BackupError::CanonicalKeyStorageMismatch {
+        table_name,
+        column_name,
+    })
+}
+
+fn schema_hash_for_diagnostic(identity: &str) -> String {
+    canonical_schema_parts(identity).map_or_else(
+        || identity.into(),
+        |(hash, _)| format!("{CANONICAL_KEY_SCHEMA_PREFIX}{hash}"),
+    )
+}
+
 impl GraphqlOrmBackupSchema {
+    pub(crate) fn ensure_restore_compatible(
+        &self,
+        target_backend: &str,
+        target_schema_hash: &str,
+    ) -> Result<(), BackupError> {
+        if self.backend == target_backend && self.schema_hash == target_schema_hash {
+            return Ok(());
+        }
+        if self.backend == target_backend
+            && let Some(error) =
+                canonical_key_storage_mismatch(&self.schema_hash, target_schema_hash)
+        {
+            return Err(error);
+        }
+        Err(BackupError::RestoreSchemaMismatch {
+            backup_backend: self.backend.clone(),
+            backup_schema_hash: schema_hash_for_diagnostic(&self.schema_hash),
+            target_backend: target_backend.into(),
+            target_schema_hash: schema_hash_for_diagnostic(target_schema_hash),
+        })
+    }
+
     pub(crate) async fn ensure_canonical_identity_unchanged(
         &self,
         database: &dyn GraphqlOrmBackupAdapter,
     ) -> Result<(), BackupError> {
-        if self.schema_hash.starts_with(CANONICAL_KEY_SCHEMA_PREFIX)
-            && database.schema_snapshot().await?.schema_hash != self.schema_hash
-        {
-            return Err(BackupError::InvalidManifestChain {
-                reason:
-                    "canonical key storage or schema changed during export; start a new full backup"
-                        .into(),
-            });
+        if self.schema_hash.starts_with(CANONICAL_KEY_SCHEMA_PREFIX) {
+            let current = database.schema_snapshot().await?;
+            if current.schema_hash != self.schema_hash {
+                let detail =
+                    canonical_key_storage_mismatch(&self.schema_hash, &current.schema_hash)
+                        .map_or_else(String::new, |error| format!("{error}; "));
+                return Err(BackupError::InvalidManifestChain {
+                    reason: format!(
+                        "{detail}canonical key storage or schema changed during export; start a new full backup"
+                    ),
+                });
+            }
         }
         Ok(())
     }

@@ -884,9 +884,14 @@ fn ensure_extends_parent(
     } else if parent.database_backend != schema.backend {
         Some("database backend")
     } else if parent.graphql_orm_schema_hash != schema.schema_hash {
+        let detail = crate::database::canonical_key_storage_mismatch(
+            &parent.graphql_orm_schema_hash,
+            &schema.schema_hash,
+        )
+        .map_or_else(String::new, |error| format!("{error}; "));
         return Err(BackupError::InvalidManifestChain {
             reason: format!(
-                "incremental snapshot {} schema hash does not match parent {}; start a new full backup after a schema or change journal key encoding change",
+                "{detail}incremental snapshot {} schema hash does not match parent {}; start a new full backup after a schema or change journal key encoding change",
                 request.snapshot_id, parent.snapshot_id
             ),
         });

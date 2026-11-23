@@ -118,25 +118,34 @@ pub(super) async fn key_type(
     table: &str,
     column: &str,
 ) -> crate::Result<(i64, i32)> {
-    sqlx::query_as(&format!(
-        "SELECT a.atttypid::pg_catalog.int8, a.atttypmod FROM pg_catalog.pg_attribute a
+    let (type_oid, modifier, supported): (i64, i32, bool) = sqlx::query_as(&format!(
+        "SELECT a.atttypid::pg_catalog.int8, a.atttypmod,
+                a.atttypid OPERATOR(pg_catalog.=) ANY ({KEY_TYPES})
+         FROM pg_catalog.pg_attribute a
          WHERE a.attrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
            AND a.attname::pg_catalog.text OPERATOR(pg_catalog.=) $2
-           AND a.atttypid OPERATOR(pg_catalog.=) ANY ({KEY_TYPES}) AND NOT a.attisdropped"
+           AND NOT a.attisdropped"
     ))
     .bind(table)
     .bind(column)
     .fetch_optional(conn)
     .await?
-    .ok_or_else(|| sqlx::Error::Protocol(format!("{UNSUPPORTED_KEY}: {table}.{column}")))
+    .ok_or_else(|| sqlx::Error::Protocol(format!(
+        "canonical key table or column not found: {table}.{column}; check that the database schema is migrated"
+    )))?;
+    if supported {
+        Ok((type_oid, modifier))
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "{UNSUPPORTED_KEY}: {table}.{column}"
+        )))
+    }
 }
 
 #[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
-pub(super) async fn registered_tables(
-    conn: &mut PgConnection,
-) -> crate::Result<Vec<(String, String, String)>> {
+async fn registered_tables(conn: &mut PgConnection) -> crate::Result<Vec<(String, String)>> {
     sqlx::query_as(&format!(
-        "SELECT r.declared_table, pg_catalog.format('%I.%I', n.nspname, c.relname), r.key_column
+        "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname), r.key_column
          FROM {registry} r
          JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.relid::pg_catalog.oid
          JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
@@ -243,7 +252,7 @@ pub(super) async fn enable(pool: &crate::DbPool) -> crate::Result<i64> {
     // Take the entity-table locks before the journal lock, in writer order.
     // Stop all writers and backup workers for the operational cutover, which
     // also needs to establish a fresh full snapshot and matching checkpoint.
-    for (_, path, column) in registered_tables(&mut tx).await? {
+    for (path, column) in registered_tables(&mut tx).await? {
         sqlx::query(&format!("LOCK TABLE {path} IN SHARE MODE"))
             .execute(&mut *tx)
             .await?;
