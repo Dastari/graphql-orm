@@ -7,8 +7,7 @@
 //! restore carries that marker with the rows; a host-held
 //! [`AiRuntimeEpochAnchor`] detects it.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
@@ -18,8 +17,8 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, OrderDirection,
-    PaginationConfig, TransactionError, TransactionMode,
+    ConditionalUpdateOutcome, MutationContext, OrderDirection, PaginationConfig, TransactionError,
+    TransactionMode,
 };
 use uuid::Uuid;
 
@@ -308,7 +307,7 @@ impl AiAppliedRestore {
 /// services refuse a lease whose epoch is not the gate's.
 #[derive(Clone)]
 pub struct OrmAiRuntimeRecoveryService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     clock: Arc<dyn Clock>,
     limits: AiRestoreCollectorLimits,
     epoch_anchor: Option<Arc<dyn AiRuntimeEpochAnchorStore>>,
@@ -316,7 +315,7 @@ pub struct OrmAiRuntimeRecoveryService {
 
 impl OrmAiRuntimeRecoveryService {
     /// Creates a recovery service with conservative default bounds.
-    pub fn new(database: Database<DefaultWriteBackend>, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(database: Database<AiOrmBackend>, clock: Arc<dyn Clock>) -> Self {
         let database = crate::custody_field_policy::custody_database(database);
         Self {
             database: database.with_pagination_config(PaginationConfig::unbounded()),
@@ -1038,7 +1037,7 @@ impl OrmAiRuntimeRecoveryService {
 /// An empty ledger is not live: nothing may be claimed or consumed until
 /// [`OrmAiRuntimeRecoveryService::readiness_proof`] records the first epoch.
 pub(crate) async fn require_live_epoch(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
 ) -> Result<Uuid, OrmPublicError> {
     match current_epoch(tx).await? {
         Some(epoch) if epoch_is_live(&epoch) => Ok(epoch.id),
@@ -1062,7 +1061,7 @@ pub(crate) fn gate_admits_lease(gate: &AiRuntimeStartGate, lease: &AiRunLease) -
 /// lease.
 #[cfg_attr(not(feature = "provider-openai-core"), allow(dead_code))]
 pub(crate) async fn require_gate_epoch(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     gate_epoch_id: Option<Uuid>,
 ) -> Result<(), OrmPublicError> {
     let live = require_live_epoch(tx).await?;
@@ -1109,7 +1108,7 @@ fn valid_text(value: &str, maximum: usize) -> bool {
 
 /// Whether the store already holds runs, approvals or egress consents.
 async fn holds_prior_ai_state(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
 ) -> Result<bool, OrmPublicError> {
     let runs = tx
         .query::<AiRunRecord>()
@@ -1133,7 +1132,7 @@ async fn holds_prior_ai_state(
 }
 
 async fn current_epoch(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
 ) -> Result<Option<AiRuntimeRecoveryRecord>, OrmPublicError> {
     tx.query::<AiRuntimeRecoveryRecord>()
         .order_by(AiRuntimeRecoveryRecordOrderByInput {
@@ -1169,7 +1168,7 @@ struct PreparedEpoch {
 }
 
 async fn insert_epoch(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     epoch: PreparedEpoch,
 ) -> Result<(), OrmPublicError> {
     let to_i64 = |value: u64| {
@@ -1195,7 +1194,7 @@ async fn insert_epoch(
 }
 
 async fn expire_reusable_approvals(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     maximum: usize,
     counts: &mut AiRuntimeClosureCounts,
 ) -> Result<(), OrmPublicError> {
@@ -1247,7 +1246,7 @@ async fn expire_reusable_approvals(
 }
 
 async fn revoke_egress_consents(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     maximum: usize,
     now: i64,
     counts: &mut AiRuntimeClosureCounts,
@@ -1306,7 +1305,7 @@ async fn revoke_egress_consents(
 /// fence fails and ordinary lease recovery reclassifies the run. A lease row
 /// with no expiry is fenced at `now` too. Returns the number fenced.
 async fn fence_epochless_leases(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     maximum: usize,
     now: i64,
 ) -> Result<u64, OrmPublicError> {
@@ -1355,7 +1354,7 @@ async fn fence_epochless_leases(
 /// Moves every non-terminal run to `RecoveryRequired` under a new lease
 /// generation. Every candidate is read before any row changes.
 async fn close_restored_runs(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     maximum: usize,
     now: i64,
     counts: &mut AiRuntimeClosureCounts,
@@ -1436,7 +1435,7 @@ async fn close_restored_runs(
 /// Post-apply validation inside the epoch transaction. Consents are checked
 /// only right after closure; a consent granted after it is a fresh decision.
 async fn verify_closure(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     limits: AiRestoreCollectorLimits,
     include_consents: bool,
 ) -> Result<(), OrmPublicError> {
@@ -1523,10 +1522,8 @@ fn map_transaction(error: TransactionError) -> AiError {
 }
 
 /// Records the first live epoch for a test store and returns its proof.
-#[cfg(all(test, feature = "sqlite"))]
-pub(crate) async fn open_test_epoch(
-    database: &Database<DefaultWriteBackend>,
-) -> AiRuntimeReadinessProof {
+#[cfg(test)]
+pub(crate) async fn open_test_epoch(database: &Database<AiOrmBackend>) -> AiRuntimeReadinessProof {
     OrmAiRuntimeRecoveryService::new(database.clone(), Arc::new(agql_auth::SystemClock))
         .readiness_proof()
         .await
@@ -1535,7 +1532,7 @@ pub(crate) async fn open_test_epoch(
 
 /// Appends a non-live epoch to a test store without changing any other row.
 #[cfg(all(test, feature = "sqlite"))]
-pub(crate) async fn close_test_epoch(database: &Database<DefaultWriteBackend>) {
+pub(crate) async fn close_test_epoch(database: &Database<AiOrmBackend>) {
     database
         .transaction(TransactionMode::StateMachine, |tx| {
             Box::pin(async move {
@@ -1568,7 +1565,7 @@ pub(crate) async fn close_test_epoch(database: &Database<DefaultWriteBackend>) {
 /// Appends a live successor epoch to a test store, as an in-place module
 /// upgrade would, without changing any other row.
 #[cfg(all(test, feature = "sqlite"))]
-pub(crate) async fn advance_test_epoch(database: &Database<DefaultWriteBackend>) {
+pub(crate) async fn advance_test_epoch(database: &Database<AiOrmBackend>) {
     database
         .transaction(TransactionMode::StateMachine, |tx| {
             Box::pin(async move {

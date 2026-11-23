@@ -100,7 +100,6 @@ pub struct AiAttachmentUploadTicket {
 }
 
 impl AiAttachmentUploadTicket {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(attachment: AiAttachmentView, token: SecretString, expires_at: i64) -> Self {
         Self {
             attachment,
@@ -461,7 +460,6 @@ pub struct AiProviderFileDeletionRequest {
 }
 
 impl AiProviderFileDeletionRequest {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         artifact_id: Uuid,
         attachment_id: Uuid,
@@ -482,7 +480,6 @@ impl AiProviderFileDeletionRequest {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_cleanup_evidence(
         mut self,
         previous: bool,

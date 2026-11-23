@@ -1,7 +1,6 @@
 //! ORM-backed protected skill publication and resolution.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{content_context, map_orm, map_transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,9 +11,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, MutationContext, TransactionMode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -136,9 +133,9 @@ struct SkillChecksumContent<'a> {
 /// makes it eligible for resolution; it never enables a tool or widens current
 /// resolver, egress, provider, proposal, approval, or budget policy.
 pub struct OrmAiSkillCatalogService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiSkillAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -149,7 +146,7 @@ pub struct OrmAiSkillCatalogService {
 impl OrmAiSkillCatalogService {
     /// Creates a protected, fail-closed skill catalog.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiSkillAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -173,7 +170,7 @@ impl OrmAiSkillCatalogService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -708,7 +705,7 @@ struct ParsedVersion {
 }
 
 async fn load_scope_skills(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     scope: &AiScope,
 ) -> Result<Vec<(AiSkillRecord, Option<AiSkillVersionRecord>)>, AiError> {
     let scope = scope.clone();
@@ -743,7 +740,7 @@ async fn load_scope_skills(
 }
 
 async fn load_current_version(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     skill: &AiSkillRecord,
 ) -> Result<Option<AiSkillVersionRecord>, OrmPublicError> {
     let Some(version_id) = skill.current_version_id else {
@@ -1210,7 +1207,7 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 }
 
 async fn insert_skill_audit(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     actor: &str,
     action: &str,
     skill_id: Uuid,

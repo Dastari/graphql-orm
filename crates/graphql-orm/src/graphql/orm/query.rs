@@ -6100,6 +6100,11 @@ where
                     DatabaseBackend::Postgres => Ok(format!(
                         "COALESCE(octet_length(CAST((SELECT {projection}) AS TEXT)), 0)::bigint"
                     )),
+                    // Count raw bytes (including binary payloads) and bound
+                    // UTF-8 decoding by four bytes per UTF-16 code unit.
+                    DatabaseBackend::Mssql => Ok(format!(
+                        "COALESCE(CAST(DATALENGTH((SELECT {projection})) AS BIGINT), 0) + 2 * COALESCE(DATALENGTH(CONVERT(NVARCHAR(MAX), (SELECT {projection}))), 0)"
+                    )),
                     _ => Err(Self::payload_budget_error()),
                 }
             })

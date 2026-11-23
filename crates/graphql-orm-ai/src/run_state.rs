@@ -132,7 +132,6 @@ impl AiRunState {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_persisted(value: &str) -> Option<Self> {
         match value {
             "queued" => Some(Self::Queued),
@@ -518,7 +517,6 @@ pub fn is_initial_planning_failure_code(code: &str) -> bool {
 /// attempt outcome, and terminal event record which refusal the planner
 /// returned. The warning carries the run ID and the same classification;
 /// it never includes the error's display text.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn planner_failure_code(
     lease: &crate::AiRunLease,
     code: &str,

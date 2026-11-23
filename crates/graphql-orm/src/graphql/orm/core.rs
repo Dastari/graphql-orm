@@ -4518,6 +4518,7 @@ impl PartialEq for IndexDef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexPredicateDef {
     pub column: &'static str,
+    /// Closed-set literals. An empty list represents `IS NOT NULL`.
     pub values: &'static [&'static str],
 }
 
@@ -4555,6 +4556,15 @@ impl IndexDef {
             .get(index)
             .copied()
             .unwrap_or(IndexDirection::Asc)
+    }
+
+    /// Restrict the index to rows whose column is not null.
+    pub const fn where_not_null(mut self, column: &'static str) -> Self {
+        self.predicate = Some(IndexPredicateDef {
+            column,
+            values: &[],
+        });
+        self
     }
 
     pub const fn where_in(mut self, column: &'static str, values: &'static [&'static str]) -> Self {

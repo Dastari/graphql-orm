@@ -1,7 +1,6 @@
 //! ORM-backed GraphQL management and runtime resolution of hierarchical rules.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_support::{map_orm, map_transaction};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use agql_auth::{
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -251,9 +250,9 @@ impl AiAgentRuleResolver for DeploymentAiCurrentRuleResolver {
 /// resolver, egress, provider, approval, and budget authorization.
 #[derive(Clone)]
 pub struct OrmAiRulePolicyService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiRuleAccessPolicy>,
     hierarchy_resolver: Arc<dyn AiRuleHierarchyResolver>,
     recent_mfa_policy: RecentMfaPolicy,
@@ -264,7 +263,7 @@ pub struct OrmAiRulePolicyService {
 impl OrmAiRulePolicyService {
     /// Creates a fail-closed hierarchical rule service.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiRuleAccessPolicy>,
         hierarchy_resolver: Arc<dyn AiRuleHierarchyResolver>,
         recent_mfa_policy: RecentMfaPolicy,
@@ -288,7 +287,7 @@ impl OrmAiRulePolicyService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 

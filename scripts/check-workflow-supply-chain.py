@@ -119,10 +119,10 @@ NON_IMAGE_TEST_LITERALS = {'crates/graphql-orm-ai/src/provider_calls/tests/stati
  'crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/complete_events.rs': ['verified-tenant-a:public-revision-1'],
  'crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/policy_projections.rs': ['verified-tenant-alpha:public-revision-1'],
  'crates/graphql-orm/tests/generated_error_sanitization.rs': ['graphql-orm-public:INTERNAL_ERROR'],
- 'crates/graphql-orm/tests/mssql_transport.rs': ['127.0.0.1:0'],
+ 'crates/graphql-orm/tests/mssql_owned_connections/mssql_transport.rs': ['127.0.0.1:0'],
  'crates/graphql-orm/tests/portable_group_pages.rs': ['alpha:r2', 'verified-alpha:policy-r1'],
  'crates/graphql-orm/tests/postgres_rls_coverage.rs': ['bin:ab01ff'],
- 'crates/graphql-orm/tests/query_shape_selection.rs': ['legacy:old'],
+ 'crates/graphql-orm/tests/sqlite_query_contracts/query_shape_selection.rs': ['legacy:old'],
  'crates/graphql-orm/tests/row_policy_and_input_transform.rs': ['create:actor-a', 'update:actor-a'],
  'crates/graphql-orm/tests/spatial_sqlite.rs': ['row-secret:database-password'],
  'crates/graphql-orm/tests/support/owned_mssql.rs': ['rsa:2048']}

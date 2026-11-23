@@ -2,10 +2,8 @@
 
 use std::time::Instant;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use async_trait::async_trait;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::{AiBudgetReservationId, AiRunId, AiRunLease, AiScope, AiSessionId, ProviderKind};
 use crate::{AiError, ProviderEvent};
 
@@ -108,7 +106,6 @@ impl AiLiveDeltaBatch {
 /// persistence, or client disclosure by itself; an [`AiLiveDeltaSink`] must
 /// recheck those properties for every batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub struct AiLiveDeltaPersistenceContext {
     session_id: AiSessionId,
     run_id: AiRunId,
@@ -122,7 +119,6 @@ pub struct AiLiveDeltaPersistenceContext {
     budget_reservation_id: AiBudgetReservationId,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl AiLiveDeltaPersistenceContext {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -206,7 +202,6 @@ impl AiLiveDeltaPersistenceContext {
 /// and uncertain provider budget, protect the batch, and commit its durable
 /// cursor event before returning. They must never persist tool arguments,
 /// hidden reasoning, raw provider frames, or unbounded content.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[async_trait]
 pub trait AiLiveDeltaSink: Send + Sync {
     /// Persists one exact ordered visible batch.
