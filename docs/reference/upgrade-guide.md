@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.203.0, `graphql-orm-macros` 0.203.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.154.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.203.0, `graphql-orm-macros` 0.203.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.157.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **Action needed** for AI 0.157.0. Apply the guarded external run-state index migration on SQL Server and drain workers on all backends before epoch rotation (#848). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01540-to-01570)
 - **Action needed** when adopting SQL Server with AI 0.154.0. Install the restore marker, apply the external schema plan, and use an explicitly writable pool (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
 - **Action needed** for AI 0.154.0 on SQLite, PostgreSQL, and SQL Server. Drain active workers before the module epoch rotates and invalidates old leases. SQLite and PostgreSQL need no data migration (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
 - **Action needed** for ORM/macros 0.203.0 on SQL Server. Review cleanup jobs and cascaded deletes before applying new append-only triggers. There is no trigger opt-out for append-only entities (#813). [ORM migration](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites)

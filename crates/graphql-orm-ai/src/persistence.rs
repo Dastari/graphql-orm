@@ -1101,7 +1101,18 @@ pub(crate) struct AiAttachmentArtifactRecord {
     plural = "GraphqlOrmAiRuns",
     default_sort = "created_at ASC",
     keyset = "recovery_examined_at asc, created_at asc, id asc",
-    mssql(schema_policy = "external_writable", exact_string_filters = true)
+    mssql(
+        schema_policy = "external_writable",
+        exact_string_filters = true,
+        index(
+            name = "idx_graphql_orm_ai_runs_claim_candidates",
+            columns = ["state", "next_attempt_at", "recovery_examined_at", "created_at", "id"]
+        ),
+        index(
+            name = "idx_graphql_orm_ai_runs_recovery_candidates",
+            columns = ["state", "lease_expires_at", "recovery_examined_at", "id"]
+        )
+    )
 )]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
@@ -2575,7 +2586,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.84.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.85.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

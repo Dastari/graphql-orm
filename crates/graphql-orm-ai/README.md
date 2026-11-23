@@ -348,7 +348,9 @@ manifest records the locked Auth commit.
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
 or `mssql`. AI 0.154.0 adds durable services for externally provisioned SQL
-Server schemas. Review the [deployment requirements and capability
+Server schemas. AI 0.157.0 adds claim and recovery run-state indexes to that
+external schema plan.
+Review the [deployment requirements and capability
 matrix](docs/backend-capability-matrix.md#sql-server-deployment). Package docs
 and rustdoc are available from the pinned repository revision.
 Upgrade deliberately: review all pinned companions' migration guides and

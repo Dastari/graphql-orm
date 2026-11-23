@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.157.0
+
+- Make SQL Server claim and expired-lease recovery candidate reads seek on
+  run state with binary-collated indexes on state and the eligibility
+  timestamps (#848). The external schema upgrade narrows the state column
+  after checking existing values.
+- Advance the AI schema module to 0.85.0. Drain workers before reopening on
+  the successor epoch.
+
 ## Unreleased - 0.154.0
 
 - **Action needed.** To adopt SQL Server, enable durable AI ORM services

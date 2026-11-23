@@ -259,13 +259,22 @@ pub(crate) async fn apply_parity_migration(
     #[cfg(feature = "mssql")]
     {
         for sql in &plan.statements {
-            tokio::time::timeout(
-                StdDuration::from_secs(15),
-                owned_mssql::execute_batch(&_server.connection_string, sql),
-            )
-            .await
-            .expect("external DDL must finish before its timeout")
-            .unwrap_or_else(|error| panic!("external DDL failed: {error}: {sql}"));
+            execute_sql_server_batch(_server, sql)
+                .await
+                .unwrap_or_else(|error| panic!("external DDL failed: {error}: {sql}"));
         }
     }
+}
+
+#[cfg(feature = "mssql")]
+pub(crate) async fn execute_sql_server_batch(
+    server: &OwnedServer,
+    sql: &str,
+) -> graphql_orm::Result<()> {
+    tokio::time::timeout(
+        StdDuration::from_secs(15),
+        owned_mssql::execute_batch(&server.connection_string, sql),
+    )
+    .await
+    .expect("owned SQL Server batch must finish before its timeout")
 }
