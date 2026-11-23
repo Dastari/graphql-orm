@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
+Local-harness, Grok ACP and Codex app-server registrations can opt into
+[freshness-bounded entity reference delivery](docs/entity-references.md#adapters-for-a-local-process).
+Codex support starts with AI 0.158.0 and requires the process's consuming
+dispatch hook. Direct runtime dispatch methods always send unavailable
+markers. Review local process retention before opting in. See the
+[migration guide](MIGRATION.md#01570-to-01580).
+
 AI 0.155.0 supports composing the exported AI roots directly through
 `schema_roots!` in camelCase and PascalCase. Compose `AiUsageQueryRoot` only
 when the schema omits `AiQueryRoot`, which already includes usage reporting.
@@ -19,7 +26,6 @@ AI 0.153.0 binds compaction to the session's pinned provider and model, checks
 the lease before adopting tool checkpoints, and reads restore facts in bounded
 pages. See [migration guidance](MIGRATION.md#01520-to-01530).
 
-AI 0.152.0 adds an opt-in for resolved [entity references](docs/entity-references.md#adapters-for-a-local-process) on the local-harness and Grok ACP adapters. It is off by default: a registration opts in with `with_resolved_entity_reference_delivery` and a freshness bound, and until then, and always on the Codex app-server adapter and the direct runtime dispatch methods, every reference is the unavailable marker. No signature, GraphQL SDL or schema change. See the [migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters) before opting in: a local process retains what it is sent.
 Version 0.151.2 emits fixed skill content-protection reason codes in debug
 tracing and reuses compiled proposal validators.
 See the [migration guide](MIGRATION.md#01512-skill-content-protection-diagnostics).

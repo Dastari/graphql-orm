@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.158.0
+
+- Codex app-server registrations can opt into freshness-bounded resolved
+  entity-reference delivery. A consuming protocol actor writes the frame
+  directly to the child and projects echoed user content out of inbound
+  events. Tool-free Codex turns also accept reference markers. Direct runtime
+  calls permanently send markers (#721).
+
 ## Unreleased - 0.155.0
 
 - Exported AI query, mutation, and subscription roots declare their GraphQL
