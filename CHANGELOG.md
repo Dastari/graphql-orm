@@ -21,6 +21,9 @@ for historical context.
   for each entity with subscriptions enabled.
   **No action.** See the
   [migration guide](MIGRATION.md#02010-to-02050-generated-changed-subscriptions).
+- **Added.** Changed subscriptions support combining `changed_started = true`
+  with `key_only_deletes`. An authorized exact-key subscriber can request a
+  started frame and receive key-only `DELETED` frames with `started: false`.
 
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
