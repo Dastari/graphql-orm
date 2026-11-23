@@ -31,23 +31,23 @@
   },
   {
     "finding": "RUSTSEC-2026-0253:lru:0.16.4",
-    "review_by": "2026-12-04",
-    "reason": "async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: fixture async-graphql 7.2.1 requires lru ^0.16.2; pinned Hive 0.2.19 owners datadog-opentelemetry 0.5.2 and libdd-sampling 6.0.0 require ^0.16.3. Fixed 0.18.2 needs Rust 1.85 but is outside those ranges. Generated DataLoader::new selects NoCache, the cross-crate cache test selects HashMapCache, and build_hive_config supplies no Datadog exporter. Host-installed LRU caches with panicking key destructors remain outside this exception."
   },
   {
     "finding": "RUSTSEC-2026-0387:crypto-bigint:0.5.5",
-    "review_by": "2026-12-04",
-    "reason": "Pinned agql-auth/jsonwebtoken RustCrypto elliptic-curve path; no compatible fixed release. Existing owner acceptance excludes private EC operations; auth pin move requires maintainer approval."
+    "review_by": "2026-12-23",
+    "reason": "Rechecked 2026-11-23: pinned agql-auth 0.26.0/jsonwebtoken 10.4.0 and router jsonwebtoken 11.0.0 use p256/p384 0.13 and elliptic-curve 0.13.8, which requires crypto-bigint ^0.5. The fixed 0.7 line needs Rust 1.87 and crosses that range; jsonwebtoken 12 moves curves but cannot replace either current requirement. Router JWT verification uses public keys and workspace signing fixtures use RSA or HS256. SMB also resolves the old curves via SSPI/picky, but the selected username/password NTLM path uses symmetric signing. S3 SigV4a is on 0.7.10. Existing owner acceptance excludes private EC operations."
   },
   {
     "finding": "RUSTSEC-2026-0441:pin-utils:0.1.0",
-    "review_by": "2026-12-04",
-    "reason": "aws-smithy-runtime (S3), sspi -> async-dnssd (optional SMB), and Hive reqwest-retry -> wasmtimer retain the unmaintained utility. Requires owning upstream migrations; maintenance status is not treated as a vulnerability exclusion."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: this is an unmaintained notice, including 0.1.1. aws-smithy-runtime 1.16.1+ (Rust 1.94.1) and wasmtimer 0.4.4+ migrate off pin-utils, but optional SMB sspi 0.16.1 still needs async-dnssd ^0.5 on macOS/iOS and every 0.5 release retains pin-utils. A complete removal needs a compatible SMB owner migration; no vulnerability is described by this notice."
   },
   {
     "finding": "RUSTSEC-2026-0459:libsqlite3-sys:0.30.1",
-    "review_by": "2026-12-04",
-    "reason": "Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: sqlx-sqlite 0.8.6 requires libsqlite3-sys ^0.30.1 and cross-crate-relations also pins =0.30.1. SQLx 0.9.1 (Rust 1.94) admits the fixed >=0.39.0 line (Rust 1.88) but changes the public SQLx dependency contract. GraphqlOrmBackupAdapter restores table/change records into a host-selected connection. This exception assumes the host controls writes to both the SQLite database and its sibling WAL; opening a less-trusted pair is outside scope."
   },
   {
     "finding": "RUSTSEC-2026-0543:chrono:0.4.45",

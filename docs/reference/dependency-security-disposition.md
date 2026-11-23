@@ -3,7 +3,7 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-23
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -63,10 +63,24 @@ Later exceptions carry their own accepted date.
 | 2026-11-19 | `RUSTSEC-2026-0581:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `Deque::make_contiguous`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
 | 2026-11-19 | `RUSTSEC-2026-0582:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `IndexMap::insert` at `u16::MAX`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
 
+### Dispositions rechecked on 2026-11-23
+
+The review covered the tracked locks and current registry metadata. The fixed
+releases fit the Rust 1.97.1 toolchain and MSRV lane, but the current owning
+requirements prevent a complete lockfile-only fix.
+
+| Identity | Review by | Evidence |
+| --- | --- | --- |
+| [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html), `lru 0.16.4` | 2027-02-23 | Fixtures resolve through async-graphql 7.2.1 (`^0.16.2`) and, in federation-end-to-end, through Hive 0.2.19's Datadog and libdd sampling dependencies (`^0.16.3`). The fix starts at 0.18.2. Generated loaders use `DataLoader::new` with `NoCache`. The cross-crate fixture's custom cache uses `HashMapCache`. The typed Hive translation configures optional Prometheus metrics and supplies no Datadog exporter. The exception excludes host LRU caches with potentially panicking key destructors. |
+| [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html), `crypto-bigint 0.5.5` | 2026-12-23 | The JWT 10 and 11 paths still use elliptic-curve 0.13.8 (`crypto-bigint ^0.5`). JWT 12 adopts the newer curves but crosses both owners' requirements. Router JWT verification uses public keys and workspace signing fixtures use RSA or HS256. The owner acceptance retains the conditions below. |
+| [RUSTSEC-2026-0441](https://rustsec.org/advisories/RUSTSEC-2026-0441.html), `pin-utils 0.1.0` | 2027-02-23 | The unmaintained notice includes 0.1.1. aws-smithy-runtime 1.16.1 and wasmtimer 0.4.4 drop the dependency. The optional SMB path still resolves it because sspi 0.16.1 requires async-dnssd 0.5 on macOS and iOS, and that line retains pin-utils. |
+| [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html), `libsqlite3-sys 0.30.1` | 2027-02-23 | SQLx SQLite 0.8.6 requires `^0.30.1`, and the cross-crate fixture pins `=0.30.1`. SQLx 0.9.1 can resolve the fixed SQLite library starting at 0.39.0. It crosses the ORM's public SQLx contract. Backup restores logical table and change records into a host-selected connection. This disposition assumes the host controls writes to the database and its sibling WAL. |
+
 ## Owner-accepted crypto-bigint 0.5.5 disposition
 
 **RUSTSEC-2026-0387; scope: `crypto-bigint` version `0.5.5` only.**
-Accepted by the workspace owner on **2026-11-04**; review by **2026-12-04**.
+Accepted by the workspace owner on **2026-11-04**, with an initial review due
+**2026-12-04**. The table above records the next review date.
 This is a timing side channel on secret arithmetic. This workspace does not
 do ECDSA private-key operations; the exposure belongs to agql-auth's signing
 API; no compatible fixed release exists in the current owning dependency ranges.
