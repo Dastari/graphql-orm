@@ -23,7 +23,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use graphql_orm::async_graphql::{Request, Variables};
+use graphql_orm::async_graphql::{ErrorExtensions, Request, Variables};
 use graphql_orm::graphql::assurance::{
     AssuranceActorClass, AssuranceCheck, AssuranceEnforcement, AssuranceRequirementEvaluator,
     AssuranceSchemaConfig, OperationAssuranceRegistry, UpdateAssuranceInput,
@@ -161,10 +161,10 @@ fn select_review_assurance(
         Some("__undeclared__") => return Ok("undeclared"),
         // Message, source and extensions all carry host text.
         Some("__selector_error__") => {
-            return Err(
-                async_graphql::Error::new_with_source(std::io::Error::other(SELECTOR_SECRET))
-                    .extend_with(|_, extensions| extensions.set("hostDetail", SELECTOR_SECRET)),
-            );
+            return Err(async_graphql::Error::new_with_source(std::io::Error::other(
+                SELECTOR_SECRET,
+            ))
+            .extend_with(|_, extensions| extensions.set("hostDetail", SELECTOR_SECRET)));
         }
         Some("__selector_panic__") => panic!("{SELECTOR_SECRET}"),
         _ => {}
@@ -893,7 +893,10 @@ async fn a_selector_error_or_panic_is_sanitized(db: &Database) -> TestResult {
     ReviewRecord::insert(db, create("r-1")).await?;
     for trigger in ["__selector_error__", "__selector_panic__"] {
         let response = harness
-            .run(update("r-1", &rename(trigger), Some("0")), Granted::Elevated)
+            .run(
+                update("r-1", &rename(trigger), Some("0")),
+                Granted::Elevated,
+            )
             .await;
         assert_eq!(
             error_code(&response).as_deref(),
