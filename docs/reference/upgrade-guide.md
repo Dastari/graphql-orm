@@ -70,9 +70,17 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.206.0, `graphql-orm-macros` 0.206.0; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.207.0, `graphql-orm-macros` 0.207.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
 - **No action** — AI 0.156.0 and AI tool profiles 0.28.0: a model-context benchmark for the fixed capability broker, and broker calls whose cost no longer grows with the index for a host that supplies one index; describe and `describe_type` no longer regenerate compact schemas, and index-set admission refuses a deserialized index that breaks its own limits or stores an entry under another ID; compiled indexes are unaffected (#551). No binding, fingerprint or schema change. [AI](../../crates/graphql-orm-ai/MIGRATION.md#01550-to-01560-capability-model-context-benchmark) · [tool profiles](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0280-index-set-and-signature-reuse)
+- **No action** — ORM/macros 0.207.0: security fix (#876). SQLite renders every closure read predicate in the original form again; from 0.200.0 through 0.206.0, a closure whose pointer column's collation treats values as equal that the key column distinguishes (for example a `NOCASE` or `RTRIM` pointer with a `BINARY` key) could reach a different verdict, so an `Any` closure could deny rows the original admits. On PostgreSQL and SQL Server, directly nested closures over built-in column tests can use fewer target SQL copies and bind parameters (#785). [Migration](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates)
+
+### workspace-2026.11.23.2
+
+Commit `70a5010ecf57` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.23.2)
+
+Packages (changed in bold): **`graphql-orm` 0.206.0**; **`graphql-orm-macros` 0.206.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.30.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
 - **No action** — ORM/macros 0.206.0 and backup 0.30.0 support the SQLite
   and PostgreSQL backup adapters in builds that enable other ORM backends
   (#870).
@@ -82,6 +90,13 @@ Versions on main (bold where they differ from the latest release): `graphql-orm`
 - **No action** — ORM/macros 0.204.0 and backup 0.29.0 add an opt-in for
   databases whose backup and restore are owned by another product.
   [ORM migration](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0281-to-0290-externally-managed-backup-and-restore)
+
+### workspace-2026.11.23.1
+
+Commit `249433ad5128` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.23.1)
+
+Packages (changed in bold): **`graphql-orm` 0.203.0**; **`graphql-orm-macros` 0.203.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.155.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
 - **No action** — AI 0.155.0 supports composing exported AI roots through
   `schema_roots!` with either GraphQL naming setting (#858).
   [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01540-to-01550)
@@ -89,6 +104,13 @@ Versions on main (bold where they differ from the latest release): `graphql-orm`
 - **Action needed** for AI 0.154.0 on SQLite, PostgreSQL, and SQL Server. Drain active workers before the module epoch rotates and invalidates old leases. SQLite and PostgreSQL need no data migration (#813). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01530-to-01540)
 - **Action needed** for ORM/macros 0.203.0 on SQL Server. Review cleanup jobs and cascaded deletes before applying new append-only triggers. There is no trigger opt-out for append-only entities (#813). [ORM migration](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites)
 - **Action needed** for ORM/macros 0.203.0 on SQL Server. Replan and resolve declarations that map to the same physical table. SQL Server now refuses these conflicts (#813). [ORM migration](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites)
+
+### workspace-2026.11.22.4
+
+Commit `ac210f98e867` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.22.4)
+
+Packages (changed in bold): **`graphql-orm` 0.202.0**; **`graphql-orm-macros` 0.202.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.153.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
 - **No action** — ORM/macros 0.202.0 groups additional integration tests. Source checkouts can use the grouped selectors to run individual tests. [Migration](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene)
 - **No action** — ORM/macros 0.202.0 documents the blocking filesystem operations in `write_migration_file`. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-02020)
 - **No action** — ORM/macros 0.201.0 and operation catalogue 0.12.0 return an error for duplicate entity identities through the generated resolver catalogue and fallible schema builders (#829). [Migration](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120)

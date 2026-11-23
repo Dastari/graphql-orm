@@ -60,13 +60,53 @@ struct ClosureParityNode {
     key_b: Option<i64>,
     ptr_a: Option<i64>,
     ptr_b: Option<i64>,
+    name: Option<String>,
+    label: Option<String>,
+}
+
+/// Text pointers and keys under declared collations. `ptr`/`tag` pair a
+/// case-insensitive pointer with a case-sensitive key; `ptr_ci`/`tag_ci`
+/// are both case-insensitive.
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(table = "closure_text_nodes", plural = "ClosureTextNodes")
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "closure_text_nodes",
+        plural = "ClosureTextNodes"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "closure_text_nodes",
+        plural = "ClosureTextNodes"
+    )
+)]
+struct ClosureTextNode {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: i64,
+    parent_id: Option<i64>,
+    ptr: Option<String>,
+    tag: Option<String>,
+    ptr_ci: Option<String>,
+    tag_ci: Option<String>,
+    score: Option<i64>,
 }
 #[cfg(feature = "sqlite")]
-schema_roots! { query_custom_ops: [], entities: [ClosureParityNode] }
+schema_roots! { query_custom_ops: [], entities: [ClosureParityNode, ClosureTextNode] }
 #[cfg(feature = "postgres")]
-schema_roots! { backend: "postgres", query_custom_ops: [], entities: [ClosureParityNode] }
+schema_roots! { backend: "postgres", query_custom_ops: [], entities: [ClosureParityNode, ClosureTextNode] }
 #[cfg(feature = "mssql")]
-schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [ClosureParityNode] }
+schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [ClosureParityNode, ClosureTextNode] }
 
 type B = DefaultBackend;
 type Node = ClosureParityNode;
@@ -259,6 +299,8 @@ fn rows() -> Vec<Node> {
         key_b: Some(key.1),
         ptr_a: pointer.0,
         ptr_b: pointer.1,
+        name: (id % 3 != 0).then(|| if id % 2 == 0 { "abc" } else { "ABC" }.to_owned()),
+        label: (id % 5 != 0).then(|| "abc ".to_owned()),
     };
     for id in 1..=85_i64 {
         let parent = match id {
@@ -387,6 +429,14 @@ async fn fixture() -> (Database, FixtureOwner) {
         let owner = FixtureOwner::start("read-predicate-closure-parity").unwrap();
         let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    graphql_orm::sqlx::query("SET statement_timeout = '60s'")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(&owner.url)
             .await
             .unwrap();
@@ -415,32 +465,43 @@ async fn fixture() -> (Database, FixtureOwner) {
                 .unwrap();
         }
     };
-    execute(
+    #[cfg(feature = "sqlite")]
+    let text_columns = "name TEXT COLLATE NOCASE NULL, label TEXT COLLATE RTRIM NULL";
+    #[cfg(feature = "postgres")]
+    let text_columns = r#"name TEXT COLLATE "C" NULL, label TEXT COLLATE "POSIX" NULL"#;
+    #[cfg(feature = "mssql")]
+    let text_columns = "name NVARCHAR(16) COLLATE Latin1_General_100_CI_AS NULL, \
+                        label NVARCHAR(16) COLLATE Latin1_General_100_CS_AS NULL";
+    execute(format!(
         "CREATE TABLE closure_parity_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, \
          score BIGINT NULL, key_a BIGINT NULL, key_b BIGINT NULL, ptr_a BIGINT NULL, \
-         ptr_b BIGINT NULL)"
-            .to_owned(),
-    )
+         ptr_b BIGINT NULL, {text_columns})"
+    ))
     .await;
     let literal = |value: Option<i64>| value.map_or("NULL".to_owned(), |value| value.to_string());
+    // The generated fixture strings contain only ASCII letters and spaces.
+    let text_literal =
+        |value: Option<&str>| value.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"));
     let values = rows()
         .iter()
         .map(|row| {
             format!(
-                "({}, {}, {}, {}, {}, {}, {})",
+                "({}, {}, {}, {}, {}, {}, {}, {}, {})",
                 row.id,
                 literal(row.parent_id),
                 literal(row.score),
                 literal(row.key_a),
                 literal(row.key_b),
                 literal(row.ptr_a),
-                literal(row.ptr_b)
+                literal(row.ptr_b),
+                text_literal(row.name.as_deref()),
+                text_literal(row.label.as_deref()),
             )
         })
         .collect::<Vec<_>>()
         .join(", ");
     execute(format!(
-        "INSERT INTO closure_parity_nodes (id, parent_id, score, key_a, key_b, ptr_a, ptr_b) VALUES {values}"
+        "INSERT INTO closure_parity_nodes (id, parent_id, score, key_a, key_b, ptr_a, ptr_b, name, label) VALUES {values}"
     ))
     .await;
     (db, owner)
@@ -492,5 +553,505 @@ async fn every_backend_admits_the_reference_sets() {
     // The cases are not vacuous: they admit and refuse rows in both forms.
     let admits = |target: &Target| target.truths(&rows).contains(&Some(true));
     assert!(cases.iter().filter(|(_, target)| admits(target)).count() > cases.len() / 2);
+    owner.cleanup().unwrap();
+}
+
+/// The first SQLite closure subquery in `sql`, through its closing
+/// parenthesis. Read statements bind every value, so the SQL has no string
+/// literals.
+fn closure_sql(sql: &str) -> &str {
+    let start = sql.find("(WITH RECURSIVE").expect("closure subquery");
+    let mut depth = 0_usize;
+    for (offset, character) in sql[start..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &sql[start..=start + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced closure subquery");
+}
+
+/// SQLite renders every closure exactly as the original renderer does.
+/// PostgreSQL and SQL Server take the compact rendering.
+fn assert_nested_rendering(name: &str, original: &str, candidate: &str) {
+    if B::DIALECT == DatabaseBackend::Sqlite {
+        assert!(
+            original.contains(closure_sql(candidate)),
+            "{name}: SQLite keeps the original nested rendering"
+        );
+    } else {
+        assert!(
+            candidate.len() + 64 < original.len(),
+            "{name}: compact rendering"
+        );
+    }
+}
+
+/// The last read statement.
+#[derive(Clone, Default)]
+struct SqlText(std::sync::Arc<std::sync::Mutex<String>>);
+impl graphql_orm::graphql::orm::ReadQueryObserver for SqlText {
+    fn on_read(&self, sql: &str, _: usize) {
+        *self.0.lock().unwrap() = sql.to_owned();
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+async fn directly_nested_closures_agree_with_original_sql() {
+    use ReadPredicateQuantifier::{All, Any};
+    use std::time::Instant;
+
+    let (db, mut owner) = fixture().await;
+    let text = SqlText::default();
+    let db = db.with_read_query_observer(text.clone());
+    let query = |policy| {
+        EntityQuery::<Node>::new()
+            .with_read_visibility(&ReadVisibility::Complete(policy))
+            .unwrap()
+    };
+    let read = |query: EntityQuery<Node>| {
+        let db = &db;
+        let text = &text;
+        async move {
+            let start = Instant::now();
+            let rows = query.fetch_all(db).await.unwrap();
+            let elapsed = start.elapsed();
+            let sql = text.0.lock().unwrap().clone();
+            let mut ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+            ids.sort_unstable();
+            (ids, sql, elapsed)
+        }
+    };
+
+    let text_eq = |column, value: &str| {
+        ReadPredicate::column::<B, Node>(
+            column,
+            ReadPredicateOp::Eq,
+            SqlValue::String(value.to_owned()),
+        )
+        .unwrap()
+    };
+    let score =
+        ReadPredicate::column::<B, Node>("score", ReadPredicateOp::Eq, SqlValue::Float(5.0))
+            .unwrap();
+    let null = ReadPredicate::is_null::<B, Node>("name").unwrap();
+    let score_is =
+        |op, value| ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap();
+    let nested = |outer, inner, target, outer_depth, inner_depth| {
+        let closure = |quantifier, target, depth| {
+            ReadPredicate::related_closure_within::<B, Node>(
+                quantifier,
+                Keys::Parent.columns(),
+                target,
+                depth,
+            )
+            .unwrap()
+        };
+        closure(outer, closure(inner, target, inner_depth), outer_depth)
+    };
+    let cases = [
+        (
+            "case folding",
+            nested(All, All, text_eq("name", "abc"), 1, 1),
+        ),
+        (
+            "trailing space",
+            nested(All, All, text_eq("label", "abc"), 1, 1),
+        ),
+        (
+            "case-sensitive label",
+            nested(All, All, text_eq("label", "ABC "), 1, 1),
+        ),
+        (
+            "float bind for integer column",
+            nested(Any, Any, score.clone(), 1, 3),
+        ),
+        (
+            "scalar negation",
+            nested(All, Any, text_eq("name", "abc").not().unwrap(), 6, 1),
+        ),
+        ("null test", nested(Any, All, null.clone(), 1, 6)),
+        (
+            "disjunction",
+            nested(
+                Any,
+                Any,
+                text_eq("name", "abc").or(null.clone()).unwrap(),
+                6,
+                1,
+            ),
+        ),
+        (
+            "conjunction",
+            nested(
+                All,
+                All,
+                score
+                    .and(ReadPredicate::is_not_null::<B, Node>("name").unwrap())
+                    .unwrap(),
+                6,
+                6,
+            ),
+        ),
+        // Two distinct binds in the nested leaf. Exchanging them would
+        // admit the score-5 rows instead of the score-1 rows.
+        (
+            "two bound values",
+            nested(
+                Any,
+                All,
+                score_is(ReadPredicateOp::Gte, 1)
+                    .and(score_is(ReadPredicateOp::Ne, 5))
+                    .unwrap(),
+                3,
+                3,
+            ),
+        ),
+        (
+            "text and integer binds",
+            nested(
+                All,
+                Any,
+                text_eq("name", "abc")
+                    .and(score_is(ReadPredicateOp::Lt, 5))
+                    .unwrap(),
+                6,
+                3,
+            ),
+        ),
+        (
+            "complete cycle",
+            nested(
+                All,
+                All,
+                ReadPredicate::is_not_null::<B, Node>("id").unwrap(),
+                6,
+                6,
+            ),
+        ),
+    ];
+    let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
+    for (name, candidate) in cases {
+        let original = candidate.clone().and(primary_key_present.clone()).unwrap();
+        let (before, before_sql, _) = read(query(original)).await;
+        let (after, after_sql, _) = read(query(candidate.clone())).await;
+        let (double_negated, _, _) = read(query(candidate.not().unwrap().not().unwrap())).await;
+        assert_eq!(before, after, "{name}");
+        assert_eq!(before, double_negated, "double negation of {name}");
+        if name == "scalar negation" && B::DIALECT == DatabaseBackend::Postgres {
+            // PostgreSQL uses the original renderer for explicit negation.
+            assert!(before_sql.len().abs_diff(after_sql.len()) < 64, "{name}");
+        } else {
+            assert_nested_rendering(name, &before_sql, &after_sql);
+        }
+        // Row 61 has no parent, name 'ABC', and label 'abc '. Check an
+        // observable difference between the declared collations.
+        match name {
+            "case folding" | "trailing space" => {
+                assert_eq!(after.contains(&61), !cfg!(feature = "postgres"), "{name}");
+            }
+            "case-sensitive label" => assert!(!after.contains(&61), "{name}"),
+            "complete cycle" => assert!((80..=85).all(|id| after.contains(&id)), "{name}"),
+            "two bound values" => {
+                // Scores are NULL, 1 or 5, so the leaf is `score < 5` and the
+                // exchanged binds would give `score >= 5`.
+                let reference = |leaf: Target| {
+                    let target = Closure(
+                        Any,
+                        Keys::Parent,
+                        Box::new(Closure(All, Keys::Parent, Box::new(leaf), 3)),
+                        3,
+                    );
+                    let rows = rows();
+                    rows.iter()
+                        .zip(target.truths(&rows))
+                        .filter(|(_, truth)| *truth == Some(true))
+                        .map(|(row, _)| row.id)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(after, reference(Below(5)), "{name}");
+                assert_ne!(after, reference(AtLeast(5)), "{name}");
+            }
+            _ => {}
+        }
+    }
+    if B::DIALECT == DatabaseBackend::Postgres {
+        let initial =
+            ReadPredicate::column::<B, Node>("id", ReadPredicateOp::Ne, SqlValue::Int(61)).unwrap();
+        let primary_key_missing = ReadPredicate::is_null::<B, Node>("id").unwrap();
+        // Each alternation adds one level while preserving the target's
+        // truth. At this boundary the extra compact scalar parentheses
+        // exceed the budget and the original renderer still fits.
+        let mut target = initial;
+        for step in 0..248 {
+            target = if step % 2 == 0 {
+                target.and(primary_key_present.clone())
+            } else {
+                target.or(primary_key_missing.clone())
+            }
+            .unwrap();
+        }
+        let below_limit = nested(All, All, target.clone(), 1, 1);
+        let fallback = nested(
+            All,
+            All,
+            target.and(primary_key_present.clone()).unwrap(),
+            1,
+            1,
+        );
+        let original = fallback.clone().and(primary_key_present).unwrap();
+        assert_eq!(query(below_limit.clone()).build_delete_sql().1.len(), 4);
+        assert_eq!(
+            query(fallback.clone()).build_delete_sql().1,
+            vec![SqlValue::Int(61); 16]
+        );
+        let (before, _, _) = read(query(original)).await;
+        let (after, _, _) = read(query(fallback)).await;
+        let (below_limit, _, _) = read(query(below_limit)).await;
+        assert_eq!(after, before, "compact cost fallback");
+        assert_eq!(after, below_limit, "at the compact cost boundary");
+        assert!(!after.is_empty() && !after.contains(&61));
+    }
+
+    for outer_keys in [Keys::Parent, Keys::Composite, Keys::FanOut] {
+        for inner_keys in [Keys::Parent, Keys::Composite, Keys::FanOut] {
+            for outer in [Any, All] {
+                for inner in [Any, All] {
+                    // Model three principals with different score thresholds.
+                    for minimum in [1, 5, 6] {
+                        let target = Closure(
+                            outer,
+                            outer_keys,
+                            Box::new(Closure(inner, inner_keys, Box::new(AtLeast(minimum)), 3)),
+                            3,
+                        );
+                        let candidate = target.predicate();
+                        // AND selects the original composition renderer. The fixture's
+                        // non-null primary key makes the additional check always true.
+                        let original = candidate
+                            .clone()
+                            .and(ReadPredicate::is_not_null::<B, Node>("id").unwrap())
+                            .unwrap();
+                        let original = query(original);
+                        let candidate = query(candidate);
+                        let (before, before_sql, _) = read(original.clone()).await;
+                        let (after, after_sql, _) = read(candidate.clone()).await;
+                        assert_eq!(before, after, "{target:?}");
+                        assert_nested_rendering(&format!("{target:?}"), &before_sql, &after_sql);
+                        if matches!(
+                            (outer_keys, inner_keys, outer, inner, minimum),
+                            (Keys::Parent, Keys::Parent, Any, All, 5)
+                        ) {
+                            let mut before_times = Vec::new();
+                            let mut after_times = Vec::new();
+                            for _ in 0..3 {
+                                before_times.push(read(original.clone()).await.2);
+                                after_times.push(read(candidate.clone()).await.2);
+                            }
+                            before_times.sort_unstable();
+                            after_times.sort_unstable();
+                            eprintln!(
+                                "{:?}: depth-3 any(all(score >= 5)), {} -> {} bytes, median {:?} -> {:?}",
+                                B::DIALECT,
+                                before_sql.len(),
+                                after_sql.len(),
+                                before_times[1],
+                                after_times[1],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    owner.cleanup().unwrap();
+}
+
+/// Two rows reached at the same depth carry the pointers `'a'` and `'A'`
+/// with different target truths. Under a case-insensitive pointer collation
+/// they compare equal, so a walk that deduplicated them without their truth
+/// could drop one before following it. `ptr`/`tag` pair a case-insensitive
+/// pointer with a case-sensitive key, where each pointer names a different
+/// row; `ptr_ci`/`tag_ci` are both case-insensitive, where each names both.
+/// The original and candidate renderings must agree on every backend. The
+/// SQL Server walk carries only pointers in both renderings, and PostgreSQL's
+/// recursive tuple carries the truth in both.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "owned database lane"
+)]
+async fn collation_equal_text_pointers_agree_with_original_sql() {
+    use ReadPredicateQuantifier::{All, Any};
+    type Text = ClosureTextNode;
+
+    let (db, mut owner) = fixture().await;
+    let execute = |sql: &str| {
+        let db = db.clone();
+        let sql = sql.to_owned();
+        async move {
+            <B as WriteBackend>::execute_with_binds(db.pool(), &sql, &[])
+                .await
+                .unwrap();
+        }
+    };
+    #[cfg(feature = "sqlite")]
+    let columns = "ptr TEXT COLLATE NOCASE NULL, tag TEXT COLLATE BINARY NULL, \
+                   ptr_ci TEXT COLLATE NOCASE NULL, tag_ci TEXT COLLATE NOCASE NULL";
+    #[cfg(feature = "postgres")]
+    let columns = {
+        execute(
+            "CREATE COLLATION closure_ci (provider = icu, \
+             locale = 'und-u-ks-level2', deterministic = false)",
+        )
+        .await;
+        r#"ptr TEXT COLLATE closure_ci NULL, tag TEXT COLLATE "C" NULL, ptr_ci TEXT COLLATE closure_ci NULL, tag_ci TEXT COLLATE closure_ci NULL"#
+    };
+    #[cfg(feature = "mssql")]
+    let columns = "ptr NVARCHAR(8) COLLATE Latin1_General_100_CI_AS NULL, \
+                   tag NVARCHAR(8) COLLATE Latin1_General_100_CS_AS NULL, \
+                   ptr_ci NVARCHAR(8) COLLATE Latin1_General_100_CI_AS NULL, \
+                   tag_ci NVARCHAR(8) COLLATE Latin1_General_100_CI_AS NULL";
+    execute(&format!(
+        "CREATE TABLE closure_text_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, \
+         {columns}, score BIGINT NULL)"
+    ))
+    .await;
+    // Row 1 points at 'p'. Rows 2 and 3 share the key 'p' and point at 'a'
+    // (score 0, FALSE) and 'A' (score NULL, UNKNOWN); only key 'A' has score
+    // 1. Rows 6 to 10 mirror this with score 1 under the lower-case key, so
+    // whichever collation-equal pointer a deduplicating walk kept, one group
+    // would lose its TRUE row. No row has a parent.
+    let rows: [(i64, Option<&str>, &str, Option<i64>); 10] = [
+        (1, Some("p"), "g", Some(0)),
+        (2, Some("a"), "p", Some(0)),
+        (3, Some("A"), "p", None),
+        (4, None, "a", Some(0)),
+        (5, None, "A", Some(1)),
+        (6, Some("q"), "h", Some(0)),
+        (7, Some("b"), "q", None),
+        (8, Some("B"), "q", Some(0)),
+        (9, None, "b", Some(1)),
+        (10, None, "B", Some(0)),
+    ];
+    let values = rows
+        .iter()
+        .map(|(id, pointer, key, score)| {
+            let pointer = pointer.map_or_else(|| "NULL".to_owned(), |text| format!("'{text}'"));
+            let score = score.map_or_else(|| "NULL".to_owned(), |score| score.to_string());
+            format!("({id}, NULL, {pointer}, '{key}', {pointer}, '{key}', {score})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute(&format!(
+        "INSERT INTO closure_text_nodes (id, parent_id, ptr, tag, ptr_ci, tag_ci, score) \
+         VALUES {values}"
+    ))
+    .await;
+
+    let text = SqlText::default();
+    let db = db.with_read_query_observer(text.clone());
+    let read = |policy: ReadPredicate| {
+        let db = &db;
+        let text = &text;
+        async move {
+            let rows = EntityQuery::<Text>::new()
+                .with_read_visibility(&ReadVisibility::Complete(policy))
+                .unwrap()
+                .fetch_all(db)
+                .await;
+            let sql = text.0.lock().unwrap().clone();
+            let rows = rows.map(|rows| {
+                let mut ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids
+            });
+            (rows.map_err(|error| error.to_string()), sql)
+        }
+    };
+    let score =
+        |op, value| ReadPredicate::column::<B, Text>("score", op, SqlValue::Int(value)).unwrap();
+    let nested = |outer, inner, keys: &[(&str, &str)], target| {
+        let closure = |quantifier, keys: &[(&str, &str)], target| {
+            ReadPredicate::related_closure_within::<B, Text>(quantifier, keys, target, 3).unwrap()
+        };
+        closure(outer, &[("parent_id", "id")], closure(inner, keys, target))
+    };
+    let primary_key_present = ReadPredicate::is_not_null::<B, Text>("id").unwrap();
+    let mut outcomes = Vec::new();
+    for (pair, keys) in [
+        ("case-sensitive key", [("ptr", "tag")]),
+        ("case-insensitive key", [("ptr_ci", "tag_ci")]),
+    ] {
+        let cases = [
+            (
+                "any",
+                nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1)),
+            ),
+            (
+                "all",
+                nested(All, All, &keys, score(ReadPredicateOp::Ne, 1)),
+            ),
+            (
+                "not any",
+                nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1))
+                    .not()
+                    .unwrap(),
+            ),
+        ];
+        for (quantifier, candidate) in cases {
+            let name = format!("{pair}, {quantifier}");
+            let original = candidate.clone().and(primary_key_present.clone()).unwrap();
+            let (before, before_sql) = read(original).await;
+            let (after, after_sql) = read(candidate).await;
+            // A statement error is the same outcome for both renderings.
+            assert_eq!(before.as_ref().ok(), after.as_ref().ok(), "{name}");
+            assert_eq!(before.is_err(), after.is_err(), "{name}");
+            // A negated closure keeps the original rendering.
+            if after.is_ok() && quantifier != "not any" {
+                assert_nested_rendering(&name, &before_sql, &after_sql);
+            }
+            outcomes.push((name, after.ok()));
+        }
+    }
+    let admitted = |ids: &[i64]| Some(ids.to_vec());
+    // PostgreSQL and SQL Server refuse to compare a pointer and key with
+    // different collations, so both renderings fail the statement there.
+    let case_sensitive = if B::DIALECT == DatabaseBackend::Sqlite {
+        [
+            admitted(&[1, 3, 5, 6, 7, 9]),
+            admitted(&[2, 4, 8, 10]),
+            admitted(&[2, 4, 8, 10]),
+        ]
+    } else {
+        [None, None, None]
+    };
+    let case_insensitive = [
+        admitted(&[1, 2, 3, 5, 6, 7, 8, 9]),
+        admitted(&[4, 10]),
+        admitted(&[4, 10]),
+    ];
+    let expected = case_sensitive
+        .into_iter()
+        .chain(case_insensitive)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes
+            .into_iter()
+            .map(|(_, outcome)| outcome)
+            .collect::<Vec<_>>(),
+        expected
+    );
     owner.cleanup().unwrap();
 }

@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.207.0 aligns with the ORM's
+[closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
 Version 0.206.0 aligns with the ORM runtime's
 [backend-typed backup API](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
 
