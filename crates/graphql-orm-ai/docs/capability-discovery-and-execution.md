@@ -143,7 +143,7 @@ for one machine and one build. Approximate tokens are bytes / 4. The *eager
 reference* is the size of one exact definition per root: what eager or
 provider-deferred delivery would send for the same roots.
 
-Release build, 2026-11-23 (AI 0.155.0, tool profiles 0.28.0):
+Release build, 2026-11-23 (AI 0.156.0, tool profiles 0.28.0):
 
 | Targets | Query roots | Index entries | First-turn definitions | Eager reference | Discover result p95 | Describe result p95 | `describe_type` page p95 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

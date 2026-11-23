@@ -10,12 +10,12 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.155.0
+## Unreleased - 0.156.0
 
 Model-context measurement for the fixed capability broker (#551). Requires AI
 tool profiles 0.28.0. No public API, GraphQL SDL, persistent schema, broker
 definition or fingerprint change, and no AI schema module change. See the
-[migration guide](MIGRATION.md#01550-capability-model-context-benchmark).
+[migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
 
 - **Added:** the `capability_context_benchmark` example (requires the
   `sqlite` feature) stamps a realistic generated entity family across 1, 10

@@ -10,11 +10,11 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.155.0 adds a model-context benchmark for the fixed capability broker and,
+AI 0.156.0 adds a model-context benchmark for the fixed capability broker and,
 with AI tool profiles 0.28.0, keeps per-call broker costs flat for a host that
 supplies one index. No API, binding or schema change. See the
 [benchmark results](docs/capability-discovery-and-execution.md#model-context-benchmark)
-and the [migration guide](MIGRATION.md#01550-capability-model-context-benchmark).
+and the [migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
 
 AI 0.153.0 binds compaction to the session's pinned provider and model, checks
 the lease before adopting tool checkpoints, and reads restore facts in bounded

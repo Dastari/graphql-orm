@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.155.0: capability model-context benchmark
+## 0.155.0 to 0.156.0: capability model-context benchmark
 
 **No action.** Upgrade together with AI tool profiles 0.28.0. Broker
 definitions, provider-session bindings, capability, index and index-set
