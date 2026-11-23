@@ -18,8 +18,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
-    BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy, EntityBackupDescriptor,
-    EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
+    BackupRestoreExternallyManaged, BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy,
+    EntityBackupDescriptor, EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
     RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode, ensure_sql_write_allowed,
     stable_schema_hash,
 };
@@ -33,6 +33,14 @@ use crate::{
     BackupRow, BackupTableExport, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema, RestoreContext,
     RestoreMode, collect_backup_stream,
 };
+
+fn require_orm_backup_restore(database: &Database) -> Result<(), BackupError> {
+    if database.backup_restore_is_externally_managed() {
+        Err(BackupRestoreExternallyManaged.into())
+    } else {
+        Ok(())
+    }
+}
 
 /// [`GraphqlOrmBackupAdapter`] over a `graphql-orm` [`Database`].
 ///
@@ -126,6 +134,7 @@ impl OrmBackupAdapter {
     /// Returns [`BackupError`] if the migration version cannot be read or a
     /// configured column policy override is invalid.
     pub async fn current_schema_snapshot(&self) -> Result<GraphqlOrmSchemaSnapshot, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         let migration_version = self.resolve_migration_version().await?;
         let mut snapshot = GraphqlOrmBackupRuntime::schema_snapshot(
             self.database.as_ref(),
@@ -192,6 +201,7 @@ impl OrmBackupAdapter {
     /// Returns [`BackupError`] if a column policy override is invalid or any
     /// clear statement or transaction fails.
     pub async fn clear_restore_target(&self) -> Result<(), BackupError> {
+        self.ensure_backup_restore_allowed()?;
         ensure_sql_write_allowed().map_err(database_error("clear restore target"))?;
         let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
@@ -314,6 +324,10 @@ impl OrmBackupAdapter {
 
 #[async_trait]
 impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
+    fn ensure_backup_restore_allowed(&self) -> Result<(), BackupError> {
+        require_orm_backup_restore(&self.database)
+    }
+
     async fn schema_snapshot(&self) -> Result<GraphqlOrmBackupSchema, BackupError> {
         let snapshot = self.current_schema_snapshot().await?;
         Ok(GraphqlOrmBackupSchema {
@@ -324,6 +338,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         let mut tx = self
             .database
             .pool()
@@ -361,6 +376,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
             left.export_order
@@ -398,6 +414,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         &self,
         _parent_snapshot_id: Uuid,
     ) -> Result<Vec<BackupChangeExport>, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         Err(BackupError::UnsupportedOperation {
             operation: "incremental export requires a graphql-orm change journal integration"
                 .to_string(),
@@ -410,6 +427,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.ensure_backup_restore_allowed()?;
         ensure_sql_write_allowed().map_err(database_error("restore rows"))?;
         let context = orm_restore_context(&context)?;
         let current_snapshot = self.current_schema_snapshot().await?;
@@ -464,6 +482,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         _changes: Vec<BackupChangeExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.ensure_backup_restore_allowed()?;
         ensure_sql_write_allowed().map_err(database_error("restore incremental rows"))?;
         Err(BackupError::UnsupportedOperation {
             operation: "incremental restore requires a graphql-orm change journal integration"
@@ -581,6 +600,10 @@ impl OrmBackupObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for OrmBackupObjectIndex {
+    fn ensure_backup_allowed(&self) -> Result<(), BackupError> {
+        require_orm_backup_restore(&self.database)
+    }
+
     fn buffered_byte_limit(&self) -> BackupByteLimit {
         self.buffered_limit
     }
@@ -588,6 +611,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
         &self,
         tables: &[BackupTableExport],
     ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         let table = tables
             .iter()
             .find(|table| table.table_name == self.columns.table_name)
@@ -627,6 +651,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
     }
 
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         let descriptor = self.object_table_descriptor()?;
         let mut snapshot = self
             .database
@@ -654,6 +679,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
         &self,
         _since_snapshot_id: Uuid,
     ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         Err(BackupError::UnsupportedOperation {
             operation:
                 "incremental object discovery requires a graphql-orm change journal integration"
@@ -662,6 +688,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
     }
 
     async fn load_object(&self, object: &BackupObjectRef) -> Result<Bytes, BackupError> {
+        self.ensure_backup_allowed()?;
         load_blob(
             self.store.as_ref(),
             &object.storage_key,
@@ -674,6 +701,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
         &self,
         object: &BackupObjectRef,
     ) -> Result<StorageByteStream, BackupError> {
+        self.ensure_backup_allowed()?;
         load_blob_stream(self.store.as_ref(), &object.storage_key).await
     }
 }

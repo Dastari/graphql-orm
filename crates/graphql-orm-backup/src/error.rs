@@ -236,6 +236,13 @@ pub enum BackupError {
     #[error("unsupported operation: {operation}")]
     UnsupportedOperation { operation: String },
 
+    /// Another product owns backup and restore for this database.
+    #[cfg(feature = "orm")]
+    #[error(transparent)]
+    BackupRestoreExternallyManaged(
+        #[from] graphql_orm::graphql::orm::BackupRestoreExternallyManaged,
+    ),
+
     #[error("database adapter error: {message}")]
     Database { message: String },
 

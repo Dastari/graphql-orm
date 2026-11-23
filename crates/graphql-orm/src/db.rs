@@ -144,6 +144,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     write_input_transform: Option<Arc<dyn Any + Send + Sync>>,
     post_commit_error_handler: Option<Arc<dyn Any + Send + Sync>>,
     change_journal_enabled: bool,
+    externally_managed_backup_restore: bool,
     schema_policy: SchemaPolicy,
     pagination_config: PaginationConfig,
     refuse_oversized_limit: bool,
@@ -181,6 +182,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             write_input_transform: self.write_input_transform.clone(),
             post_commit_error_handler: self.post_commit_error_handler.clone(),
             change_journal_enabled: self.change_journal_enabled,
+            externally_managed_backup_restore: self.externally_managed_backup_restore,
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
@@ -264,6 +266,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy,
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -302,6 +305,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -337,6 +341,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -372,6 +377,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -407,6 +413,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -445,6 +452,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: Some(Arc::new(transform)),
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -490,6 +498,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            externally_managed_backup_restore: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
@@ -515,6 +524,29 @@ impl<B: OrmBackend> Database<B> {
     /// Return the backend pool used by generated code.
     pub fn pool(&self) -> &B::Pool {
         &self.pool
+    }
+
+    /// Whether another system owns backup and restore for this database handle.
+    ///
+    /// See [`DatabaseBuilder::externally_managed_backup_restore`].
+    pub fn backup_restore_is_externally_managed(&self) -> bool {
+        #[cfg(feature = "mssql")]
+        if let Some(pool) = (&self.pool as &dyn Any).downcast_ref::<mssql::MssqlPool>() {
+            return pool.externally_managed_backup_restore;
+        }
+        self.externally_managed_backup_restore
+    }
+
+    /// Configure who owns backup and restore for this database handle.
+    ///
+    /// See [`DatabaseBuilder::externally_managed_backup_restore`].
+    pub fn with_externally_managed_backup_restore(mut self, enabled: bool) -> Self {
+        self.externally_managed_backup_restore = enabled;
+        #[cfg(feature = "mssql")]
+        if let Some(pool) = (&mut self.pool as &mut dyn Any).downcast_mut::<mssql::MssqlPool>() {
+            pool.externally_managed_backup_restore = enabled;
+        }
+        self
     }
 
     /// Return the schema ownership policy attached to this database handle.
@@ -2330,6 +2362,29 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Set the schema ownership policy for the resulting [`Database`].
     pub fn schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
         self.database.schema_policy = schema_policy;
+        self
+    }
+
+    /// Declare that another product owns this database's backup and restore.
+    ///
+    /// Off by default. Enabling this refuses ORM backup, restore and restore
+    /// fencing before database access. On SQL Server, ordinary queries and
+    /// writes use neither the restore marker nor its application lock.
+    ///
+    /// Set this on every handle: a default handle can still back up, restore,
+    /// or fence the same database where supported, and opted-in writers can
+    /// keep writing during that restore. On PostgreSQL and SQLite,
+    /// `Database::new(db.pool().clone())` drops this setting.
+    ///
+    /// Before opting in on an existing SQL Server database, call
+    /// [`Database::restore_in_progress`] on a default handle and resolve any
+    /// interrupted restore. Drop the marker only after confirming that the
+    /// database is fully restored, since opted-in handles skip the check.
+    /// This setting does not change schema ownership or grant write access.
+    pub fn externally_managed_backup_restore(mut self, enabled: bool) -> Self {
+        self.database = self
+            .database
+            .with_externally_managed_backup_restore(enabled);
         self
     }
 

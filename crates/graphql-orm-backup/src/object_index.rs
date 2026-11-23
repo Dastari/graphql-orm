@@ -9,6 +9,16 @@ use crate::{BackupByteLimit, BackupError};
 #[async_trait]
 /// Application object lookup contract used by backup operations.
 pub trait BackupObjectIndex: Send + Sync {
+    /// Check whether backup may use this index before accessing it or the
+    /// repository. Implementations must perform this check without I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns a refusal when the index is configured to disallow backup.
+    fn ensure_backup_allowed(&self) -> Result<(), BackupError> {
+        Ok(())
+    }
+
     /// Limit checked after the buffered loader returns; provider allocation already exists.
     fn buffered_byte_limit(&self) -> BackupByteLimit {
         BackupByteLimit::default()
@@ -50,6 +60,7 @@ pub trait BackupObjectIndex: Send + Sync {
         _parent_snapshot_id: Uuid,
         _changes: &[crate::BackupChangeExport],
     ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         Err(BackupError::UnsupportedOperation {
             operation: "object index must derive references from the incremental database export"
                 .into(),

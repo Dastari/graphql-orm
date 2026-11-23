@@ -43,6 +43,14 @@ for historical context.
   Entities that opt into neither keep byte-identical SDL, catalogues,
   fingerprints and debug output.
 
+## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
+
+- **Added (follow-up to #731).** Opt in per database when another product
+  owns backup and restore. The ORM and its backup adapter refuse backup and
+  restore before I/O. SQL Server queries and writes on opted-in handles
+  run without the restore marker or fencing lock.
+  [Migration](MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore)
+
 ## Unreleased - ORM/macros 0.203.0
 
 - **Action needed.** Before applying a regenerated SQL Server plan, review

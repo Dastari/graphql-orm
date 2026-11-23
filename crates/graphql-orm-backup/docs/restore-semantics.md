@@ -10,6 +10,17 @@ supersedes: []
 
 # Restore Semantics
 
+## Externally managed databases
+
+Use the ORM's
+[external backup and restore setting](../../../docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore)
+for databases whose backup and restore are owned by another product.
+`OrmBackupAdapter` returns `BackupError::BackupRestoreExternallyManaged`
+(code `BACKUP_RESTORE_EXTERNALLY_MANAGED`) before reading or writing the
+database or the snapshot repository. This covers full and incremental
+backups, target checks and clears, and both applying and dry-run restores.
+`OrmBackupObjectIndex` also refuses when its database has opted in.
+
 ## Supported Modes
 
 The default applying mode restores into an empty target:

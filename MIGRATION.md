@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.203.0 to 0.209.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+## 0.204.0 to 0.209.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
 
 **No action.** Both features are opt-in, and no data migration is needed.
 Entities that declare neither option generate byte-identical SDL, operation
@@ -47,6 +47,17 @@ selector. Host SQL in a filter or policy predicate runs inside the same
 transaction, and any write it makes rolls back on refusal.
 See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
 and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+## 0.203.0 to 0.204.0: externally managed backup and restore
+
+**No action.** The default backup and restore behavior stays the same. No
+data migration is needed. For a database whose backup and restore are owned
+by another product, opt in with
+`DatabaseBuilder::externally_managed_backup_restore(true)` on every handle.
+Backup, restore, and explicit restore-fencing operations return
+`BACKUP_RESTORE_EXTERNALLY_MANAGED`. Use the same reviewed workspace revision
+for ORM and backup 0.29.0 if you use its ORM adapter.
+See [backup ownership](docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore).
 
 ## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
 
