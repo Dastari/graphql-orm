@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.208.0 exposes the read-only duplicate-key preflight for hosts
+Version 0.209.0 exposes the read-only duplicate-key preflight for hosts
 applying DDL externally. See the
-[migration guide](../../MIGRATION.md#02070-to-02080-external-migration-preflight).
+[migration guide](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
 
 Version 0.207.0 renders SQLite closure read predicates in the original form
 again (#876) and reduces SQL duplication for directly nested closure read

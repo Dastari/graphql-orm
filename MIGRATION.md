@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.207.0 to 0.208.0: external migration preflight
+## 0.208.0 to 0.209.0: external migration preflight
 
 **No action.** Upgrade ORM and macros together. Hosts applying DDL externally
 can call `database.schema().preflight_unique_indexes(&plan).await?` before any
