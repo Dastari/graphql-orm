@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.156.0 adds a model-context benchmark for the fixed capability broker and,
+with AI tool profiles 0.28.0, keeps per-call broker costs flat for a host that
+supplies one index. No API, binding or schema change. See the
+[benchmark results](docs/capability-discovery-and-execution.md#model-context-benchmark)
+and the [migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
+
 AI 0.155.0 supports composing the exported AI roots directly through
 `schema_roots!` in camelCase and PascalCase. Compose `AiUsageQueryRoot` only
 when the schema omits `AiQueryRoot`, which already includes usage reporting.
