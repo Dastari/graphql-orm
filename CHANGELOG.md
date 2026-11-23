@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.211.0
+## Unreleased - ORM/macros 0.207.0
 
 - **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite
   closure read predicate (`related_closure_within` and its shorthands) could

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.206.0 to 0.211.0: SQLite closure rendering and nested closure read predicates
+## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
 
 **No action.** SQLite renders every closure read predicate, single-level and
 nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
