@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.30.0
+
+- `orm-sqlite` and `orm-postgres` select the database handle type used by the
+  ready-made adapter and object index, including when other workspace
+  members enable additional ORM backends. Enabling both adapter features
+  produces a compile-time diagnostic (#870).
+
 ## Unreleased - 0.29.0
 
 - The ORM adapter and object index honor the database's external backup and

@@ -10,11 +10,11 @@ supersedes: []
 
 # Migration Guide
 
-## 0.205.0 to 0.211.0: SQLite closure rendering and nested closure read predicates
+## 0.206.0 to 0.211.0: SQLite closure rendering and nested closure read predicates
 
 **No action.** SQLite renders every closure read predicate, single-level and
 nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
-on 0.200.0 through 0.205.0 were exposed only if a SQLite closure walks a
+on 0.200.0 through 0.206.0 were exposed only if a SQLite closure walks a
 pointer column with a case-insensitive collation (for example `NOCASE`) into a
 case-sensitive key column; there, collation-equal pointers such as `'a'` and
 `'A'` could be followed differently from the original rendering.
@@ -29,6 +29,16 @@ binds whose type differs from the column's. Where PostgreSQL or SQL Server
 cannot compare a pointer and key with different collations, both renderings
 fail the statement. Composition limits still apply. Applications that
 snapshot generated policy SQL may need to refresh those snapshots. Refs #785.
+
+## 0.205.0 to 0.206.0: backend-typed backup runtime
+
+**No action.** Upgrade ORM and macros together. SQLite and PostgreSQL
+`Database<B>` handles expose full backup and restore even when Cargo enables
+multiple ORM backends. Incremental backup still requires a single ORM backend
+with `change-journal`: in a multi-backend build `ensure_change_journal_table`,
+`ensure_change_journal_recorder` and `export_changes*` exist but always return
+an error. Use backup 0.30.0 from the same reviewed workspace
+revision to select a typed adapter with `orm-sqlite` or `orm-postgres`.
 
 ## 0.204.0 to 0.205.0: generated Changed subscriptions
 
