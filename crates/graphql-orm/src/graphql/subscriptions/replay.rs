@@ -42,6 +42,7 @@ pub(super) fn reset() -> async_graphql::Error {
 pub(super) struct Position {
     pub(super) sequence: u64,
     milliseconds: u64,
+    ring_id: uuid::Uuid,
 }
 
 type Witness<E, B> = SubscriptionEvent<E, B>;
@@ -62,6 +63,7 @@ struct Retention<T> {
 /// Owns the publication lock and cursor key for one typed channel generation.
 pub(crate) struct ChangedReplay<T> {
     channel: broadcast::WeakSender<T>,
+    id: uuid::Uuid,
     cipher: XChaCha20Poly1305,
     start: Instant,
     retained: Mutex<Retention<T>>,
@@ -71,6 +73,7 @@ impl<T: Clone + Send + Sync + 'static> ChangedReplay<T> {
     pub(crate) fn new(channel: &broadcast::Sender<T>) -> Arc<Self> {
         let replay = Arc::new(Self {
             channel: channel.downgrade(),
+            id: uuid::Uuid::new_v4(),
             cipher: XChaCha20Poly1305::new(&XChaCha20Poly1305::generate_key(&mut OsRng)),
             start: Instant::now(),
             retained: Mutex::new(Retention {
@@ -125,7 +128,14 @@ impl<T: Clone + Send + Sync + 'static> ChangedReplay<T> {
         expired(position, self.now())
     }
 
+    pub(super) fn is_next(&self, position: Position, expected: Option<u64>) -> bool {
+        position.ring_id == self.id && Some(position.sequence) == expected
+    }
+
     pub(super) fn seal(&self, position: Position, binding: &[u8; 32]) -> Option<String> {
+        if position.ring_id != self.id {
+            return None;
+        }
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let mut plain = [0; POSITION_BYTES];
         plain[..8].copy_from_slice(&position.sequence.to_be_bytes());
@@ -169,6 +179,7 @@ impl<T: Clone + Send + Sync + 'static> ChangedReplay<T> {
         Some(Position {
             sequence: u64::from_be_bytes(plain[..8].try_into().ok()?),
             milliseconds: u64::from_be_bytes(plain[8..].try_into().ok()?),
+            ring_id: self.id,
         })
     }
 
@@ -229,6 +240,7 @@ impl<E: Clone + Send + Sync + 'static, B: OrmBackend> ChangedReplay<Witness<E, B
         let position = Position {
             sequence,
             milliseconds: now,
+            ring_id: self.id,
         };
         retained.sequence = sequence;
         event.replay_position = Some(position);

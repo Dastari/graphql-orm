@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.213.0 and operation catalogue 0.13.0
+## Unreleased - ORM/macros 0.213.0 and operation catalogue 0.12.1
 
 - **Added (#668).** Generated Changed subscriptions can opt in to an opaque
   cursor and bounded, process-local replay. Replay checks current subscriber

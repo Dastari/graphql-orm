@@ -1043,6 +1043,13 @@ pub(crate) fn take_lag_marker(error: &mut async_graphql::Error) -> bool {
     lagged
 }
 
+fn source_closed() -> async_graphql::Error {
+    subscription_end(
+        SUBSCRIPTION_SOURCE_CLOSED,
+        "subscription event source closed; subscribe again, then refetch",
+    )
+}
+
 /// Events of one generated subscription's channel, checked for continuity
 /// before any filter.
 ///
@@ -1072,13 +1079,7 @@ where
         match events.next().await {
             Some(Ok(event)) => Some((Ok(event), Some(events))),
             Some(Err(BroadcastStreamRecvError::Lagged(_))) => Some((Err(lag_end()), None)),
-            None => Some((
-                Err(subscription_end(
-                    SUBSCRIPTION_SOURCE_CLOSED,
-                    "subscription event source closed; subscribe again, then refetch",
-                )),
-                None,
-            )),
+            None => Some((Err(source_closed()), None)),
         }
     })
 }

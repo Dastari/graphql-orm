@@ -16,7 +16,14 @@ supersedes: []
 To adopt replay, set `changed_started = true, changed_replay = true` on the
 entity. Update clients to save `Cursor`, resume with `After` and resubscribe
 without a cursor before refetching on `SUBSCRIPTION_REPLAY_RESET`. Operation
-catalogue 0.13.0 describes the replay window in exported client metadata.
+catalogue 0.12.1 describes the replay window in exported client metadata.
+
+A resume waits for the authority tick within the advertised 120-second
+window. Base intervals of 120 seconds or more make every resume age out.
+The reset bit is visible at tick granularity. Parallel probes with reusable
+cursors can estimate when total writes after a checkpoint cross the 128-event
+bound, including hidden and other-tenant writes. An oversized delete preimage
+or a value whose storage cannot be measured clears the ring.
 [Changed replay reference](docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
 
 ## 0.204.0 to 0.205.0: generated Changed subscriptions

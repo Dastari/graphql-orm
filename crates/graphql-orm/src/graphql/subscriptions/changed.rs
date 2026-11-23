@@ -4,7 +4,7 @@ use super::{
     ChangedPayload, SubscriptionEvent, SubscriptionKeySet, admit_generated_operation,
     admit_subscription_keys, authority_check_end, authority_recheck_delay,
     authorize_subscription_fields, authorize_subscription_key_fields, authorize_subscription_keys,
-    authorize_subscription_row, continuity_events, lag_end, replay,
+    authorize_subscription_row, continuity_events, lag_end, replay, source_closed,
     validate_subscription_selection, watch_subscription_authority,
 };
 use crate::db::{Database, request_database};
@@ -167,10 +167,6 @@ where
                     }
                     Err(error) => return Some(Err(error)),
                 };
-                if cursor.is_some() && witness.replay_position.is_none() {
-                    // A host-injected unsequenced witness breaks continuity.
-                    return Some(Err(lag_end()));
-                }
                 filter_event::<B, E>(db, ctx, witness, key, keys, actions, cursor.as_ref()).await
             }
         });
@@ -221,7 +217,13 @@ where
     } else {
         None
     };
-    let (receiver, last) = ring.subscribe(&sender, after).ok_or_else(replay::reset)?;
+    let (receiver, last) = ring.subscribe(&sender, after).ok_or_else(|| {
+        if after.is_some() {
+            replay::reset()
+        } else {
+            source_closed()
+        }
+    })?;
     let replay = stream::unfold(after.and_then(|pos| pos.sequence.checked_add(1)), {
         let ring = ring.clone();
         move |next| {
@@ -235,11 +237,25 @@ where
             }
         }
     });
+    let mut expected = last.checked_add(1);
+    let live = continuity_events(receiver).map({
+        let ring = ring.clone();
+        move |item| {
+            let witness = item?;
+            let position = witness.replay_position.ok_or_else(lag_end)?;
+            // Check continuity before filtering, including events this subscriber cannot read.
+            if !ring.is_next(position, expected) {
+                return Err(lag_end());
+            }
+            expected = position.sequence.checked_add(1);
+            Ok(Frame::Witness(witness))
+        }
+    });
     let frames = replay
         .chain(stream::iter(
             (started || after.is_some()).then_some(Ok(Frame::Started)),
         ))
-        .chain(continuity_events(receiver).map(|item| item.map(Frame::Witness)))
+        .chain(live)
         .boxed();
     Ok((frames, Cursor { ring, binding }))
 }

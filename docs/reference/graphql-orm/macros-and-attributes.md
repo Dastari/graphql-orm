@@ -1594,10 +1594,13 @@ that the live subscription is listening before fetching initial state.
 
 Each entity has one ring shared by all subscriptions of a `Database` and its
 clones. It retains up to 128 events and 2 MiB of accounted witness storage.
-Cursors and ring entries expire after two minutes. Oldest entries are evicted
-first. A witness that exceeds the budget still travels live and creates a
-replay gap. A reconnect holds at most one retained witness at a time and scans
-at most one ring window.
+Cursors and ring entries become ineligible for replay after two minutes.
+Oldest entries are evicted first. An idle ring prunes expired entries on the
+Tokio runtime that created it. If that runtime shuts down, or the ring was
+created outside a Tokio runtime, an idle entity can retain deleted preimages
+past two minutes until a later publish, subscription attachment, replay read,
+or ring retirement. A reconnect holds at most one retained witness at a time
+and scans at most one ring window.
 
 Replay covers ORM events published on that handle family. Its internal
 sequence increases in publication order after commit. Concurrent writes can
@@ -1610,19 +1613,32 @@ Replay and live events use the same checks for current resolver, entity, row,
 field, key and provenance authority. A retained update uses the current row.
 A retained delete uses its trusted preimage only with current preimage
 authority. The same exact-key and key-field checks apply to key-only deletes.
-For custom owned Rust field types, implement the hidden
-`graphql_orm::graphql::subscriptions::ChangedReplaySize` trait with an upper
-bound on retained heap storage. Values whose storage cannot be bounded, such
-as a JSON object in a retained delete preimage, create a replay gap.
+An opted-in entity with a field type that lacks built-in accounting, such as
+a custom enum or a geometry type, fails to compile until the field type
+implements the hidden `graphql_orm::graphql::subscriptions::ChangedReplaySize`
+trait. Include an upper bound on all owned heap allocations. For external
+types that cannot implement the trait directly, use a local wrapper.
+An oversized witness, such as a large delete preimage, or a value whose
+storage cannot be measured, such as a JSON object in a delete preimage,
+still travels through live authorization and clears the ring.
 
 `SUBSCRIPTION_REPLAY_RESET` ends a resume whose cursor is malformed, expired,
 belongs to another stream or epoch, or precedes a retention gap. It carries
 no change or skipped count. Resumes with a valid, unexpired cursor wait for
 the independent, jittered authority recheck before releasing either replay or
-a capacity reset. Its base interval is 30 seconds and can be set with
-`Database::with_subscription_authority_recheck_interval`. Allow time for the
-recheck within the two-minute window when configuring replay. Current
-subscriber authority takes precedence at that check.
+a capacity reset. The base interval defaults to 30 seconds.
+`Database::with_subscription_authority_recheck_interval` configures the base
+interval, clamped to 1–300 seconds, with up to 10% jitter added. The two-minute
+maximum age includes that wait. Use a shorter interval for replay. A base
+interval of 120 seconds or more makes every resume age out while waiting.
+Current subscriber authority takes precedence at that check.
+
+The reset bit is observable at authority-tick granularity. A subscriber
+holding several reusable cursors can probe them in parallel and estimate when
+total writes after a checkpoint crossed the 128-event bound, including hidden and
+other-tenant writes. Byte eviction and ring clearing can also cause resets.
+This timing disclosure is an accepted consequence of sharing one bounded
+ring per entity and handle family.
 If the stream loses continuity after opening, it ends with
 `SUBSCRIPTION_CONTINUITY_LOST` as usual.
 

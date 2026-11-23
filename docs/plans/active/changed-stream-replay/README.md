@@ -139,7 +139,8 @@ passes cursors and the reset error through unchanged.
 - On subscribe with `After`, admission and authorization run exactly as for a
   live subscription, then the receiver is subscribed before the ring is read,
   so no event falls between replay and live delivery. Events seen in both are
-  delivered once, by sequence.
+  delivered once, by sequence. Live delivery checks that each witness is the
+  next sequence from that ring before applying subscriber filters.
 - Each replayed event goes through the same release path as a live event:
   provenance, row policy, field policies and key checks with current
   authority. A row that has since changed or been deleted is re-read. A
@@ -166,6 +167,11 @@ passes cursors and the reset error through unchanged.
   hidden writes included. That reveals the same bit as lag, so it is
   released no earlier than the next authority tick, as the lag error is
   (`subscriptions.rs:1208-1219`).
+- Accepted residual disclosure. Several reusable cursors can be probed in
+  parallel to estimate at tick granularity when total writes after a position
+  cross the 128-event bound, including hidden and other-tenant writes. A
+  hidden oversized delete preimage or a value whose storage cannot be measured
+  clears the ring and can also cause a capacity reset.
 - Deferring every reset would make each expired reconnect wait up to the
   30-second default interval plus jitter (`db.rs:87-88`,
   `subscriptions.rs:1007-1015`) before the client could refetch.
@@ -219,16 +225,17 @@ passes cursors and the reset error through unchanged.
 
 - A subscriber that reconnects with its last cursor inside retention receives
   exactly the events it missed and may read now, in order, then the "now live"
-  frame, then live events; tested on SQLite and test-owned PostgreSQL.
+  frame, then live events. The test runs on SQLite and test-owned PostgreSQL
+  and SQL Server.
 - Outside retention, from another epoch, under another sealing key, or with a
   tampered cursor, it receives exactly one reset-required error and no event.
 - Row and field policies are re-evaluated for replayed events: an event the
   subscriber could read when written but not now is not replayed.
 - A cursor from one subscription is refused by a subscription with another
   filter or key set.
-- Neither cursors nor reset timing let a subscriber count hidden writes; a
-  test writes hidden rows between two visible ones and compares what two
-  subscribers with different visibility observe.
+- Cursors carry no readable sequence. A test interleaves writes for two
+  subscribers with different visibility, checks their replay and live events,
+  and verifies that both capacity resets wait for the authority tick.
 - Ring memory stays within its caps under a write burst, and replay work per
   reconnect is bounded.
 - Entities without the opt-in serve byte-identical SDL and catalogues
@@ -244,11 +251,11 @@ passes cursors and the reset error through unchanged.
 
 ## Current checkpoint
 
-The implementation is ready for qualification and independent authorization
-review. It uses the shared Changed release path and fixed caps of 128 events,
-2 MiB of accounted witness storage, and two minutes. An authenticated,
-unexpired resume waits for the authority tick before replay or a capacity
-reset. The
+The independent authorization review confirmed that replay uses the shared
+Changed release path. The follow-up checks live witness identity and sequence
+before filtering and covers replay visibility, cursor binding, authority
+revocation, age, eviction, propagation, and concurrent publication across
+the backend scenarios. The
 [Changed reference](../../../reference/graphql-orm/macros-and-attributes.md#bounded-replay)
-describes the wire contract. Next gate is independent authorization review
-before the plan moves to the completed index.
+describes the wire contract. The remaining review gate is a focused check of
+live witness continuity.

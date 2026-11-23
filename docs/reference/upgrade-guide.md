@@ -70,9 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.213.0, `graphql-orm-macros` 0.213.0, `graphql-orm-operation-catalog` 0.13.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.1**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.213.0, `graphql-orm-macros` 0.213.0, `graphql-orm-operation-catalog` 0.12.1**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.17.1**.
 
-- **No action** — ORM/macros 0.213.0 and operation catalogue 0.13.0 add opt-in, bounded replay for generated Changed streams (#668). [Migration](../../MIGRATION.md#02050-to-02130-generated-changed-replay)
+- **No action** — ORM/macros 0.213.0 and operation catalogue 0.12.1 add opt-in, bounded replay for generated Changed streams (#668). [Migration](../../MIGRATION.md#02050-to-02130-generated-changed-replay)
 - **No action** — ORM/macros 0.205.0 share the generated Changed stream implementation to reduce compile work (part of #677 and #358). [Migration](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions)
 - **No action** — ORM/macros 0.205.0 support combining `changed_started = true` and `key_only_deletes` on generated Changed subscriptions. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-02050)
 - **No action** — ORM/macros 0.204.0 and backup 0.29.0 add an opt-in for
