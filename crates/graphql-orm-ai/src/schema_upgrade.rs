@@ -2,8 +2,8 @@
 //! created and the current module replaces.
 
 use graphql_orm::graphql::orm::{
-    ApplyOptions, Entity, EntityMetadata, IndexDef, IntrospectionBackend, MigrationRisk,
-    MigrationStep, OrmSchemaModule, PlannedMigration, SchemaModel,
+    ApplyOptions, DatabaseBackend, Entity, EntityMetadata, IndexDef, IntrospectionBackend,
+    MigrationRisk, MigrationStep, OrmSchemaModule, PlannedMigration, SchemaModel,
 };
 
 use graphql_orm::prelude::Database;
@@ -59,7 +59,8 @@ impl AiSchemaModule {
     /// the live index with that name is non-unique: a host that created its
     /// own index under one of these names must review the plan itself. This
     /// checks the plan's steps only: apply the same plan it inspected, and
-    /// review host-owned destructive steps separately.
+    /// review host-owned destructive steps separately. Declined destructive
+    /// steps are reported at the `debug` tracing level.
     #[must_use]
     pub fn admit_index_replacements(
         &self,
@@ -78,15 +79,18 @@ impl AiSchemaModule {
     /// lookup index drop when the same plan creates the current unique
     /// `tool_call_id` index on the approvals table. The plan must still match
     /// the live source schema, and the legacy index must match by table, name,
-    /// key columns and non-uniqueness. All destructive steps must be supported
-    /// replacements for this method to enable `allow_destructive`.
+    /// key columns and non-uniqueness, with no filter or included columns.
+    /// All destructive steps must be supported replacements for this method
+    /// to enable `allow_destructive`. Admission declines leave the supplied
+    /// options as-is and report the reason at the `debug` tracing level.
     ///
-    /// Plan to the module's entities and pass the unmodified plan to the
-    /// migration runner. Use the same database with a connection that sees all affected
-    /// rows, and quiesce writes and other schema changes from planning through
-    /// application. SQLite and PostgreSQL hosts can pass the result directly
-    /// to managed apply. SQL Server hosts can use it to check a reviewed plan
-    /// before executing it transactionally with external migration tooling.
+    /// Plan to the module's entities or just its approvals entity and pass
+    /// the unmodified plan to the migration runner. Use the same database
+    /// with a connection that sees all affected rows, and quiesce writes
+    /// and other schema changes from planning through application. SQLite and
+    /// PostgreSQL hosts can pass the result directly to managed apply. SQL
+    /// Server hosts can check a reviewed plan before executing it
+    /// transactionally with external migration tooling.
     ///
     /// # Errors
     ///
@@ -106,24 +110,55 @@ impl AiSchemaModule {
             return Ok(self.admit_index_replacements(plan, options));
         }
 
-        if plan.backend != B::DIALECT.name() || !only_index_replacements(plan, true) {
+        if plan.backend != B::DIALECT.name() {
+            tracing::debug!(
+                plan_backend = plan.backend,
+                database_backend = B::DIALECT.name(),
+                "AI index replacement declined: backend mismatch"
+            );
             return Ok(options);
         }
-        let declared_tables = self
-            .entities()
+        if !only_index_replacements(plan, true) {
+            return Ok(options);
+        }
+
+        let approval = AiApprovalRecord::metadata();
+        let approvals_only = [approval];
+        // SQL Server normalizes the names of declared tables only. Use the
+        // same declarations as the planner so both paths hash the full source.
+        let entities = if B::DIALECT == DatabaseBackend::Mssql
+            && plan.target_schema_hash == SchemaModel::from_entities(&approvals_only).stable_hash()
+        {
+            &approvals_only[..]
+        } else {
+            self.entities()
+        };
+        let declared_tables = entities
             .iter()
             .map(|entity| entity.table_name)
             .collect::<Vec<_>>();
         let live = B::introspect_schema_including(database.pool(), &declared_tables).await?;
-        if plan.source_schema_hash.as_ref() != Some(&live.stable_hash())
-            || !live.tables.iter().any(|table| {
-                table.table_name == AiApprovalRecord::metadata().table_name
-                    && table.indexes.contains(&LEGACY_APPROVAL_INDEX)
-            })
-        {
+        if plan.source_schema_hash.as_ref() != Some(&live.stable_hash()) {
+            tracing::debug!("AI index replacement declined: live source schema hash mismatch");
             return Ok(options);
         }
-        database.schema().preflight_unique_indexes(plan).await?;
+
+        let schema = database.schema();
+        let matches_model = live.tables.iter().any(|table| {
+            table.table_name == approval.table_name
+                && table.indexes.contains(&LEGACY_APPROVAL_INDEX)
+        });
+        if !matches_model
+            || !schema
+                .index_has_only_plain_keys(approval.table_name, LEGACY_APPROVAL_INDEX.name, 1)
+                .await?
+        {
+            tracing::debug!(
+                "AI index replacement declined: live approval index differs from legacy definition"
+            );
+            return Ok(options);
+        }
+        schema.preflight_unique_indexes(plan).await?;
         options.allow_destructive = true;
         Ok(options)
     }
@@ -186,13 +221,19 @@ fn only_index_replacements(plan: &PlannedMigration, allow_approval: bool) -> boo
             true,
         );
     destructive.all(|step| {
-        (replaces_webhook
+        let supported = (replaces_webhook
             && matches!(
                 &step.step,
                 MigrationStep::DropIndex { table_name, index_name }
                     if table_name == webhook.table_name
                         && REPLACED_WEBHOOK_RECEIPT_INDEXES.contains(&index_name.as_str())
             ))
-            || (replaces_approval && is_approval_lookup_drop(&step.step))
+            || (replaces_approval && is_approval_lookup_drop(&step.step));
+        if !supported {
+            tracing::debug!(
+                "AI index replacement declined: unsupported destructive step or missing replacement"
+            );
+        }
+        supported
     })
 }

@@ -31,10 +31,28 @@ database.schema().apply_migration(&plan, options).await?;
 ```
 
 The experimental SQL Server schema profile from before 0.83.0 generated the
-same lookup index. If you provisioned it, run the same admission check and
-require `options.allow_destructive` before applying a reviewed replacement
-plan with your external transactional migration tool. Review other SQL Server
-schema changes separately.
+same lookup index. Apply reviewed SQL Server DDL with your external
+transactional migration tool. Keep writes and other schema changes quiesced
+until it commits. Choose either sequence:
+
+1. To admit the approval upgrade on its own, plan against the live store
+   with only the `[graphql_orm_ai_approvals]` table as the target entity.
+   Select it by `table_name` from `AiSchemaModule::entities()` and pass that
+   one-element slice to `plan_migration_to_entities`. Review the plan, call
+   `admit_index_replacements_with_live_schema` with default
+   options, and require `options.allow_destructive` before applying that
+   plan's statements in one transaction. Plan and review the remaining AI
+   schema changes separately.
+2. To upgrade the full module together, plan against all
+   `AiSchemaModule::entities()`. Legacy SQL Server stores can also require
+   destructive index replacements introduced in module 0.84.0, so the
+   approval admission helper can leave `allow_destructive` unset. Review
+   every destructive step, then run
+   `database.schema().preflight_unique_indexes(&plan).await?` on the full
+   reviewed plan. After it succeeds, explicitly authorize destructive
+   application (`allow_destructive: true` for an
+   `ApplyOptions`-based gate) and apply the same plan's statements in one
+   external transaction.
 
 If the check returns `UniqueIndexDuplicates`, use the table and columns in
 the error to inspect the conflicting rows. Resolve them according to your

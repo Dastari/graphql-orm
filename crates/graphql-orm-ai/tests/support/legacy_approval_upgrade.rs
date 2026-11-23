@@ -13,6 +13,10 @@ const TABLE: &str = "graphql_orm_ai_approvals";
 const TABLE: &str = "[graphql_orm_ai_approvals]";
 const LEGACY_NAME: &str = "idx_graphql_orm_ai_approvals_tool_call_id";
 const KEY: &[&str] = &["tool_call_id"];
+#[cfg(not(feature = "mssql"))]
+const WEBHOOK_TABLE: &str = "graphql_orm_ai_provider_webhook_receipts";
+#[cfg(not(feature = "mssql"))]
+const LEGACY_WEBHOOK: &str = "idx_graphql_orm_ai_provider_webhook_receipts_provider_kind";
 
 // Module 0.83.0 replaced the approval lookup index and added two other
 // unique keys. The SQL Server fixture covers the approvals table only.
@@ -47,6 +51,26 @@ fn legacy_module(target: &SchemaModel) -> SchemaModel {
         if table_name == TABLE {
             table.indexes.push(IndexDef::new(LEGACY_NAME, KEY));
         }
+    }
+    #[cfg(not(feature = "mssql"))]
+    {
+        let webhook = model
+            .tables
+            .iter_mut()
+            .find(|table| table.table_name == WEBHOOK_TABLE)
+            .expect("AI webhook table");
+        webhook.indexes.retain(|index| {
+            index.columns
+                != [
+                    "provider_kind",
+                    "provider_profile_id",
+                    "provider_response_id",
+                    "state",
+                ]
+        });
+        webhook
+            .indexes
+            .push(IndexDef::new(LEGACY_WEBHOOK, &["provider_kind"]));
     }
     model
 }
@@ -157,6 +181,17 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
         .expect("plan legacy AI module");
     apply(database, &initial, ApplyOptions::default()).await;
 
+    // An approvals-only plan still hashes the rest of the live catalog.
+    // Ensure admission uses the same SQL Server name normalization as planning.
+    #[cfg(feature = "mssql")]
+    AiOrmBackend::execute_with_binds(
+        database.pool(),
+        "CREATE TABLE dbo.graphql_orm_ai_provider_webhook_receipts (id BIGINT NOT NULL PRIMARY KEY)",
+        &[],
+    )
+    .await
+    .expect("create an existing AI table outside the approval plan");
+
     let approval = Uuid::new_v4();
     let tool_call = Uuid::new_v4();
     insert_approval(database, approval, tool_call)
@@ -172,6 +207,12 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
         MigrationStep::DropIndex { table_name, index_name }
             if table_name == TABLE && index_name == LEGACY_NAME
     )));
+    #[cfg(not(feature = "mssql"))]
+    assert!(upgrade.steps.iter().any(|step| matches!(
+        &step.step,
+        MigrationStep::DropIndex { table_name, index_name }
+            if table_name == WEBHOOK_TABLE && index_name == LEGACY_WEBHOOK
+    )));
     let replacement = upgrade
         .steps
         .iter()
@@ -185,6 +226,25 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
         })
         .expect("upgrade creates the matching key");
     let before = live_schema(database).await;
+
+    let mut wrong_table = upgrade.clone();
+    let drop = wrong_table
+        .steps
+        .iter_mut()
+        .find_map(|step| match &mut step.step {
+            MigrationStep::DropIndex {
+                table_name,
+                index_name,
+            } if index_name == LEGACY_NAME => Some(table_name),
+            _ => None,
+        })
+        .expect("approval lookup drop");
+    *drop = "other_table".into();
+    let options = module
+        .admit_index_replacements_with_live_schema(database, &wrong_table, ApplyOptions::default())
+        .await
+        .expect("inspect index drop on an unrelated table");
+    assert!(!options.allow_destructive);
 
     let mut altered_target = target.clone();
     let approvals = altered_target
@@ -234,7 +294,12 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
             .iter()
             .filter(|step| step.risk == MigrationRisk::Destructive)
             .count(),
-        2,
+        upgrade
+            .steps
+            .iter()
+            .filter(|step| step.risk == MigrationRisk::Destructive)
+            .count()
+            + 1,
         "{:?}",
         with_unrelated_drop.steps
     );
@@ -357,6 +422,39 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
         },
     )
     .await;
+
+    #[cfg(not(feature = "mssql"))]
+    let (drop_legacy, index_suffix) = (
+        format!("DROP INDEX {LEGACY_NAME}"),
+        "WHERE state = 'pending'",
+    );
+    #[cfg(feature = "mssql")]
+    let (drop_legacy, index_suffix) = (
+        format!("DROP INDEX {LEGACY_NAME} ON {TABLE}"),
+        "INCLUDE (state)",
+    );
+    for suffix in [index_suffix, ""] {
+        AiOrmBackend::execute_with_binds(database.pool(), &drop_legacy, &[])
+            .await
+            .expect("drop approval index for catalog fixture");
+        AiOrmBackend::execute_with_binds(
+            database.pool(),
+            &format!("CREATE INDEX {LEGACY_NAME} ON {TABLE} (tool_call_id) {suffix}"),
+            &[],
+        )
+        .await
+        .expect("create approval index for catalog fixture");
+        let plan = schema
+            .plan_migration_to_entities("catalog-index", "upgrade catalog fixture", &entities)
+            .await
+            .expect("plan upgrade for catalog fixture");
+        assert_eq!(plan.source_schema_hash, upgrade.source_schema_hash);
+        let options = module
+            .admit_index_replacements_with_live_schema(database, &plan, ApplyOptions::default())
+            .await
+            .expect("inspect approval index catalog fixture");
+        assert_eq!(options.allow_destructive, suffix.is_empty(), "{suffix}");
+    }
 
     let options = module
         .admit_index_replacements_with_live_schema(database, &upgrade, ApplyOptions::default())

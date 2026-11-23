@@ -380,6 +380,97 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         })
     }
 
+    /// Supplement a matching introspected index with catalog properties the
+    /// schema model can omit. Require an unfiltered index with no included
+    /// columns and the expected number of key columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog query fails.
+    #[doc(hidden)]
+    pub async fn index_has_only_plain_keys(
+        &self,
+        table: &str,
+        index: &str,
+        key_count: i64,
+    ) -> crate::Result<bool>
+    where
+        B: IntrospectionBackend,
+    {
+        use super::dialect::SqlDialect;
+        use super::{DatabaseBackend, SqlValue};
+
+        let backend = B::DIALECT;
+        let (sql, binds) = match backend {
+            DatabaseBackend::Sqlite => (
+                // SQLite parses the WHERE clause into index_list.partial. A
+                // text search in the stored DDL could miss comments or whitespace.
+                "SELECT 1 FROM main.sqlite_master AS i
+                 JOIN pragma_index_list(?1, 'main') AS il ON il.name = i.name
+                 WHERE i.type = 'index' AND i.tbl_name = ?1 AND i.name = ?2
+                   AND i.sql IS NOT NULL AND il.partial = 0
+                   AND (SELECT COUNT(*) FROM pragma_index_xinfo(?2, 'main') WHERE key = 1) = ?3
+                   AND NOT EXISTS (
+                       SELECT 1 FROM temp.sqlite_master WHERE type = 'index' AND name = ?2
+                   )",
+                vec![
+                    SqlValue::String(backend.table_name_part(table)),
+                    SqlValue::String(index.to_owned()),
+                    SqlValue::Int(key_count),
+                ],
+            ),
+            DatabaseBackend::Postgres => (
+                "SELECT 1 FROM pg_catalog.pg_index AS ix
+                 JOIN pg_catalog.pg_class AS t ON t.oid OPERATOR(pg_catalog.=) ix.indrelid
+                 JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) t.relnamespace
+                 WHERE ix.indrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
+                   AND ix.indexrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($2)::pg_catalog.oid
+                   AND ($4::pg_catalog.bool OR n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema())
+                   AND ix.indpred IS NULL AND ix.indexprs IS NULL
+                   AND ix.indnatts OPERATOR(pg_catalog.=) ix.indnkeyatts
+                   AND ix.indnkeyatts OPERATOR(pg_catalog.=) $3::pg_catalog.int8",
+                vec![
+                    SqlValue::String(backend.render_table_identifier_path(table)),
+                    SqlValue::String(backend.quote_identifier(index)),
+                    SqlValue::Int(key_count),
+                    SqlValue::Bool(super::dialect::postgres_resolved_identifier_parts(table).len() > 1),
+                ],
+            ),
+            DatabaseBackend::Mssql => {
+                let Some((schema, name)) = backend.mssql_schema_and_table(table) else {
+                    return Ok(false);
+                };
+                (
+                    "SELECT 1 FROM sys.indexes AS i
+                     WHERE i.object_id = OBJECT_ID(@P1) AND i.object_id = OBJECT_ID(@P2)
+                       AND i.name = @P3 AND i.has_filter = 0 AND i.filter_definition IS NULL
+                       AND NOT EXISTS (
+                           SELECT 1 FROM sys.index_columns AS ic
+                           WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+                             AND ic.is_included_column = 1
+                       )
+                       AND (SELECT COUNT_BIG(*) FROM sys.index_columns AS ic
+                            WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+                              AND ic.key_ordinal > 0) = @P4",
+                    vec![
+                        SqlValue::String(backend.render_table_identifier_path(table)),
+                        SqlValue::String(format!(
+                            "{}.{}",
+                            backend.delimit_raw_identifier(&schema),
+                            backend.delimit_raw_identifier(&name),
+                        )),
+                        SqlValue::String(index.to_owned()),
+                        SqlValue::Int(key_count),
+                    ],
+                )
+            }
+            DatabaseBackend::Mysql => return Ok(false),
+        };
+        Ok(!B::fetch_rows(self.database.pool(), sql, &binds)
+            .await?
+            .is_empty())
+    }
+
     /// Check existing rows for repeated keys of unique indexes the plan creates.
     ///
     /// This read-only check is available to hosts that apply DDL externally,
@@ -391,7 +482,8 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     /// # Errors
     ///
     /// Returns an error for a repeated key, a plan for a different backend,
-    /// an unsupported backend or step, or a failed database read.
+    /// an unsupported backend or step, unavailable restore state or an active
+    /// restore, or a failed database read.
     pub async fn preflight_unique_indexes(&self, plan: &PlannedMigration) -> crate::Result<()>
     where
         B: IntrospectionBackend,
