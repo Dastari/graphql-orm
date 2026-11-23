@@ -1,5 +1,4 @@
-#[path = "support/fixture_target.rs"]
-mod fixture_target;
+use super::fixture_target;
 
 #[test]
 fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
@@ -75,7 +74,7 @@ fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
     assert_eq!(agql_auth.len(), 1, "resolved metadata:\n{metadata}");
     // The standalone host must adopt the same reviewed identity as the
     // canonical workspace dependency, rather than defining another type universe.
-    let dependency = include_str!("../../../Cargo.toml")
+    let dependency = include_str!("../../../../Cargo.toml")
         .lines()
         .find(|line| line.starts_with("agql-auth = "))
         .expect("canonical workspace auth dependency");
@@ -105,7 +104,7 @@ fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
     };
     assert_eq!(agql_auth[0]["version"], field("version"));
     // The host graph must resolve the same locked identity as the workspace.
-    let workspace_lock = include_str!("../../../Cargo.lock");
+    let workspace_lock = include_str!("../../../../Cargo.lock");
     let locked = workspace_lock
         .split("[[package]]")
         .find(|package| package.contains("\nname = \"agql-auth\"\n"))

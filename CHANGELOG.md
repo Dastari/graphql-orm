@@ -19,7 +19,13 @@ for historical context.
 - PostgreSQL hosts can opt into canonical change-journal keys (#592). The
   recorder and full snapshot use the same encoding for single-column keys.
   The cutover retires legacy cursors and requires a new full backup.
-  [Migration](MIGRATION.md#02010-to-02080-canonical-postgresql-journal-keys)
+  [Migration](MIGRATION.md#02020-to-02080-canonical-postgresql-journal-keys)
+
+## Unreleased - ORM/macros 0.202.0
+
+- Grouped additional SQLite GraphQL, owned database and consumer fixture tests.
+  See the [test lanes](docs/development/testing.md) for the selectors.
+- Documented the blocking filesystem operations in `write_migration_file`.
 
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
