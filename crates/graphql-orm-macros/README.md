@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.205.0 aligns with the ORM runtime's
+[backend-typed backup API](../../MIGRATION.md#02040-to-02050-backend-typed-backup-runtime).
+
 Version 0.204.0 aligns with the ORM runtime's
 [external backup and restore setting](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
 

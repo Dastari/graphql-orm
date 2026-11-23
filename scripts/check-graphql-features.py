@@ -99,6 +99,7 @@ def main() -> None:
         'crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml',
         'crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml',
         'crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.toml',
+        'crates/graphql-orm/tests/fixtures/backup-backend-coexistence/Cargo.toml',
         'crates/graphql-orm/tests/fixtures/federation-end-to-end/Cargo.toml',
         'crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml',
         'crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml',

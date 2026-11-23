@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.205.0 and backup 0.30.0
+
+- **Fixed (#870).** SQLite and PostgreSQL database handles expose the backup
+  runtime in multi-backend builds. The ready-made backup adapter and object
+  index use the handle selected by their own feature.
+  [Migration](MIGRATION.md#02040-to-02050-backend-typed-backup-runtime)
+
 ## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
 
 - **Added (follow-up to #731).** Opt in per database when another product

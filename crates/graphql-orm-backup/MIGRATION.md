@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.29.0 to 0.30.0: adapter backend selection
+
+**No action.** No snapshot format or data migration is needed. Use backup
+0.30.0 and ORM 0.205.0 from the same reviewed workspace revision. In a
+multi-backend build, pass an explicitly typed `Database<SqliteBackend>`
+or `Database<PostgresBackend>` to the adapter or object index and enable the
+corresponding backup adapter feature. Select one adapter feature per build.
+
 ## 0.28.1 to 0.29.0: externally managed backup and restore
 
 **No action.** No snapshot format or data migration is needed. Use backup

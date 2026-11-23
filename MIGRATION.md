@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.204.0 to 0.205.0: backend-typed backup runtime
+
+**No action.** Upgrade ORM and macros together. SQLite and PostgreSQL
+`Database<B>` handles expose full backup and restore even when Cargo enables
+multiple ORM backends. Incremental backup still requires a single ORM backend
+with `change-journal`. Use backup 0.30.0 from the same reviewed workspace
+revision to select a typed adapter with `orm-sqlite` or `orm-postgres`.
+
 ## 0.203.0 to 0.204.0: externally managed backup and restore
 
 **No action.** The default backup and restore behavior stays the same. No
