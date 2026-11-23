@@ -168,22 +168,30 @@ describe of the widest entity, with all five of its operations, stays below
   fingerprint and an eager binding, but not the fixed-broker session binding.
 - A count question's top candidate offers the entity's `aggregate`
   operation.
+- No `describe_type` page reaches the describe byte bound, so none is
+  refused.
 
 All points fit the default index and index-set limits.
 
-| Targets | Discover p50 / p95 | Startup, one target | Peak memory |
-| ---: | ---: | ---: | ---: |
-| 1 | 0.04 / 0.05 ms | 19 s | 174 MiB |
-| 10 | 0.25 / 0.28 ms | 19 s | 910 MiB |
-| 100 | 4.0 / 5.8 ms | 19 s | 7.3 GiB |
+| Targets | Discover p50 / p95 | Describe p95, first | Describe p95, repeat | `describe_type` p95 | Startup, one target | Peak memory |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.05 / 0.07 ms | 0.87 s | 15 ms (was 0.92 s) | 3.9 ms (was 244 ms) | 23 s | 174 MiB |
+| 10 | 0.27 / 0.39 ms | 0.91 s | 19 ms (was 1.00 s) | 4.3 ms (was 228 ms) | 22 s | 1.3 GiB |
+| 100 | 2.7 / 4.7 ms | 0.89 s | 22 ms (was 0.89 s) | 3.9 ms (was 223 ms) | 21 s | 7.8 GiB |
+
+A *first* describe is the process's first describe of a capability: it
+recovers the capability's signature type names. A *repeat* describes the
+same entity again. "Was" is the same benchmark against AI tool profiles
+0.27.1, which recovered the names on every call.
 
 Discover time follows the number of matches, not the catalogue as such. The
 benchmark's questions share words such as "records" with every entity, and
 host policy is applied to every match before the result ceiling (see
 [Discovery is not authority](#discovery-is-not-authority)). A host with an
 expensive policy should override `authorize_discovery`. Startup and memory
-are linear in the number of targets of a given shape: about 0.3 s and
-1.2 MiB per wide-entity root. Within one target, catalogue compile time
+are linear in the number of targets of a given shape: about 0.35 s and
+1.3 MiB per wide-entity root, counting the capabilities registered in the
+`AiToolCatalog`. Within one target, catalogue compile time
 still grows faster than linearly: 300 roots in one target took about 500 s.
 Size a very large single target from the startup benchmark above.
 
@@ -194,14 +202,18 @@ what it costs a host that caches its set. Describe and `describe_type`
 render a signature on every call. Since 0.28.0, a capability recovers the
 type names behind its signature once, so only the first describe of a
 capability pays for that. Measured on one target with 60 entities (300
-roots):
+roots). A first pass on the single-index host meets cold per-capability
+caches. Both hosts are then measured on equally warm caches, the
+single-index host first:
 
 | | Before (tool profiles 0.27.1) | After (0.28.0) |
 | --- | ---: | ---: |
-| Discover p50, single-index host | 1.78 ms | 0.145 ms |
-| Discover p50, host-cached set | 0.164 ms | 0.137 ms |
-| Describe p95, first describe of a wide entity | 5.2 s | 4.1 s |
-| Describe p95, the same entities described again | 5.0 s | 0.015 s |
+| Discover p50, single-index host, warm pass | 1.56 ms | 0.153 ms |
+| Discover p50, host-cached set, warm pass | 0.137 ms | 0.161 ms |
+| Describe p95, cold pass (each capability's first describe) | 4.0 s | 4.6 s |
+| Describe p95, warm pass, single-index host | 4.1 s | 0.025 s |
+| Describe p95, warm pass, host-cached set | 4.0 s | 0.019 s |
+| `describe_type` p95, warm pass, single-index host | 1.09 s | 4.4 ms |
 
 The benchmark also reports whether a keyset operation offers a
 continuation. It does not: the page argument is server-owned, so a model
