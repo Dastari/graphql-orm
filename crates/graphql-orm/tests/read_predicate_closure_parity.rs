@@ -645,9 +645,8 @@ async fn directly_nested_closures_agree_with_original_sql() {
         ReadPredicate::column::<B, Node>("score", ReadPredicateOp::Eq, SqlValue::Float(5.0))
             .unwrap();
     let null = ReadPredicate::is_null::<B, Node>("name").unwrap();
-    let score_is = |op, value| {
-        ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap()
-    };
+    let score_is =
+        |op, value| ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap();
     let nested = |outer, inner, target, outer_depth, inner_depth| {
         let closure = |quantifier, target, depth| {
             ReadPredicate::related_closure_within::<B, Node>(
@@ -981,18 +980,13 @@ async fn collation_equal_text_pointers_agree_with_original_sql() {
             (rows.map_err(|error| error.to_string()), sql)
         }
     };
-    let score = |op, value| {
-        ReadPredicate::column::<B, Text>("score", op, SqlValue::Int(value)).unwrap()
-    };
+    let score =
+        |op, value| ReadPredicate::column::<B, Text>("score", op, SqlValue::Int(value)).unwrap();
     let nested = |outer, inner, keys: &[(&str, &str)], target| {
         let closure = |quantifier, keys: &[(&str, &str)], target| {
             ReadPredicate::related_closure_within::<B, Text>(quantifier, keys, target, 3).unwrap()
         };
-        closure(
-            outer,
-            &[("parent_id", "id")],
-            closure(inner, keys, target),
-        )
+        closure(outer, &[("parent_id", "id")], closure(inner, keys, target))
     };
     let primary_key_present = ReadPredicate::is_not_null::<B, Text>("id").unwrap();
     let mut outcomes = Vec::new();
@@ -1001,8 +995,14 @@ async fn collation_equal_text_pointers_agree_with_original_sql() {
         ("case-insensitive key", [("ptr_ci", "tag_ci")]),
     ] {
         let cases = [
-            ("any", nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1))),
-            ("all", nested(All, All, &keys, score(ReadPredicateOp::Ne, 1))),
+            (
+                "any",
+                nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1)),
+            ),
+            (
+                "all",
+                nested(All, All, &keys, score(ReadPredicateOp::Ne, 1)),
+            ),
             (
                 "not any",
                 nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1))
