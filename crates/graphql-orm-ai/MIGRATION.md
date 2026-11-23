@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.154.0 to 0.156.0
+## 0.154.0 to 0.155.0
 
 **No action.** The exported AI roots now implement `GraphqlRootFieldNames`,
 so existing `schema_roots!` declarations can compose them directly with their

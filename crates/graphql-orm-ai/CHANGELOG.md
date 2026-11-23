@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.156.0
+## Unreleased - 0.155.0
 
 - Exported AI query, mutation, and subscription roots declare their GraphQL
   fields for composition through `schema_roots!`. The declarations follow
