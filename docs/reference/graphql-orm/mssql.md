@@ -851,10 +851,10 @@ it, for review or for a host's own tooling.
 - Introspection reports column types with their parameters (`DECIMAL(19,4)`,
   `VARBINARY(MAX)`, `NVARCHAR(50)`), primary keys, unique constraints, foreign
   keys with their delete action, and ordinary and unique indexes with their
-  column order, descending columns and `IN`-list filters. Indexes that back a
+  column order, descending columns and `IN`-list and `IS NOT NULL` filters. Indexes that back a
   primary key or unique constraint are reported as key and unique columns
   instead. Included columns and spatial, XML and columnstore indexes are not
-  part of the model; a filter other than an `IN` list on one column is kept
+  part of the model; a filter outside those one-column forms is kept
   as text that never matches a declared index, so a plan replaces such an
   index rather than ignoring the filter. A table without a primary key
   reports none. Check constraints are not read: portable constraints are not
@@ -873,6 +873,24 @@ it, for review or for a host's own tooling.
   the live collation when it runs and adds `COLLATE` when it differs from
   the database default. It fails, rather than alter the column, when that
   name is not listed by `sys.fn_helpcollations()`.
+- `append_only = true` renders an update/delete trigger. The catalog
+  recognizes the generated, enabled trigger when its definition is visible.
+  SQL Server does not implement privileged append-only retention purge.
+- `exact_string_filters = true` applies binary, length-sensitive matching to
+  generated equality and membership filters for Unicode columns. The default
+  string filters, pattern matching, sort order, and uniqueness use the column's
+  collation. Plans also render `COLLATE Latin1_General_100_BIN2` on the
+  entity's generated Unicode key columns: primary keys, unique columns,
+  relation foreign-key sources and index members.
+  - SQL Server requires both sides of a string foreign key to share a
+    collation, so opt in the referencing and referenced entities together.
+  - On an existing table the planner emits `ALTER COLUMN … COLLATE`, which
+    SQL Server refuses on indexed or constrained columns. Drop the dependent
+    indexes, unique constraints or primary key, apply the step, and recreate
+    them.
+  - BIN2 makes uniqueness case-sensitive, which is stricter than the default,
+    so existing rows don't collide. Removing the option leaves the live BIN2
+    collation in place, and schema validation accepts it.
 - Search metadata statements are T-SQL. SQL Server full-text indexes are not
   created; the plan renders a comment for them.
 

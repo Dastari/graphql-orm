@@ -276,7 +276,6 @@ pub struct AiCollectedRestoreFacts {
 }
 
 impl AiCollectedRestoreFacts {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         facts: AiRestoreSnapshotFacts,
         audit_statuses: BTreeMap<AiRestoreAuditKind, AiRestoreAuditStatus>,

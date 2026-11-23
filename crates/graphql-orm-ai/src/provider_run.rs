@@ -4,7 +4,6 @@ use uuid::Uuid;
 
 use sha2::{Digest, Sha256};
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::{AiError, AiRunLease};
 use crate::{AiRunId, AiSessionId};
 
@@ -24,7 +23,6 @@ pub struct AiProviderRunBinding {
 }
 
 impl AiProviderRunBinding {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         session_id: AiSessionId,
         run_id: AiRunId,
@@ -48,7 +46,6 @@ impl AiProviderRunBinding {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_lease(lease: &AiRunLease) -> Result<Self, AiError> {
         Self::new(
             lease.session_id(),
@@ -62,7 +59,7 @@ impl AiProviderRunBinding {
     #[cfg(all(
         test,
         feature = "provider-codex-app-server",
-        any(feature = "sqlite", feature = "postgres")
+        any(feature = "sqlite", feature = "postgres", feature = "mssql")
     ))]
     pub(crate) fn new_for_principal_reference(
         session_id: AiSessionId,
@@ -80,7 +77,6 @@ impl AiProviderRunBinding {
         )
     }
 
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn matches_principal_reference(
         self,
         reference: &agql_auth::PrincipalReference,
@@ -114,7 +110,6 @@ impl AiProviderRunBinding {
     }
 }
 
-#[cfg_attr(feature = "mssql", allow(dead_code))]
 fn provider_run_owner_fingerprint(reference: &agql_auth::PrincipalReference) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"graphql-orm-ai/provider-run-owner/v1\0");
@@ -290,7 +285,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn exact_binding_rejects_nil_or_nonpositive_fence_members() {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();
@@ -311,7 +305,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn attempt_and_generation_participate_in_identity() {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();

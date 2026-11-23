@@ -19,7 +19,29 @@ for historical context.
 - PostgreSQL hosts can opt into canonical change-journal keys (#592). The
   recorder and full snapshot use the same encoding for single-column keys.
   The cutover retires legacy cursors and requires a new full backup.
-  [Migration](MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys)
+  [Migration](MIGRATION.md#02030-to-02070-canonical-postgresql-journal-keys)
+
+## Unreleased - ORM/macros 0.203.0
+
+- **Action needed.** Before applying a regenerated SQL Server plan, review
+  cleanup jobs and foreign-key cascades that touch `append_only = true`
+  tables. The plan now installs triggers that reject updates and deletes,
+  including cascaded deletes. There is no SQL Server trigger opt-out while
+  the entity remains append-only (#813).
+- **Action needed.** Replan SQL Server schemas and resolve any table
+  declarations that map to the same physical identifier. SQL Server
+  planning now refuses these collisions (#813).
+- **No action.** SQL Server supports bounded row-size preflights and filtered
+  unique indexes over non-null keys.
+- **Action needed, only when opting in.** Entities opting in to
+  `exact_string_filters = true` get length-sensitive string comparisons, and
+  SQL Server plans give their generated Unicode string keys (primary keys,
+  unique columns, relation foreign-key sources and index members)
+  `COLLATE Latin1_General_100_BIN2`. Opt in both sides of a string foreign key
+  together, because SQL Server requires matching collations. On an existing
+  table, the generated `ALTER COLUMN … COLLATE` fails on indexed or constrained
+  columns: drop and recreate the dependent indexes and constraints around it.
+  Removing the option later leaves the live BIN2 collation in place (#813).
 
 ## Unreleased - ORM/macros 0.202.0
 

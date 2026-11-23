@@ -1,7 +1,5 @@
 //! ORM-backed catch-up-to-watermark durable subscriptions.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use std::sync::Arc;
 use std::time::Duration;
 

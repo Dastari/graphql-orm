@@ -38,12 +38,19 @@ cargo clippy -p graphql-orm-ai --no-default-features --features postgres --all-t
 cargo clippy -p graphql-orm-ai --no-default-features --features mssql --all-targets -- -D warnings
 ```
 
-Run PostgreSQL behavioral parity only through the self-owning harness:
+The integration and checkpoint/compaction suites run through the owned database
+lanes.
 
 ```bash
-cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai \
-  --test postgres_parity -- --test-threads=1
+scripts/run-owned-database-lanes.sh ai-postgres
+scripts/run-owned-database-lanes.sh ai-mssql
 ```
+
+The SQL Server lane uses the ORM's pinned image and OpenSSL-generated TLS
+certificates. It starts a new database with generated credentials for each test,
+caps containers at 3 GiB with zero swap, and sets a 15-second query deadline
+for the runtime pool and for external DDL statements. Set
+`GRAPHQL_ORM_TEST_MSSQL_PULL=missing` to pull the pinned image on first use.
 
 The test forces the local Docker socket, generates a container identity,
 ownership label, credentials, database, and loopback port, and accepts no URL

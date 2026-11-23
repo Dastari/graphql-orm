@@ -196,12 +196,10 @@ impl AiSessionExecutionSelection {
             reasoning_effort: self.reasoning_effort,
         }
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres", test))]
     pub(crate) fn encode(&self) -> Result<String, AiError> {
         self.validate()?;
         serde_json::to_string(&(1u8, self)).map_err(|_| AiError::PersistenceFailed)
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres", test))]
     pub(crate) fn decode(value: &str) -> Result<Self, AiError> {
         if value.len() > 2_048 {
             return Err(AiError::PersistenceFailed);
@@ -272,7 +270,6 @@ pub struct PinAiSessionExecutionSelectionInput {
 }
 
 /// Lease-fenced reader used by a host's single global claim/concurrency loop.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[async_trait]
 pub trait AiRunExecutionSelectionReader: Send + Sync {
     /// Reads the enqueue-time snapshot after fresh owner authorization.
@@ -299,7 +296,6 @@ pub trait AiRunExecutionSelectionReader: Send + Sync {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) async fn resolve_exact(
     selection_policy_resolver: &dyn AiSessionExecutionSelectionResolver,
     principal: &AuthPrincipal,

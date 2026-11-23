@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sha2::Sha256;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -471,7 +470,6 @@ pub enum ModelContinuation {
 }
 
 impl ModelContinuation {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn chain_reference(&self, input: &[ModelInputBlock]) -> Option<String> {
         match self {
             Self::ProviderResponse { response_id } => Some(response_id.clone()),
@@ -1213,23 +1211,11 @@ impl ModelToolDefinition {
 
 /// An immutable offer or native admission entry. Cache compilation failure as
 /// well as success so a malformed schema remains a refusal on every call.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-codex-app-server",
-    feature = "provider-grok-acp"
-))]
 pub(crate) struct ModelToolOffer {
     definition: ModelToolDefinition,
     validator: std::sync::OnceLock<Option<std::panic::AssertUnwindSafe<jsonschema::Validator>>>,
 }
 
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-codex-app-server",
-    feature = "provider-grok-acp"
-))]
 impl ModelToolOffer {
     pub(crate) fn new(definition: ModelToolDefinition) -> Self {
         Self {
@@ -1614,13 +1600,11 @@ pub struct ProviderRequestContext {
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
     compaction_admitted: bool,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     compaction_admission: Option<Box<crate::runtime::CompactionDispatchAdmission>>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
     retained_tool_images: Vec<crate::AiResolvedToolImage>,
     static_offering_reset_receipt:
         Option<Arc<crate::provider_session::AiStaticOfferingResetReceipt>>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
 }
 
@@ -1648,12 +1632,10 @@ impl ProviderRequestContext {
             budget,
             transfers: Vec::new(),
             compaction_admitted: false,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             compaction_admission: None,
             resolved_attachments: Vec::new(),
             retained_tool_images: Vec::new(),
             static_offering_reset_receipt: None,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_source_delivery: None,
         }
         .with_authorized_transfer(manifest, proof)
@@ -1667,7 +1649,6 @@ impl ProviderRequestContext {
     pub fn retained_tool_result_images(&self) -> &[crate::AiResolvedToolImage] {
         &self.retained_tool_images
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_retained_tool_result_images(
         mut self,
         images: Vec<crate::AiResolvedToolImage>,
@@ -1691,7 +1672,6 @@ impl ProviderRequestContext {
         self.retained_tool_images = images;
         Ok(self)
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn tool_source_delivery_check(
         &self,
     ) -> Option<Arc<crate::provider_calls::ToolSourceDelivery>> {
@@ -1707,13 +1687,11 @@ impl ProviderRequestContext {
     /// # Errors
     /// Returns a safe provider error for unavailable/revoked/expired/cancelled source content.
     pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         if let Some(delivery) = &self.tool_source_delivery {
             delivery.authorize().await?;
         }
         Ok(())
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_tool_source_delivery(
         mut self,
         delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
@@ -1722,7 +1700,6 @@ impl ProviderRequestContext {
         self
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn set_compaction_admission(
         &mut self,
         admission: crate::runtime::CompactionDispatchAdmission,
@@ -1736,7 +1713,6 @@ impl ProviderRequestContext {
         provider: &Arc<dyn AiProvider>,
     ) -> Result<(), ProviderError> {
         self.authorize_tool_source_delivery().await?;
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         if self.compaction_admitted {
             // Check after all other asynchronous authorization, using the exact adapter
             // that will receive the request. The proof is never handed to the adapter.
@@ -1746,7 +1722,7 @@ impl ProviderRequestContext {
                 .verify(provider)
                 .await?;
         }
-        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
         let _ = provider;
         Ok(())
     }
@@ -1782,7 +1758,6 @@ impl ProviderRequestContext {
     ///
     /// Returns [`AiError::Conflict`] unless the binding belongs to this exact
     /// request session and run.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_run_binding(
         mut self,
         binding: crate::AiProviderRunBinding,
@@ -1796,7 +1771,6 @@ impl ProviderRequestContext {
 
     /// Installs one freshly opened retained provider session for this exact
     /// request fence.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_provider_session(
         mut self,
         session: crate::AiOpenedProviderSession,
@@ -1814,7 +1788,6 @@ impl ProviderRequestContext {
         Ok(self)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_static_offering_reset_receipt(
         mut self,
         receipt: Arc<crate::provider_session::AiStaticOfferingResetReceipt>,
@@ -3006,7 +2979,6 @@ impl ProviderDynamicToolResult {
 
     #[cfg(all(
         test,
-        any(feature = "sqlite", feature = "postgres"),
         any(feature = "provider-codex-app-server", feature = "provider-grok-acp")
     ))]
     pub(crate) fn new(
@@ -3025,7 +2997,6 @@ impl ProviderDynamicToolResult {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn persisted(
         call_id: String,
         tool_id: String,
@@ -3067,13 +3038,11 @@ impl ProviderDynamicToolResult {
         &self.images
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn require_source_delivery(mut self, required: bool) -> Self {
         self.requires_source_delivery = required;
         self
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_images(
         mut self,
         images: Vec<crate::AiResolvedToolImage>,
@@ -3604,7 +3573,7 @@ impl ProviderBackgroundRetrievalBinding {
     #[allow(clippy::too_many_arguments)]
     #[cfg(all(
         feature = "provider-openai-core",
-        any(feature = "sqlite", feature = "postgres")
+        any(feature = "sqlite", feature = "postgres", feature = "mssql")
     ))]
     pub(crate) fn new(
         submission_id: Uuid,
@@ -3729,7 +3698,6 @@ impl ProviderBackgroundRetrievalBinding {
     }
 
     pub(crate) fn source_reference(submission_id: Uuid, response_id: &str) -> String {
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         {
             let mut hasher = Sha256::new();
             hasher.update(b"graphql-orm-ai/provider-background-retrieval/v1\0");
@@ -3737,7 +3705,7 @@ impl ProviderBackgroundRetrievalBinding {
             hasher.update(response_id.as_bytes());
             hex::encode(hasher.finalize())
         }
-        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
         {
             format!("{submission_id}:{response_id}")
         }
@@ -3778,7 +3746,7 @@ pub struct ProviderBackgroundRetrievalContext {
 impl ProviderBackgroundRetrievalContext {
     #[cfg(all(
         feature = "provider-openai-core",
-        any(feature = "sqlite", feature = "postgres")
+        any(feature = "sqlite", feature = "postgres", feature = "mssql")
     ))]
     pub(crate) fn new(
         manifest: AiEgressManifest,
@@ -4008,7 +3976,6 @@ pub trait AiProvider: Send + Sync {
     /// Returns a non-sensitive provider error when empty-session creation is
     /// unsupported or the exact run, descriptor, model, or reviewed tool
     /// binding cannot be honored.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn create_empty_session(
         &self,
         _binding: &crate::AiProviderRunBinding,
@@ -4024,7 +3991,6 @@ pub trait AiProvider: Send + Sync {
     ///
     /// Returns a non-sensitive provider error when the exact empty session
     /// cannot be deleted or confirmed absent.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn discard_empty_session(
         &self,
         _binding: &crate::AiProviderRunBinding,

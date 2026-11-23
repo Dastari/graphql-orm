@@ -8,8 +8,6 @@
 //! ordinary coordinator. Every other server-initiated request remains
 //! forbidden.
 
-#![cfg_attr(feature = "mssql", allow(dead_code))]
-
 use super::{
     AiCodexAppServerSupportedVersions, AiCodexAppServerVersionObservation,
     AiCodexAppServerVersionReadiness,
@@ -811,7 +809,6 @@ pub struct AiCodexAppServerTurnInput {
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
     tool_images: Vec<crate::AiResolvedToolImage>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
     tools: Vec<ModelToolDefinition>,
     web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
@@ -863,7 +860,6 @@ impl AiCodexAppServerTurnInput {
             retained_bootstrap_fingerprint: None,
             input,
             tool_images: Vec::new(),
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             source_delivery: None,
             tools: Vec::new(),
             web_search: None,
@@ -880,7 +876,6 @@ impl AiCodexAppServerTurnInput {
         context: &ProviderRequestContext,
     ) -> Result<Self, ProviderError> {
         self.tool_images = context.retained_tool_result_images().to_vec();
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         {
             self.source_delivery = context.tool_source_delivery_check();
         }
@@ -895,7 +890,6 @@ impl AiCodexAppServerTurnInput {
     /// # Errors
     /// Returns a safe error for unavailable/expired/revoked/cancelled historical sources.
     pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         if let Some(delivery) = &self.source_delivery {
             delivery.authorize().await?;
         }
@@ -1689,7 +1683,6 @@ impl AiProvider for AiCodexAppServerProvider {
         self.pool.close_run(binding, reason).await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn create_empty_session(
         &self,
         binding: &AiProviderRunBinding,
@@ -1739,7 +1732,6 @@ impl AiProvider for AiCodexAppServerProvider {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn discard_empty_session(
         &self,
         binding: &AiProviderRunBinding,

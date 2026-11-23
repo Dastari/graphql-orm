@@ -91,7 +91,7 @@ to an existing database.
 
 PostgreSQL journal users can opt into canonical single-column keys shared by
 the recorder and full snapshots. The cutover starts a fresh incremental
-chain. See the [migration procedure](MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys).
+chain. See the [migration procedure](MIGRATION.md#02030-to-02070-canonical-postgresql-journal-keys).
 
 The packages remain independently consumable. Adding one does not enable the
 others as ORM features.

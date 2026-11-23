@@ -12,7 +12,11 @@ supersedes: []
 
 Version 0.207.0 stays aligned with the ORM's opt-in canonical PostgreSQL
 journal keys. Existing macro call sites require no changes. See the
-[migration guide](../../MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys).
+[migration guide](../../MIGRATION.md#02030-to-02070-canonical-postgresql-journal-keys).
+
+Version 0.203.0 adds SQL Server-only options to
+`backend_selected_graphql_entity` and opt-in exact string filters. See the
+[migration guide](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites).
 
 Version 0.202.0 aligns with the ORM's
 [integration test consolidation](../../docs/development/testing.md).

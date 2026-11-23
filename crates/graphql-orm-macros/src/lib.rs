@@ -249,10 +249,27 @@ pub fn graphql_policy_object(args: TokenStream, input: TokenStream) -> TokenStre
 /// exclusive `sqlite`, `postgres`, and `mssql` features while depending on a
 /// `graphql-orm` instance whose features may be unified with other workspace
 /// consumers. The attribute accepts the same arguments as `graphql_entity`
-/// except `backend`, which it supplies itself.
+/// except `backend`, which it supplies itself. Put options exclusive to SQL
+/// Server in an optional `mssql(...)` argument.
 pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) -> TokenStream {
-    let args = proc_macro2::TokenStream::from(args);
+    let options = parse_macro_input!(args with syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated);
     let input = parse_macro_input!(input as syn::ItemStruct);
+    let mut shared = Vec::new();
+    let mut mssql_options = None;
+    for option in options {
+        match option {
+            syn::Meta::List(list) if list.path.is_ident("mssql") && mssql_options.is_none() => {
+                mssql_options = Some(list.tokens);
+            }
+            option if option.path().is_ident("mssql") => {
+                return syn::Error::new_spanned(option, "expected a single mssql(...) argument")
+                    .to_compile_error()
+                    .into();
+            }
+            option => shared.push(option),
+        }
+    }
+    let args = quote::quote! { #(#shared,)* };
     let mut sqlite = input.clone();
     sqlite.attrs.push(syn::parse_quote!(
         #[graphql_entity(backend = "sqlite", #args)]
@@ -263,7 +280,7 @@ pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) ->
     ));
     let mut mssql = input;
     mssql.attrs.push(syn::parse_quote!(
-        #[graphql_entity(backend = "mssql", #args)]
+        #[graphql_entity(backend = "mssql", #args #mssql_options)]
     ));
     quote::quote! {
         #[cfg(feature = "sqlite")]

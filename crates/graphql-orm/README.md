@@ -13,7 +13,10 @@ supersedes: []
 Version 0.207.0 adds an opt-in PostgreSQL journal key encoding shared with
 full backups. Call `Database::enable_canonical_change_journal_keys` as the
 schema owner and start a fresh incremental chain. The legacy encoding remains
-the default. See the [migration procedure](../../MIGRATION.md#02020-to-02070-canonical-postgresql-journal-keys).
+the default. See the [migration procedure](../../MIGRATION.md#02030-to-02070-canonical-postgresql-journal-keys).
+
+Version 0.203.0 adds SQL Server prerequisites for durable AI stores. See the
+[SQL Server DDL reference](../../docs/reference/graphql-orm/mssql.md#introspection-and-rendered-ddl).
 
 Version 0.202.0 groups additional integration tests and documents the blocking
 migration file writer. See the [test selectors](../../docs/development/testing.md).
