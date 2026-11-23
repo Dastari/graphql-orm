@@ -1429,8 +1429,10 @@ mod portable {
             .with_read_visibility(&ReadVisibility::Complete(all(PARENT, passes())))
             .unwrap()
             .build_delete_sql();
+        // SQLite keeps the original rendering: the TRUE and FALSE tests at
+        // the anchor and at the recursive step.
         let copies = if B::DIALECT == DatabaseBackend::Sqlite {
-            1
+            4
         } else {
             2
         };

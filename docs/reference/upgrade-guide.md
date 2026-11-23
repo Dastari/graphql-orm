@@ -72,7 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.211.0, `graphql-orm-macros` 0.211.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-- **No action** — ORM/macros 0.211.0: on PostgreSQL and SQL Server, directly nested closures over built-in column tests can use fewer target SQL copies and bind parameters; SQLite keeps the original nested rendering, and admitted rows are unchanged (#785). [Migration](../../MIGRATION.md#02050-to-02110-directly-nested-closure-read-predicates)
+- **No action** — ORM/macros 0.211.0: security fix (#876). SQLite renders every closure read predicate in the original form again; since 0.200.0, a closure over a case-insensitive (`NOCASE`) pointer column joined to a case-sensitive key could reach a different verdict. On PostgreSQL and SQL Server, directly nested closures over built-in column tests can use fewer target SQL copies and bind parameters (#785). [Migration](../../MIGRATION.md#02050-to-02110-sqlite-closure-rendering-and-nested-closure-read-predicates)
 - **No action** — ORM/macros 0.205.0 share the generated Changed stream implementation to reduce compile work (part of #677 and #358). [Migration](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions)
 - **No action** — ORM/macros 0.205.0 support combining `changed_started = true` and `key_only_deletes` on generated Changed subscriptions. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-02050)
 - **No action** — ORM/macros 0.204.0 and backup 0.29.0 add an opt-in for

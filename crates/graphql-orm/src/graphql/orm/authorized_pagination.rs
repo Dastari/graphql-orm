@@ -338,7 +338,8 @@ enum Policy {
     },
     /// Keep the original rendering and binds for composition and budgets.
     /// The compact scalar is NULL, 0 or 1. It can be used at the root, or
-    /// as a directly nested closure target built from column tests.
+    /// as a directly nested closure target built from column tests. SQLite
+    /// closures never take this form.
     Closure {
         sql: RowBoundSql,
         values: Vec<SqlValue>,
@@ -2062,7 +2063,10 @@ fn render_mssql_closure(
     clause
 }
 
-/// SQLite and PostgreSQL walk the same pointers with a recursive CTE.
+/// SQLite and PostgreSQL walk the same pointers with a recursive CTE. Each
+/// row of the CTE carries the target's truth, so `UNION` keeps two reached
+/// rows whose pointers compare equal under the pointer column's collation
+/// when their truths differ, and the walk follows both.
 fn render_recursive_closure(
     dialect: DatabaseBackend,
     table: &str,
@@ -2070,7 +2074,6 @@ fn render_recursive_closure(
     keys: &[(&str, &str)],
     quantifier: ReadPredicateQuantifier,
     truth: &RowBoundSql,
-    columns_for_truth: Option<&[String]>,
     max_depth: u32,
 ) -> RowBoundSql {
     let join = |items: Vec<String>, separator: &str| items.join(separator);
@@ -2082,10 +2085,9 @@ fn render_recursive_closure(
     };
     let columns = join(indexed(&|index, _, _| format!("__gom_p{index}")), ", ");
     // The anchor has no FROM: its row is the one being authorized, the
-    // governed row, which the enclosing context binds. The step uses
-    // `reached` for the physical row. The target reads that same row,
-    // either through the projection or directly through `reached`.
-    // A missing column fails the statement (#796).
+    // governed row, which the enclosing context binds. The step joins the
+    // reached row as `reached` and evaluates the target on it, so a column
+    // it lacks fails the statement (#796).
     let reached = format!("{cte}_t");
     let step = join(
         indexed(&|index, _, key| {
@@ -2147,13 +2149,8 @@ fn render_recursive_closure(
         }),
         ", ",
     );
-    let truth_column = if columns_for_truth.is_some() {
-        ""
-    } else {
-        ", __gom_truth"
-    };
     let mut clause = RowBoundSql::sql(format!(
-        "(WITH RECURSIVE {cte} ({columns}, __gom_depth{truth_column}) AS (SELECT "
+        "(WITH RECURSIVE {cte} ({columns}, __gom_depth, __gom_truth) AS (SELECT "
     ));
     for (index, (pointer, _)) in keys.iter().enumerate() {
         if index > 0 {
@@ -2165,41 +2162,14 @@ fn render_recursive_closure(
             dialect.delimited_column_identifier(pointer)
         ));
     }
-    clause.push_str(", 0");
-    if columns_for_truth.is_none() {
-        clause.push_str(", ");
-        clause.push(truth);
-    }
+    clause.push_str(", 0, ");
+    clause.push(truth);
     clause.push_str(&format!(
-        " UNION SELECT {reached_pointers}, {cte}.__gom_depth + 1"
+        " UNION SELECT {reached_pointers}, {cte}.__gom_depth + 1, {} \
+         FROM {cte} JOIN {table} AS {reached} ON {step} \
+         WHERE {cte}.__gom_depth < {max_depth}) SELECT {verdict} FROM {cte})",
+        truth.bind(&reached),
     ));
-    if columns_for_truth.is_none() {
-        clause.push_str(&format!(", {}", truth.bind(&reached)));
-    }
-    clause.push_str(&format!(
-        " FROM {cte} JOIN {table} AS {reached} ON {step} \
-         WHERE {cte}.__gom_depth < {max_depth}) SELECT {verdict} FROM "
-    ));
-    if let Some(columns) = columns_for_truth {
-        // The walk needs only (pointer, depth). Joining each pointer
-        // below the bound once more recovers every reached input to
-        // MIN/MAX. Repeated matches do not affect these aggregates.
-        let input = format!("{cte}_i");
-        let truths = format!("{cte}_x");
-        let origin = format!("{cte}_origin");
-        clause.push_str(&format!(
-            "(SELECT {} AS __gom_truth FROM (",
-            truth.bind(&input)
-        ));
-        clause.push(&closure_anchor_projection(columns, &origin));
-        clause.push_str(&format!(
-            " UNION ALL SELECT 0{reached_columns} FROM {cte} JOIN {table} AS {reached} ON {step} \
-             WHERE {cte}.__gom_depth < {max_depth}) AS {input}) AS {truths})",
-            reached_columns = closure_column_projection(columns, &reached),
-        ));
-    } else {
-        clause.push_str(&format!("{cte})"));
-    }
     clause
 }
 
@@ -2834,14 +2804,15 @@ impl ReadPredicate {
     ///
     /// **Rendering.** A correlated scalar subquery, used wherever the policy
     /// clause is applied: reads, counts, aggregates, keyset and connection
-    /// pages, search and subscription delivery re-reads. A standalone
-    /// closure can share the target SQL between the governed and reached rows
-    /// on SQLite and SQL Server. PostgreSQL keeps one traversal join and can
+    /// pages, search and subscription delivery re-reads. SQLite renders
+    /// every closure in the original form, single-level and nested, with
+    /// separate TRUE and FALSE tests carried in the recursive tuple. On SQL
+    /// Server a standalone closure can share the target SQL between the
+    /// governed and reached rows. PostgreSQL keeps one traversal join and can
     /// use a single scalar truth test at each site. On PostgreSQL and SQL
     /// Server, a root closure directly wrapping a closure over built-in
-    /// column tests can also reuse the inner walk's scalar result. SQLite
-    /// renders nested closures in the original form. Other compositions keep
-    /// the separate TRUE and FALSE tests.
+    /// column tests can also reuse the inner walk's scalar result. Other
+    /// compositions keep the separate TRUE and FALSE tests.
     /// SQLite and PostgreSQL render a
     /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
     /// common table expression inside a subquery, so there the walk is
@@ -2942,21 +2913,28 @@ impl ReadPredicate {
             relation.scope.level(CLOSURE_ALIASES)
         );
         let render = |truth: &RowBoundSql, columns: Option<&[String]>| {
-            let renderer = if dialect == DatabaseBackend::Mssql {
-                render_mssql_closure
+            if dialect == DatabaseBackend::Mssql {
+                render_mssql_closure(
+                    dialect,
+                    &relation.table,
+                    &cte,
+                    keys,
+                    quantifier,
+                    truth,
+                    columns,
+                    max_depth,
+                )
             } else {
-                render_recursive_closure
-            };
-            renderer(
-                dialect,
-                &relation.table,
-                &cte,
-                keys,
-                quantifier,
-                truth,
-                columns,
-                max_depth,
-            )
+                render_recursive_closure(
+                    dialect,
+                    &relation.table,
+                    &cte,
+                    keys,
+                    quantifier,
+                    truth,
+                    max_depth,
+                )
+            }
         };
 
         // Build and check exactly the original composition, including every
@@ -2977,15 +2955,18 @@ impl ReadPredicate {
         )?;
         predicate.negation = negation;
         predicate.column_tests_only = target.column_tests_only;
+        // SQLite always uses the original rendering. Its recursive CTE
+        // deduplicates rows under `UNION` with the pointer column's
+        // collation. The original tuple carries the target's truth, so two
+        // collation-equal pointers with different truths are both followed.
+        // A walk over `(pointer, depth)` alone keeps only one of them, and
+        // a case-sensitive key can name different rows for each.
+        if dialect == DatabaseBackend::Sqlite {
+            return Ok(predicate);
+        }
 
         let (compact_truth, mut compact_values) = match &target.policy {
-            // SQLite keeps the original rendering for nested closures. Its
-            // compact inner walk deduplicates pointers without their truth
-            // under the pointer column's collation, which can drop a pointer
-            // the original walk follows.
-            Policy::Closure { scalar, .. }
-                if target.column_tests_only && dialect != DatabaseBackend::Sqlite =>
-            {
+            Policy::Closure { scalar, .. } if target.column_tests_only => {
                 // A closure already returns nullable 0/1. Convert that
                 // scalar to the aggregate's 0/1/2 encoding without a
                 // second walk to find its FALSE rows. ISNULL avoids SQL
@@ -3006,20 +2987,16 @@ impl ReadPredicate {
                 relation.values,
             ),
             _ if dialect == DatabaseBackend::Postgres => return Ok(predicate),
-            _ if dialect == DatabaseBackend::Sqlite && uses_native_truth => (
-                relation
-                    .predicate
-                    .wrapped("COALESCE(2 * (NOT NOT (", ")), 1)"),
-                relation.values,
-            ),
             _ => (legacy_truth, legacy_values),
         };
         let compact_sql = if dialect == DatabaseBackend::Postgres {
             // PostgreSQL evaluates the scalar at the anchor and the
-            // recursive step, in SQL order.
+            // recursive step, in SQL order. Its recursive tuple carries the
+            // truth, as in the original rendering.
             compact_values.extend_from_within(..);
             render(&compact_truth, None)
         } else {
+            // SQL Server: both renderings walk pointers only.
             let Some(columns) = closure_columns(dialect, &compact_truth) else {
                 return Ok(predicate);
             };

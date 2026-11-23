@@ -1,6 +1,7 @@
 #![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-//! SQLite renders nested closures in the original form. These cases cover
-//! column collation, affinity and collation-equal pointers.
+//! SQLite renders every closure, single-level and nested, in the original
+//! form. These cases cover column collation, affinity and collation-equal
+//! pointers, and check the rendering verbatim against the original renderer.
 use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -69,7 +70,7 @@ async fn execute(db: &Database<SqliteBackend>, statements: &[&str]) {
 }
 
 #[tokio::test]
-async fn nested_compact_matches_original_on_collation_and_affinity() {
+async fn closures_match_original_on_collation_and_affinity() {
     use ReadPredicateQuantifier::{All, Any};
 
     let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
@@ -152,11 +153,9 @@ async fn nested_compact_matches_original_on_collation_and_affinity() {
         let (candidate_ids, candidate_sql) = read(candidate).await;
         assert_eq!(original_ids, expected, "{name}, original");
         assert_eq!(candidate_ids, expected, "{name}, candidate");
-        // SQLite renders a nested closure exactly as the original renderer
-        // does. A single-level closure keeps its compact form.
-        assert_eq!(
+        // SQLite renders every closure exactly as the original renderer.
+        assert!(
             original_sql.contains(closure_sql(&candidate_sql)),
-            name.starts_with("nested"),
             "{name}, rendering"
         );
     }
@@ -167,9 +166,10 @@ async fn nested_compact_matches_original_on_collation_and_affinity() {
 /// truths. The step compares through the BINARY key, so each names a
 /// different row, and only `'A'` leads to a TRUE row. The original walk keeps
 /// both pointers because its recursive tuple includes the truth. A walk that
-/// deduplicated on `(pointer, depth)` alone would follow only one of them.
+/// deduplicated on `(pointer, depth)` alone followed only one of them: the
+/// single-level and nested `Any` cases below then denied row 6.
 #[tokio::test]
-async fn nested_closure_follows_collation_equal_pointers_like_the_original() {
+async fn closures_follow_collation_equal_pointers_like_the_original() {
     use ReadPredicateQuantifier::{All, Any};
 
     let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
@@ -215,19 +215,37 @@ async fn nested_closure_follows_collation_equal_pointers_like_the_original() {
             closure(inner, &[("ptr", "key")], target),
         )
     };
-    let cases: [(&str, ReadPredicate, &[i64]); 3] = [
+    let fan_out = |quantifier, target| closure(quantifier, &[("ptr", "key")], target);
+    let cases: [(&str, ReadPredicate, &[i64]); 6] = [
         (
-            "any reaches the case-sensitive key",
+            "single-level any reaches the case-sensitive key",
+            fan_out(Any, score(ReadPredicateOp::Eq, 1)),
+            &[1, 3, 5, 6, 7, 9],
+        ),
+        // Row 6 reaches the UNKNOWN row 7 and, through 'b', the FALSE row
+        // 9, so it is denied; rows 2, 4, 8 and 10 reach only TRUE rows.
+        (
+            "single-level all reaches the case-sensitive key",
+            fan_out(All, score(ReadPredicateOp::Ne, 1)),
+            &[2, 4, 8, 10],
+        ),
+        (
+            "single-level negated any",
+            fan_out(Any, score(ReadPredicateOp::Eq, 1)).not().unwrap(),
+            &[2, 4, 8, 10],
+        ),
+        (
+            "nested any reaches the case-sensitive key",
             nested(Any, Any, score(ReadPredicateOp::Eq, 1)),
             &[1, 3, 5, 6, 7, 9],
         ),
         (
-            "all reaches the case-sensitive key",
+            "nested all reaches the case-sensitive key",
             nested(All, All, score(ReadPredicateOp::Ne, 1)),
             &[2, 4, 8, 10],
         ),
         (
-            "negated any",
+            "nested negated any",
             nested(Any, Any, score(ReadPredicateOp::Eq, 1))
                 .not()
                 .unwrap(),
@@ -265,4 +283,117 @@ async fn nested_closure_follows_collation_equal_pointers_like_the_original() {
             "{name}, rendering"
         );
     }
+}
+
+/// Generated tables over the same columns: pointers and keys drawn from
+/// collation-equal letters, NULL pointers, fan-out keys and parent chains.
+/// Every closure shape admits the original renderer's rows with its SQL.
+#[tokio::test]
+async fn generated_collation_fan_outs_match_the_original_renderer() {
+    use ReadPredicateQuantifier::{All, Any};
+
+    struct Generator(u64);
+    impl Generator {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % bound
+        }
+    }
+    let letters = ["a", "A", "b", "B", "p"];
+    let mut random = Generator(785);
+    let mut admitting = 0;
+    for _ in 0..150 {
+        let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap();
+        let rows = 4 + random.below(8);
+        let values = (1..=rows)
+            .map(|id| {
+                let parent = match random.below(3) {
+                    0 => "NULL".to_owned(),
+                    _ => (1 + random.below(rows)).to_string(),
+                };
+                let pointer = match random.below(6) {
+                    5 => "NULL".to_owned(),
+                    index => format!("'{}'", letters[index as usize]),
+                };
+                let key = letters[random.below(5) as usize];
+                let score = match random.below(3) {
+                    0 => "NULL".to_owned(),
+                    score => (score - 1).to_string(),
+                };
+                format!("({id}, {parent}, {pointer}, '{key}', {score})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute(
+            &db,
+            &[
+                "CREATE TABLE closure_fan_out_nodes (id INTEGER PRIMARY KEY, parent_id INTEGER NULL, \
+                 ptr TEXT COLLATE NOCASE NULL, key TEXT COLLATE BINARY NULL, score INTEGER NULL)",
+                &format!("INSERT INTO closure_fan_out_nodes VALUES {values}"),
+            ],
+        )
+        .await;
+        let text = SqlText::default();
+        let db = db.with_read_query_observer(text.clone());
+        let depth = 1 + random.below(3) as u32;
+        let closure = |quantifier, keys: &[(&str, &str)], target| {
+            ReadPredicate::related_closure_within::<SqliteBackend, ClosureFanOutNode>(
+                quantifier, keys, target, depth,
+            )
+            .unwrap()
+        };
+        for quantifier in [Any, All] {
+            for op in [ReadPredicateOp::Eq, ReadPredicateOp::Ne] {
+                let target = ReadPredicate::column::<SqliteBackend, ClosureFanOutNode>(
+                    "score",
+                    op,
+                    SqlValue::Int(1),
+                )
+                .unwrap();
+                let single = closure(quantifier, &[("ptr", "key")], target);
+                let nested = closure(quantifier, &[("parent_id", "id")], single.clone());
+                for candidate in [single.clone(), single.not().unwrap(), nested] {
+                    let original = candidate
+                        .clone()
+                        .and(
+                            ReadPredicate::is_not_null::<SqliteBackend, ClosureFanOutNode>("id")
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    let read = |policy| {
+                        let db = &db;
+                        let text = &text;
+                        async move {
+                            let mut ids = EntityQuery::<ClosureFanOutNode>::new()
+                                .with_read_visibility(&ReadVisibility::Complete(policy))
+                                .unwrap()
+                                .fetch_all(db)
+                                .await
+                                .unwrap()
+                                .into_iter()
+                                .map(|row| row.id)
+                                .collect::<Vec<_>>();
+                            ids.sort_unstable();
+                            (ids, text.0.lock().unwrap().clone())
+                        }
+                    };
+                    let (original_ids, original_sql) = read(original).await;
+                    let (candidate_ids, candidate_sql) = read(candidate).await;
+                    assert_eq!(candidate_ids, original_ids, "{values}");
+                    assert!(
+                        original_sql.contains(closure_sql(&candidate_sql)),
+                        "{values}"
+                    );
+                    admitting += usize::from(!original_ids.is_empty());
+                }
+            }
+        }
+    }
+    // The generated cases admit rows, so the comparison is not vacuous.
+    assert!(admitting > 300);
 }

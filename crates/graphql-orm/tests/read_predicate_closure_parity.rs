@@ -577,7 +577,7 @@ fn closure_sql(sql: &str) -> &str {
     panic!("unbalanced closure subquery");
 }
 
-/// SQLite renders a nested closure exactly as the original renderer does.
+/// SQLite renders every closure exactly as the original renderer does.
 /// PostgreSQL and SQL Server take the compact rendering.
 fn assert_nested_rendering(name: &str, original: &str, candidate: &str) {
     if B::DIALECT == DatabaseBackend::Sqlite {

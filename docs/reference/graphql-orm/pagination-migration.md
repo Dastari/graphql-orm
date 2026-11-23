@@ -377,17 +377,19 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   negate it.
 - **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
-  search and subscription delivery re-reads. SQLite and SQL Server can
-  project the governed and reached rows into one target expression for a
-  standalone closure. PostgreSQL keeps the traversal join and can encode
-  scalar truth at each site with a single target expression. On PostgreSQL
-  and SQL Server, when a root closure directly wraps another closure over
-  built-in column comparisons and NULL tests, it can use the inner walk's
-  nullable verdict as its target. SQL Server can share that verdict across
-  the governed and reached rows; PostgreSQL uses it once at each site.
-  SQLite renders nested closures in the original form. Other compositions use
-  separate TRUE and FALSE tests. Each form admits the same rows. Every test keeps the
-  target's bind order. Nested closures get distinct names. The database
+  search and subscription delivery re-reads. SQLite renders every closure,
+  single-level and nested, in the original form: the recursive tuple carries
+  the target's truth, so pointers that compare equal under the pointer
+  column's collation but carry different truths are all followed (#876). SQL
+  Server can project the governed and reached rows into one target
+  expression for a standalone closure. PostgreSQL keeps the traversal join
+  and can encode scalar truth at each site with a single target expression.
+  On PostgreSQL and SQL Server, when a root closure directly wraps another
+  closure over built-in column comparisons and NULL tests, it can use the
+  inner walk's nullable verdict as its target. SQL Server can share that
+  verdict across the governed and reached rows; PostgreSQL uses it once at
+  each site. Other compositions use separate TRUE and FALSE tests. Each form
+  admits the same rows. Every test keeps the target's bind order. Nested closures get distinct names. The database
   evaluates the closure per row. Unsupported backends are refused with
   `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
