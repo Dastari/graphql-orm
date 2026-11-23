@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.154.0 to 0.155.0
+
+**No action.** The exported AI roots now implement `GraphqlRootFieldNames`,
+so existing `schema_roots!` declarations can compose them directly with their
+configured field names. No data migration is needed.
+
 ## 0.153.0 to 0.154.0
 
 **Action needed.** When adopting SQL Server, install the ORM restore marker with
