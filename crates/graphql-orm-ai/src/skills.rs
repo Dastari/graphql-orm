@@ -359,6 +359,7 @@ pub trait AiSkillCatalogService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiSkillQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -390,6 +391,7 @@ impl AiSkillQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiSkillMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
