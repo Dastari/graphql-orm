@@ -15,6 +15,15 @@ struct ClosureCollationNode {
 }
 schema_roots! { query_custom_ops: [], entities: [ClosureCollationNode] }
 
+/// The length of the last read statement.
+#[derive(Clone, Default)]
+struct SqlSize(std::sync::Arc<std::sync::Mutex<usize>>);
+impl graphql_orm::graphql::orm::ReadQueryObserver for SqlSize {
+    fn on_read(&self, sql: &str, _: usize) {
+        *self.0.lock().unwrap() = sql.len();
+    }
+}
+
 #[tokio::test]
 async fn nested_compact_matches_original_on_collation_and_affinity() {
     use ReadPredicateQuantifier::{All, Any};
@@ -32,6 +41,8 @@ async fn nested_compact_matches_original_on_collation_and_affinity() {
             .await
             .unwrap();
     }
+    let size = SqlSize::default();
+    let db = db.with_read_query_observer(size.clone());
     let column = |name, op, value| {
         ReadPredicate::column::<SqliteBackend, ClosureCollationNode>(name, op, value).unwrap()
     };
@@ -71,6 +82,7 @@ async fn nested_compact_matches_original_on_collation_and_affinity() {
     ];
     let read = |policy| {
         let db = &db;
+        let size = &size;
         async move {
             let mut ids = EntityQuery::<ClosureCollationNode>::new()
                 .with_read_visibility(&ReadVisibility::Complete(policy))
@@ -82,7 +94,7 @@ async fn nested_compact_matches_original_on_collation_and_affinity() {
                 .map(|row| row.id)
                 .collect::<Vec<_>>();
             ids.sort_unstable();
-            ids
+            (ids, *size.0.lock().unwrap())
         }
     };
     for (name, candidate, expected) in cases {
@@ -92,7 +104,17 @@ async fn nested_compact_matches_original_on_collation_and_affinity() {
             .clone()
             .and(ReadPredicate::is_not_null::<SqliteBackend, ClosureCollationNode>("id").unwrap())
             .unwrap();
-        assert_eq!(read(original).await, expected, "{name}, original");
-        assert_eq!(read(candidate).await, expected, "{name}, compact");
+        let (original_ids, original_bytes) = read(original).await;
+        let (compact_ids, compact_bytes) = read(candidate).await;
+        assert_eq!(original_ids, expected, "{name}, original");
+        assert_eq!(compact_ids, expected, "{name}, compact");
+        // A nested candidate must take the compact rendering, or this test
+        // would compare the original SQL with itself.
+        if name.starts_with("nested") {
+            assert!(
+                compact_bytes + 64 < original_bytes,
+                "{name}, compact rendering"
+            );
+        }
     }
 }

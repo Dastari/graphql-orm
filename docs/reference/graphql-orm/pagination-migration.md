@@ -387,8 +387,9 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   SQLite and PostgreSQL can use it once at each site. SQLite reads the physical
   row at each site to preserve column collation and affinity. Other
   compositions use separate TRUE and FALSE tests. Every test keeps the
-  target's bind order. Nested closures get distinct names. The database evaluates the closure per row. Unsupported backends
-  are refused with `AUTHORIZATION_MISCONFIGURED`.
+  target's bind order. Nested closures get distinct names. The database
+  evaluates the closure per row. Unsupported backends are refused with
+  `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
   so the walk is unrolled into a breadth-first search, with no schema objects
