@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
+  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -84,9 +84,9 @@ run_postgres() {
     --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test authorized_pagination_postgres --test bounded_mutation_sentinels \
+    --test postgres_owned_contracts --test bounded_mutation_sentinels \
     --test bulk_refusals --test delete_propagation --test denied_relations \
-    --test host_primary_keys --test postgres_constraint_index_idempotency --test postgres_runtime_repository \
+    --test host_primary_keys --test postgres_runtime_repository \
     --test single_row_refusals \
     -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
@@ -215,9 +215,15 @@ run_ai_postgres() {
   # The AI effect guard is enforced by the ORM's transaction-bound planner.
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test dependent_delete_repro transaction_effect_guard -- --ignored --test-threads=1
-  cargo test -p graphql-orm-ai --no-default-features \
-    --features postgres,provider-openai --test postgres_parity --locked \
-    -- --test-threads=1
+  run_ai_parity postgres
+}
+
+run_ai_parity() {
+  local backend=$1
+  cargo test -p graphql-orm-ai --locked --no-default-features \
+    --features "${backend},provider-openai" --test durable_parity -- --test-threads=1
+  cargo test -p graphql-orm-ai --locked --no-default-features \
+    --features "${backend},provider-openai" --lib database_parity_ -- --ignored --test-threads=1
 }
 
 run_field_write_denial() {
@@ -348,12 +354,14 @@ case "${lane}" in
   migration-journal) run_migration_journal ;;
   mssql) run_mssql ;;
   ai-postgres) run_ai_postgres ;;
+  ai-mssql) run_ai_parity mssql ;;
   all)
     run_sqlite
     run_postgres
     run_postgres_legacy
     run_mssql
     run_ai_postgres
+    run_ai_parity mssql
     ;;
 esac
 

@@ -6,6 +6,7 @@
 //! through this separate, Rust-only type. It is never exposed through GraphQL
 //! and never reachable from [`crate::OrmAiConfigurationService`].
 
+use crate::AiOrmBackend;
 use crate::orm_configuration::{
     AuditFact, budget_policy_view, insert_audit, normalize_and_validate_budget_policy_input,
     scope_key, validate_scope,
@@ -20,7 +21,7 @@ use crate::{
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::StringFilter;
-use graphql_orm::graphql::orm::{DefaultWriteBackend, TransactionError, TransactionMode};
+use graphql_orm::graphql::orm::{TransactionError, TransactionMode};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use uuid::Uuid;
@@ -147,7 +148,7 @@ impl AiDeploymentBudgetPolicyOutcome {
 /// Interactive MFA-authorized edits of a provisioned policy are authoritative.
 #[derive(Clone)]
 pub struct OrmAiBudgetPolicyProvisioner {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     actor: AiDeploymentActor,
     limits: AiBudgetPolicyManagementLimits,
 }
@@ -156,7 +157,7 @@ impl OrmAiBudgetPolicyProvisioner {
     /// Creates a provisioner. Use the same `limits` as the host's interactive
     /// management and [`crate::AiRestorePolicyAuditLimits`].
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         actor: AiDeploymentActor,
         limits: AiBudgetPolicyManagementLimits,
     ) -> Self {

@@ -1,7 +1,5 @@
 //! Fenced top-level coordination for bounded read-only provider/tool loops.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use std::sync::Arc;
 
 use async_trait::async_trait;

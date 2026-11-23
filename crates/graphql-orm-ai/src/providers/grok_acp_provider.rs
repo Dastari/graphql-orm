@@ -1144,7 +1144,6 @@ impl AiProvider for AiGrokAcpProvider {
             }),
         }
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn create_empty_session(
         &self,
         binding: &AiProviderRunBinding,
@@ -1187,7 +1186,6 @@ impl AiProvider for AiGrokAcpProvider {
         guard.complete = true;
         Ok(created)
     }
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn discard_empty_session(
         &self,
         binding: &AiProviderRunBinding,
@@ -1267,7 +1265,7 @@ impl crate::AiProviderSessionDeletionService for AiGrokAcpDeletionService {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 pub(super) mod tests {
     use super::*;
     use serde_json::json;

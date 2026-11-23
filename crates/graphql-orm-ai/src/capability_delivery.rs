@@ -186,7 +186,6 @@ impl AiCapabilityDeliveryDecision {
 pub struct AiCapabilityDeliverySurface {
     mode: AiCapabilityDeliveryMode,
     tools: Vec<ModelToolDefinition>,
-    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     offering: Option<AiCapabilityOfferingSnapshot>,
 }
 
@@ -198,7 +197,6 @@ struct AiCapabilityOfferingState {
     frozen_plans: usize,
 }
 
-#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 #[derive(Clone, Debug)]
 struct AiCapabilityOfferingSnapshot {
     state: Arc<Mutex<AiCapabilityOfferingState>>,
@@ -228,7 +226,6 @@ impl Drop for AiCapabilityOfferingPlanFreeze {
 }
 
 impl AiCapabilityOfferingPlanGuard {
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn validate(&self) -> Result<(), AiError> {
         let state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.generation != self.0.generation {
@@ -253,7 +250,6 @@ impl AiCapabilityDeliverySurface {
         &self.tools
     }
 
-    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     pub(crate) fn freeze_offering(&self) -> Result<Option<AiCapabilityOfferingPlanGuard>, AiError> {
         let Some(snapshot) = &self.offering else {
             return Ok(None);
@@ -342,7 +338,6 @@ pub fn prepare_capability_delivery_surface(
     Ok(AiCapabilityDeliverySurface {
         mode: decision.mode,
         tools,
-        #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
         offering: None,
     })
 }
@@ -2102,7 +2097,6 @@ impl AiCapabilityBrokerSession {
         }
     }
 
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     fn record_deferred_search(
         &self,
         result: AiCapabilityIndexSetSearchResult,
@@ -2122,7 +2116,6 @@ impl AiCapabilityBrokerSession {
         self.state().deferred_installation_pending
     }
 
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     fn complete_deferred_installation(&self) {
         self.state().deferred_installation_pending = false;
     }
@@ -2942,7 +2935,6 @@ impl AiCapabilityDiscoveryBroker {
     /// constrained to generated reads, capped by the deferred-definition
     /// limit, freshly loaded under current authority, and installed verbatim
     /// by the coordinator after the durable discovery outcome commits.
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) async fn dispatch_client_deferred_discover(
         &self,
         principal_reference: &PrincipalReference,
@@ -3372,7 +3364,6 @@ pub struct AiCapabilityDeliveryTurn {
     session_binding: AiProviderCapabilitySessionBinding,
     broker: Arc<AiCapabilityDiscoveryBroker>,
     session: AiCapabilityBrokerSession,
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     static_bootstrap_tools: Arc<Vec<ModelToolDefinition>>,
     tools: Arc<Mutex<AiCapabilityOfferingState>>,
 }
@@ -3512,7 +3503,6 @@ impl AiCapabilityDeliveryTurn {
     /// Whether `admits` accepts every reviewed static tool this run may reach
     /// through the fixed broker. The coordinator uses it to hold brokered
     /// static tools to the same hierarchical rules as offered ones.
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn brokered_static_tools_admitted(&self, admits: impl Fn(&str) -> bool) -> bool {
         self.session
             .brokered_static_tools
@@ -3541,7 +3531,6 @@ impl AiCapabilityDeliveryTurn {
         AiCapabilityDeliverySurface {
             mode: self.mode,
             tools: state.tools.clone(),
-            #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
             offering: Some(AiCapabilityOfferingSnapshot {
                 state: self.tools.clone(),
                 generation: state.generation,
@@ -3549,7 +3538,6 @@ impl AiCapabilityDeliveryTurn {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn require_unfrozen_static_offering(&self) -> Result<(), AiError> {
         let state = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
         if state.frozen_plans != 0 {
@@ -3613,7 +3601,6 @@ impl AiCapabilityDeliveryTurn {
     ///
     /// The fixed broker's definitions are catalogue-independent; the
     /// client-deferred discovery definition stays bound to the index.
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn broker_definition(
         &self,
         operation: AiCapabilityBrokerOperation,
@@ -3646,7 +3633,6 @@ impl AiCapabilityDeliveryTurn {
     /// Matching fingerprints alone are insufficient on a continuation: a host
     /// must carry forward the crate-owned broker session and installed surface
     /// rather than recreate empty state under the same public configuration.
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn shares_run_state(&self, other: &Self) -> bool {
         self.mode == other.mode
             && self.index_fingerprint == other.index_fingerprint
@@ -3676,7 +3662,6 @@ impl AiCapabilityDeliveryTurn {
     /// Returns a safe error unless the run is client-deferred and every
     /// supplied definition matches exactly one current loaded binding within
     /// the configured selection count.
-    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn install_deferred_definitions(
         &self,
         exact_definitions: Vec<ModelToolDefinition>,
@@ -3720,7 +3705,6 @@ impl AiCapabilityDeliveryTurn {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl AiCapabilityRunBinding {
     /// Builds one exact broker run fence from a renewed run lease.
     ///

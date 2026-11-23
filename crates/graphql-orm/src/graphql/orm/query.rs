@@ -6127,6 +6127,11 @@ where
                     DatabaseBackend::Postgres => Ok(format!(
                         "COALESCE(octet_length(CAST((SELECT {projection}) AS TEXT)), 0)::bigint"
                     )),
+                    // Count raw bytes (including binary payloads) and bound
+                    // UTF-8 decoding by four bytes per UTF-16 code unit.
+                    DatabaseBackend::Mssql => Ok(format!(
+                        "COALESCE(CAST(DATALENGTH((SELECT {projection})) AS BIGINT), 0) + 2 * COALESCE(DATALENGTH(CONVERT(NVARCHAR(MAX), (SELECT {projection}))), 0)"
+                    )),
                     _ => Err(Self::payload_budget_error()),
                 }
             })
@@ -7976,6 +7981,34 @@ mod grouped_aggregate_tests {
 #[cfg(test)]
 mod visible_row_scan_tests {
     use super::*;
+
+    #[test]
+    fn postgres_sort_projection_admits_only_unqualified_physical_columns() {
+        let columns = ["id", r#""Mixed.Case""#, r#""odd""name""#];
+        for clause in [
+            "id DESC NULLS LAST",
+            r#""Mixed.Case" ASC NULLS LAST, "odd""name" DESC"#,
+        ] {
+            assert!(
+                postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+        for clause in [
+            "records.id ASC",
+            "public.records.id",
+            "lower(id)",
+            "id /* comment */ DESC",
+            "id DESC -- comment",
+            r#""mixed.case" ASC"#,
+            "missing NULLS LAST",
+        ] {
+            assert!(
+                !postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+    }
 
     #[test]
     fn key_tiebreak_needs_a_direct_key_term() {

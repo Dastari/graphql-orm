@@ -1,14 +1,13 @@
 //! ORM-backed append-only egress decision audit.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::map_transaction;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::UuidFilter;
-use graphql_orm::graphql::orm::{DefaultWriteBackend, TransactionError, TransactionMode};
+use graphql_orm::graphql::orm::{TransactionError, TransactionMode};
 
 use crate::persistence::*;
 use crate::{
@@ -20,14 +19,14 @@ use crate::{
 /// repository operations.
 #[derive(Clone)]
 pub struct OrmAiEgressDecisionAudit {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
 }
 
 impl OrmAiEgressDecisionAudit {
     /// Creates an ORM-backed egress decision audit.
-    pub fn new(database: Database<DefaultWriteBackend>) -> Self {
+    pub fn new(database: Database<AiOrmBackend>) -> Self {
         let host_database = database.clone();
         let database = crate::custody_field_policy::custody_database(database);
         Self {
@@ -40,7 +39,7 @@ impl OrmAiEgressDecisionAudit {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 }

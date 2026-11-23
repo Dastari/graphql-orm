@@ -16,9 +16,37 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.207.0
 
-- **Fixed (#555).** PostgreSQL native search on generated RLS entities can use
-  a document primary-key lookup for narrow visibility or a bulk join for
-  broad visibility. Both RLS policies stay in force. [Migration](MIGRATION.md#02010-to-02070-postgresql-rls-search)
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02030-to-02070-postgresql-rls-search)
+
+## Unreleased - ORM/macros 0.203.0
+
+- **Action needed.** Before applying a regenerated SQL Server plan, review
+  cleanup jobs and foreign-key cascades that touch `append_only = true`
+  tables. The plan now installs triggers that reject updates and deletes,
+  including cascaded deletes. There is no SQL Server trigger opt-out while
+  the entity remains append-only (#813).
+- **Action needed.** Replan SQL Server schemas and resolve any table
+  declarations that map to the same physical identifier. SQL Server
+  planning now refuses these collisions (#813).
+- **No action.** SQL Server supports bounded row-size preflights and filtered
+  unique indexes over non-null keys.
+- **Action needed, only when opting in.** Entities opting in to
+  `exact_string_filters = true` get length-sensitive string comparisons, and
+  SQL Server plans give their generated Unicode string keys (primary keys,
+  unique columns, relation foreign-key sources and index members)
+  `COLLATE Latin1_General_100_BIN2`. Opt in both sides of a string foreign key
+  together, because SQL Server requires matching collations. On an existing
+  table, the generated `ALTER COLUMN … COLLATE` fails on indexed or constrained
+  columns: drop and recreate the dependent indexes and constraints around it.
+  Removing the option later leaves the live BIN2 collation in place (#813).
+
+## Unreleased - ORM/macros 0.202.0
+
+- Grouped additional SQLite GraphQL, owned database and consumer fixture tests.
+  See the [test lanes](docs/development/testing.md) for the selectors.
+- Documented the blocking filesystem operations in `write_migration_file`.
 
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 

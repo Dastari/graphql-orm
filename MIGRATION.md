@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.201.0 to 0.207.0: PostgreSQL RLS search
+## 0.203.0 to 0.207.0: PostgreSQL RLS search
 
 **No action.** Upgrade ORM and macros together. Native search on generated
 PostgreSQL `#[graphql_rls]` entities with an unqualified, column-based
@@ -22,8 +22,34 @@ the search. With 200,000 documents the median selective page at 10%
 visibility went from 318 to 87 ms and its count from 276 to 79 ms. At full
 visibility the common page went from 370 to 353 ms and its count from 252
 to 238 ms. The full-visibility selective query still scanned documents and
-its page went from 233 to 256 ms. See the
+its page went from 233 to 256 ms. Broad partial visibility can also be
+slower. At 50% and 90% visibility the common page went from 280 to 418 ms
+and from 422 to 628 ms, respectively. The 90%-visible common count went
+from 300 to 546 ms. See the
 [measured plans and costs](docs/reference/graphql-orm/postgres.md#search-performance).
+
+## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
+
+**Action needed** for SQL Server hosts with `append_only = true` entities.
+Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
+both operations. Before applying a plan, review cleanup jobs and foreign-key
+cascades that delete rows from these tables. Change or disable those paths
+and rehearse the migration on a copy. There is no trigger opt-out while an
+entity remains append-only. Remove `append_only = true` only if the entity
+should no longer have the append-only contract.
+
+**Action needed** for SQL Server hosts whose declarations can resolve to the
+same physical table. Regenerate the plan and resolve any identifier conflict
+before applying it. Use one declaration for each physical table, including
+when an unqualified name and a `dbo`-qualified name refer to the same object.
+
+**No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
+together. No physical schema or data migration is required on these backends.
+
+## 0.201.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
 
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 

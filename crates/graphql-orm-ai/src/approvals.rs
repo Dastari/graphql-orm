@@ -273,7 +273,6 @@ pub struct ConsumedAiApproval {
 }
 
 impl ConsumedAiApproval {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(authorized: AuthorizedAiApproval, consumed_at: OffsetDateTime) -> Self {
         Self {
             approval_id: authorized.approval_id,
@@ -419,7 +418,6 @@ impl AiApprovalAccessEvidence {
         &self.preview
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_binding(
         id: AiApprovalId,
         binding: &AiApprovalBinding,
@@ -707,7 +705,6 @@ mod preview_bound_tests {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     #[test]
     fn consumed_approval_clones_share_one_execution_claim() {
         let proof = ConsumedAiApproval::new(

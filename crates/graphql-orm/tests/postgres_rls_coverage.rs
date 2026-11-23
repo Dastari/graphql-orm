@@ -743,8 +743,21 @@ async fn create_doc(
 #[tokio::test]
 #[ignore = "requires test-owned PostgreSQL container"]
 async fn base_row_first_search_preserves_rls_results() -> Result<(), Box<dyn std::error::Error>> {
-    use graphql_orm::graphql::filters::SearchInput;
-    use graphql_orm::graphql::orm::SqlValue;
+    use graphql_orm::graphql::filters::{SearchInput, SearchMode};
+    use graphql_orm::graphql::orm::{DatabaseFilter, EntitySearchQuery, SqlValue};
+
+    #[derive(Clone)]
+    struct CallerFilter(&'static str, Vec<SqlValue>);
+
+    impl DatabaseFilter for CallerFilter {
+        fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+            (vec![self.0.into()], self.1.clone())
+        }
+
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
 
     let Provisioned { owner } = provision().await?;
     let (_, runtime) = role_pool(&owner, "search", "NOSUPERUSER NOBYPASSRLS").await?;
@@ -759,10 +772,10 @@ async fn base_row_first_search_preserves_rls_results() -> Result<(), Box<dyn std
 
     sqlx::raw_sql(&format!(
         "INSERT INTO rls_cov_docs (id, tenant_id, title, body) VALUES
-             (md5('1')::uuid, 'tenant-a', 'needle report', 'needle needle'),
-             (md5('2')::uuid, 'tenant-a', 'needle report', NULL),
-             (md5('3')::uuid, 'tenant-b', 'needle ledger', 'private body'),
-             (md5('4')::uuid, 'tenant-b', 'ordinary ledger', 'private body'),
+             (md5('1')::uuid, 'tenant-a', 'needle report hay', 'needle needle'),
+             (md5('2')::uuid, 'tenant-a', 'needle report hay', NULL),
+             (md5('3')::uuid, 'tenant-b', 'needle ledger hay', 'private body'),
+             (md5('4')::uuid, 'tenant-b', 'ordinary ledger hay', 'private body'),
              (md5('5')::uuid, 'tenant-a', 'needle without a document', NULL);
          INSERT INTO {SEARCH_TABLE} (entity_pk, entity_pk_json, document_text, document_vector, updated_at)
          SELECT id::text, to_jsonb(id), concat_ws(' ', title, body),
@@ -776,19 +789,22 @@ async fn base_row_first_search_preserves_rls_results() -> Result<(), Box<dyn std
     .execute(&owner)
     .await?;
 
-    let legacy_sql = format!(
-        "SELECT to_jsonb(b) AS node, s.score
-         FROM rls_cov_docs b
-         JOIN (
-             SELECT entity_pk,
-                    CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS score
-             FROM {SEARCH_TABLE} CROSS JOIN plainto_tsquery('english', $1) q(query)
-             WHERE document_vector @@ q.query
-         ) s ON s.entity_pk = b.id::text
-         ORDER BY s.score DESC, b.id ASC"
-    );
+    let first = graphql_orm::uuid::Uuid::parse_str("c4ca4238-a0b9-2382-0dcc-509a6f75849b")?;
+    let third = graphql_orm::uuid::Uuid::parse_str("eccbc87e-4b5c-e2fe-2830-8fd9f2a7baf3")?;
+    let filters = [
+        CallerFilter("TRUE", vec![]),
+        CallerFilter(
+            "rls_cov_docs.title ILIKE ?",
+            vec![SqlValue::String("NEEDLE%".into())],
+        ),
+        CallerFilter(
+            "rls_cov_docs.id >= ? AND rls_cov_docs.id < ?",
+            vec![SqlValue::Uuid(first), SqlValue::Uuid(third)],
+        ),
+        CallerFilter("rls_cov_docs.id <> ?", vec![SqlValue::Uuid(first)]),
+    ];
     let raw_document_count = format!("SELECT COUNT(*) AS count FROM {SEARCH_TABLE}");
-    for (pool, auth, visible_documents, expected_hits) in [
+    for (pool, auth, visible_documents, expected_needle_hits) in [
         (&runtime, Some(tenant("tenant-a")), 2, 2),
         (&runtime, Some(tenant("tenant-b")), 2, 1),
         (&runtime, Some(tenant("tenant-denied")), 0, 0),
@@ -799,84 +815,80 @@ async fn base_row_first_search_preserves_rls_results() -> Result<(), Box<dyn std
             count_as(pool, &raw_document_count, auth.as_ref()).await?,
             visible_documents
         );
-        let legacy = fetch_rows_with_auth::<PostgresBackend>(
-            pool,
-            &legacy_sql,
-            &[SqlValue::String("needle".into())],
-            auth.as_ref(),
-        )
-        .await?
-        .into_iter()
-        .map(|row| {
-            let node: sqlx::types::Json<RlsCovDoc> = row.try_get("node")?;
-            let score: f64 = row.try_get("score")?;
-            Ok((node.0, score.to_bits()))
-        })
-        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        for term in ["needle", "hay", "hay -needle", "unmatched"] {
+            for filter in &filters {
+                let context = format!("principal={auth:?}, term={term}, filter={}", filter.0);
+                let legacy_sql = format!(
+                    "SELECT to_jsonb(rls_cov_docs) AS node, s.score
+                     FROM rls_cov_docs
+                     JOIN (
+                         SELECT entity_pk,
+                                CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS score
+                         FROM {SEARCH_TABLE} CROSS JOIN websearch_to_tsquery('english', ?) q(query)
+                         WHERE document_vector @@ q.query
+                     ) s ON s.entity_pk = rls_cov_docs.id::text
+                     WHERE {}
+                     ORDER BY s.score DESC, rls_cov_docs.id ASC",
+                    filter.0,
+                );
+                let mut binds = vec![SqlValue::String(term.into())];
+                binds.extend_from_slice(&filter.1);
+                let legacy = fetch_rows_with_auth::<PostgresBackend>(
+                    pool,
+                    &legacy_sql,
+                    &binds,
+                    auth.as_ref(),
+                )
+                .await?
+                .into_iter()
+                .map(|row| {
+                    let node: sqlx::types::Json<RlsCovDoc> = row.try_get("node")?;
+                    let score: f64 = row.try_get("score")?;
+                    Ok((node.0, score.to_bits()))
+                })
+                .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
-        let search = || {
-            RlsCovDoc::search(
-                pool,
-                SearchInput {
-                    query: "needle".into(),
-                    mode: None,
-                    min_score: None,
-                },
-            )
-        };
-        let all = search().fetch_all_with_auth(auth.as_ref()).await?;
-        let hit_bytes = all
-            .into_iter()
-            .map(|hit| (hit.entity, hit.score.to_bits()))
-            .collect::<Vec<_>>();
-        assert_eq!(legacy.len(), expected_hits);
-        assert_eq!(
-            serde_json::to_vec(&hit_bytes)?,
-            serde_json::to_vec(&legacy)?
-        );
+                if term == "needle" && filter.0 == "TRUE" {
+                    assert_eq!(legacy.len(), expected_needle_hits, "{context}");
+                }
 
-        let page = search()
-            .limit(1)
-            .offset(1)
-            .fetch_connection_with_auth(auth.as_ref())
-            .await?;
-        let page_bytes = page
-            .edges
-            .into_iter()
-            .map(|edge| (edge.node, edge.score.to_bits()))
-            .collect::<Vec<_>>();
-        assert_eq!(page.page_info.total_count, Some(expected_hits as i64));
-        assert_eq!(
-            serde_json::to_vec(&page_bytes)?,
-            serde_json::to_vec(&legacy.iter().skip(1).take(1).collect::<Vec<_>>())?
-        );
+                let search = || {
+                    EntitySearchQuery::<RlsCovDoc, CallerFilter, PostgresBackend>::new(
+                        pool,
+                        SearchInput {
+                            query: term.into(),
+                            mode: Some(SearchMode::Web),
+                            min_score: None,
+                        },
+                    )
+                    .filter(filter.clone())
+                };
+                let hits = search()
+                    .fetch_all_with_auth(auth.as_ref())
+                    .await?
+                    .into_iter()
+                    .map(|hit| (hit.entity, hit.score.to_bits()))
+                    .collect::<Vec<_>>();
+                assert_eq!(hits, legacy, "{context}");
+
+                let page = search()
+                    .limit(2)
+                    .fetch_connection_with_auth(auth.as_ref())
+                    .await?;
+                let page_hits = page
+                    .edges
+                    .into_iter()
+                    .map(|edge| (edge.node, edge.score.to_bits()))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    page.page_info.total_count,
+                    Some(legacy.len() as i64),
+                    "{context}"
+                );
+                assert_eq!(page_hits, legacy[..legacy.len().min(2)], "{context}");
+            }
+        }
     }
-    let tenant_a = tenant("tenant-a");
-    let id = graphql_orm::uuid::Uuid::parse_str("c4ca4238-a0b9-2382-0dcc-509a6f75849b")?;
-    let filtered = RlsCovDoc::search(
-        &runtime,
-        SearchInput {
-            query: "needle".into(),
-            mode: None,
-            min_score: None,
-        },
-    )
-    .filter(RlsCovDocWhereInput {
-        id: Some(UuidFilter {
-            eq: Some(id),
-            ..Default::default()
-        }),
-        tenant_id: Some(StringFilter {
-            eq: Some("tenant-a".into()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    })
-    .fetch_connection_with_auth(Some(&tenant_a))
-    .await?;
-    assert_eq!(filtered.page_info.total_count, Some(1));
-    assert_eq!(filtered.edges.len(), 1);
-    assert_eq!(filtered.edges[0].node.id, id);
 
     Ok(())
 }

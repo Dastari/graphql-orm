@@ -438,9 +438,10 @@ doubling the cost of parsing floats. Store values that must be exact beyond
 For generated `#[graphql_rls]` entities with an unqualified, column-based
 default sort, native search projects the document key from visible base rows
 after applying caller filters. PostgreSQL can use the resulting text equality
-to probe the document primary-key B-tree for narrow visibility, or choose a
-bulk join when many rows are visible. Both plans enforce the base and document
-RLS policies. Default sort expressions that need the original table scope
+to probe the document primary-key B-tree or join the documents in bulk. The
+planner can still choose per-row probes at broad partial visibility, even
+when a bulk join would execute faster. Both plans enforce the base and
+document RLS policies. Default sort expressions that need the original table scope
 keep the direct join.
 
 The document-vector GIN index does not serve RLS searches. PostgreSQL keeps
@@ -460,7 +461,20 @@ four runs per query, with a 20-row page and a separate total-count query.
 | Full | Common | 370.0 → 352.7 ms | 251.8 → 238.0 ms |
 
 The selective tenant query used a document primary-key index condition.
-The full-visibility queries used a hash join and scanned documents.
+The full-visibility queries in this benchmark used a hash join and scanned
+documents.
+
+A separate 200,000-row benchmark measured broad partial visibility. The
+table reports the best of three runs per query. In that benchmark PostgreSQL
+favored per-row probes until about 90–95% estimated visibility, while a hash
+join was faster from about 50%. The cutoff depends on the planner's estimates.
+
+| Visibility | Term | Page, legacy → new | Count, legacy → new |
+| --- | --- | ---: | ---: |
+| 50% | Selective | 291 → 387 ms | 281 → 333 ms |
+| 50% | Common | 280 → 418 ms | 253 → 374 ms |
+| 90% | Selective | 366 → 580 ms | 342 → 536 ms |
+| 90% | Common | 422 → 628 ms | 300 → 546 ms |
 
 Use a separate runtime database role without superuser, `BYPASSRLS`, or inherited
 table-owner privileges. The schema owner applies the plan; the runtime role needs

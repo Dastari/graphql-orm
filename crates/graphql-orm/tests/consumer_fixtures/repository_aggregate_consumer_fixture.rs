@@ -1,5 +1,4 @@
-#[path = "support/fixture_target.rs"]
-mod fixture_target;
+use super::fixture_target;
 
 #[test]
 fn external_repository_aggregate_consumer_requires_no_direct_graphql_dependency() {

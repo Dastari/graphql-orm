@@ -170,7 +170,7 @@ SQL Server lanes, owned fixtures and the consumer examples).
 retain the commands of the qualified single ORM job, with explicit PostgreSQL,
 MSSQL and SQLite/MSSQL all-target check and warnings-denied Clippy coverage. The one intended
 difference is that the SQLite migration API fixture now runs only through the
-default suite's `migration_api_compatibility_fixture` driver, which ran the
+default suite's `consumer_fixtures::migration_api_compatibility_fixture` module, which ran the
 same command.
 
 CI runs the same three jobs, and also moves the fixture runner tests into a
@@ -188,6 +188,11 @@ the lane.
 
 | Integration binary | Modules |
 | --- | --- |
+| `consumer_fixtures` | `backend_coexistence_fixture`, `migration_api_compatibility_fixture`, `relationship_capability_fixture`, `repository_aggregate_consumer_fixture` |
+| `postgres_owned_contracts` | `authorized_pagination_postgres`, `postgres_constraint_index_idempotency` |
+| `mssql_owned_connections` | `mssql_notifications`, `mssql_tls`, `mssql_transport` |
+| `sqlite_query_contracts` | `query_shape_selection`, `root_field_names` |
+| `sqlite_schema_contracts` | `generated_input_member_inventory`, `graphql_attribute_composition` |
 | `postgres_runtime_repository` | `repository_only_postgres`, `runtime_records_postgres`, `runtime_relations_postgres` |
 | `mssql_owned_queries` | `mssql_correctness`, `mssql_integration` |
 | `mssql_owned_writes` | `mssql_trigger_writes`, `mssql_writes` |

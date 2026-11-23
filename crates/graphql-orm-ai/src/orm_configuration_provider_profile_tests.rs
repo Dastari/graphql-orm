@@ -1,5 +1,6 @@
 //! Provider-profile endpoint identity and credential authority tests.
 
+use crate::AiOrmBackend;
 use std::sync::Mutex;
 
 use agql_auth::{
@@ -932,11 +933,11 @@ async fn inaccessible_profile_ids_are_masked_like_missing_ids() {
 }
 
 struct PossiblyFilteredProfiles;
-impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for PossiblyFilteredProfiles {
+impl graphql_orm::graphql::orm::RowPolicy<AiOrmBackend> for PossiblyFilteredProfiles {
     fn can_read_row<'a>(
         &'a self,
         _: Option<&'a async_graphql::Context<'_>>,
-        _: &'a Database<DefaultWriteBackend>,
+        _: &'a Database<AiOrmBackend>,
         entity: &'static str,
         _: Option<&'static str>,
         _: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -947,7 +948,7 @@ impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for PossiblyFilte
     fn can_write_row<'a>(
         &'a self,
         _: Option<&'a async_graphql::Context<'_>>,
-        _: &'a Database<DefaultWriteBackend>,
+        _: &'a Database<AiOrmBackend>,
         _: &'static str,
         _: Option<&'static str>,
         _: graphql_orm::graphql::orm::EntityAccessSurface,

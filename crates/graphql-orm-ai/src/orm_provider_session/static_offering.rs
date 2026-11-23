@@ -1,7 +1,7 @@
 // Dedicated native static-offering reset. Generic rebind reasons remain unchanged.
 
 async fn validate_static_reset_graph(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     lease: &AiRunLease,
     request: &crate::AiProviderStaticOfferingResetRequest,
     now: OffsetDateTime,
