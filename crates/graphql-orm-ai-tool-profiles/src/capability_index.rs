@@ -3712,44 +3712,71 @@ mod tests {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let refused = |case: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        // Each case must be refused by its own check, so the expected
+        // message is asserted: removing any one check fails its case.
+        let refused = |case: &str, expected: &str, edit: &dyn Fn(&mut serde_json::Value)| {
             let mut tampered = encoded.clone();
             edit(&mut tampered);
             let tampered: AiCapabilityIndex = serde_json::from_value(tampered).expect("decoded");
-            assert!(
-                AiCapabilityIndexSet::compile([Arc::new(tampered)]).is_err(),
-                "{case} is admitted"
-            );
+            match AiCapabilityIndexSet::compile([Arc::new(tampered)]) {
+                Err(AiError::InvalidConfiguration(message)) => {
+                    assert_eq!(message, expected, "{case} is refused for another reason");
+                }
+                Err(other) => panic!("{case} is refused with an unexpected error: {other:?}"),
+                Ok(_) => panic!("{case} is admitted"),
+            }
         };
-        refused("more entries than the index's maximum", &|value| {
-            value["limits"]["maximum_entries"] = json!(2);
-        });
-        refused("an entry larger than the index's maximum", &|value| {
-            value["limits"]["maximum_entry_bytes"] = json!(1_024);
-            value["entries"][&ids[0]]["description"] = json!("x".repeat(2_048));
-        });
+        refused(
+            "more entries than the index's maximum",
+            "capability index has too many entries",
+            &|value| {
+                value["limits"]["maximum_entries"] = json!(2);
+            },
+        );
+        refused(
+            "an entry larger than the index's maximum",
+            "capability index entry is too large",
+            &|value| {
+                value["limits"]["maximum_entry_bytes"] = json!(1_024);
+                value["entries"][&ids[0]]["description"] = json!("x".repeat(2_048));
+            },
+        );
         refused(
             "entries larger in total than the index's maximum",
+            "capability index is too large",
             &|value| {
                 value["limits"]["maximum_entry_bytes"] = json!(256 * 1_024);
                 value["limits"]["maximum_total_bytes"] = json!(1_024);
             },
         );
-        refused("invalid index limits", &|value| {
-            value["limits"]["maximum_entries"] = json!(0);
-        });
-        refused("a key that differs from its entry's identity", &|value| {
-            let entries = value["entries"].as_object_mut().expect("entries");
-            let entry = entries.remove(&ids[0]).expect("entry");
-            entries.insert("inventory.renamed_entity".to_owned(), entry);
-        });
-        refused("two keys holding one identity", &|value| {
-            let entries = value["entries"].as_object_mut().expect("entries");
-            // Without its roots, so only the embedded identity repeats.
-            let mut entry = entries[&ids[0]].clone();
-            entry["operations"] = json!([]);
-            entries.insert("inventory.zz_copy".to_owned(), entry);
-        });
+        // The entry count stays valid and within its maximum, so only the
+        // limits' own validation can refuse this index.
+        refused(
+            "invalid index limits",
+            "capability-index limits are invalid",
+            &|value| {
+                value["limits"]["maximum_search_results"] = json!(0);
+            },
+        );
+        refused(
+            "a key that differs from its entry's identity",
+            "capability index entry is stored under another ID",
+            &|value| {
+                let entries = value["entries"].as_object_mut().expect("entries");
+                let entry = entries.remove(&ids[0]).expect("entry");
+                entries.insert("inventory.renamed_entity".to_owned(), entry);
+            },
+        );
+        refused(
+            "two entries holding one grouped-root identity",
+            "capability index set contains a duplicate capability",
+            &|value| {
+                // Every entry still sits under its own ID, so only the
+                // distinctness check can refuse the repeated root.
+                let repeated = value["entries"][&ids[0]]["operations"][0]["capability_id"].clone();
+                value["entries"][&ids[1]]["operations"][0]["capability_id"] = repeated;
+            },
+        );
     }
 
     #[test]
