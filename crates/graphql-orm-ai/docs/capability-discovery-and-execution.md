@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -126,6 +126,82 @@ let index = AiCapabilityIndex::compile(
 AiCapabilityIndexSet::compile([Arc::new(index)])
 # }
 ```
+
+### Model-context benchmark
+
+`cargo run --release -p graphql-orm-ai --example capability_context_benchmark
+-- 1 10 100` measures what the model receives as the catalogue grows. It
+stamps out one realistic generated family per target: a wide entity with
+forty public scalar fields and five to-many relationships, plus the five
+related entities, each with its five generated query roots (list, keyset
+and aggregate among them). That is 12 entities and 60 query roots per
+target. Each target gets
+its own query catalogue and index. The example then drives the version 2
+broker the way the coordinator does, on a host that caches its index set.
+Each point runs in its own process. Byte sizes are deterministic; times are
+for one machine and one build. Approximate tokens are bytes / 4. The *eager
+reference* is the size of one exact definition per root: what eager or
+provider-deferred delivery would send for the same roots.
+
+Release build, 2026-11-23 (AI 0.155.0, tool profiles 0.28.0):
+
+| Targets | Query roots | Index entries | First-turn definitions | Eager reference | Discover result p95 | Describe result p95 | `describe_type` page p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 60 | 12 | 5,548 B (≈1.4k tokens) | 1.49 MB | 5,302 B | 6,037 B | 4,653 B |
+| 10 | 600 | 120 | 5,548 B | 14.9 MB | 5,372 B | 6,080 B | 4,660 B |
+| 100 | 6,000 | 1,200 | 5,548 B | 149 MB | 5,394 B | 6,123 B | 4,664 B |
+
+From 1 to 100 targets, the first-turn definitions are byte-identical (the
+four frozen broker definitions). Discover, describe and `describe_type`
+results grow by under 2%, while the eager reference grows 100 times. A
+describe of the widest entity, with all five of its operations, stays below
+8 KB. At every point:
+
+- A caller whose policy admits one target still receives a full page of that
+  target's candidates for a query that matches every target.
+- Changing one entity description in one target changes the index-set
+  fingerprint and an eager binding, but not the fixed-broker session binding.
+- A count question's top candidate offers the entity's `aggregate`
+  operation.
+
+All points fit the default index and index-set limits.
+
+| Targets | Discover p50 / p95 | Startup, one target | Peak memory |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.04 / 0.05 ms | 19 s | 174 MiB |
+| 10 | 0.25 / 0.28 ms | 19 s | 910 MiB |
+| 100 | 4.0 / 5.8 ms | 19 s | 7.3 GiB |
+
+Discover time follows the number of matches, not the catalogue as such. The
+benchmark's questions share words such as "records" with every entity, and
+host policy is applied to every match before the result ceiling (see
+[Discovery is not authority](#discovery-is-not-authority)). A host with an
+expensive policy should override `authorize_discovery`. Startup and memory
+are linear in the number of targets of a given shape: about 0.3 s and
+1.2 MiB per wide-entity root. Within one target, catalogue compile time
+still grows faster than linearly: 300 roots in one target took about 500 s.
+Size a very large single target from the startup benchmark above.
+
+A single-target host can supply its index through `AiCurrentCapabilityIndex`,
+and the crate then forms a one-member set on every broker call. Since AI tool
+profiles 0.28.0, that set reuses the index's measurements, so each call costs
+what it costs a host that caches its set. Describe and `describe_type`
+render a signature on every call. Since 0.28.0, a capability recovers the
+type names behind its signature once, so only the first describe of a
+capability pays for that. Measured on one target with 60 entities (300
+roots):
+
+| | Before (tool profiles 0.27.1) | After (0.28.0) |
+| --- | ---: | ---: |
+| Discover p50, single-index host | 1.78 ms | 0.145 ms |
+| Discover p50, host-cached set | 0.164 ms | 0.137 ms |
+| Describe p95, first describe of a wide entity | 5.2 s | 4.1 s |
+| Describe p95, the same entities described again | 5.0 s | 0.015 s |
+
+The benchmark also reports whether a keyset operation offers a
+continuation. It does not: the page argument is server-owned, so a model
+reads only the first page of a keyset or list root. Continuation cursors are
+planned for the next fingerprint-breaking release.
 
 ## Discovery is not authority
 

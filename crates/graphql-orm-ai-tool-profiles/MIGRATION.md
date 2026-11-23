@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.28.0 index-set and signature reuse
+
+**No action.** Index and index-set fingerprints, search results, capability
+signatures and shared-type renderings are unchanged, and no schema or data
+migration is needed. A host that already caches its `AiCapabilityIndexSet`
+sees no difference. A host that compiles a set per call from the same index
+now gets it in constant time. A set formed from a freshly deserialized index
+still measures that index once.
+
 ## 0.27.1 subscription validator reuse
 
 **No action.** Existing subscription plans and capability bindings remain

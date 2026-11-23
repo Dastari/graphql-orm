@@ -332,6 +332,10 @@ pub struct AiCapabilityIndex {
     /// Never serialized or compared.
     #[serde(skip)]
     root_search: RootSearchCache,
+    /// Canonical entry bytes and identity uniqueness, derived from
+    /// `entries` on first use by an index set. Never serialized or compared.
+    #[serde(skip)]
+    membership: MembershipCache,
 }
 
 impl AiCapabilityIndex {
@@ -533,6 +537,7 @@ impl AiCapabilityIndex {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
         };
         let member_ids = index
             .entries
@@ -595,6 +600,36 @@ impl AiCapabilityIndex {
         self.search_terms
             .0
             .get_or_init(|| Arc::new(SearchTermIndex::compile(&self.target_id, &self.entries)))
+    }
+
+    /// Canonical byte size of the discoverable entries and whether every
+    /// entry and grouped-root identity is distinct, measured once per index.
+    ///
+    /// Compilation already proves both, but a deserialized index has not
+    /// been compiled, so an index set still checks them; the cache keeps a
+    /// set formed again from the same index from measuring it again.
+    fn membership(&self) -> Option<IndexMembership> {
+        *self.membership.0.get_or_init(|| {
+            let mut entry_bytes = 0_u64;
+            for entry in self.entries.values() {
+                #[cfg(test)]
+                MEASURED_SET_ENTRIES.with(|count| count.set(count.get() + 1));
+                entry_bytes = entry_bytes
+                    .checked_add(u64::try_from(canonical_json_bytes(entry).len()).ok()?)?;
+            }
+            let mut identities = BTreeSet::new();
+            let unique_identities =
+                self.entries
+                    .keys()
+                    .chain(self.entries.values().flat_map(|entry| {
+                        entry.operations.iter().map(|member| &member.capability_id)
+                    }))
+                    .all(|id| identities.insert(id));
+            Some(IndexMembership {
+                entry_bytes,
+                unique_identities,
+            })
+        })
     }
 
     /// Canonical index fingerprint.
@@ -740,7 +775,6 @@ impl AiCapabilityIndexSet {
     {
         limits.validate()?;
         let mut canonical = BTreeMap::new();
-        let mut capability_owners = BTreeMap::new();
         let mut total_bytes = 0_u64;
         // Discoverable entries only: the roots an entity entry groups are
         // part of that entry and are not counted again.
@@ -759,29 +793,19 @@ impl AiCapabilityIndexSet {
                     "capability index set contains a duplicate target",
                 ));
             }
-            let member_ids = index
-                .entries
-                .values()
-                .flat_map(|entry| entry.operations.iter().map(|member| &member.capability_id));
-            for id in index.entries.keys().chain(member_ids) {
-                if capability_owners
-                    .insert(id.clone(), target_id.clone())
-                    .is_some()
-                {
-                    return Err(configuration_error(
-                        "capability index set contains a duplicate capability",
-                    ));
-                }
+            // Measured once per index and reused by every set formed from
+            // it, such as the one-member set a single-index host gets per call.
+            let membership = index
+                .membership()
+                .ok_or_else(|| configuration_error("capability index set byte size overflowed"))?;
+            if !membership.unique_identities {
+                return Err(configuration_error(
+                    "capability index set contains a duplicate capability",
+                ));
             }
-            for entry in index.entries.values() {
-                let entry_bytes =
-                    u64::try_from(canonical_json_bytes(entry).len()).map_err(|_| {
-                        configuration_error("capability index set byte size overflowed")
-                    })?;
-                total_bytes = total_bytes.checked_add(entry_bytes).ok_or_else(|| {
-                    configuration_error("capability index set byte size overflowed")
-                })?;
-            }
+            total_bytes = total_bytes
+                .checked_add(membership.entry_bytes)
+                .ok_or_else(|| configuration_error("capability index set byte size overflowed"))?;
             total_entries = total_entries.saturating_add(index.entries.len());
             maximum_search_results =
                 maximum_search_results.min(index.limits.maximum_search_results);
@@ -804,6 +828,28 @@ impl AiCapabilityIndexSet {
         }
         if canonical.is_empty() {
             return Err(configuration_error("capability index set is empty"));
+        }
+        // Each member's own identities are distinct, so only a set of
+        // several targets can collide, and only such a set needs the owner
+        // map; a one-member set resolves every identity to its sole index.
+        let mut capability_owners = BTreeMap::new();
+        if canonical.len() > 1 {
+            for (target_id, index) in &canonical {
+                let member_ids = index
+                    .entries
+                    .values()
+                    .flat_map(|entry| entry.operations.iter().map(|member| &member.capability_id));
+                for id in index.entries.keys().chain(member_ids) {
+                    if capability_owners
+                        .insert(id.clone(), target_id.clone())
+                        .is_some()
+                    {
+                        return Err(configuration_error(
+                            "capability index set contains a duplicate capability",
+                        ));
+                    }
+                }
+            }
         }
         let members = canonical
             .iter()
@@ -849,6 +895,14 @@ impl AiCapabilityIndexSet {
 
     /// Resolves the sole owning index for a globally unique capability ID.
     pub fn owning_index(&self, id: &AiToolId) -> Option<&Arc<AiCapabilityIndex>> {
+        if self.capability_owners.is_empty() {
+            // A one-member set keeps no owner map.
+            return self
+                .indexes
+                .values()
+                .next()
+                .filter(|index| self.indexes.len() == 1 && index.entry(id).is_some());
+        }
         self.capability_owners
             .get(id)
             .and_then(|target_id| self.indexes.get(target_id))
@@ -1565,6 +1619,27 @@ impl PartialEq for OperationEntryCache {
 }
 
 impl Eq for OperationEntryCache {}
+
+/// Set-membership measurements of one index.
+#[derive(Clone, Copy, Debug)]
+struct IndexMembership {
+    entry_bytes: u64,
+    unique_identities: bool,
+}
+
+/// Lazily measured, never serialized, never compared membership cache.
+/// `None` records a byte count that overflowed.
+#[derive(Clone, Debug, Default)]
+struct MembershipCache(OnceLock<Option<IndexMembership>>);
+
+impl PartialEq for MembershipCache {
+    fn eq(&self, _: &Self) -> bool {
+        // Derived from the entries, which the owning index already compares.
+        true
+    }
+}
+
+impl Eq for MembershipCache {}
 
 /// Lazily built, never serialized, never compared cache of search terms.
 #[derive(Clone, Debug, Default)]
@@ -2493,6 +2568,13 @@ thread_local! {
     static TOKENISED_TEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of entries an index-set compilation measured on this thread,
+    /// for tests that prove a set reuses each member index's measurements.
+    static MEASURED_SET_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn search_tokens(value: &str) -> Vec<String> {
     #[cfg(test)]
     TOKENISED_TEXTS.with(|count| count.set(count.get() + 1));
@@ -2653,6 +2735,7 @@ mod tests {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
         }
     }
 
@@ -2819,6 +2902,7 @@ mod tests {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -2864,6 +2948,7 @@ mod tests {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -3515,8 +3600,81 @@ mod tests {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
             ..roots
         }
+    }
+
+    #[test]
+    fn index_set_compilation_reuses_member_measurements() {
+        // A host that supplies one current index gets a one-member set per
+        // broker call. Compiling it again must not measure every entry again.
+        let index = Arc::new(synthetic_entity_index(40));
+        let first = AiCapabilityIndexSet::compile([Arc::clone(&index)]).expect("set");
+        let entity = index.entries().next().expect("entity").clone();
+        let root = entity.operations[0].capability_id.clone();
+        let unknown = AiToolId::parse("inventory.not_indexed").expect("id");
+        MEASURED_SET_ENTRIES.with(|count| count.set(0));
+        for _ in 0..3 {
+            let set = AiCapabilityIndexSet::compile([Arc::clone(&index)]).expect("set");
+            assert_eq!(set, first);
+            assert_eq!(set.fingerprint(), first.fingerprint());
+            assert_eq!(
+                set.entry(&entity.id).map(|(_, entry)| &entry.id),
+                Some(&entity.id)
+            );
+            assert_eq!(set.entry(&root).map(|(_, entry)| &entry.id), Some(&root));
+            assert!(set.owning_index(&unknown).is_none());
+            assert!(set.entry(&unknown).is_none());
+        }
+        assert_eq!(MEASURED_SET_ENTRIES.with(std::cell::Cell::get), 0);
+
+        // Limits are still enforced against the reused measurements.
+        let bytes = u64::try_from(
+            index
+                .entries()
+                .map(|entry| canonical_json_bytes(entry).len())
+                .sum::<usize>(),
+        )
+        .expect("bytes");
+        let limits = |maximum_entries: u32, maximum_total_bytes: u64| AiCapabilityIndexSetLimits {
+            maximum_entries,
+            maximum_total_bytes,
+            ..AiCapabilityIndexSetLimits::default()
+        };
+        assert!(
+            AiCapabilityIndexSet::compile_with_limits([Arc::clone(&index)], limits(40, bytes))
+                .is_ok()
+        );
+        assert!(
+            AiCapabilityIndexSet::compile_with_limits([Arc::clone(&index)], limits(39, bytes))
+                .is_err()
+        );
+        assert!(
+            AiCapabilityIndexSet::compile_with_limits([Arc::clone(&index)], limits(40, bytes - 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn index_set_refuses_a_deserialized_index_with_duplicate_identities() {
+        // Deserialization does not rerun compilation, so the set is the
+        // check that keeps one identity per capability.
+        let index = synthetic_entity_index(3);
+        let mut encoded = serde_json::to_value(&index).expect("encoded");
+        let entries = encoded["entries"].as_object_mut().expect("entries");
+        let ids = entries.keys().cloned().collect::<Vec<_>>();
+        let duplicate = entries[&ids[0]]["operations"][0]["capability_id"].clone();
+        entries.get_mut(&ids[1]).expect("second")["operations"][0]["capability_id"] = duplicate;
+        let tampered: AiCapabilityIndex = serde_json::from_value(encoded).expect("decoded");
+        assert!(AiCapabilityIndexSet::compile([Arc::new(tampered.clone())]).is_err());
+        // An entity's own ID reused as one of its roots is refused as well.
+        let mut encoded = serde_json::to_value(&index).expect("encoded");
+        let entries = encoded["entries"].as_object_mut().expect("entries");
+        entries.get_mut(&ids[0]).expect("first")["operations"][0]["capability_id"] =
+            serde_json::json!(ids[1]);
+        let tampered: AiCapabilityIndex = serde_json::from_value(encoded).expect("decoded");
+        assert!(AiCapabilityIndexSet::compile([Arc::new(tampered)]).is_err());
     }
 
     #[test]
@@ -3668,6 +3826,7 @@ mod tests {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
             ..roots
         }
     }
@@ -3819,6 +3978,7 @@ mod tests {
             search_terms: SearchTermCache::default(),
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
+            membership: MembershipCache::default(),
             ..index.clone()
         };
         for text in [
