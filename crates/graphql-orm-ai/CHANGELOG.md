@@ -31,6 +31,12 @@ definition or fingerprint change, and no AI schema module change. See the
   with the index on every broker call. Describe and `describe_type` no longer
   regenerate a capability's compact schema on every call.
 
+## Unreleased - 0.155.0
+
+- Exported AI query, mutation, and subscription roots declare their GraphQL
+  fields for composition through `schema_roots!`. The declarations follow
+  the resolver naming rules for camelCase and PascalCase (#858).
+
 ## Unreleased - 0.154.0
 
 - **Action needed.** To adopt SQL Server, enable durable AI ORM services
