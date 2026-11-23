@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.156.0
+
+- Exported AI query, mutation, and subscription roots declare their GraphQL
+  fields for composition through `schema_roots!`. The declarations follow
+  the resolver naming rules for camelCase and PascalCase (#858).
+
 ## Unreleased - 0.154.0
 
 - **Action needed.** To adopt SQL Server, enable durable AI ORM services

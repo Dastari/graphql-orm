@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.156.0 supports composing the exported AI roots directly through
+`schema_roots!` in camelCase and PascalCase. Compose `AiUsageQueryRoot` only
+when the schema omits `AiQueryRoot`, which already includes usage reporting.
+See the [migration guide](MIGRATION.md#01540-to-01560).
+
 AI 0.153.0 binds compaction to the session's pinned provider and model, checks
 the lease before adopting tool checkpoints, and reads restore facts in bounded
 pages. See [migration guidance](MIGRATION.md#01520-to-01530).
