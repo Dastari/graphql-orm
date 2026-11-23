@@ -1,20 +1,24 @@
 //! Owned SQL Server evidence for run candidate selection.
 
 use super::*;
+use graphql_orm::graphql::orm::{PlannedMigration, SchemaModel};
+use graphql_orm::prelude::Database;
 
 const RUNS: usize = 4096;
 const QUEUED: usize = 320;
 const EXPIRED: usize = 64;
-const CLAIM_WORKERS: usize = 3;
+const CLAIM_WORKERS: usize = 8;
+const HEARTBEAT_WORKERS: usize = 4;
 const RECOVERY_WORKERS: usize = 2;
-const CLAIM_CALLS: usize = 96;
+const CLAIM_CALLS: usize = 36;
+const HEARTBEAT_CALLS: usize = 72;
 const RECOVERY_CALLS: usize = 32;
 
 const DEADLOCK_COUNTER: &str = "SELECT cntr_value FROM sys.dm_os_performance_counters
     WHERE RTRIM(object_name) LIKE N'%:Locks' AND counter_name = N'Number of Deadlocks/sec'
     AND instance_name = N'_Total'";
 
-async fn deadlocks(database: &graphql_orm::prelude::Database<AiOrmBackend>) -> i64 {
+async fn deadlocks(database: &Database<AiOrmBackend>) -> i64 {
     database
         .pool()
         .fetch_rows(DEADLOCK_COUNTER, &[])
@@ -24,9 +28,7 @@ async fn deadlocks(database: &graphql_orm::prelude::Database<AiOrmBackend>) -> i
         .unwrap()
 }
 
-async fn run_candidate_plans(
-    database: &graphql_orm::prelude::Database<AiOrmBackend>,
-) -> Vec<(String, String)> {
+async fn run_candidate_plans(database: &Database<AiOrmBackend>) -> Vec<(String, String)> {
     database
         .pool()
         .fetch_rows(
@@ -59,6 +61,13 @@ struct Calls {
     recovered: usize,
 }
 
+#[derive(Clone, Copy)]
+enum Operation {
+    Claim,
+    Recovery,
+    Heartbeat,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
 #[ignore = "bounded SQL Server load measurement; run explicitly with --ignored --nocapture"]
 async fn owned_sql_server_measures_concurrent_run_candidates() {
@@ -70,20 +79,25 @@ async fn owned_sql_server_measures_concurrent_run_candidates() {
 }
 
 async fn measure(layout: &str) {
-    let (server, database) = owned_database().await.unwrap();
-    let plan = database
-        .schema()
-        .plan_migration_to_entities(
-            "ai-candidate-load",
-            "Candidate load",
-            AiSchemaModule.entities(),
-        )
+    let options = graphql_orm::db::mssql::MssqlPoolOptions::default()
+        .max_connections(CLAIM_WORKERS + RECOVERY_WORKERS + HEARTBEAT_WORKERS);
+    let (server, database) = durable_database::owned_database_with_options(options)
         .await
         .unwrap();
+    let plan = if layout == "legacy" {
+        legacy_plan(&database)
+    } else {
+        database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-candidate-load",
+                "Candidate load",
+                AiSchemaModule.entities(),
+            )
+            .await
+            .unwrap()
+    };
     apply_parity_migration(&server, &database, &plan).await;
-    if layout == "legacy" {
-        restore_legacy_run_state(&server).await;
-    }
     let now = OffsetDateTime::now_utc();
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::new(now));
     let epoch = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
@@ -123,14 +137,46 @@ async fn measure(layout: &str) {
     )
     .await
     .unwrap();
-    let runs = Arc::new(OrmAiRunService::new(
-        database.clone(),
-        clock,
-        AiRunServiceLimits::new(Duration::minutes(1), Duration::minutes(5), 16, 2, 4).unwrap(),
-    ));
+    let limits =
+        AiRunServiceLimits::new(Duration::minutes(1), Duration::minutes(5), 16, 2, 4).unwrap();
+    let runs = Arc::new(OrmAiRunService::new(database.clone(), clock, limits));
+    let mut heartbeat_leases = Vec::new();
+    for worker in 0..HEARTBEAT_WORKERS {
+        let lease = runs
+            .claim_next(&format!("heartbeat-worker-{worker}"))
+            .await
+            .unwrap()
+            .expect("heartbeat seed should be claimable");
+        heartbeat_leases.push(runs.start(&lease).await.unwrap());
+    }
     let before = deadlocks(&database).await;
-    let barrier = Arc::new(tokio::sync::Barrier::new(CLAIM_WORKERS + RECOVERY_WORKERS));
+    let barrier = Arc::new(tokio::sync::Barrier::new(
+        CLAIM_WORKERS + RECOVERY_WORKERS + HEARTBEAT_WORKERS,
+    ));
     let mut tasks = tokio::task::JoinSet::new();
+    for mut lease in heartbeat_leases {
+        let barrier = barrier.clone();
+        let clock = FixedClock::new(now);
+        let runs = OrmAiRunService::new(database.clone(), Arc::new(clock.clone()), limits);
+        tasks.spawn(async move {
+            let mut calls = Calls::default();
+            barrier.wait().await;
+            for _ in 0..HEARTBEAT_CALLS {
+                // Separate clocks keep the recovery cutoff fixed and move the
+                // expiry key on every successful heartbeat.
+                clock.advance_seconds(1);
+                match runs.heartbeat(&lease).await {
+                    Ok(renewed) => {
+                        lease = renewed;
+                        calls.successes += 1;
+                    }
+                    Err(AiError::PersistenceFailed) => calls.persistence_failures += 1,
+                    Err(error) => panic!("unexpected heartbeat error: {error}"),
+                }
+            }
+            (Operation::Heartbeat, calls)
+        });
+    }
     for worker in 0..CLAIM_WORKERS {
         let (runs, barrier) = (runs.clone(), barrier.clone());
         tasks.spawn(async move {
@@ -145,7 +191,7 @@ async fn measure(layout: &str) {
                     Err(error) => panic!("unexpected claim error: {error}"),
                 }
             }
-            (true, calls)
+            (Operation::Claim, calls)
         });
     }
     for _ in 0..RECOVERY_WORKERS {
@@ -163,14 +209,19 @@ async fn measure(layout: &str) {
                     Err(error) => panic!("unexpected recovery error: {error}"),
                 }
             }
-            (false, calls)
+            (Operation::Recovery, calls)
         });
     }
     let mut claim = Calls::default();
     let mut recovery = Calls::default();
+    let mut heartbeat = Calls::default();
     while let Some(result) = tasks.join_next().await {
-        let (is_claim, calls) = result.unwrap();
-        let total = if is_claim { &mut claim } else { &mut recovery };
+        let (operation, calls) = result.unwrap();
+        let total = match operation {
+            Operation::Claim => &mut claim,
+            Operation::Recovery => &mut recovery,
+            Operation::Heartbeat => &mut heartbeat,
+        };
         total.successes += calls.successes;
         total.empty_claims += calls.empty_claims;
         total.persistence_failures += calls.persistence_failures;
@@ -178,29 +229,48 @@ async fn measure(layout: &str) {
     }
     let victim_count = deadlocks(&database).await - before;
     println!(
-        "layout={layout}; 1205 victims: {victim_count}; claims leased/empty/PersistenceFailed: {}/{}/{};          recovery calls successful/PersistenceFailed: {}/{}; leases requeued: {}",
+        "layout={layout}; 1205 victims: {victim_count}; claims leased/empty/PersistenceFailed: {}/{}/{}; \
+         recovery successful/PersistenceFailed: {}/{}; leases requeued: {}; \
+         heartbeat successful/PersistenceFailed: {}/{}",
         claim.successes,
         claim.empty_claims,
         claim.persistence_failures,
         recovery.successes,
         recovery.persistence_failures,
-        recovery.recovered
+        recovery.recovered,
+        heartbeat.successes,
+        heartbeat.persistence_failures
     );
     assert!(claim.successes > 0);
+    assert!(heartbeat.successes > 0);
     assert!(recovery.recovered > 0);
 
     let plans = run_candidate_plans(&database).await;
     assert!(!plans.is_empty(), "no candidate plans captured");
-    for (sql, plan) in plans {
-        let eligibility = [
+    let shapes = [
+        (
             "[lease_expires_at] IS NULL",
+            "[idx_graphql_orm_ai_runs_recovery_candidates]",
+        ),
+        (
             "[lease_expires_at] <=",
+            "[idx_graphql_orm_ai_runs_recovery_candidates]",
+        ),
+        (
             "[next_attempt_at] IS NULL",
+            "[idx_graphql_orm_ai_runs_claim_candidates]",
+        ),
+        (
             "[next_attempt_at] <=",
-        ]
-        .into_iter()
-        .find(|condition| sql.contains(condition))
-        .expect("candidate eligibility condition");
+            "[idx_graphql_orm_ai_runs_claim_candidates]",
+        ),
+    ];
+    let mut observed = std::collections::BTreeSet::new();
+    for (sql, plan) in plans {
+        let (eligibility, expected_index) = shapes
+            .into_iter()
+            .find(|(condition, _)| sql.contains(condition))
+            .expect("candidate eligibility condition");
         let indexes = plan
             .split("Index=\"")
             .skip(1)
@@ -210,12 +280,20 @@ async fn measure(layout: &str) {
             seek.split_once("</SeekPredicates>")
                 .is_some_and(|(seek, _)| seek.contains("Column=\"state\""))
         });
+        if layout == "indexed" {
+            assert!(
+                state_seek && indexes.contains(expected_index),
+                "{eligibility} should seek on state via {expected_index}: {indexes:?}",
+            );
+        }
+        observed.insert(eligibility);
         println!(
             "{layout}: {eligibility}; state seek={state_seek}; scan={}; indexes={indexes:?}",
             plan.contains("PhysicalOp=\"Clustered Index Scan\"")
                 || plan.contains("PhysicalOp=\"Index Scan\""),
         );
     }
+    assert_eq!(observed.len(), shapes.len(), "missing candidate shapes");
 }
 
 #[tokio::test]
@@ -223,13 +301,8 @@ async fn owned_sql_server_upgrades_existing_run_state_without_truncation() {
     use graphql_orm::graphql::orm::MigrationStep;
 
     let (server, database) = owned_database().await.unwrap();
-    let plan = database
-        .schema()
-        .plan_migration_to_entities("ai-runs-fresh", "AI schema", AiSchemaModule.entities())
-        .await
-        .unwrap();
+    let plan = legacy_plan(&database);
     apply_parity_migration(&server, &database, &plan).await;
-    restore_legacy_run_state(&server).await;
 
     durable_database::execute_sql_server_batch(
         &server,
@@ -264,12 +337,13 @@ async fn owned_sql_server_upgrades_existing_run_state_without_truncation() {
     let (_, migration) = include_str!("../../MIGRATION.md")
         .split_once("The check counts UTF-16 bytes")
         .unwrap();
-    let (_, preflight) = migration.split_once("```sql\n").unwrap();
-    let (preflight, _) = preflight.split_once("```").unwrap();
-    let batch = format!(
-        "SET XACT_ABORT ON; BEGIN TRANSACTION; {preflight}\n{}; COMMIT TRANSACTION;",
-        upgrade.statements.join(";\n")
-    );
+    let (_, batch) = migration.split_once("```sql\n").unwrap();
+    let (batch, _) = batch.split_once("```").unwrap();
+    let plan_slot = "-- Insert the reviewed plan statements here, including any required DROP STATISTICS before ALTER COLUMN.";
+    assert!(batch.contains(plan_slot));
+    let statements = upgrade.statements.join(";\n");
+    let with_plan = |plan: &str| batch.replace(plan_slot, plan);
+    let batch = with_plan(&format!("{statements};"));
     let error = durable_database::execute_sql_server_batch(&server, &batch)
         .await
         .expect_err("oversized legacy state must refuse the upgrade");
@@ -295,9 +369,25 @@ async fn owned_sql_server_upgrades_existing_run_state_without_truncation() {
     )
     .await
     .unwrap();
+    durable_database::execute_sql_server_batch(
+        &server,
+        "CREATE STATISTICS run_state_test_stats ON dbo.graphql_orm_ai_runs ([state]);",
+    )
+    .await
+    .unwrap();
+    let error = durable_database::execute_sql_server_batch(&server, &batch)
+        .await
+        .expect_err("user-created state statistics should block the alter");
+    assert!(
+        error.to_string().contains("run_state_test_stats"),
+        "{error}"
+    );
+    let batch = with_plan(&format!(
+        "DROP STATISTICS dbo.graphql_orm_ai_runs.run_state_test_stats;\n{statements};"
+    ));
     durable_database::execute_sql_server_batch(&server, &batch)
         .await
-        .expect("a clean store should upgrade");
+        .expect("a clean store should upgrade once user statistics are dropped");
     let states: Vec<String> = database
         .pool()
         .fetch_rows(
@@ -322,14 +412,31 @@ async fn owned_sql_server_upgrades_existing_run_state_without_truncation() {
     assert!(replan.statements.is_empty(), "{:?}", replan.statements);
 }
 
-async fn restore_legacy_run_state(server: &durable_database::OwnedServer) {
-    durable_database::execute_sql_server_batch(
-        server,
-        "DROP INDEX IF EXISTS [idx_graphql_orm_ai_runs_claim_candidates] ON dbo.graphql_orm_ai_runs;
-         DROP INDEX IF EXISTS [idx_graphql_orm_ai_runs_recovery_candidates] ON dbo.graphql_orm_ai_runs;
-         DROP INDEX IF EXISTS [idx_graphql_orm_ai_runs_state] ON dbo.graphql_orm_ai_runs;
-         ALTER TABLE dbo.graphql_orm_ai_runs ALTER COLUMN [state] NVARCHAR(MAX) COLLATE DATABASE_DEFAULT NOT NULL;",
-    )
-    .await
-    .unwrap();
+fn legacy_plan(database: &Database<AiOrmBackend>) -> PlannedMigration {
+    let mut target = SchemaModel::from_entities(AiSchemaModule.entities());
+    let runs = target
+        .tables
+        .iter_mut()
+        .find(|table| table.table_name == "[graphql_orm_ai_runs]")
+        .unwrap();
+    let state = runs
+        .columns
+        .iter_mut()
+        .find(|column| column.name == "state")
+        .unwrap();
+    state.sql_type = "NVARCHAR(MAX)".to_owned();
+    runs.indexes
+        .retain(|index| !index.columns.contains(&"state"));
+    database
+        .schema()
+        .plan_migration(
+            "ai-runs-legacy",
+            "Legacy AI schema",
+            &SchemaModel {
+                extensions: vec![],
+                tables: vec![],
+            },
+            &target,
+        )
+        .unwrap()
 }

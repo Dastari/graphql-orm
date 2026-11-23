@@ -23,11 +23,12 @@ with `AiSchemaModule.entities()`. Review the change to
 Plan a maintenance window and quiesce writers. The `ALTER COLUMN` rewrites the
 run table under an exclusive schema modification lock. User-created statistics
 on `state` block the ALTER. Drop them after the preflight and before the ALTER,
-inside the same transaction. If the ALTER is blocked or any statement fails,
-the transaction rolls back cleanly, including any drops already performed.
+inside the same transaction. A blocked ALTER rolls back the transaction,
+including any drops already performed.
 
 Replace the indicated comment with the reviewed plan statements. Run the whole
 batch on one connection.
+
 The check counts UTF-16 bytes, including trailing spaces and both code units
 of a supplementary character. SQL Server can silently trim trailing spaces
 when narrowing this column, even with `ANSI_WARNINGS ON`.

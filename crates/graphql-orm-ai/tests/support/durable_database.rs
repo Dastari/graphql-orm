@@ -226,7 +226,14 @@ pub(crate) async fn owned_database() -> Option<(OwnedServer, Database<ParityBack
 
 #[cfg(feature = "mssql")]
 pub(crate) async fn owned_database() -> Option<(OwnedServer, Database<ParityBackend>)> {
-    use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
+    owned_database_with_options(graphql_orm::db::mssql::MssqlPoolOptions::default()).await
+}
+
+#[cfg(feature = "mssql")]
+pub(crate) async fn owned_database_with_options(
+    options: graphql_orm::db::mssql::MssqlPoolOptions,
+) -> Option<(OwnedServer, Database<ParityBackend>)> {
+    use graphql_orm::db::mssql::MssqlPool;
 
     let server = tokio::time::timeout(
         StdDuration::from_secs(120),
@@ -235,7 +242,7 @@ pub(crate) async fn owned_database() -> Option<(OwnedServer, Database<ParityBack
     .await
     .expect("owned SQL Server startup timed out")
     .expect("owned SQL Server should start");
-    let options = MssqlPoolOptions::default().query_timeout(Some(StdDuration::from_secs(15)));
+    let options = options.query_timeout(Some(StdDuration::from_secs(15)));
     let pool = MssqlPool::connect_ado_external_writable_with(&server.connection_string, options)
         .await
         .expect("ORM should connect only to the owned container");

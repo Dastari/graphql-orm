@@ -104,9 +104,10 @@ the external schema plan.
 
 The owned SQL Server 2022 comparison used separate 3 GiB containers with
 zero swap and 15-second query deadlines. Each database held 4,096 runs,
-including 320 queued runs and 64 expired leases. Three concurrent claim
-workers made 96 calls each, and two recovery workers made 32 calls each.
-The benchmark restored the legacy schema for the first run and used the
+including 320 queued runs and 64 expired leases. Eight claim workers made
+36 calls each, two recovery workers made 32 calls each, and four heartbeat
+workers made 72 calls each. Each successful heartbeat moved the lease expiry
+key. The benchmark provisioned the legacy schema for the first run and the
 generated schema for the second.
 
 | Measurement | Legacy schema | Indexed schema |
@@ -115,15 +116,18 @@ generated schema for the second.
 | Claim with a due next-attempt timestamp | Timestamp seek with a state filter | State seek on the claim index |
 | Recovery with no lease expiry | Clustered index scan | State seek on the recovery index |
 | Recovery with an expired lease | Timestamp seek with a state filter | State seek on the recovery index |
-| SQL Server deadlock victims (1205) per 352 public calls | 0 (0%) | 0 (0%) |
+| SQL Server deadlock victims (1205) per 640 public calls | 0 (0%) | 0 (0%) |
 | Claim `PersistenceFailed` | 0/288 (0%) | 0/288 (0%) |
 | Recovery `PersistenceFailed` | 0/64 (0%) | 0/64 (0%) |
+| Heartbeat `PersistenceFailed` | 0/288 (0%) | 0/288 (0%) |
 
-Both runs leased 288 candidates and requeued all 64 expired leases. The
-plans came from SQL Server's cache after the workers completed. The deadlock
-count is the delta of the isolated server's lock counter and includes
-deadlocks that bounded retries could absorb. This workload demonstrated the
-access-plan change and observed zero deadlocks on both schemas.
+The legacy layout leased 288 candidates. The indexed layout leased 285 and
+returned three empty claims. Both requeued all 64 expired leases and renewed
+all 288 heartbeats. The test checks all four indexed query shapes against
+SQL Server's cached plans. The deadlock count is the delta of the isolated
+server's lock counter and includes victims absorbed by retries. The workload
+did not reproduce the predicted deadlock pattern at this scale. Its effect
+on deadlock rates at higher contention remains unmeasured.
 
 ```bash
 cargo test -p graphql-orm-ai --locked --no-default-features --features mssql \
