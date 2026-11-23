@@ -168,6 +168,13 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     subscription_authority_recheck_interval: std::time::Duration,
     /// The named system access this handle presents to policies, if any.
     system_access: Option<Arc<crate::graphql::auth::SystemAccess>>,
+    /// Opt-in: a generated GraphQL mutation presents its request's authority
+    /// to policies for the nested operations of its mutation hook.
+    propagate_request_authority_to_hooks: bool,
+    /// The originating request this handle presents to policies. Set only on
+    /// the handle a `MutationContext` evaluates policies on while a mutation
+    /// hook runs, and revoked when that hook invocation ends.
+    hook_request: Option<Arc<crate::graphql::auth::HookRequestAuthority>>,
     _backend: PhantomData<B>,
 }
 
@@ -200,6 +207,8 @@ impl<B: OrmBackend> Clone for Database<B> {
             subscription_key_limit: self.subscription_key_limit,
             subscription_authority_recheck_interval: self.subscription_authority_recheck_interval,
             system_access: self.system_access.clone(),
+            propagate_request_authority_to_hooks: self.propagate_request_authority_to_hooks,
+            hook_request: self.hook_request.clone(),
             _backend: PhantomData,
         }
     }
@@ -285,6 +294,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -324,6 +335,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -360,6 +373,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -396,6 +411,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -432,6 +449,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -471,6 +490,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -517,6 +538,8 @@ impl<B: OrmBackend> Database<B> {
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
+            propagate_request_authority_to_hooks: false,
+            hook_request: None,
             _backend: PhantomData,
         }
     }
@@ -727,6 +750,44 @@ impl<B: OrmBackend> Database<B> {
     /// policy should also check that `ctx` is `None`.
     pub fn with_system_access(mut self, access: crate::graphql::auth::SystemAccess) -> Self {
         self.system_access = Some(Arc::new(access));
+        // A named access replaces a hook's originating request; it never adds to it.
+        self.hook_request = None;
+        self
+    }
+
+    /// The explicit authority this handle presents to policies: its named
+    /// system access, if any. The ORM passes this value to every
+    /// `*_with_authority` policy callback it makes on this handle; host code
+    /// that calls a policy itself forwards it the same way.
+    pub fn policy_authority(&self) -> crate::graphql::auth::PolicyAuthority<'_> {
+        crate::graphql::auth::PolicyAuthority::new(
+            self.system_access.as_deref(),
+            self.hook_request.as_deref(),
+        )
+    }
+
+    /// Whether a generated GraphQL mutation presents its request's authority
+    /// to policies for its mutation hook's nested operations; see
+    /// [`DatabaseBuilder::propagate_request_authority_to_hooks`].
+    pub fn propagates_request_authority_to_hooks(&self) -> bool {
+        self.propagate_request_authority_to_hooks
+    }
+
+    /// Set
+    /// [`DatabaseBuilder::propagate_request_authority_to_hooks`] on this handle.
+    pub fn with_request_authority_propagated_to_hooks(mut self, enabled: bool) -> Self {
+        self.propagate_request_authority_to_hooks = enabled;
+        self
+    }
+
+    /// The handle a `MutationContext` evaluates policies on while a mutation
+    /// hook invoked by a generated GraphQL mutation runs.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn with_hook_request(
+        mut self,
+        request: Arc<crate::graphql::auth::HookRequestAuthority>,
+    ) -> Self {
+        self.hook_request = Some(request);
         self
     }
 
@@ -1063,7 +1124,15 @@ impl<B: OrmBackend> Database<B> {
 
         if let Some(policy) = &self.entity_policy {
             return policy
-                .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
+                .can_access_entity_with_authority(
+                    self.policy_authority(),
+                    ctx,
+                    self,
+                    entity_name,
+                    policy_key,
+                    kind,
+                    surface,
+                )
                 .await;
         }
         missing_policy_access(self.authorization_mode, PolicyScope::Entity, policy_key.is_some(), || {
@@ -1228,7 +1297,8 @@ impl<B: OrmBackend> Database<B> {
         let access = self.repository_access(access);
         let allowed = if let Some(policy) = &self.field_policy {
             policy
-                .can_read_repository_field(
+                .can_read_repository_field_with_authority(
+                    self.policy_authority(),
                     access,
                     self,
                     entity_name,
@@ -1293,7 +1363,8 @@ impl<B: OrmBackend> Database<B> {
         let access = self.repository_access(access);
         let allowed = if let Some(policy) = &self.field_policy {
             policy
-                .can_write_repository_field(
+                .can_write_repository_field_with_authority(
+                    self.policy_authority(),
                     access,
                     self,
                     entity_name,
@@ -1482,7 +1553,8 @@ impl<B: OrmBackend> Database<B> {
         use crate::graphql::orm::ReadVisibility;
         let visibility = if let Some(policy) = &self.row_policy {
             policy
-                .read_visibility(
+                .read_visibility_with_authority(
+                    self.policy_authority(),
                     ctx,
                     self,
                     metadata.entity_name,
@@ -1522,7 +1594,15 @@ impl<B: OrmBackend> Database<B> {
     ) -> async_graphql::Result<bool> {
         if let Some(policy) = &self.row_policy {
             return policy
-                .can_read_row(ctx, self, entity_name, policy_key, surface, row)
+                .can_read_row_with_authority(
+                    self.policy_authority(),
+                    ctx,
+                    self,
+                    entity_name,
+                    policy_key,
+                    surface,
+                    row,
+                )
                 .await;
         }
         missing_policy_access(self.authorization_mode, PolicyScope::Row, policy_key.is_some(), || {
@@ -1544,7 +1624,15 @@ impl<B: OrmBackend> Database<B> {
         }
         if let Some(policy) = &self.row_policy {
             return policy
-                .can_write_row(ctx, self, entity_name, policy_key, surface, row)
+                .can_write_row_with_authority(
+                    self.policy_authority(),
+                    ctx,
+                    self,
+                    entity_name,
+                    policy_key,
+                    surface,
+                    row,
+                )
                 .await;
         }
         missing_policy_access(self.authorization_mode, PolicyScope::Row, policy_key.is_some(), || {
@@ -2544,6 +2632,35 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// visibility are locked and passed to the callbacks.
     pub fn narrow_bulk_writes_to_read_visibility(mut self, enabled: bool) -> Self {
         self.database.narrow_bulk_writes_to_read_visibility = enabled;
+        self
+    }
+
+    /// Present the originating request's authority to policies for the nested
+    /// writes and reads of a mutation hook. Off by default.
+    ///
+    /// A mutation hook's operations on its
+    /// [`MutationContext`](crate::graphql::orm::MutationContext) reach entity,
+    /// row and repository field policies with `ctx = None` on the
+    /// `Repository` surface, so a policy that requires a request refuses them
+    /// even when the GraphQL caller holds the authority. With this on, a hook
+    /// that a generated GraphQL mutation invokes presents a
+    /// [`HookRequestAuthority`](crate::graphql::auth::HookRequestAuthority) on
+    /// those checks, through
+    /// [`PolicyAuthority::hook_request`](crate::graphql::auth::PolicyAuthority::hook_request).
+    /// `ctx` and the surface are unchanged.
+    ///
+    /// The setting grants nothing by itself. Only a policy that reads the
+    /// authority in a `*_with_authority` method decides differently:
+    /// [`ScopeEntityPolicy`](crate::graphql::orm::ScopeEntityPolicy) then
+    /// applies its scope requirement to the originating subject, and a host
+    /// policy that overrides none of those methods decides as before. The
+    /// authority covers that hook invocation's operations on the mutation's
+    /// own transaction and nothing else: not the handle
+    /// [`MutationContext::database`](crate::graphql::orm::MutationContext::database)
+    /// returns, a repository call, another transaction, a post-commit action
+    /// or a later request.
+    pub fn propagate_request_authority_to_hooks(mut self, enabled: bool) -> Self {
+        self.database.propagate_request_authority_to_hooks = enabled;
         self
     }
 

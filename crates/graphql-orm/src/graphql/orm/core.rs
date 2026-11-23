@@ -1131,6 +1131,9 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The handle policies see while a [`Self::with_system_access`] scope is open.
     scoped_db: Option<Box<crate::db::Database<B>>>,
+    /// The handle policies see while a mutation hook invoked by a generated
+    /// GraphQL mutation runs, when the host propagates request authority.
+    hook_db: Option<Box<crate::db::Database<B>>>,
     /// Typed values attached by the code that began this transaction.
     extensions: TransactionExtensions,
     /// Tables whose PostgreSQL change journal recorder this transaction has verified.
@@ -1426,7 +1429,7 @@ where
             (rows, read)
         };
         bound.check_overflow(rows.len())?;
-        let database = self.hook_ctx.database();
+        let database = self.hook_ctx.__policy_database();
         let mut visible = Vec::with_capacity(rows.len());
         let mut refused = false;
         for row in rows {
@@ -1451,7 +1454,7 @@ where
         // Resolve the read decision once. Its predicate narrows the base query,
         // so the initial SQL window and the scan both carry it.
         let mode = super::query::repository_read_plan::<T, B>(
-            self.hook_ctx.database(),
+            self.hook_ctx.__policy_database(),
             Some(&mut self.query),
         )
         .await?;
@@ -1516,7 +1519,7 @@ where
                 .await?;
             let fetched = rows.len();
             let mut examined = 0;
-            let database = self.hook_ctx.database();
+            let database = self.hook_ctx.__policy_database();
             for (row, matches) in rows.into_iter().take(batch.examine) {
                 if !scan.wants_more() {
                     break;
@@ -1543,7 +1546,7 @@ where
     /// row scan budget runs out before the page is complete, plus the usual
     /// safe authorization and backend errors.
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
-        Self::ensure_read_access(self.hook_ctx.database()).await?;
+        Self::ensure_read_access(self.hook_ctx.__policy_database()).await?;
         let bound = self
             .hook_ctx
             .database()
@@ -1577,7 +1580,7 @@ where
         use super::query::RepositoryBound;
         use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
 
-        let database = self.hook_ctx.database();
+        let database = self.hook_ctx.__policy_database();
         Self::ensure_read_access(database).await?;
         let bound = database
             .pagination_config()
@@ -1599,7 +1602,7 @@ where
 
     /// Fetch the first visible row after [`Self::offset`].
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
-        Self::ensure_read_access(self.hook_ctx.database()).await?;
+        Self::ensure_read_access(self.hook_ctx.__policy_database()).await?;
         let bound = self
             .hook_ctx
             .database()
@@ -1621,7 +1624,7 @@ where
     pub async fn count(self) -> crate::Result<i64> {
         let metadata = T::metadata();
         self.hook_ctx
-            .database()
+            .__policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -1631,7 +1634,7 @@ where
             )
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
-        let database = self.hook_ctx.database();
+        let database = self.hook_ctx.__policy_database();
         let visibility = database
             .read_visibility::<T>(None, EntityAccessSurface::Repository)
             .await
@@ -2003,6 +2006,7 @@ where
             deferred_actions: Vec::new(),
             hook_depth: Default::default(),
             scoped_db: None,
+            hook_db: None,
             extensions: TransactionExtensions::default(),
             change_journal_verified_tables: Vec::new(),
         }
@@ -2061,10 +2065,31 @@ where
     /// The database handle this transaction runs on. Inside a
     /// [`Self::with_system_access`] scope it is that handle labelled with the
     /// scope's [`SystemAccess`](crate::graphql::auth::SystemAccess).
+    ///
+    /// This handle never presents a mutation hook's originating request
+    /// ([`HookRequestAuthority`](crate::graphql::auth::HookRequestAuthority)):
+    /// only operations made through this context do.
     pub fn database(&self) -> &crate::db::Database<B> {
         match &self.scoped_db {
             Some(scoped) => scoped,
             None => self.db,
+        }
+    }
+
+    /// The handle this transaction's own operations evaluate policies on.
+    ///
+    /// It is [`Self::database`], except while a mutation hook that a generated
+    /// GraphQL mutation invoked is running on a database that propagates
+    /// request authority: outside a [`Self::with_system_access`] scope it
+    /// then also presents that request. For generated code only; the request
+    /// it presents is revoked when the hook invocation ends, so a retained
+    /// clone presents nothing.
+    #[doc(hidden)]
+    pub fn __policy_database(&self) -> &crate::db::Database<B> {
+        match (&self.scoped_db, &self.hook_db) {
+            (Some(scoped), _) => scoped,
+            (None, Some(hook)) => hook,
+            (None, None) => self.db,
         }
     }
 
@@ -2365,9 +2390,10 @@ where
         row: &(dyn std::any::Any + Send + Sync),
     ) -> async_graphql::Result<()> {
         // The written row is checked under the same authority as the rest of
-        // the write: inside a `with_system_access` scope, the scoped handle.
+        // the write: inside a `with_system_access` scope, the scoped handle;
+        // in a mutation hook, the handle presenting the originating request.
         let result = self
-            .database()
+            .__policy_database()
             .ensure_writable_row(ctx, entity_name, write_policy, surface, row)
             .await;
         if result.is_err() {
@@ -2412,6 +2438,7 @@ where
             deferred_actions,
             hook_depth: _,
             scoped_db: _,
+            hook_db: _,
             extensions,
             change_journal_verified_tables: _,
         } = self;
@@ -2463,7 +2490,39 @@ where {
             self.hook_depth
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _depth = HookDepth(self.hook_depth.clone());
-            hook.on_mutation(ctx, self, event).await?;
+            // Opt-in: this hook's operations on this transaction present the
+            // originating request to policies. A nested hook (`ctx` is `None`,
+            // or an authority is already presented) keeps the outer one.
+            /// Revokes the authority when the invocation ends, however it ends.
+            struct Revoke(Option<std::sync::Arc<crate::graphql::auth::HookRequestAuthority>>);
+            impl Drop for Revoke {
+                fn drop(&mut self) {
+                    if let Some(authority) = &self.0 {
+                        authority.revoke();
+                    }
+                }
+            }
+            let presented = self
+                .hook_db
+                .as_ref()
+                .is_some_and(|hook| hook.policy_authority().hook_request().is_some());
+            let revoke = Revoke(match ctx {
+                Some(ctx) if self.db.propagates_request_authority_to_hooks() && !presented => Some(
+                    std::sync::Arc::new(crate::graphql::auth::HookRequestAuthority::capture(ctx)),
+                ),
+                _ => None,
+            });
+            if let Some(authority) = &revoke.0 {
+                self.hook_db = Some(Box::new(
+                    self.db.clone().with_hook_request(authority.clone()),
+                ));
+            }
+            let result = hook.on_mutation(ctx, self, event).await;
+            if revoke.0.is_some() {
+                self.hook_db = None;
+            }
+            drop(revoke);
+            result?;
         }
         #[cfg(any(
             all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
@@ -2485,7 +2544,7 @@ where {
     where
         T: MutationContextInsert<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::insert_in_mutation_context(self, input).await
     }
 
@@ -2497,7 +2556,7 @@ where {
         T: MutationContextUpsert<B> + Entity,
     {
         self.require_state_machine("upsert")?;
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::upsert_in_mutation_context(self, input).await
     }
 
@@ -2509,7 +2568,7 @@ where {
     where
         T: MutationContextUpdateById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::update_by_id_in_mutation_context(self, id, input).await
     }
 
@@ -2521,7 +2580,7 @@ where {
     where
         T: MutationContextUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::update_where_in_mutation_context(self, where_input, input).await
     }
 
@@ -2537,7 +2596,7 @@ where {
     where
         T: MutationContextCompareAndSwap<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::compare_and_swap_in_mutation_context(self, id, expected_version, expected, input).await
     }
 
@@ -2548,7 +2607,7 @@ where {
     where
         T: MutationContextDeleteById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::delete_by_id_in_mutation_context(self, id).await
     }
 
@@ -2559,7 +2618,7 @@ where {
     where
         T: MutationContextDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::delete_where_in_mutation_context(self, where_input).await
     }
 
@@ -2587,7 +2646,7 @@ where {
         T: MutationContextFindById<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.__policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2601,7 +2660,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.database(), &row).await? {
+        if authorize_repository_row::<T, B>(self.__policy_database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2617,7 +2676,7 @@ where {
         T: MutationContextFindByKey<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.__policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2631,7 +2690,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.database(), &row).await? {
+        if authorize_repository_row::<T, B>(self.__policy_database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2647,7 +2706,7 @@ where {
     where
         T: MutationContextUpdateByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::update_by_key_in_mutation_context(self, key, input).await
     }
 
@@ -2659,7 +2718,7 @@ where {
     where
         T: MutationContextDeleteByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::delete_by_key_in_mutation_context(self, key).await
     }
 
@@ -2671,7 +2730,7 @@ where {
     where
         T: MutationContextInsertIfAbsent<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::insert_if_absent_in_mutation_context(self, input).await
     }
 
@@ -2685,7 +2744,7 @@ where {
     where
         T: MutationContextBoundedUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::update_where_bounded_in_mutation_context(self, where_input, input, limit).await
     }
 
@@ -2698,7 +2757,7 @@ where {
     where
         T: MutationContextBoundedDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::delete_where_bounded_in_mutation_context(self, where_input, limit).await
     }
 
@@ -2712,7 +2771,7 @@ where {
     where
         T: MutationContextPredicateUpdate<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.__policy_database()).await?;
         T::update_if_in_mutation_context(self, key, expected, input).await
     }
 
@@ -2725,7 +2784,7 @@ where {
         T: MutationContextKeysetPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.__policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2739,7 +2798,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.database().row_policy().is_some() {
+        if page.include_total_count && self.__policy_database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2749,7 +2808,7 @@ where {
         }
         let connection = T::keyset_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
+            if !authorize_repository_row::<T, B>(self.__policy_database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -2770,7 +2829,7 @@ where {
         T: MutationContextKeysetConnectionPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.database()
+        self.__policy_database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2784,7 +2843,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.database().row_policy().is_some() {
+        if page.include_total_count && self.__policy_database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2794,7 +2853,7 @@ where {
         }
         let connection = T::keyset_connection_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
+            if !authorize_repository_row::<T, B>(self.__policy_database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -3527,6 +3586,26 @@ impl ScopeEntityPolicy {
         self.write = write;
         self
     }
+
+    fn decide(
+        &self,
+        subject: Option<&crate::graphql::auth::AuthSubject>,
+        kind: EntityAccessKind,
+    ) -> async_graphql::Result<bool> {
+        let requirement = match kind {
+            EntityAccessKind::Read => self.read,
+            EntityAccessKind::Write => self.write,
+        };
+        let Some(subject) = subject else {
+            if self.require_auth {
+                return Err(
+                    crate::graphql::errors::OrmPublicError::unauthenticated().into_graphql_error()
+                );
+            }
+            return Ok(false);
+        };
+        Ok(requirement.admits(subject))
+    }
 }
 
 impl<B: OrmBackend> EntityPolicy<B> for ScopeEntityPolicy {
@@ -3539,19 +3618,34 @@ impl<B: OrmBackend> EntityPolicy<B> for ScopeEntityPolicy {
         kind: EntityAccessKind,
         _surface: EntityAccessSurface,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { self.decide(ctx.and_then(AuthExt::auth_subject_opt).as_ref(), kind) })
+    }
+
+    /// With a GraphQL request the decision is the one above. A mutation
+    /// hook's nested operation has no request; when the host opted in to
+    /// propagating the originating request, its subject is held to the same
+    /// requirement. Nothing else is read from `authority`: a named system
+    /// access is not a subject.
+    fn can_access_entity_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        _surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            let requirement = match kind {
-                EntityAccessKind::Read => self.read,
-                EntityAccessKind::Write => self.write,
-            };
-            let Some(subject) = ctx.and_then(AuthExt::auth_subject_opt) else {
-                if self.require_auth {
-                    return Err(crate::graphql::errors::OrmPublicError::unauthenticated()
-                        .into_graphql_error());
-                }
-                return Ok(false);
-            };
-            Ok(requirement.admits(&subject))
+            match ctx {
+                Some(ctx) => self.decide(ctx.auth_subject_opt().as_ref(), kind),
+                None => self.decide(
+                    authority
+                        .hook_request()
+                        .and_then(crate::graphql::auth::HookRequestAuthority::subject),
+                    kind,
+                ),
+            }
         })
     }
 }
@@ -3566,6 +3660,34 @@ pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         kind: EntityAccessKind,
         surface: EntityAccessSurface,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// [`Self::can_access_entity`] with the explicit authority the call is
+    /// made under. The ORM always calls this method.
+    ///
+    /// The default ignores `authority` and calls [`Self::can_access_entity`]
+    /// with the same arguments, so a policy that does not override it decides
+    /// exactly as before. Override it to decide on a named
+    /// [`SystemAccess`](crate::graphql::auth::SystemAccess), to honour a
+    /// mutation hook's originating request
+    /// ([`PolicyAuthority::hook_request`](crate::graphql::auth::PolicyAuthority::hook_request)),
+    /// or to refuse a call that presents no authority at all (`ctx` is `None`
+    /// and [`PolicyAuthority::is_none`](crate::graphql::auth::PolicyAuthority::is_none)).
+    /// A policy that wraps another forwards `authority` to the inner policy's
+    /// `*_with_authority` method.
+    #[allow(clippy::too_many_arguments)]
+    fn can_access_entity_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database<B>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let _ = authority;
+        self.can_access_entity(ctx, db, entity_name, policy_key, kind, surface)
+    }
 }
 
 pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
@@ -3637,6 +3759,56 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         _value: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move { Ok(policy_key.is_none()) })
+    }
+
+    /// [`Self::can_read_repository_field`] with the explicit authority the
+    /// call is made under. The ORM always calls this method; the default
+    /// ignores `authority` and calls [`Self::can_read_repository_field`].
+    ///
+    /// `access` keeps its meaning: a named system access arrives there as
+    /// `AccessContext::System` and also as
+    /// [`PolicyAuthority::system`](crate::graphql::auth::PolicyAuthority::system).
+    /// A mutation hook's originating request arrives only in `authority`.
+    #[allow(clippy::too_many_arguments)]
+    fn can_read_repository_field_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        access: Option<crate::graphql::auth::AccessContext<'a>>,
+        db: &'a crate::db::Database<B>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let _ = authority;
+        self.can_read_repository_field(access, db, entity_name, field_name, policy_key, record)
+    }
+
+    /// [`Self::can_write_repository_field`] with the explicit authority the
+    /// call is made under. The ORM always calls this method; the default
+    /// ignores `authority` and calls [`Self::can_write_repository_field`].
+    #[allow(clippy::too_many_arguments)]
+    fn can_write_repository_field_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        access: Option<crate::graphql::auth::AccessContext<'a>>,
+        db: &'a crate::db::Database<B>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        value: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let _ = authority;
+        self.can_write_repository_field(
+            access,
+            db,
+            entity_name,
+            field_name,
+            policy_key,
+            record,
+            value,
+        )
     }
 }
 
@@ -3732,6 +3904,63 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// [`Self::read_visibility`] with the explicit authority the call is made
+    /// under. The ORM always calls this method; the default ignores
+    /// `authority` and calls [`Self::read_visibility`]. See
+    /// [`EntityPolicy::can_access_entity_with_authority`].
+    fn read_visibility_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database<B>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<super::ReadVisibility>> {
+        let _ = authority;
+        self.read_visibility(ctx, db, entity_name, policy_key, surface)
+    }
+
+    /// [`Self::can_read_row`] with the explicit authority the call is made
+    /// under. The ORM always calls this method; the default ignores
+    /// `authority` and calls [`Self::can_read_row`].
+    #[allow(clippy::too_many_arguments)]
+    fn can_read_row_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database<B>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let _ = authority;
+        self.can_read_row(ctx, db, entity_name, policy_key, surface, row)
+    }
+
+    /// [`Self::can_write_row`] with the explicit authority the call is made
+    /// under. The ORM always calls this method; the default ignores
+    /// `authority` and calls [`Self::can_write_row`].
+    ///
+    /// [`Self::can_read_deleted_preimage`] and
+    /// [`Self::write_target_prefilter`] have no such form: they are asked
+    /// only for a GraphQL request or subscription, which presents its `ctx`.
+    #[allow(clippy::too_many_arguments)]
+    fn can_write_row_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database<B>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let _ = authority;
+        self.can_write_row(ctx, db, entity_name, policy_key, surface, row)
+    }
 
     /// Optionally narrow, in SQL, the rows a generated GraphQL write selects
     /// as its targets.

@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.214.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02060-to-02140-explicit-authority-for-hooks-and-workers).
+
 Version 0.206.0 aligns with the ORM runtime's
 [backend-typed backup API](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
 

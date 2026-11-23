@@ -14,6 +14,36 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.214.0
+
+- **Added (#291).** A mutation hook's nested writes can be authorized from
+  the request that caused them. With
+  `DatabaseBuilder::propagate_request_authority_to_hooks(true)`, a hook that a
+  generated GraphQL mutation invokes presents a `HookRequestAuthority` (the
+  request's subject, and its accepted agql-auth identity with `auth-agql`) on
+  the policy checks of the operations it makes through its `MutationContext`.
+  It is off by default and grants nothing by itself.
+  `ScopeEntityPolicy` then holds the originating subject to its scope
+  requirement, so a cleanup hook no longer fails `UNAUTHENTICATED` for a
+  caller that holds the scope. The authority is revoked when the hook
+  invocation ends and is never presented by `MutationContext::database()`, a
+  repository call, another transaction, a post-commit action or a later
+  request.
+- **Added (#291).** `EntityPolicy`, `RowPolicy` and `FieldPolicy` have
+  `*_with_authority` methods that receive a `PolicyAuthority`: the named
+  `SystemAccess` of the handle or scope, and a hook's originating request.
+  The ORM always calls them. Their defaults call the existing methods with
+  the same arguments, so existing policies are unchanged. A policy can now
+  refuse a call that presents no authority (`ctx` is `None` and
+  `PolicyAuthority::is_none()`) while admitting a named worker or a hook.
+  `Database::policy_authority()` returns a handle's authority.
+- **Added (#291).** `AgqlCurrentAuthorityPolicy` admits a hook's nested
+  operation on the originating request's accepted identity, with the same
+  status and authority revalidation as a request, when the host's
+  `AgqlBindingAuthorizer::authorize_hook_operation` allows it. The default
+  denies, so `ctx = None` calls stay refused until the host implements it.
+  **No action.** See the
+  [migration guide](MIGRATION.md#02060-to-02140-explicit-authority-for-hooks-and-workers).
 ## Unreleased - ORM/macros 0.206.0 and backup 0.30.0
 
 - **Fixed (#870).** SQLite and PostgreSQL database handles expose the backup

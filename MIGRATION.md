@@ -10,6 +10,28 @@ supersedes: []
 
 # Migration Guide
 
+## 0.206.0 to 0.214.0: explicit authority for hooks and workers
+
+**No action.** Upgrade ORM and macros together. Existing policies decide
+exactly as before: the new `*_with_authority` methods on `EntityPolicy`,
+`RowPolicy` and `FieldPolicy` have defaults that call the existing methods
+with the same arguments, and nothing is propagated unless the host opts in.
+
+To let a mutation hook's nested writes be authorized from the GraphQL request
+that caused them, set
+`DatabaseBuilder::propagate_request_authority_to_hooks(true)` (or
+`Database::with_request_authority_propagated_to_hooks(true)`) on the handle
+the schema serves. Then:
+
+- `ScopeEntityPolicy` applies its scope requirement to the originating
+  subject for the hook's nested operations.
+- A host policy reads `PolicyAuthority::hook_request()` in a
+  `*_with_authority` method and decides. A policy that wraps another forwards
+  the authority to the inner policy's `*_with_authority` method.
+- Under `AgqlCurrentAuthorityPolicy`, also implement
+  `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.
+
+See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
 ## 0.205.0 to 0.206.0: backend-typed backup runtime
 
 **No action.** Upgrade ORM and macros together. SQLite and PostgreSQL

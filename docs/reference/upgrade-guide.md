@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.206.0, `graphql-orm-macros` 0.206.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.30.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.214.0, `graphql-orm-macros` 0.214.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.30.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.214.0 add an opt-in that lets a mutation hook's nested writes be authorized from the originating request, and pass an explicit `PolicyAuthority` to entity, row and repository field policies (#291). [Migration](../../MIGRATION.md#02060-to-02140-explicit-authority-for-hooks-and-workers)
 - **No action** — ORM/macros 0.206.0 and backup 0.30.0 support the SQLite
   and PostgreSQL backup adapters in builds that enable other ORM backends
   (#870).

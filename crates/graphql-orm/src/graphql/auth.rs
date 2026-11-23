@@ -371,6 +371,141 @@ impl<'a> AccessContext<'a> {
     }
 }
 
+/// The authority of the GraphQL request whose generated mutation is running a
+/// mutation hook, presented to policies for that hook's nested writes and
+/// reads.
+///
+/// The ORM creates one only when the host opted in with
+/// [`DatabaseBuilder::propagate_request_authority_to_hooks`](crate::db::DatabaseBuilder::propagate_request_authority_to_hooks),
+/// when a generated GraphQL mutation invokes the mutation hook, and presents
+/// it only on the policy checks of operations that hook makes through its
+/// [`MutationContext`](crate::graphql::orm::MutationContext). It is revoked
+/// when the hook invocation ends, including on an error or a dropped future.
+/// It is a typed copy of the request's identity, not the request: it holds no
+/// GraphQL `Context`, cannot be cloned or constructed by host code, and is
+/// never presented by a repository call, another transaction, a post-commit
+/// action or a later request.
+///
+/// It grants nothing by itself. A policy that does not read it decides as it
+/// did before, and a policy that honours it applies the same checks it
+/// applies to the request's own operations.
+pub struct HookRequestAuthority {
+    subject: Option<AuthSubject>,
+    #[cfg(feature = "auth-agql")]
+    agql_accepted: Option<crate::graphql::auth_agql::AgqlAcceptedRequest>,
+    live: std::sync::atomic::AtomicBool,
+}
+
+impl fmt::Debug for HookRequestAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HookRequestAuthority")
+            .field("subject", &self.subject)
+            .field("live", &self.is_live())
+            .finish_non_exhaustive()
+    }
+}
+
+impl HookRequestAuthority {
+    /// Copy the identity a generated mutation's request presents.
+    pub(crate) fn capture(ctx: &async_graphql::Context<'_>) -> Self {
+        Self {
+            subject: ctx.auth_subject_opt(),
+            // A request whose accepted identity is absent or incoherent
+            // presents none, so the bridge refuses the nested write.
+            #[cfg(feature = "auth-agql")]
+            agql_accepted: crate::graphql::auth_agql::AgqlAcceptedRequest::from_context(ctx)
+                .ok()
+                .cloned(),
+            live: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// End the hook invocation this authority belongs to.
+    pub(crate) fn revoke(&self) {
+        self.live.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The originating request's subject, or `None` for a request that
+    /// presented no [`AuthSubject`].
+    pub fn subject(&self) -> Option<&AuthSubject> {
+        self.subject.as_ref()
+    }
+
+    /// The originating request's accepted agql-auth identity, when the
+    /// request carried one that passed
+    /// [`AgqlAcceptedRequest::from_context`](crate::graphql::auth_agql::AgqlAcceptedRequest::from_context).
+    /// It was accepted when the hook was invoked; current authority must
+    /// still be revalidated for every decision made on it.
+    #[cfg(feature = "auth-agql")]
+    pub fn agql_accepted_request(&self) -> Option<&crate::graphql::auth_agql::AgqlAcceptedRequest> {
+        self.agql_accepted.as_ref()
+    }
+}
+
+/// The explicit authority a policy call is made under, besides the GraphQL
+/// request context the callback also receives.
+///
+/// Every entity, row and repository field policy callback the ORM makes goes
+/// through the `*_with_authority` trait method and passes this value. The
+/// default implementations ignore it and call the method without it, so an
+/// existing policy decides exactly as before.
+///
+/// [`Self::is_none`] with `ctx = None` is a call that presents no authority at
+/// all: a plain repository helper, transaction or unlabelled hook write. It is
+/// never system authority, and a policy can refuse it while admitting a named
+/// [`SystemAccess`] or a hook's [`HookRequestAuthority`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PolicyAuthority<'a> {
+    system: Option<&'a SystemAccess>,
+    hook_request: Option<&'a HookRequestAuthority>,
+}
+
+impl<'a> PolicyAuthority<'a> {
+    /// No explicit authority.
+    pub const fn none() -> Self {
+        Self {
+            system: None,
+            hook_request: None,
+        }
+    }
+
+    pub(crate) fn new(
+        system: Option<&'a SystemAccess>,
+        hook_request: Option<&'a HookRequestAuthority>,
+    ) -> Self {
+        Self {
+            system,
+            // A revoked authority is never presented.
+            hook_request: hook_request.filter(|request| request.is_live()),
+        }
+    }
+
+    /// The named system access of the handle or scope the call runs on; the
+    /// same value as [`Database::system_access`](crate::db::Database::system_access)
+    /// on the handle the callback receives.
+    pub fn system(self) -> Option<&'a SystemAccess> {
+        self.system
+    }
+
+    /// The originating request of the mutation hook making this call, when
+    /// the host opted in to propagating it. Always `None` inside a
+    /// [`MutationContext::with_system_access`](crate::graphql::orm::MutationContext::with_system_access)
+    /// scope, whose named access replaces it.
+    pub fn hook_request(self) -> Option<&'a HookRequestAuthority> {
+        self.hook_request
+    }
+
+    /// Whether the call presents neither a named system access nor a hook's
+    /// originating request.
+    pub fn is_none(self) -> bool {
+        self.system.is_none() && self.hook_request.is_none()
+    }
+}
+
 /// Authentication helpers for generated resolvers and policy hooks.
 pub trait AuthExt {
     /// Deprecated compatibility alias for [`AuthExt::auth_user_id`].

@@ -5368,7 +5368,7 @@ where
     }
 
     async fn fetch(self, read: ProjectionRead) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.context.database()).await?;
+        let visibility = ensure_projection_access::<P, B>(self.context.__policy_database()).await?;
         self.state.validate()?;
         let bound = self
             .state
