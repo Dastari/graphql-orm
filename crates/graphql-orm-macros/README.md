@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.206.0 aligns with the ORM runtime's
+[backend-typed backup API](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
+
 Version 0.205.0 reduces per-entity compile work for generated Changed
 subscriptions by sharing their stream implementation. See the
 [migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
