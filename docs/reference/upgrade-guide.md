@@ -70,7 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.206.0, `graphql-orm-macros` 0.206.0; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.207.0, `graphql-orm-macros` 0.207.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **No action** — ORM/macros 0.207.0: security fix (#876). SQLite renders every closure read predicate in the original form again; from 0.200.0 through 0.206.0, a closure whose pointer column's collation treats values as equal that the key column distinguishes (for example a `NOCASE` or `RTRIM` pointer with a `BINARY` key) could reach a different verdict, so an `Any` closure could deny rows the original admits. On PostgreSQL and SQL Server, directly nested closures over built-in column tests can use fewer target SQL copies and bind parameters (#785). [Migration](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates)
 
 ### workspace-2026.11.23.2
 

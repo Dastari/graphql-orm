@@ -10,6 +10,30 @@ supersedes: []
 
 # Migration Guide
 
+## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
+
+**No action.** SQLite renders every closure read predicate, single-level and
+nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
+on 0.200.0 through 0.206.0 were exposed only if a SQLite closure walks a
+pointer column whose collation treats values as equal that the key column
+distinguishes, for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY`
+key. There, pointers such as `'a'` and `'A'`, or `'a'` and `'a '`, reached at
+the same depth were followed only once. An `Any` closure could then deny a
+row that the original rendering admits. A randomized search found no case
+that admitted extra rows, but over-admission is not proven impossible: SQLite
+does not guarantee which of several equal pointers it keeps.
+
+On PostgreSQL and SQL Server, a root closure whose target is itself a closure
+over built-in column tests and NULL checks can reuse the inner walk's
+three-valued result, with fewer SQL fragments and bind parameters. PostgreSQL
+and SQL Server single-level closures keep their 0.200.0 rendering. The policy
+admits the same rows as the original rendering on SQLite, PostgreSQL, and SQL
+Server, including text pointers and targets with declared collations and
+binds whose type differs from the column's. Where PostgreSQL or SQL Server
+cannot compare a pointer and key with different collations, both renderings
+fail the statement. Composition limits still apply. Applications that
+snapshot generated policy SQL may need to refresh those snapshots. Refs #785.
+
 ## 0.205.0 to 0.206.0: backend-typed backup runtime
 
 **No action.** Upgrade ORM and macros together. SQLite and PostgreSQL

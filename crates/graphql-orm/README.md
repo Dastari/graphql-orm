@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.207.0 renders SQLite closure read predicates in the original form
+again (#876) and reduces SQL duplication for directly nested closure read
+predicates on PostgreSQL and SQL Server. See the [migration note](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
 Version 0.206.0 exposes full backup and restore on explicitly typed SQLite
 and PostgreSQL handles in multi-backend builds. See the
 [migration guide](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
