@@ -14,13 +14,58 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.210.0
+## Unreleased - ORM/macros 0.208.0
 
 - **Added (#852).** Typed transactions can delete a bounded key set or scalar
   filter match with one DELETE for opted-in mutable entities. The operation
   checks row write authorization and exact cardinality, runs per-row delete
   hooks and queues the generated change notifications.
-  [Migration](MIGRATION.md#02030-to-02100-bounded-set-based-deletes)
+  [Migration](MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
+
+## Unreleased - ORM/macros 0.207.0
+
+- **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite
+  closure read predicate (`related_closure_within` and its shorthands) could
+  reach a different verdict than the original rendering when its pointer
+  column's collation treats values as equal that the key column distinguishes,
+  for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY` key. The
+  compact walk deduplicated such pointers (`'a'` and `'A'`, or `'a'` and
+  `'a '`) at the same depth and followed only one of them, so an `Any`
+  closure could deny a row that the original rendering admits. A randomized
+  search found no over-admission, but it is not proven impossible, because
+  SQLite does not guarantee which equal pointer survives. SQLite now renders
+  every closure, single-level and nested, in the original form, byte for
+  byte as before 0.200.0. PostgreSQL and SQL Server are not affected.
+- **No action.** On PostgreSQL and SQL Server, directly nested closure read
+  predicates over built-in column tests can reuse the inner closure's scalar
+  result, reducing SQL and bind duplication. The admitted rows are unchanged
+  on all three backends (#785).
+
+## Unreleased - ORM/macros 0.206.0 and backup 0.30.0
+
+- **Fixed (#870).** SQLite and PostgreSQL database handles expose the backup
+  runtime in multi-backend builds. The ready-made backup adapter and object
+  index use the handle selected by their own feature.
+  [Migration](MIGRATION.md#02050-to-02060-backend-typed-backup-runtime)
+
+## Unreleased - ORM/macros 0.205.0
+
+- **Changed (part of #677, #358).** Generated Changed subscriptions share
+  the runtime's stream and authorization code, reducing the work rustc does
+  for each entity with subscriptions enabled.
+  **No action.** See the
+  [migration guide](MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+- **Added.** Changed subscriptions support combining `changed_started = true`
+  with `key_only_deletes`. An authorized exact-key subscriber can request a
+  started frame and receive key-only `DELETED` frames with `started: false`.
+
+## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
+
+- **Added (follow-up to #731).** Opt in per database when another product
+  owns backup and restore. The ORM and its backup adapter refuse backup and
+  restore before I/O. SQL Server queries and writes on opted-in handles
+  run without the restore marker or fencing lock.
+  [Migration](MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore)
 
 ## Unreleased - ORM/macros 0.203.0
 

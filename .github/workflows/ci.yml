@@ -216,6 +216,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --test consumer_fixtures --test cross_crate_relations_fixture --test federation_end_to_end_fixture
+      - name: Check backup adapter backend selection
+        run: bash scripts/check-backup-backend-fixture.sh
       - name: Run the graphql-orm-usage skill examples and behaviour contract
         run: cargo test --manifest-path skills/verify/Cargo.toml --target-dir target/fixtures --locked
 

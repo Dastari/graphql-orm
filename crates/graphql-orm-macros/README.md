@@ -10,8 +10,21 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.210.0 generates the adapter for opt-in
+Version 0.208.0 generates the adapter for opt-in
 [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes).
+
+Version 0.207.0 aligns with the ORM's
+[closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
+Version 0.206.0 aligns with the ORM runtime's
+[backend-typed backup API](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
+
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+
+Version 0.204.0 aligns with the ORM runtime's
+[external backup and restore setting](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
 
 Version 0.203.0 adds SQL Server-only options to
 `backend_selected_graphql_entity` and opt-in exact string filters. See the

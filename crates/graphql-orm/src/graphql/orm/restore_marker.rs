@@ -22,6 +22,45 @@ use super::backend::OrmBackend;
 /// Table that holds the marker row while a host-run restore is in progress.
 pub const RESTORE_MARKER_TABLE: &str = "dbo.__graphql_orm_restore_marker";
 
+/// The database is configured for another product to manage backup and restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackupRestoreExternallyManaged;
+
+impl std::fmt::Display for BackupRestoreExternallyManaged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: another product owns this database's backup and restore",
+            self.code(),
+        )
+    }
+}
+
+impl std::error::Error for BackupRestoreExternallyManaged {}
+
+impl BackupRestoreExternallyManaged {
+    /// Stable code identifying this refusal.
+    pub const fn code(&self) -> &'static str {
+        "BACKUP_RESTORE_EXTERNALLY_MANAGED"
+    }
+
+    /// The refusal carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn ensure_allowed(externally_managed: bool) -> crate::Result<()> {
+        if externally_managed {
+            Err(sqlx::Error::Decode(Box::new(Self)))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// A host-run restore started and has not finished.
 ///
 /// Returned by [`Database::restore_in_progress`](crate::db::Database::restore_in_progress),
@@ -179,7 +218,7 @@ impl RestoreStateUnavailable {
 
 /// Read the marker. Backends that restore transactionally have none, and a
 /// SQL Server database with missing or unreadable infrastructure fails closed.
-pub(crate) async fn read_restore_marker<B: OrmBackend>(
+async fn read_restore_marker<B: OrmBackend>(
     pool: &B::Pool,
 ) -> crate::Result<Option<RestoreInProgress>> {
     #[cfg(feature = "mssql")]
@@ -194,46 +233,55 @@ pub(crate) async fn read_restore_marker<B: OrmBackend>(
     Ok(None)
 }
 
-/// Fail with [`RestoreInProgress`] while a marker is present.
-pub(crate) async fn refuse_while_restoring<B: OrmBackend>(pool: &B::Pool) -> crate::Result<()> {
-    match read_restore_marker::<B>(pool).await? {
-        Some(marker) => Err(marker.into_error()),
-        None => Ok(()),
-    }
-}
-
 impl<B: OrmBackend> crate::db::Database<B> {
+    pub(crate) fn ensure_backup_restore_allowed(&self) -> crate::Result<()> {
+        BackupRestoreExternallyManaged::ensure_allowed(self.backup_restore_is_externally_managed())
+    }
+
+    pub(crate) async fn check_restore_state_for_schema_validation(&self) -> crate::Result<()> {
+        if self.backup_restore_is_externally_managed() {
+            return Ok(());
+        }
+        self.ensure_no_restore_in_progress().await
+    }
+
     /// The host-run restore whose marker is present on this database, if any.
     ///
-    /// Always `None` on PostgreSQL and SQLite, where a snapshot restores in
-    /// one transaction and no marker is kept.
+    /// On PostgreSQL and SQLite an ORM-managed database always returns `None`
+    /// because a snapshot restores in one transaction and no marker is kept.
     ///
     /// # Errors
     ///
-    /// Fails with an error carrying [`RestoreStateUnavailable`] when the
+    /// Fails with [`BackupRestoreExternallyManaged`] if another product owns
+    /// backup and restore. Fails with an error carrying [`RestoreStateUnavailable`] when the
     /// marker table is missing, unreadable or the database cannot be reached;
     /// that is not a restore in progress.
     pub async fn restore_in_progress(&self) -> crate::Result<Option<RestoreInProgress>> {
+        self.ensure_backup_restore_allowed()?;
         read_restore_marker::<B>(self.pool()).await
     }
 
     /// Refuse to continue while a host-run restore's marker is present.
     ///
-    /// SQL Server statements are refused during a restore whether or not this
-    /// is called; it gives a service a single check to make when it starts.
+    /// For ORM-managed backups and restores, SQL Server statements are refused
+    /// during a restore whether or not this is called.
     /// [`SchemaManager::validate_against_entities`](super::SchemaManager::validate_against_entities)
     /// and [`SchemaManager::validate_target`](super::SchemaManager::validate_target)
     /// make the same check.
     ///
     /// # Errors
     ///
-    /// Fails with an error carrying [`RestoreInProgress`] (see
+    /// Fails with [`BackupRestoreExternallyManaged`] if another product owns
+    /// backup and restore. Fails with an error carrying [`RestoreInProgress`] (see
     /// [`RestoreInProgress::from_error`]) while a marker is present, with an
     /// error carrying [`RestoreStateUnavailable`] when the marker table is
     /// missing, unreadable or the database cannot be reached, or with a
     /// database failure.
     pub async fn ensure_no_restore_in_progress(&self) -> crate::Result<()> {
-        refuse_while_restoring::<B>(self.pool()).await
+        if let Some(marker) = self.restore_in_progress().await? {
+            return Err(marker.into_error());
+        }
+        Ok(())
     }
 }
 
@@ -259,7 +307,8 @@ impl crate::db::Database<super::MssqlBackend> {
     ///
     /// # Errors
     ///
-    /// Fails with an error carrying [`RestoreInProgress`] when the lock is
+    /// Fails with [`BackupRestoreExternallyManaged`] if another product owns
+    /// backup and restore. Fails with an error carrying [`RestoreInProgress`] when the lock is
     /// not granted within `wait` or another restore's marker is present, with
     /// an error carrying [`RestoreStateUnavailable`] when the marker table is
     /// missing or the role may not use it, and with a database failure
@@ -278,7 +327,8 @@ impl crate::db::Database<super::MssqlBackend> {
     ///
     /// # Errors
     ///
-    /// Fails when no marker is present, with an error carrying
+    /// Fails with [`BackupRestoreExternallyManaged`] if another product owns
+    /// backup and restore. Fails when no marker is present, with an error carrying
     /// [`RestoreInProgress`] when the marker belongs to another restore or
     /// the lock is not granted within `wait`, with an error carrying
     /// [`RestoreStateUnavailable`] when the marker table is missing or the

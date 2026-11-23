@@ -8,10 +8,7 @@ pub use authorized_page::*;
 mod authorized_pagination;
 pub use authorized_pagination::*;
 mod backend;
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod backup;
 mod client_metadata;
 pub use client_metadata::*;
@@ -101,10 +98,7 @@ pub(crate) async fn begin_change_journal_transaction<B: WriteBackend>(
 ) -> crate::Result<()> {
     Ok(())
 }
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use backup::*;
 pub use core::*;
 pub use dialect::*;
@@ -118,7 +112,8 @@ pub use point_read::*;
 pub use query::*;
 pub use read_authorization::*;
 pub use restore_marker::{
-    RESTORE_MARKER_TABLE, RestoreInProgress, RestoreStateUnavailable, RestoreStateUnavailableReason,
+    BackupRestoreExternallyManaged, RESTORE_MARKER_TABLE, RestoreInProgress,
+    RestoreStateUnavailable, RestoreStateUnavailableReason,
 };
 pub use rls::*;
 pub use root_fields::*;

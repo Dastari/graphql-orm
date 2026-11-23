@@ -1,0 +1,3 @@
+[workspace]
+members = ["backup-service", "mssql-service"]
+resolver = "3"

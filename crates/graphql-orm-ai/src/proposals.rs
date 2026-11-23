@@ -455,6 +455,7 @@ pub trait AiProposalService: AiProposalOutcomeRecorder + Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiProposalQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -494,6 +495,7 @@ impl AiProposalQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiProposalMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

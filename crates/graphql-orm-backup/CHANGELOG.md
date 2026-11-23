@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.30.0
+
+- `orm-sqlite` and `orm-postgres` select the database handle type used by the
+  ready-made adapter and object index, including when other workspace
+  members enable additional ORM backends. Enabling both adapter features
+  produces a compile-time diagnostic (#870).
+
+## Unreleased - 0.29.0
+
+- The ORM adapter and object index honor the database's external backup and
+  restore setting. Backup orchestration and restore, including dry runs,
+  refuse these databases before accessing the database or repository (follow-up
+  to #731).
+
 ## Unreleased - 0.28.1
 
 - The optional ORM adapter refuses target clears and restores from a read

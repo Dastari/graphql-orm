@@ -1128,6 +1128,7 @@ pub trait AiRulePolicyService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiRuleQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -1152,6 +1153,7 @@ impl AiRuleQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiRuleMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
