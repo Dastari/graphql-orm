@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.155.0 to 0.156.0: capability model-context benchmark
+
+**No action.** Upgrade together with AI tool profiles 0.28.0. Broker
+definitions, provider-session bindings, capability, index and index-set
+fingerprints, model-facing results, GraphQL SDL and the AI schema module are
+unchanged, so no retained session rebinds and no data migration is needed.
+Broker calls on a host that supplies one index through
+`AiCurrentCapabilityIndex` cost the same at any index size, and describe and
+`describe_type` are faster for wide entities. To measure a deployment's own
+shape, run the
+[model-context benchmark](docs/capability-discovery-and-execution.md#model-context-benchmark).
+
 ## 0.154.0 to 0.155.0
 
 **No action.** The exported AI roots now implement `GraphqlRootFieldNames`,
