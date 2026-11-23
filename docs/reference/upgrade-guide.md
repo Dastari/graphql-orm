@@ -70,8 +70,11 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.203.0, `graphql-orm-macros` 0.203.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.28.1; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.155.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.204.0, `graphql-orm-macros` 0.204.0**; **`graphql-orm-operation-catalog` 0.12.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.155.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.204.0 and backup 0.29.0 add an opt-in for
+  databases whose backup and restore are owned by another product.
+  [ORM migration](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0281-to-0290-externally-managed-backup-and-restore)
 - **No action** — AI 0.155.0 supports composing exported AI roots through
   `schema_roots!` with either GraphQL naming setting (#858).
   [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01540-to-01550)
