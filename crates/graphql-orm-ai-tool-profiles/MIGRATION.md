@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.29.0 generated keyset page limits
+
+**No action.** The planner now validates the server-injected `limit` on the
+generated keyset root's own `KeysetPageInput!` argument. The model still
+requests a bound through `maximumItems`, and the resolver applies the schema's
+maximum page limit. Plans continue to omit `after` and `includeTotalCount`,
+so reads start at the beginning and use the GraphQL default of `false` for
+counting. Handwritten inputs still require explicit host disclosure.
+
+Keyset, offset, and other capability fingerprints are unchanged. No schema or
+data migration is needed.
+
 ## 0.28.0 index-set and signature reuse
 
 **No action.** Index and index-set fingerprints, search results, capability
