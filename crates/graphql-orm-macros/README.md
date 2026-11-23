@@ -14,6 +14,10 @@ Version 0.206.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
 column types with the `mssql_type` field attribute.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
 
+Version 0.202.0 aligns with the ORM's
+[integration test consolidation](../../docs/development/testing.md).
+See the [migration guide](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene).
+
 Version 0.201.0 makes `schema_roots!` report duplicate entity identities
 through its fallible schema builders and resolver catalogue helper. Upgrade
 ORM and macros together. See the

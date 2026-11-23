@@ -80,9 +80,9 @@ run_postgres() {
     --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test authorized_pagination_postgres --test bounded_mutation_sentinels \
+    --test postgres_owned_contracts --test bounded_mutation_sentinels \
     --test bulk_refusals --test delete_propagation --test denied_relations \
-    --test host_primary_keys --test postgres_constraint_index_idempotency --test postgres_runtime_repository \
+    --test host_primary_keys --test postgres_runtime_repository \
     --test single_row_refusals \
     -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \

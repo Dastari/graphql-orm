@@ -24,6 +24,12 @@ for historical context.
 - **Fixed (#849).** SQL Server character column ALTER statements use the parsed
   column name when looking up collation, including literal brackets.
 
+## Unreleased - ORM/macros 0.202.0
+
+- Grouped additional SQLite GraphQL, owned database and consumer fixture tests.
+  See the [test lanes](docs/development/testing.md) for the selectors.
+- Documented the blocking filesystem operations in `write_migration_file`.
+
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 
 - **Fixed (#829).** Repeated entity identities return a typed composition

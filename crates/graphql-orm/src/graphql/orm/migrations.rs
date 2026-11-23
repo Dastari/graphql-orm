@@ -4637,6 +4637,15 @@ pub fn render_migration_file(plan: &MigrationPlan, version: &str, description: &
     out
 }
 
+/// Render a migration and write it to the named directory, creating parent
+/// directories as needed. If the file already exists, this overwrites it.
+///
+/// This function performs blocking filesystem I/O. From async code, call it
+/// on a blocking thread, for example with `tokio::task::spawn_blocking`.
+///
+/// # Errors
+///
+/// Returns the I/O error if creating the directory or writing the file fails.
 pub fn write_migration_file(
     directory: impl AsRef<std::path::Path>,
     plan: &MigrationPlan,

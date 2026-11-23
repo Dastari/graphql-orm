@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.201.0 to 0.206.0: SQL Server parameter types and column identifiers
+## 0.202.0 to 0.206.0: SQL Server parameter types and column identifiers
 
 **No action.** Upgrade ORM and macros together. SQL Server keeps the
 existing Unicode string and BIGINT binds by default. To use each declared
@@ -23,6 +23,11 @@ Unicode binding. Generated unsigned operands outside their SQL Server range
 return `INVALID_INPUT`. SQL Server ALTER COLUMN planning parses the column
 identifier for its collation lookup.
 See [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+## 0.201.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
 
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 

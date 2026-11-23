@@ -913,7 +913,7 @@ encryption default, the explicit opt-ins, session reset between checkouts, pool
 timeouts and a `NOCOUNT ON` session default:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls --test mssql_transport -- --ignored --test-threads=1
+cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_owned_connections -- --ignored --test-threads=1 --skip mssql_notifications::
 ```
 
 The correctness regression executes error classification, decoding (including
@@ -1054,7 +1054,7 @@ Run the explicitly opted-in integration test against its self-provisioned,
 loopback-only, two-CPU/3-GiB disposable Docker SQL Server (no application DSN):
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --test mssql_notifications -- --ignored
+cargo test -p graphql-orm --no-default-features --features mssql --test mssql_owned_connections -- mssql_notifications:: --ignored
 ```
 
 On shared hosts use the host-required bounded Cargo wrapper. The test uses an
