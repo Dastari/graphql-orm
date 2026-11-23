@@ -12,14 +12,18 @@ supersedes: []
 
 ## 0.201.0 to 0.207.0: PostgreSQL RLS search
 
-**No action.** Upgrade ORM and macros together. PostgreSQL searches on
-generated `#[graphql_rls]` entities now probe the search document primary key
-from each visible base row. The change is in ORM-generated queries and needs
-no database migration, index rebuild, or policy update. PostgreSQL keeps
-`@@` behind the search-document RLS policy because the operator is not
-leakproof, so this path uses the document primary-key B-tree. The search
-[performance notes](docs/reference/graphql-orm/postgres.md#search-performance)
-describe the cost for principals with broad visibility.
+**No action.** Upgrade ORM and macros together. Native search on generated
+PostgreSQL `#[graphql_rls]` entities with an unqualified, column-based
+default sort can use a document primary-key probe or a bulk join. Both RLS
+policies still apply. The change only affects ORM-generated queries, so hosts
+need no database migration, index rebuild, or policy update. PostgreSQL
+evaluates `@@` after the document policy, which prevents GIN from serving
+the search. With 200,000 documents the median selective page at 10%
+visibility went from 318 to 87 ms and its count from 276 to 79 ms. At full
+visibility the common page went from 370 to 353 ms and its count from 252
+to 238 ms. The full-visibility selective query still scanned documents and
+its page went from 233 to 256 ms. See the
+[measured plans and costs](docs/reference/graphql-orm/postgres.md#search-performance).
 
 ## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
 

@@ -115,9 +115,9 @@ pub trait SearchableEntity: DatabaseSearchSchema {
     #[doc(hidden)]
     const SEARCH_KEY_IS_BINARY: bool = false;
 
-    /// Whether PostgreSQL search must probe documents from RLS-visible base rows.
+    /// Physical columns projected before joining PostgreSQL RLS search documents.
     #[doc(hidden)]
-    const POSTGRES_SEARCH_BASE_ROW_FIRST: bool = false;
+    const POSTGRES_SEARCH_BASE_COLUMNS: &'static [&'static str] = &[];
 
     /// Helper join key chosen to leave the entity's projected names available.
     #[doc(hidden)]
@@ -1246,44 +1246,66 @@ where
         let helper_alias = self.native_search_helper_alias();
         let key_column = B::DIALECT.render_identifier(T::SEARCH_KEY_COLUMN);
         let score_column = B::DIALECT.render_identifier(T::SEARCH_SCORE_COLUMN);
+        let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
+        let base_columns = T::POSTGRES_SEARCH_BASE_COLUMNS;
+        let use_projected_key = !base_columns.is_empty()
+            && super::query::postgres_sort_uses_projected_columns(T::DEFAULT_SORT, base_columns);
+        let mut values = Vec::new();
+        let (source, qualifier, document_key) = if use_projected_key {
+            let alias = B::DIALECT.delimit_raw_identifier(
+                &super::dialect::postgres_resolved_identifier_parts(T::TABLE_NAME)
+                    .pop()
+                    .unwrap_or_else(|| table.to_string()),
+            );
+            // Preserve the cast as an output column so the leakproof text
+            // equality can drive the document B-tree under its RLS policy.
+            let mut base = "SELECT ".to_owned();
+            if !count_only {
+                base.push_str(&base_columns.join(", "));
+                base.push_str(", ");
+            }
+            base.push_str(&format!(
+                "{} AS {key_column} FROM {table} WHERE 1 = 1",
+                self.document_key_sql(),
+            ));
+            self.append_filter_sql(&mut base, &mut values);
+            let key = format!("{alias}.{key_column}");
+            (format!("({base} OFFSET 0) {alias}"), alias, key)
+        } else {
+            (
+                table.to_string(),
+                table.to_string(),
+                self.document_key_sql(),
+            )
+        };
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!(
-                "{}, {helper_alias}.{score_column}",
-                T::search_projection().join(", ")
-            )
+            let columns = if use_projected_key {
+                T::column_names()
+            } else {
+                T::search_projection()
+            };
+            format!("{}, {helper_alias}.{score_column}", columns.join(", "))
         };
-        // Use a query alias distinct from the base qualifier when the inner
-        // SELECT references that qualifier. Keep both helper scopes private.
-        let query_alias = if T::POSTGRES_SEARCH_BASE_ROW_FIRST {
-            helper_alias
+        let bind = if use_projected_key {
+            B::DIALECT.placeholder(values.len() + 1)
         } else {
-            "q"
+            "?".to_owned()
         };
-        let mut documents = format!(
-            "SELECT entity_pk AS {key_column}, \
-             CAST(ts_rank_cd(document_vector, {query_alias}.query) AS DOUBLE PRECISION) AS {score_column} \
-             FROM {search_table} CROSS JOIN {function}('{}', ?) {query_alias}(query) \
-             WHERE document_vector @@ {query_alias}.query",
+        values.push(SqlValue::String(query_text));
+        let mut sql = format!(
+            "SELECT {projection} FROM {source} \
+             JOIN (SELECT entity_pk AS {key_column}, \
+             CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS {score_column} \
+             FROM {search_table} CROSS JOIN {function}('{}', {bind}) q(query) \
+             WHERE document_vector @@ q.query) {helper_alias} \
+             ON {helper_alias}.{key_column} = {document_key} WHERE 1 = 1",
             index.language.replace('\'', "''"),
         );
-        let document_key = self.document_key_sql();
-        let join = if T::POSTGRES_SEARCH_BASE_ROW_FIRST {
-            // RLS must precede the non-leakproof match operator. Prevent
-            // flattening so that each visible base key bounds the document
-            // lookup, with the document's own policy still in force.
-            documents.push_str(&format!(" AND entity_pk = {document_key} OFFSET 0"));
-            format!("JOIN LATERAL ({documents}) {helper_alias} ON TRUE")
-        } else {
-            format!(
-                "JOIN ({documents}) {helper_alias} ON {helper_alias}.{key_column} = {document_key}"
-            )
-        };
-        let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
-        let mut sql = format!("SELECT {projection} FROM {table} {join} WHERE 1 = 1");
-        let mut values = vec![SqlValue::String(query_text)];
-        self.append_filter_sql(&mut sql, &mut values);
+        if !use_projected_key {
+            self.append_filter_sql(&mut sql, &mut values);
+        }
         if !count_only {
             sql.push_str(&format!(" ORDER BY {helper_alias}.{score_column} DESC"));
             if !T::DEFAULT_SORT.trim().is_empty() {
@@ -1292,7 +1314,8 @@ where
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_orders_by_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(", {} ASC", self.entity_column(column)));
+                    let column = B::DIALECT.render_identifier_path(column);
+                    sql.push_str(&format!(", {qualifier}.{column} ASC"));
                 }
             }
             let page = self
@@ -1917,7 +1940,7 @@ mod postgres_tests {
     use crate::graphql::orm::PostgresBackend;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, crate::GraphQLEntity)]
-    #[graphql_entity(backend = "postgres", table = "indexed_records", auth = "none")]
+    #[graphql_entity(backend = "postgres", table = "public.indexed_records", auth = "none")]
     #[graphql_rls(select(tenant = "tenant"))]
     #[graphql_orm(search(index = true))]
     struct IndexedRecord {
@@ -1948,11 +1971,102 @@ mod postgres_tests {
                 count_only,
                 true,
             );
-            assert!(sql.contains("JOIN LATERAL ("), "{sql}");
+            assert!(!sql.contains("JOIN LATERAL"), "{sql}");
             assert!(
-                sql.contains("entity_pk = indexed_records.id::text OFFSET 0"),
+                sql.contains(
+                    "public.indexed_records.id::text AS __gom_search_pk FROM public.indexed_records"
+                ) && sql.contains(r#"OFFSET 0) "indexed_records" JOIN"#),
                 "{sql}"
             );
         }
+    }
+    #[tokio::test]
+    #[ignore = "requires test-owned PostgreSQL container"]
+    async fn postgres_rls_search_planner_chooses_the_join() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::graphql::orm::migrations::owned_postgres_support::OwnedPostgres;
+
+        let pool = OwnedPostgres::pool("rls-search-plan", 1).await?;
+        sqlx::raw_sql(
+            "SET statement_timeout = '10s';
+             CREATE ROLE tenant_reader NOSUPERUSER NOBYPASSRLS;
+             CREATE ROLE full_reader NOSUPERUSER NOBYPASSRLS;
+             CREATE TABLE indexed_records (id bigint PRIMARY KEY, tenant text, title text);
+             CREATE TABLE __graphql_orm_search_public_indexed_records (
+                 entity_pk text PRIMARY KEY, document_vector tsvector NOT NULL
+             );
+             CREATE INDEX ON __graphql_orm_search_public_indexed_records USING gin (document_vector);
+             INSERT INTO indexed_records
+                 SELECT id, 'tenant-' || (id % 10),
+                     CASE WHEN id % 1000 = 0 THEN 'needle hay report' ELSE 'hay stack report' END
+                 FROM generate_series(1, 200000) id;
+             INSERT INTO __graphql_orm_search_public_indexed_records
+                 SELECT id::text, to_tsvector('english', title) FROM indexed_records;
+             ANALYZE indexed_records;
+             ANALYZE __graphql_orm_search_public_indexed_records;
+             ALTER TABLE indexed_records ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE indexed_records FORCE ROW LEVEL SECURITY;
+             ALTER TABLE __graphql_orm_search_public_indexed_records ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE __graphql_orm_search_public_indexed_records FORCE ROW LEVEL SECURITY;
+             CREATE POLICY tenant_only ON indexed_records FOR SELECT
+                 USING (tenant = current_setting('app.tenant_id', true));
+             CREATE POLICY all_rows ON indexed_records FOR SELECT TO full_reader USING (true);
+             CREATE POLICY document_visible ON __graphql_orm_search_public_indexed_records FOR SELECT
+                 USING (EXISTS (SELECT 1 FROM indexed_records base
+                     WHERE base.id = __graphql_orm_search_public_indexed_records.entity_pk::bigint));
+             GRANT SELECT ON indexed_records, __graphql_orm_search_public_indexed_records
+                 TO tenant_reader, full_reader;",
+        )
+        .execute(&pool)
+        .await?;
+
+        for (role, term, expect_probe) in [
+            ("tenant_reader", "needle", true),
+            ("full_reader", "needle", false),
+            ("full_reader", "hay", false),
+        ] {
+            let mut tx = pool.begin().await?;
+            sqlx::raw_sql(&format!(
+                "SET LOCAL statement_timeout = '10s';
+                 SET LOCAL ROLE {role};
+                 SET LOCAL app.tenant_id = 'tenant-0';"
+            ))
+            .execute(&mut *tx)
+            .await?;
+            let query = EntitySearchQuery::<IndexedRecord, (), PostgresBackend>::new(
+                &pool,
+                SearchInput {
+                    query: term.into(),
+                    mode: None,
+                    min_score: None,
+                },
+            )
+            .limit(20);
+            for count_only in [false, true] {
+                let (sql, _) = query.render_postgres_search(
+                    IndexedRecord::search_index().unwrap(),
+                    count_only,
+                    true,
+                );
+                let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN (COSTS OFF) {sql}"))
+                    .bind(term)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let plan = plan.join("\n");
+                assert_eq!(
+                    plan.contains("Index Cond: (entity_pk ="),
+                    expect_probe,
+                    "{role}, count_only={count_only}:\n{plan}",
+                );
+                if !expect_probe {
+                    assert!(
+                        plan.contains("Hash Join") || plan.contains("Merge Join"),
+                        "{plan}"
+                    );
+                }
+            }
+            tx.rollback().await?;
+        }
+        Ok(())
     }
 }

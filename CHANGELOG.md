@@ -16,10 +16,9 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.207.0
 
-- **Fixed (#555).** PostgreSQL native search on generated RLS entities starts
-  from visible base rows and probes the search document primary key. This
-  avoids scanning documents for hidden base rows and keeps both RLS policies
-  in force. [Migration](MIGRATION.md#02010-to-02070-postgresql-rls-search)
+- **Fixed (#555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup for narrow visibility or a bulk join for
+  broad visibility. Both RLS policies stay in force. [Migration](MIGRATION.md#02010-to-02070-postgresql-rls-search)
 
 ## Unreleased - ORM/macros 0.201.0, operation catalogue 0.12.0
 

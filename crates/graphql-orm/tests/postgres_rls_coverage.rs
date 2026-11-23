@@ -851,6 +851,33 @@ async fn base_row_first_search_preserves_rls_results() -> Result<(), Box<dyn std
             serde_json::to_vec(&legacy.iter().skip(1).take(1).collect::<Vec<_>>())?
         );
     }
+    let tenant_a = tenant("tenant-a");
+    let id = graphql_orm::uuid::Uuid::parse_str("c4ca4238-a0b9-2382-0dcc-509a6f75849b")?;
+    let filtered = RlsCovDoc::search(
+        &runtime,
+        SearchInput {
+            query: "needle".into(),
+            mode: None,
+            min_score: None,
+        },
+    )
+    .filter(RlsCovDocWhereInput {
+        id: Some(UuidFilter {
+            eq: Some(id),
+            ..Default::default()
+        }),
+        tenant_id: Some(StringFilter {
+            eq: Some("tenant-a".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .fetch_connection_with_auth(Some(&tenant_a))
+    .await?;
+    assert_eq!(filtered.page_info.total_count, Some(1));
+    assert_eq!(filtered.edges.len(), 1);
+    assert_eq!(filtered.edges[0].node.id, id);
+
     Ok(())
 }
 

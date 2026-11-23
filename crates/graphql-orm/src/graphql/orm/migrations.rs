@@ -7353,7 +7353,7 @@ mod mssql_unique_preflight_tests {
 #[cfg(all(test, feature = "postgres"))]
 #[allow(dead_code)]
 #[path = "../../../tests/support/owned_postgres.rs"]
-mod owned_postgres_support;
+pub(super) mod owned_postgres_support;
 
 #[cfg(all(test, feature = "postgres"))]
 mod catalog_read_cancellation_tests {

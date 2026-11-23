@@ -435,18 +435,32 @@ doubling the cost of parsing floats. Store values that must be exact beyond
 
 ### Search performance
 
-Searches on generated `#[graphql_rls]` entities start from base rows visible
-to the current principal. For each visible row PostgreSQL can probe the search
-document's primary-key B-tree. This avoids a scan of the entire document table
-and keeps the search-document policy in force for each lookup.
+For generated `#[graphql_rls]` entities with an unqualified, column-based
+default sort, native search projects the document key from visible base rows
+after applying caller filters. PostgreSQL can use the resulting text equality
+to probe the document primary-key B-tree for narrow visibility, or choose a
+bulk join when many rows are visible. Both plans enforce the base and document
+RLS policies. Default sort expressions that need the original table scope
+keep the direct join.
 
-This path does not use the document-vector GIN index. PostgreSQL keeps the
-non-leakproof full-text operator `@@` behind the document's RLS policy, so the
-operator cannot drive an index scan. The work still grows with the number of
-visible base rows, including for a highly selective search term. Measure
-representative queries for principals with broad visibility. Entities without
-`#[graphql_rls]` keep the ordinary native search query, which can use GIN on
-tables without a document RLS policy.
+The document-vector GIN index does not serve RLS searches. PostgreSQL keeps
+the non-leakproof full-text operator `@@` behind the document policy. With
+broad visibility, searches can still scan the document table even when the
+term matches few rows. Tables without document RLS can still use GIN.
+
+In an owned PostgreSQL 17 benchmark with 200,000 documents across ten
+tenants, both RLS policies were active. These are median execution times for
+four runs per query, with a 20-row page and a separate total-count query.
+
+| Visibility | Term | Page, legacy → new | Count, legacy → new |
+| --- | --- | ---: | ---: |
+| 10% | Selective | 318.0 → 86.5 ms | 276.1 → 79.4 ms |
+| 10% | Common | 394.9 → 228.6 ms | 195.5 → 79.9 ms |
+| Full | Selective | 232.9 → 256.2 ms | 205.6 → 222.9 ms |
+| Full | Common | 370.0 → 352.7 ms | 251.8 → 238.0 ms |
+
+The selective tenant query used a document primary-key index condition.
+The full-visibility queries used a hash join and scanned documents.
 
 Use a separate runtime database role without superuser, `BYPASSRLS`, or inherited
 table-owner privileges. The schema owner applies the plan; the runtime role needs
