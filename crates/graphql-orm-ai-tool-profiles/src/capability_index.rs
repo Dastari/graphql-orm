@@ -332,8 +332,8 @@ pub struct AiCapabilityIndex {
     /// Never serialized or compared.
     #[serde(skip)]
     root_search: RootSearchCache,
-    /// Canonical entry bytes and identity uniqueness, derived from
-    /// `entries` on first use by an index set. Never serialized or compared.
+    /// Canonical entry bytes, kept once an index set has admitted this
+    /// index. Never serialized or compared.
     #[serde(skip)]
     membership: MembershipCache,
 }
@@ -602,34 +602,62 @@ impl AiCapabilityIndex {
             .get_or_init(|| Arc::new(SearchTermIndex::compile(&self.target_id, &self.entries)))
     }
 
-    /// Canonical byte size of the discoverable entries and whether every
-    /// entry and grouped-root identity is distinct, measured once per index.
+    /// Admits this index to an index set: applies the checks compilation
+    /// applies and returns the canonical byte size of its discoverable
+    /// entries.
     ///
-    /// Compilation already proves both, but a deserialized index has not
-    /// been compiled, so an index set still checks them; the cache keeps a
-    /// set formed again from the same index from measuring it again.
-    fn membership(&self) -> Option<IndexMembership> {
-        *self.membership.0.get_or_init(|| {
-            let mut entry_bytes = 0_u64;
-            for entry in self.entries.values() {
-                #[cfg(test)]
-                MEASURED_SET_ENTRIES.with(|count| count.set(count.get() + 1));
-                entry_bytes = entry_bytes
-                    .checked_add(u64::try_from(canonical_json_bytes(entry).len()).ok()?)?;
+    /// Compilation already proves all of this, but a deserialized index has
+    /// not been compiled. Its own limits must be valid and hold: entry
+    /// count, each entry's size and the total size. Each entry must sit
+    /// under its own ID, and every entry and grouped-root identity must be
+    /// distinct. Only an admitted index's byte size is kept, so a set formed
+    /// again from the same index does not measure it again; a refused index
+    /// is checked again, and refused again, each time.
+    fn admitted_entry_bytes(&self) -> Result<u64, AiError> {
+        if let Some(bytes) = self.membership.0.get() {
+            return Ok(*bytes);
+        }
+        self.limits.validate()?;
+        if self.entries.len() > usize::from(self.limits.maximum_entries) {
+            return Err(configuration_error("capability index has too many entries"));
+        }
+        let mut entry_bytes = 0_u64;
+        for (id, entry) in &self.entries {
+            #[cfg(test)]
+            MEASURED_SET_ENTRIES.with(|count| count.set(count.get() + 1));
+            if &entry.id != id {
+                return Err(configuration_error(
+                    "capability index entry is stored under another ID",
+                ));
             }
-            let mut identities = BTreeSet::new();
-            let unique_identities =
+            let bytes = canonical_json_bytes(entry).len();
+            if bytes > self.limits.maximum_entry_bytes as usize {
+                return Err(configuration_error("capability index entry is too large"));
+            }
+            entry_bytes = u64::try_from(bytes)
+                .ok()
+                .and_then(|bytes| entry_bytes.checked_add(bytes))
+                .ok_or_else(|| configuration_error("capability index is too large"))?;
+        }
+        if entry_bytes > u64::from(self.limits.maximum_total_bytes) {
+            return Err(configuration_error("capability index is too large"));
+        }
+        let mut identities = BTreeSet::new();
+        if !self
+            .entries
+            .keys()
+            .chain(
                 self.entries
-                    .keys()
-                    .chain(self.entries.values().flat_map(|entry| {
-                        entry.operations.iter().map(|member| &member.capability_id)
-                    }))
-                    .all(|id| identities.insert(id));
-            Some(IndexMembership {
-                entry_bytes,
-                unique_identities,
-            })
-        })
+                    .values()
+                    .flat_map(|entry| entry.operations.iter().map(|member| &member.capability_id)),
+            )
+            .all(|id| identities.insert(id))
+        {
+            return Err(configuration_error(
+                "capability index set contains a duplicate capability",
+            ));
+        }
+        Ok(*self.membership.0.get_or_init(|| entry_bytes))
     }
 
     /// Canonical index fingerprint.
@@ -795,16 +823,9 @@ impl AiCapabilityIndexSet {
             }
             // Measured once per index and reused by every set formed from
             // it, such as the one-member set a single-index host gets per call.
-            let membership = index
-                .membership()
-                .ok_or_else(|| configuration_error("capability index set byte size overflowed"))?;
-            if !membership.unique_identities {
-                return Err(configuration_error(
-                    "capability index set contains a duplicate capability",
-                ));
-            }
+            let entry_bytes = index.admitted_entry_bytes()?;
             total_bytes = total_bytes
-                .checked_add(membership.entry_bytes)
+                .checked_add(entry_bytes)
                 .ok_or_else(|| configuration_error("capability index set byte size overflowed"))?;
             total_entries = total_entries.saturating_add(index.entries.len());
             maximum_search_results =
@@ -1620,17 +1641,10 @@ impl PartialEq for OperationEntryCache {
 
 impl Eq for OperationEntryCache {}
 
-/// Set-membership measurements of one index.
-#[derive(Clone, Copy, Debug)]
-struct IndexMembership {
-    entry_bytes: u64,
-    unique_identities: bool,
-}
-
-/// Lazily measured, never serialized, never compared membership cache.
-/// `None` records a byte count that overflowed.
+/// Canonical entry bytes of an index that set admission has validated.
+/// Lazily measured, never serialized, never compared.
 #[derive(Clone, Debug, Default)]
-struct MembershipCache(OnceLock<Option<IndexMembership>>);
+struct MembershipCache(OnceLock<u64>);
 
 impl PartialEq for MembershipCache {
     fn eq(&self, _: &Self) -> bool {
@@ -3675,6 +3689,67 @@ mod tests {
             serde_json::json!(ids[1]);
         let tampered: AiCapabilityIndex = serde_json::from_value(encoded).expect("decoded");
         assert!(AiCapabilityIndexSet::compile([Arc::new(tampered)]).is_err());
+    }
+
+    #[test]
+    fn index_set_applies_a_deserialized_index_its_own_compilation_checks() {
+        // Deserialization does not rerun compilation, so set admission
+        // applies the per-index limits and identity rules compilation does.
+        let index = synthetic_entity_index(3);
+        let encoded = serde_json::to_value(&index).expect("encoded");
+        let decoded: AiCapabilityIndex = serde_json::from_value(encoded.clone()).expect("decoded");
+        assert_eq!(
+            AiCapabilityIndexSet::compile([Arc::new(decoded)])
+                .expect("an untampered index is admitted")
+                .fingerprint(),
+            AiCapabilityIndexSet::compile([Arc::new(index.clone())])
+                .expect("set")
+                .fingerprint()
+        );
+        let ids = encoded["entries"]
+            .as_object()
+            .expect("entries")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let refused = |case: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut tampered = encoded.clone();
+            edit(&mut tampered);
+            let tampered: AiCapabilityIndex = serde_json::from_value(tampered).expect("decoded");
+            assert!(
+                AiCapabilityIndexSet::compile([Arc::new(tampered)]).is_err(),
+                "{case} is admitted"
+            );
+        };
+        refused("more entries than the index's maximum", &|value| {
+            value["limits"]["maximum_entries"] = json!(2);
+        });
+        refused("an entry larger than the index's maximum", &|value| {
+            value["limits"]["maximum_entry_bytes"] = json!(1_024);
+            value["entries"][&ids[0]]["description"] = json!("x".repeat(2_048));
+        });
+        refused(
+            "entries larger in total than the index's maximum",
+            &|value| {
+                value["limits"]["maximum_entry_bytes"] = json!(256 * 1_024);
+                value["limits"]["maximum_total_bytes"] = json!(1_024);
+            },
+        );
+        refused("invalid index limits", &|value| {
+            value["limits"]["maximum_entries"] = json!(0);
+        });
+        refused("a key that differs from its entry's identity", &|value| {
+            let entries = value["entries"].as_object_mut().expect("entries");
+            let entry = entries.remove(&ids[0]).expect("entry");
+            entries.insert("inventory.renamed_entity".to_owned(), entry);
+        });
+        refused("two keys holding one identity", &|value| {
+            let entries = value["entries"].as_object_mut().expect("entries");
+            // Without its roots, so only the embedded identity repeats.
+            let mut entry = entries[&ids[0]].clone();
+            entry["operations"] = json!([]);
+            entries.insert("inventory.zz_copy".to_owned(), entry);
+        });
     }
 
     #[test]

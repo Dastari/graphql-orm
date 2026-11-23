@@ -135,9 +135,14 @@ stamps out one realistic generated family per target: a wide entity with
 forty public scalar fields and five to-many relationships, plus the five
 related entities, each with its five generated query roots (list, keyset
 and aggregate among them). That is 12 entities and 60 query roots per
-target. Each target gets
-its own query catalogue and index. The example then drives the version 2
-broker the way the coordinator does, on a host that caches its index set.
+target. Each target gets its own query catalogue and index, and the
+catalogues are registered in one `AiToolCatalog`. The example then drives
+the version 2 broker on a host that caches its index set, with the
+coordinator's own describe steps. For each described operation it builds and
+validates the exact model definition, checks its fingerprint and renders the
+signature. Describe results are merged under
+`AiCapabilityDeliveryLimits::maximum_describe_bytes`, and a `describe_type`
+page above that bound is refused and counted, as the coordinator refuses it.
 Each point runs in its own process. Byte sizes are deterministic; times are
 for one machine and one build. Approximate tokens are bytes / 4. The *eager
 reference* is the size of one exact definition per root: what eager or

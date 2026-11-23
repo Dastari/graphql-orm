@@ -20,7 +20,9 @@ definition or fingerprint change, and no AI schema module change. See the
 - **Added:** the `capability_context_benchmark` example (requires the
   `sqlite` feature) stamps a realistic generated entity family across 1, 10
   and 100 independent targets and drives the version 2 broker as the
-  coordinator does. It reports first-turn definition bytes, discover,
+  coordinator does, including the coordinator's describe steps (the exact
+  model definition and its fingerprint, the signature, and the describe byte
+  bounds). It reports first-turn definition bytes, discover,
   describe and `describe_type` result bytes, discover latency, a restricted
   caller's candidates, whether an unrelated target's schema change rotates a
   retained binding, startup time and peak memory, and the bytes eager

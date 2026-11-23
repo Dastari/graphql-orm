@@ -17,7 +17,15 @@ signatures and shared-type renderings are unchanged, and no schema or data
 migration is needed. A host that already caches its `AiCapabilityIndexSet`
 sees no difference. A host that compiles a set per call from the same index
 now gets it in constant time. A set formed from a freshly deserialized index
-still measures that index once.
+still validates and measures that index once.
+
+Index-set admission now refuses a deserialized index that breaks its own
+limits or stores an entry under a key other than the entry's ID.
+`AiCapabilityIndex::compile` never produces such an index, so a compiled
+index, or one serialized and deserialized unchanged, is still admitted. If
+set compilation now fails for an index your deployment deserializes, the
+stored index was altered after compilation: recompile it from the finished
+schema and catalogues.
 
 ## 0.27.1 subscription validator reuse
 

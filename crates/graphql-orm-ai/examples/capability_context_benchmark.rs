@@ -4,14 +4,18 @@
 //! with forty public scalar fields and five to-many relationships, plus its
 //! five related entities, each with its generated query roots) across `T`
 //! independent logical targets, compiles every target's
-//! query catalogue and capability index, and drives the frozen version 2
-//! broker the way the coordinator does. For each `T` it reports what the
+//! query catalogue and capability index, registers the catalogues in an
+//! [`AiToolCatalog`], and drives the frozen version 2 broker with the
+//! coordinator's own describe steps: the exact model definition and its
+//! fingerprint check, the signature, and the describe byte bounds, which
+//! also refuse an oversized `describe_type` page. For each `T` it reports what the
 //! model receives: the first-turn definition bytes, discover, describe and
 //! `describe_type` result bytes, discover latency, a restricted caller's
 //! candidates, and whether an unrelated target's schema change rotates a
 //! retained session binding. The eager reference is what one exact
 //! definition per root would cost. A separate single-target point compares
-//! a host that supplies one index with a host that caches its index set.
+//! a host that supplies one index with a host that caches its index set,
+//! after a first pass that meets cold per-capability caches.
 //!
 //! ```text
 //! cargo run --release -p graphql-orm-ai \
@@ -988,12 +992,65 @@ fn binding(mode: AiCapabilityDeliveryMode, index_set_fingerprint: &str) -> Resul
     .to_owned())
 }
 
+const TYPE_PAGE_OVER_CEILING: &str =
+    "broker capability type page exceeds its bound; request a smaller limit";
+
+/// The coordinator's signature step for one described operation
+/// (`operation_signature` in `orm_tools.rs`): build and validate the exact
+/// model definition, require its fingerprint, then render the signature.
+fn production_signature(
+    catalog: &AiToolCatalog,
+    operation: &AiCapabilityDescribedOperation,
+) -> Result<AiCapabilitySignature, AiError> {
+    let definition = catalog.query_capability_model_definition(
+        operation.capability_id(),
+        capability_provider_alias(operation.capability_id()),
+    )?;
+    if definition.fingerprint != operation.capability_fingerprint() {
+        return Err(AiError::Forbidden);
+    }
+    catalog.query_capability_signature(operation.capability_id())
+}
+
+/// The coordinator's describe result: every operation's signature summary,
+/// merged under the describe byte bound.
+fn production_describe(
+    catalog: &AiToolCatalog,
+    description: AiCapabilityDescription,
+    limits: AiCapabilityDeliveryLimits,
+) -> Result<Value, AiError> {
+    let summaries = description
+        .operations()
+        .iter()
+        .map(|operation| {
+            production_signature(catalog, operation).map(|signature| signature.summary())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(description
+        .with_operation_signatures(summaries, limits.maximum_describe_bytes)?
+        .into_model_result())
+}
+
+/// The coordinator's `describe_type` page, refused above the describe byte
+/// bound exactly as the coordinator refuses it.
+fn production_type_page(
+    catalog: &AiToolCatalog,
+    request: &AiCapabilityTypeRequest,
+    limits: AiCapabilityDeliveryLimits,
+) -> Result<Value, AiError> {
+    let page = request.render(&production_signature(catalog, request.operation())?)?;
+    if bytes(&page) > u64::from(limits.maximum_describe_bytes) {
+        return Err(AiError::InvalidInput(TYPE_PAGE_OVER_CEILING.to_owned()));
+    }
+    Ok(page)
+}
+
 /// Discovers, describes and expands the wide entity of each sampled family
-/// through the fixed broker, as the coordinator does.
+/// through the fixed broker and the coordinator's own describe steps.
 async fn broker_round_trips(
     broker: &AiCapabilityDiscoveryBroker,
     families: &[String],
-    capabilities: &BTreeMap<AiToolId, &AiGraphqlQueryCapability>,
+    catalog: &AiToolCatalog,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let reference = principal().reference();
     let run = run_binding();
@@ -1047,6 +1104,7 @@ async fn broker_round_trips(
     let mut describe_micros = Vec::new();
     let mut type_page_bytes = Vec::new();
     let mut type_errors = Vec::new();
+    let mut pages_over_ceiling = 0_usize;
     let mut warm_describe_micros = Vec::new();
     let mut type_page_micros = Vec::new();
     let mut keyset_example = Value::Null;
@@ -1070,66 +1128,28 @@ async fn broker_round_trips(
         let candidate = discovered["candidates"]
             .get(0)
             .ok_or("wide entity was not discovered")?;
+        let describe = json!({
+            "capabilityId": candidate["capabilityId"],
+            "candidateFingerprint": candidate["candidateFingerprint"],
+        });
         let started = Instant::now();
         let description = broker
-            .dispatch_describe(
-                &reference,
-                &run,
-                &session,
-                &json!({
-                    "capabilityId": candidate["capabilityId"],
-                    "candidateFingerprint": candidate["candidateFingerprint"],
-                }),
-            )
+            .dispatch_describe(&reference, &run, &session, &describe)
             .await?;
-        let mut signatures = Vec::new();
-        for operation in description.operations() {
-            let capability = capabilities
-                .get(operation.capability_id())
-                .ok_or("described operation is not compiled")?;
-            signatures.push((
-                operation.operation_name().to_owned(),
-                capability.capability_signature()?,
-            ));
-        }
-        let model_result = description
-            .clone()
-            .with_operation_signatures(
-                signatures
-                    .iter()
-                    .map(|(_, signature)| signature.summary())
-                    .collect(),
-                limits.maximum_describe_bytes,
-            )?
-            .into_model_result();
+        let model_result = production_describe(catalog, description.clone(), limits)?;
         describe_micros.push(elapsed_micros(started));
         describe_bytes.push(bytes(&model_result));
         // The same entity described again, as a later turn would.
         let started = Instant::now();
         let again = broker
-            .dispatch_describe(
-                &reference,
-                &run,
-                &session,
-                &json!({
-                    "capabilityId": candidate["capabilityId"],
-                    "candidateFingerprint": candidate["candidateFingerprint"],
-                }),
-            )
+            .dispatch_describe(&reference, &run, &session, &describe)
             .await?;
-        let mut summaries = Vec::new();
-        for operation in again.operations() {
-            let capability = capabilities
-                .get(operation.capability_id())
-                .ok_or("described operation is not compiled")?;
-            summaries.push(capability.capability_signature()?.summary());
-        }
-        again
-            .with_operation_signatures(summaries, limits.maximum_describe_bytes)?
-            .into_model_result();
+        production_describe(catalog, again, limits)?;
         warm_describe_micros.push(elapsed_micros(started));
-        operations_per_describe = operations_per_describe.max(signatures.len());
-        for (operation, signature) in &signatures {
+        operations_per_describe = operations_per_describe.max(description.operations().len());
+        for operation in description.operations() {
+            let signature = production_signature(catalog, operation)?;
+            let operation = operation.operation_name();
             if signature.signature().contains("after?:")
                 && signature
                     .type_names()
@@ -1173,17 +1193,13 @@ async fn broker_round_trips(
                         }),
                     )
                     .await
-                    .and_then(|request| {
-                        // The coordinator renders each page from a fresh
-                        // signature of the capability.
-                        let capability = capabilities
-                            .get(request.operation().capability_id())
-                            .ok_or(AiError::Forbidden)?;
-                        request.render(&capability.capability_signature()?)
-                    });
+                    .and_then(|request| production_type_page(catalog, &request, limits));
                 type_page_micros.push(elapsed_micros(started));
                 match page {
                     Ok(page) => type_page_bytes.push(bytes(&page)),
+                    Err(AiError::InvalidInput(message)) if message == TYPE_PAGE_OVER_CEILING => {
+                        pages_over_ceiling += 1;
+                    }
                     Err(error) => type_errors.push(format!("{operation} {name}: {error}")),
                 }
             }
@@ -1217,6 +1233,7 @@ async fn broker_round_trips(
             "pageBytesP95": percentile(&mut type_page_bytes.clone(), 95),
             "pageBytesMaximum": type_page_bytes.iter().copied().max().unwrap_or(0),
             "microsecondsP95": percentile(&mut type_page_micros, 95),
+            "pagesOverCeiling": pages_over_ceiling,
             "errors": type_errors,
         },
     }))
@@ -1238,73 +1255,74 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
     let first_target_micros = elapsed_micros(started);
     let started = Instant::now();
     let threads = COMPILE_THREADS.min(targets.saturating_sub(1)).max(1);
-    let mut rest = std::thread::scope(|scope| {
-        let workers = (0..threads)
-            .map(|worker| {
-                let template = &template;
-                let families = &families;
-                scope.spawn(move || {
-                    (1..targets)
-                        .filter(|target| target % threads == worker)
-                        .map(|target| {
-                            compile_target(
-                                template,
-                                target,
-                                &families[target],
-                                false,
-                                LARGE_INDEX_LIMITS,
-                            )
-                            .map(|compiled| (target, compiled))
-                            .map_err(|error| error.to_string())
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                })
-            })
-            .collect::<Vec<_>>();
-        workers
-            .into_iter()
-            .map(|worker| {
-                worker
-                    .join()
-                    .map_err(|_| "compile worker panicked".to_owned())?
-            })
-            .collect::<Result<Vec<_>, String>>()
-    })?
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    rest.sort_by_key(|(target, _)| *target);
-    let mut compiled = vec![first];
-    compiled.extend(rest.into_iter().map(|(_, compiled)| compiled));
+    // The runtime tool catalogue holds the registered capabilities, as in
+    // production. Each compiled catalogue is registered as soon as a worker
+    // finishes it and is then dropped, so at most one copy of each target's
+    // capabilities is alive at a time.
+    let mut catalog = AiToolCatalog::new();
+    let mut excluded = 0_usize;
+    let mut fits_default_index_limits = true;
+    let mut indexes = BTreeMap::new();
+    let mut register =
+        |target: usize, compiled: CompiledTarget| -> Result<(), Box<dyn std::error::Error>> {
+            excluded += compiled.catalogue.excluded_capabilities().len();
+            fits_default_index_limits &= compiled.fits_default_index_limits;
+            catalog.register_query_capability_catalog(&compiled.catalogue)?;
+            indexes.insert(target, compiled.index);
+            Ok(())
+        };
+    register(0, first)?;
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(usize, CompiledTarget), String>>();
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        for worker in 0..threads {
+            let template = &template;
+            let families = &families;
+            let sender = sender.clone();
+            scope.spawn(move || {
+                for target in (1..targets).filter(|target| target % threads == worker) {
+                    let compiled = compile_target(
+                        template,
+                        target,
+                        &families[target],
+                        false,
+                        LARGE_INDEX_LIMITS,
+                    )
+                    .map(|compiled| (target, compiled))
+                    .map_err(|error| error.to_string());
+                    let failed = compiled.is_err();
+                    if sender.send(compiled).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for compiled in receiver {
+            let (target, compiled) = compiled?;
+            register(target, compiled)?;
+        }
+        Ok(())
+    })?;
     let compile_micros = elapsed_micros(started);
+    let indexes = indexes.into_values().collect::<Vec<_>>();
+    if indexes.len() != targets {
+        return Err("a target did not compile".into());
+    }
     let started = Instant::now();
     let set = Arc::new(AiCapabilityIndexSet::compile_with_limits(
-        compiled.iter().map(|target| Arc::clone(&target.index)),
+        indexes.iter().map(Arc::clone),
         LARGE_SET_LIMITS,
     )?);
     let set_compile_micros = elapsed_micros(started);
-    let fits_default_set_limits = compiled
-        .iter()
-        .all(|target| target.fits_default_index_limits)
-        && AiCapabilityIndexSet::compile(compiled.iter().map(|target| Arc::clone(&target.index)))
-            .is_ok();
-
-    let capabilities = compiled
-        .iter()
-        .flat_map(|target| target.catalogue.capabilities())
-        .map(|capability| (capability.id().clone(), capability))
-        .collect::<BTreeMap<_, _>>();
-    let roots = capabilities.len();
-    let excluded = compiled
-        .iter()
-        .map(|target| target.catalogue.excluded_capabilities().len())
-        .sum::<usize>();
+    let fits_default_set_limits = fits_default_index_limits
+        && AiCapabilityIndexSet::compile(indexes.iter().map(Arc::clone)).is_ok();
+    let roots = catalog.query_capabilities().count();
     let entries = set
         .indexes()
         .map(|index| index.entries().len())
         .sum::<usize>();
-    let eager_bytes = capabilities
-        .values()
+    let eager_bytes = catalog
+        .query_capabilities()
         .map(|capability| {
             bytes(&json!({
                 "name": capability_provider_alias(capability.id()),
@@ -1320,13 +1338,13 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
     let round_trips = broker_round_trips(
         &broker(Arc::new(CachedSet(Arc::clone(&set))), None)?,
         &all_families,
-        &capabilities,
+        &catalog,
     )
     .await?;
 
     // A caller restricted to one target still receives that target's
     // candidates for a broad query that matches every target.
-    let restricted_target = compiled[targets - 1].index.target_id().clone();
+    let restricted_target = indexes[targets - 1].target_id().clone();
     let restricted = broker(
         Arc::new(CachedSet(Arc::clone(&set))),
         Some(restricted_target.clone()),
@@ -1344,10 +1362,7 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
         .map_or(0, Vec::len);
 
     // Revise one wide entity's description in the first target only.
-    let mut revised = compiled
-        .iter()
-        .map(|target| Arc::clone(&target.index))
-        .collect::<Vec<_>>();
+    let mut revised = indexes.clone();
     revised[0] = compile_target(&template, 0, &families[0], true, LARGE_INDEX_LIMITS)?.index;
     let revised_set = AiCapabilityIndexSet::compile_with_limits(revised, LARGE_SET_LIMITS)?;
 
@@ -1399,7 +1414,8 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
 }
 
 /// One large target supplied through the single-index path, compared with
-/// the same index supplied as a host-cached set.
+/// the same index supplied as a host-cached set. A first pass meets cold
+/// per-capability caches; both hosts are then measured warm.
 async fn measure_single_target(families: usize) -> Result<Value, Box<dyn std::error::Error>> {
     let template = template().await?;
     let names = (0..families)
@@ -1408,40 +1424,41 @@ async fn measure_single_target(families: usize) -> Result<Value, Box<dyn std::er
     let started = Instant::now();
     let target = compile_target(&template, 0, &names, false, LARGE_INDEX_LIMITS)?;
     let compile_micros = elapsed_micros(started);
-    let capabilities = target
-        .catalogue
-        .capabilities()
-        .map(|capability| (capability.id().clone(), capability))
-        .collect::<BTreeMap<_, _>>();
+    let mut catalog = AiToolCatalog::new();
+    catalog.register_query_capability_catalog(&target.catalogue)?;
+    let roots = catalog.query_capabilities().count();
     let single = broker(Arc::new(SingleIndex(Arc::clone(&target.index))), None)?;
-    let single_trips = broker_round_trips(&single, &names, &capabilities).await?;
     let cached_set = Arc::new(AiCapabilityIndexSet::compile_with_limits(
         [Arc::clone(&target.index)],
         LARGE_SET_LIMITS,
     )?);
     let cached = broker(Arc::new(CachedSet(cached_set)), None)?;
-    let cached_trips = broker_round_trips(&cached, &names, &capabilities).await?;
+    // The first pass meets cold per-capability caches: its describe is each
+    // capability's first. Both hosts are then measured on equally warm
+    // caches, the single-index host first and the cached-set host second.
+    let cold_trips = broker_round_trips(&single, &names, &catalog).await?;
+    let single_trips = broker_round_trips(&single, &names, &catalog).await?;
+    let cached_trips = broker_round_trips(&cached, &names, &catalog).await?;
+    let host = |trips: &Value| {
+        json!({
+            "discoverMicrosecondsP50": trips["discover"]["microsecondsP50"],
+            "discoverMicrosecondsP95": trips["discover"]["microsecondsP95"],
+            "describeMicrosecondsP95": trips["describe"]["microsecondsP95"],
+            "repeatDescribeMicrosecondsP95": trips["describe"]["repeatMicrosecondsP95"],
+            "describeTypeMicrosecondsP95": trips["describeType"]["microsecondsP95"],
+        })
+    };
     Ok(json!({
         "entities": families * 6,
-        "roots": capabilities.len(),
+        "roots": roots,
         "indexEntries": target.index.entries().len(),
         "fitsDefaultIndexLimits": target.fits_default_index_limits,
         "targetCompileMicroseconds": compile_micros,
-        "singleIndexHost": {
-            "discoverMicrosecondsP50": single_trips["discover"]["microsecondsP50"],
-            "discoverMicrosecondsP95": single_trips["discover"]["microsecondsP95"],
-            "describeMicrosecondsP95": single_trips["describe"]["microsecondsP95"],
-            "repeatDescribeMicrosecondsP95": single_trips["describe"]["repeatMicrosecondsP95"],
-            "describeTypeMicrosecondsP95": single_trips["describeType"]["microsecondsP95"],
-        },
-        "cachedSetHost": {
-            "discoverMicrosecondsP50": cached_trips["discover"]["microsecondsP50"],
-            "discoverMicrosecondsP95": cached_trips["discover"]["microsecondsP95"],
-            "describeMicrosecondsP95": cached_trips["describe"]["microsecondsP95"],
-            "repeatDescribeMicrosecondsP95": cached_trips["describe"]["repeatMicrosecondsP95"],
-            "describeTypeMicrosecondsP95": cached_trips["describeType"]["microsecondsP95"],
-        },
-        "describe": single_trips["describe"],
+        "coldPassSingleIndexHost": host(&cold_trips),
+        "singleIndexHost": host(&single_trips),
+        "cachedSetHost": host(&cached_trips),
+        "describe": cold_trips["describe"],
+        "describeType": cold_trips["describeType"],
         "peakResidentKibibytes": peak_resident_kibibytes(),
     }))
 }

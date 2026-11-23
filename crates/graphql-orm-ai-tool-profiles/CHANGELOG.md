@@ -12,9 +12,20 @@ supersedes: []
 
 ## Unreleased - 0.28.0
 
-Per-call costs of the capability broker that grew with the index (#551). No
-public API, schema, fingerprint or rendering change. See the
+Per-call costs of the capability broker that grew with the index, and
+admission checks for deserialized indexes (#551). No public API, schema,
+fingerprint or rendering change. See the
 [migration guide](MIGRATION.md#0280-index-set-and-signature-reuse).
+
+- **Fixed:** `AiCapabilityIndexSet::compile` now applies to every member
+  index the checks `AiCapabilityIndex::compile` applies. Its own limits must
+  be valid and hold for its entry count, each entry's size and the total
+  size, and each entry must be stored under its own ID. A deserialized index
+  is not recompiled, so before this change one that broke its own limits, or
+  stored an entry under a key other than the entry's ID, was admitted and
+  reached the broker. Such an index is now refused with a configuration
+  error. A compiled index, or one serialized and deserialized unchanged, is
+  admitted as before.
 
 - **Performance:** `AiCapabilityIndexSet::compile` measures each member
   index once and reuses the measurement for every later set formed from the
