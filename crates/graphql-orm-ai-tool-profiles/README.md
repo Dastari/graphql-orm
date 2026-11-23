@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+Version 0.28.0 stops two broker per-call costs from growing with the index:
+an index set formed again from the same index reuses that index's
+measurements, and a capability recovers its signature type names once. See
+the [migration guide](MIGRATION.md#0280-index-set-and-signature-reuse).
+
 Version 0.27.1 reuses compiled replayable subscription validators for both
 plan formats and for admitted condition values. See the
 [migration guide](MIGRATION.md#0271-subscription-validator-reuse).

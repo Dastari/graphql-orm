@@ -801,7 +801,14 @@ pub struct AiGraphqlQueryCapability {
     limits: AiGraphqlQueryCapabilityLimits,
     output: QueryOutput,
     relationship_argument_depth: u8,
+    // Input-type names recovered once, on the first signature or shared
+    // rendering, and shared by clones. Derived from the fields above.
+    input_type_names: InputTypeNames,
 }
+
+/// Lazily recovered input-type names of one capability's compact schema.
+#[derive(Clone, Debug, Default)]
+struct InputTypeNames(Arc<OnceLock<Arc<BTreeMap<String, String>>>>);
 
 impl AiGraphqlQueryCapability {
     fn variable_schema(
@@ -901,11 +908,24 @@ impl AiGraphqlQueryCapability {
 
     /// GraphQL input-type names of the compact schema's subschemas, keyed for
     /// [`AiSharedTypePlanSchema::compile`].
-    fn input_type_names(&self) -> BTreeMap<String, String> {
+    ///
+    /// Recovering them regenerates the whole compact schema, which for a
+    /// wide entity costs far more than rendering a signature, and broker
+    /// describe and describe-type render one on every call. The table is
+    /// recovered once per capability and kept; it is small, unlike the
+    /// signature it names.
+    fn input_type_names(&self) -> Arc<BTreeMap<String, String>> {
+        Arc::clone(
+            self.input_type_names
+                .0
+                .get_or_init(|| Arc::new(self.recover_input_type_names())),
+        )
+    }
+
+    fn recover_input_type_names(&self) -> BTreeMap<String, String> {
         // Names are recovered by regenerating the compact schema with a
-        // recorder, so no per-capability name table is retained. A schema
-        // that does not regenerate identically still shares its types under
-        // positional names.
+        // recorder. A schema that does not regenerate identically still
+        // shares its types under positional names.
         let (regenerated, names) = record_input_type_names(|| {
             AiGraphqlQueryCapabilityOptions::new(self.relationship_argument_depth).and_then(
                 |options| {
@@ -3609,6 +3629,7 @@ fn compile_capability(
             limits,
             output,
             relationship_argument_depth: options.maximum_relationship_argument_depth(),
+            input_type_names: InputTypeNames::default(),
         },
     )))
 }
@@ -4788,10 +4809,20 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of compact plan schemas regenerated on this thread to recover
+    /// input-type names, for tests that prove the names are recovered once
+    /// per capability.
+    static REGENERATED_TYPE_NAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Runs one schema generation and returns the GraphQL input-type name of
 /// every enum and input-object schema it emitted, keyed for
 /// [`AiSharedTypePlanSchema::compile`]. Nested calls are not supported.
 fn record_input_type_names<T>(generate: impl FnOnce() -> T) -> (T, BTreeMap<String, String>) {
+    #[cfg(test)]
+    REGENERATED_TYPE_NAMES.with(|count| count.set(count.get() + 1));
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -11918,6 +11949,28 @@ mod tests {
                 .iter()
                 .all(|candidate| !candidate.operations.is_empty())
         );
+    }
+
+    #[test]
+    fn capability_signatures_recover_input_type_names_once_per_capability() {
+        // Broker describe and describe_type render a signature on every call.
+        // Recovering its type names regenerates the whole compact schema, so
+        // it must happen once per capability, not once per call.
+        let catalogue = catalog();
+        let capability = catalogue.capabilities().next().expect("capability");
+        let first = capability.capability_signature().expect("signature");
+        let shared = capability.shared_type_plan_schema().expect("shared");
+        let clone = capability.clone();
+        REGENERATED_TYPE_NAMES.with(|count| count.set(0));
+        for _ in 0..3 {
+            assert_eq!(capability.capability_signature().expect("signature"), first);
+            assert_eq!(clone.capability_signature().expect("signature"), first);
+            assert_eq!(
+                capability.shared_type_plan_schema().expect("shared"),
+                shared
+            );
+        }
+        assert_eq!(REGENERATED_TYPE_NAMES.with(std::cell::Cell::get), 0);
     }
 
     #[test]
