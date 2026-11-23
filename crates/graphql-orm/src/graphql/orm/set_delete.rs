@@ -12,9 +12,10 @@ use crate::graphql::errors::{
 
 /// Opt a mutable entity into [MutationContext::delete_keys_set_bounded] and
 /// [MutationContext::delete_where_set_bounded] with an empty impl.
-/// Entities with ORM-managed dependent deletes, append-only entities, and
-/// read-only entities cannot opt in. A generated search index that requires
-/// additional DELETE statements also makes the operation unavailable.
+/// Entities with ORM-managed dependent deletes lack the generated adapter.
+/// The operation refuses append-only and read-only entities with `FORBIDDEN`,
+/// entities with an enabled generated search index with `CONFLICT`, and
+/// composite keys without an entity policy with `AUTHORIZATION_MISCONFIGURED`.
 ///
 /// The host must confirm that cascades, SET NULL/SET DEFAULT foreign keys
 /// and triggers cannot delete, rewrite or redirect additional rows as a
@@ -75,8 +76,11 @@ impl<B: WriteBackend> MutationContext<'_, B> {
     ///
     /// A one-row look-ahead enforces the limit before deletion. Zero matches
     /// return [BoundedMutationOutcome::Applied] with an affected count of zero
-    /// and no DELETE. Any error or cancellation prevents commit of the
-    /// surrounding transaction. See [SetDeleteEntity] for the opt-in contract.
+    /// and no DELETE. If the caller's limit exceeds the statement's key
+    /// capacity and the look-ahead finds more matches than fit, the
+    /// operation returns `INVALID_INPUT`.
+    /// Any error or cancellation prevents commit of the surrounding
+    /// transaction. See [SetDeleteEntity] for the opt-in contract.
     pub async fn delete_where_set_bounded<T: SetDeleteEntity<B>>(
         &mut self,
         filter: T::WhereInput,
@@ -250,7 +254,6 @@ impl<B: WriteBackend> MutationContext<'_, B> {
             rows = current;
         }
 
-        tracing::trace!(target: "graphql_orm::set_delete", sql = rendered.sql.as_str());
         let result = self.execute(&rendered.sql, &rendered.values).await?;
         let affected = B::rows_affected(&result);
         if affected != u64::from(selected) {

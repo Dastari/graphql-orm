@@ -697,12 +697,18 @@ let outcome = database
   hooks. A filter that matches zero rows returns `Applied { affected: 0 }`
   without a DELETE. Larger key sets that cannot fit in one statement are
   refused. The filter path uses an independent one-row look-ahead and ignores
-  repository page limits.
+  repository page limits. If the caller sets a limit above the statement's
+  key capacity and that look-ahead finds more matches than fit, the operation
+  returns `INVALID_INPUT` and prevents commit. For example, SQL Server allows
+  2,000 single-column keys per statement.
 - The ORM checks entity write access and calls the row write policy for
   every selected row. Any denied row refuses the batch. The database
   principal must be able to select the entire requested scope. Database RLS
   can hide rows from selection, so a filter operation can only bound and
-  authorize the matches visible to that principal.
+  authorize the matches visible to that principal. On SQL Server, the
+  `UPDLOCK, HOLDLOCK` selection locks the rows read by a scan, including
+  rows hidden from the caller. The `mssql_snapshot_bulk_write_targets`
+  option does not apply.
 - Adopt this API only if the row policy can authorize the batch against the
   pre-delete state. All Before hooks run before the DELETE and all After
   hooks run after it, each in complete primary-key order. Hooks can write
@@ -712,8 +718,10 @@ let outcome = database
   selected row count. Errors, vetoes and cancellation prevent commit even
   if the caller catches an error. The ordinary generated Changed
   notifications are queued after the After hooks and emitted at commit.
-- Append-only, read-only and ORM-managed dependent-delete models cannot opt
-  in. A generated search index requiring extra DELETE statements is refused.
+- The runtime refuses append-only and read-only entities with `FORBIDDEN`,
+  composite keys without an entity policy with `AUTHORIZATION_MISCONFIGURED`,
+  and enabled generated search indexes with `CONFLICT`. Entities with
+  ORM-managed dependent deletes lack the generated adapter.
   Opt in only after checking that foreign keys and triggers cannot delete,
   rewrite or redirect other rows as a side effect of deleting targets.
   Database cascades and other database-side effects fall outside the
