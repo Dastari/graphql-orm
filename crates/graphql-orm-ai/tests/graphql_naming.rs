@@ -1,8 +1,79 @@
-use async_graphql::{EmptySubscription, Schema};
+use async_graphql::{EmptyMutation, EmptySubscription, Schema};
+use async_graphql_parser::types::{TypeKind, TypeSystemDefinition};
+use graphql_orm::graphql::orm::GraphqlRootFieldNames;
 use graphql_orm_ai::{
-    AiConfigurationMutationRoot, AiConfigurationQueryRoot, AiMutationRoot, AiQueryRoot,
-    AiRuleMutationRoot, AiRuleQueryRoot, AiSkillMutationRoot, AiSkillQueryRoot, AiSubscriptionRoot,
+    AiApprovalMutationRoot, AiApprovalQueryRoot, AiAttachmentMutationRoot, AiAttachmentQueryRoot,
+    AiConfigurationMutationRoot, AiConfigurationQueryRoot, AiMutationRoot, AiProposalMutationRoot,
+    AiProposalQueryRoot, AiQueryRoot, AiRuleMutationRoot, AiRuleQueryRoot, AiSkillMutationRoot,
+    AiSkillQueryRoot, AiSubscriptionRoot, AiUsageQueryRoot,
 };
+
+fn assert_sdl_fields<T: GraphqlRootFieldNames>(sdl: &str, type_name: &str) {
+    let document = async_graphql_parser::parse_schema(sdl).unwrap();
+    let mut actual = document
+        .definitions
+        .iter()
+        .find_map(|definition| {
+            let TypeSystemDefinition::Type(definition) = definition else {
+                return None;
+            };
+            let TypeKind::Object(object) = &definition.node.kind else {
+                return None;
+            };
+            (definition.node.name.node.as_str() == type_name).then_some(&object.fields)
+        })
+        .unwrap_or_else(|| panic!("{type_name} is missing from the SDL"))
+        .iter()
+        .map(|field| field.node.name.node.as_str())
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    let mut declared = T::ROOT_FIELD_NAMES.to_vec();
+    declared.sort_unstable();
+    assert_eq!(declared, actual, "{type_name}");
+}
+
+#[test]
+fn declared_root_field_names_equal_sdl() {
+    macro_rules! check_pair {
+        ($query:ident, $mutation:ident, $subscription:expr) => {{
+            let sdl = Schema::build($query, $mutation, $subscription)
+                .finish()
+                .sdl();
+            assert_sdl_fields::<$query>(&sdl, stringify!($query));
+            assert_sdl_fields::<$mutation>(&sdl, stringify!($mutation));
+            sdl
+        }};
+    }
+
+    let sdl = check_pair!(AiQueryRoot, AiMutationRoot, AiSubscriptionRoot);
+    assert_sdl_fields::<AiSubscriptionRoot>(&sdl, "AiSubscriptionRoot");
+    check_pair!(
+        AiApprovalQueryRoot,
+        AiApprovalMutationRoot,
+        EmptySubscription
+    );
+    check_pair!(
+        AiAttachmentQueryRoot,
+        AiAttachmentMutationRoot,
+        EmptySubscription
+    );
+    check_pair!(
+        AiConfigurationQueryRoot,
+        AiConfigurationMutationRoot,
+        EmptySubscription
+    );
+    check_pair!(
+        AiProposalQueryRoot,
+        AiProposalMutationRoot,
+        EmptySubscription
+    );
+    check_pair!(AiRuleQueryRoot, AiRuleMutationRoot, EmptySubscription);
+    check_pair!(AiSkillQueryRoot, AiSkillMutationRoot, EmptySubscription);
+    let sdl = Schema::build(AiUsageQueryRoot, EmptyMutation, EmptySubscription)
+        .finish()
+        .sdl();
+    assert_sdl_fields::<AiUsageQueryRoot>(&sdl, "AiUsageQueryRoot");
+}
 
 #[test]
 fn configured_graphql_case_is_coherent_without_aliases() {

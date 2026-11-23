@@ -112,6 +112,7 @@ pub trait AiSubscriptionService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiSubscriptionRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Subscription(rename_fields = "PascalCase", rename_args = "PascalCase")

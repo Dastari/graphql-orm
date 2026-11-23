@@ -200,9 +200,31 @@ pub trait AiUsageService: Send + Sync {
 }
 
 /// Composable authenticated usage query root.
+///
+/// Use this root when the schema omits [`crate::AiQueryRoot`], which already
+/// exposes usage reporting.
+#[cfg_attr(
+    feature = "sqlite",
+    doc = r#"
+`schema_roots!` rejects the duplicate usage field when both roots are included.
+
+```compile_fail,E0080
+use graphql_orm::prelude::schema_roots;
+use graphql_orm_ai::{AiQueryRoot, AiUsageQueryRoot};
+
+schema_roots! {
+    backend: "sqlite",
+    schema_policy: "managed",
+    entities: [],
+    extra_query_types: [AiQueryRoot, AiUsageQueryRoot],
+}
+```
+"#
+)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiUsageQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
