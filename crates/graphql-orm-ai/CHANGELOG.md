@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.157.0
+
+- **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier
+  can admit replacement of the legacy approval lookup index with the unique
+  `tool_call_id` index. The live index must match the legacy definition, and
+  duplicate approval keys stop the upgrade before any DDL.
+  [Migration](MIGRATION.md#01560-to-01570)
+
 ## Unreleased - 0.156.0
 
 Model-context measurement for the fixed capability broker (#551). Requires AI

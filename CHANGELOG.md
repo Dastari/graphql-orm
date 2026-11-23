@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.209.0
+
+- `SchemaManager::preflight_unique_indexes` exposes the read-only duplicate-key
+  check to hosts using external migration tools, including SQL Server (#878).
+  [Migration](MIGRATION.md#02080-to-02090-external-migration-preflight)
+
 ## Unreleased - ORM/macros 0.208.0
 
 - **Added (#852).** Typed transactions can delete a bounded key set or scalar
