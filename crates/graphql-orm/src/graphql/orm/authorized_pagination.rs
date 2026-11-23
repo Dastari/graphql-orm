@@ -2385,6 +2385,24 @@ impl ReadPredicate {
         self.policy.expression(&row)
     }
 
+    fn with_compact_closure(mut self, scalar: RowBoundSql, binds: Vec<SqlValue>) -> Self {
+        let executable = scalar
+            .wrapped("", " = 1")
+            .bind(&root_row(self.backend, self.table));
+        if Cost::of(self.backend, &executable)
+            .and_then(|cost| cost.check(self.backend))
+            .is_ok()
+            && let Policy::Sql { sql, values } = self.policy
+        {
+            self.policy = Policy::Closure {
+                sql,
+                values,
+                scalar: std::sync::Arc::new((scalar, binds)),
+            };
+        }
+        self
+    }
+
     /// The rendering TRUE exactly where this predicate is FALSE; see
     /// [`negated`].
     fn negated(&self) -> Option<(Policy, Cost)> {
@@ -3004,24 +3022,7 @@ impl ReadPredicate {
             };
             render(&compact_truth, Some(&columns))
         };
-        // The executable alternative must also meet the SQL parser limits.
-        if Cost::of(
-            dialect,
-            &compact_sql
-                .wrapped("", " = 1")
-                .bind(&root_row(dialect, Some(T::TABLE_NAME))),
-        )
-        .and_then(|cost| cost.check(dialect))
-        .is_ok()
-            && let Policy::Sql { sql, values } = predicate.policy
-        {
-            predicate.policy = Policy::Closure {
-                sql,
-                values,
-                scalar: std::sync::Arc::new((compact_sql, compact_values)),
-            };
-        }
-        Ok(predicate)
+        Ok(predicate.with_compact_closure(compact_sql, compact_values))
     }
 
     pub fn and(self, other: Self) -> async_graphql::Result<Self> {
@@ -4631,6 +4632,43 @@ mod predicate_tests {
         DatabaseBackend::Postgres,
         DatabaseBackend::Mssql,
     ];
+
+    #[test]
+    fn over_budget_compact_closure_keeps_original_sql_and_binds() {
+        let original_sql = "(CASE WHEN ? = 1 THEN 1 WHEN ? <> 1 THEN 0 END) = 1";
+        let original_binds = vec![SqlValue::Int(1); 2];
+        let compact_sql = RowBoundSql::sql("(SELECT ?)");
+        let compact_binds = vec![SqlValue::Int(1)];
+        let parentheses = MAX_EXPRESSION_DEPTH as usize;
+        let over_budget = compact_sql.wrapped(&"(".repeat(parentheses), &")".repeat(parentheses));
+        let render = |predicate: ReadPredicate| {
+            let (sql, binds) = raw_policy(&predicate.root_expression()).flatten();
+            (sql.bind(READ_PREDICATE_ROW), binds)
+        };
+        for backend in BACKENDS {
+            let legacy = ReadPredicate::fragment(
+                TypeId::of::<()>(),
+                backend,
+                None,
+                RowBoundSql::sql(original_sql),
+                original_binds.clone(),
+                1,
+            )
+            .unwrap();
+            let compact = legacy
+                .clone()
+                .with_compact_closure(compact_sql.clone(), compact_binds.clone());
+            assert_eq!(
+                render(compact),
+                ("(SELECT ?) = 1".to_owned(), compact_binds.clone())
+            );
+            let fallback = legacy.with_compact_closure(over_budget.clone(), compact_binds.clone());
+            assert_eq!(
+                render(fallback),
+                (original_sql.to_owned(), original_binds.clone())
+            );
+        }
+    }
 
     /// The public code of a refusal.
     fn code(error: &async_graphql::Error) -> String {

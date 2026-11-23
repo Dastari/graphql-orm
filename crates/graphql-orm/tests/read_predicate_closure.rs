@@ -1396,7 +1396,7 @@ mod portable {
             .unwrap()
             .build_delete_sql();
         let copies = match B::DIALECT {
-            DatabaseBackend::Sqlite => 1,
+            DatabaseBackend::Sqlite => 2,
             DatabaseBackend::Postgres => 4,
             DatabaseBackend::Mssql => 2,
             other => panic!("unsupported test backend: {other:?}"),

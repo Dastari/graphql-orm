@@ -442,9 +442,8 @@ async fn fixture() -> (Database, FixtureOwner) {
     .await;
     let literal = |value: Option<i64>| value.map_or("NULL".to_owned(), |value| value.to_string());
     // The generated fixture strings contain only ASCII letters and spaces.
-    let text_literal = |value: Option<&str>| {
-        value.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"))
-    };
+    let text_literal =
+        |value: Option<&str>| value.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"));
     let values = rows()
         .iter()
         .map(|row| {
@@ -560,6 +559,159 @@ async fn directly_nested_closures_agree_with_original_sql() {
         }
     };
 
+    let text_eq = |column, value: &str| {
+        ReadPredicate::column::<B, Node>(
+            column,
+            ReadPredicateOp::Eq,
+            SqlValue::String(value.to_owned()),
+        )
+        .unwrap()
+    };
+    let score =
+        ReadPredicate::column::<B, Node>("score", ReadPredicateOp::Eq, SqlValue::Float(5.0))
+            .unwrap();
+    let null = ReadPredicate::is_null::<B, Node>("name").unwrap();
+    let nested = |outer, inner, target, outer_depth, inner_depth| {
+        let closure = |quantifier, target, depth| {
+            ReadPredicate::related_closure_within::<B, Node>(
+                quantifier,
+                Keys::Parent.columns(),
+                target,
+                depth,
+            )
+            .unwrap()
+        };
+        closure(outer, closure(inner, target, inner_depth), outer_depth)
+    };
+    let cases = [
+        (
+            "case folding",
+            nested(All, All, text_eq("name", "abc"), 1, 1),
+        ),
+        (
+            "trailing space",
+            nested(All, All, text_eq("label", "abc"), 1, 1),
+        ),
+        (
+            "case-sensitive label",
+            nested(All, All, text_eq("label", "ABC "), 1, 1),
+        ),
+        (
+            "float bind for integer column",
+            nested(Any, Any, score.clone(), 1, 3),
+        ),
+        (
+            "scalar negation",
+            nested(All, Any, text_eq("name", "abc").not().unwrap(), 6, 1),
+        ),
+        ("null test", nested(Any, All, null.clone(), 1, 6)),
+        (
+            "disjunction",
+            nested(
+                Any,
+                Any,
+                text_eq("name", "abc").or(null.clone()).unwrap(),
+                6,
+                1,
+            ),
+        ),
+        (
+            "conjunction",
+            nested(
+                All,
+                All,
+                score
+                    .and(ReadPredicate::is_not_null::<B, Node>("name").unwrap())
+                    .unwrap(),
+                6,
+                6,
+            ),
+        ),
+        (
+            "complete cycle",
+            nested(
+                All,
+                All,
+                ReadPredicate::is_not_null::<B, Node>("id").unwrap(),
+                6,
+                6,
+            ),
+        ),
+    ];
+    let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
+    for (name, candidate) in cases {
+        let original = candidate.clone().and(primary_key_present.clone()).unwrap();
+        let (before, before_bytes, _) = read(query(original)).await;
+        let (after, after_bytes, _) = read(query(candidate.clone())).await;
+        let (double_negated, _, _) = read(query(candidate.not().unwrap().not().unwrap())).await;
+        assert_eq!(before, after, "{name}");
+        assert_eq!(before, double_negated, "double negation of {name}");
+        if name == "scalar negation" && B::DIALECT == DatabaseBackend::Postgres {
+            // PostgreSQL uses the original renderer for explicit negation.
+            assert!(before_bytes.abs_diff(after_bytes) < 64, "{name}");
+        } else {
+            assert!(after_bytes + 64 < before_bytes, "{name}");
+        }
+        // Row 61 has no parent, name 'ABC', and label 'abc '. Check an
+        // observable difference between the declared collations.
+        match name {
+            "case folding" | "trailing space" => {
+                assert_eq!(after.contains(&61), !cfg!(feature = "postgres"), "{name}");
+            }
+            "case-sensitive label" => assert!(!after.contains(&61), "{name}"),
+            "complete cycle" => assert!((80..=85).all(|id| after.contains(&id)), "{name}"),
+            _ => {}
+        }
+    }
+    if matches!(
+        B::DIALECT,
+        DatabaseBackend::Sqlite | DatabaseBackend::Postgres
+    ) {
+        let initial =
+            ReadPredicate::column::<B, Node>("id", ReadPredicateOp::Ne, SqlValue::Int(61)).unwrap();
+        let primary_key_missing = ReadPredicate::is_null::<B, Node>("id").unwrap();
+        // Each alternation adds one level while preserving the target's
+        // truth. At this boundary the extra compact scalar parentheses
+        // exceed the budget and the original renderer still fits.
+        let mut target = initial;
+        for step in 0..248 {
+            target = if step % 2 == 0 {
+                target.and(primary_key_present.clone())
+            } else {
+                target.or(primary_key_missing.clone())
+            }
+            .unwrap();
+        }
+        let below_limit = nested(All, All, target.clone(), 1, 1);
+        let fallback = nested(
+            All,
+            All,
+            target.and(primary_key_present.clone()).unwrap(),
+            1,
+            1,
+        );
+        let original = fallback.clone().and(primary_key_present).unwrap();
+        let expected_compact_binds = if B::DIALECT == DatabaseBackend::Sqlite {
+            2
+        } else {
+            4
+        };
+        assert_eq!(
+            query(below_limit.clone()).build_delete_sql().1.len(),
+            expected_compact_binds
+        );
+        assert_eq!(
+            query(fallback.clone()).build_delete_sql().1,
+            vec![SqlValue::Int(61); 16]
+        );
+        let (before, _, _) = read(query(original)).await;
+        let (after, _, _) = read(query(fallback)).await;
+        let (below_limit, _, _) = read(query(below_limit)).await;
+        assert_eq!(after, before, "compact cost fallback");
+        assert_eq!(after, below_limit, "at the compact cost boundary");
+        assert!(!after.is_empty() && !after.contains(&61));
+    }
+
     for outer_keys in [Keys::Parent, Keys::Composite, Keys::FanOut] {
         for inner_keys in [Keys::Parent, Keys::Composite, Keys::FanOut] {
             for outer in [Any, All] {
@@ -610,59 +762,5 @@ async fn directly_nested_closures_agree_with_original_sql() {
         }
     }
 
-    let text_eq = |column, value: &str| {
-        ReadPredicate::column::<B, Node>(
-            column,
-            ReadPredicateOp::Eq,
-            SqlValue::String(value.to_owned()),
-        )
-        .unwrap()
-    };
-    let score = ReadPredicate::column::<B, Node>("score", ReadPredicateOp::Eq, SqlValue::Float(5.0))
-        .unwrap();
-    let null = ReadPredicate::is_null::<B, Node>("name").unwrap();
-    let nested = |outer, inner, target, outer_depth, inner_depth| {
-        let closure = |quantifier, target, depth| {
-            ReadPredicate::related_closure_within::<B, Node>(
-                quantifier,
-                Keys::Parent.columns(),
-                target,
-                depth,
-            )
-            .unwrap()
-        };
-        closure(outer, closure(inner, target, inner_depth), outer_depth)
-    };
-    let cases = [
-        ("case folding", nested(All, All, text_eq("name", "abc"), 1, 1)),
-        ("trailing space", nested(All, All, text_eq("label", "abc"), 1, 1)),
-        ("case-sensitive label", nested(All, All, text_eq("label", "ABC "), 1, 1)),
-        ("float bind for integer column", nested(Any, Any, score.clone(), 1, 3)),
-        ("scalar negation", nested(All, Any, text_eq("name", "abc").not().unwrap(), 6, 1)),
-        ("null test", nested(Any, All, null.clone(), 1, 6)),
-        ("disjunction", nested(Any, Any, text_eq("name", "abc").or(null.clone()).unwrap(), 6, 1)),
-        ("conjunction", nested(All, All, score.and(null.not().unwrap()).unwrap(), 6, 6)),
-        ("complete cycle", nested(All, All, ReadPredicate::is_not_null::<B, Node>("id").unwrap(), 6, 6)),
-    ];
-    let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
-    for (name, candidate) in cases {
-        let original = candidate.clone().and(primary_key_present.clone()).unwrap();
-        let (before, before_bytes, _) = read(query(original)).await;
-        let (after, after_bytes, _) = read(query(candidate.clone())).await;
-        let (double_negated, _, _) = read(query(candidate.not().unwrap().not().unwrap())).await;
-        assert_eq!(before, after, "{name}");
-        assert_eq!(before, double_negated, "double negation of {name}");
-        assert!(after_bytes + 64 < before_bytes, "{name}");
-        // Row 61 has no parent, name 'ABC', and label 'abc '. Check an
-        // observable difference between the declared collations.
-        match name {
-            "case folding" | "trailing space" => {
-                assert_eq!(after.contains(&61), !cfg!(feature = "postgres"), "{name}");
-            }
-            "case-sensitive label" => assert!(!after.contains(&61), "{name}"),
-            "complete cycle" => assert!((80..=85).all(|id| after.contains(&id)), "{name}"),
-            _ => {}
-        }
-    }
     owner.cleanup().unwrap();
 }
