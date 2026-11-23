@@ -12,16 +12,19 @@ supersedes: []
 
 ## 0.205.0 to 0.211.0: directly nested closure read predicates
 
-**No action.** A root closure whose target is itself a closure over built-in
-column tests and NULL checks can reuse the inner walk's three-valued result.
-On SQLite, PostgreSQL, and SQL Server the policy admits the same rows as the
-original rendering, with fewer SQL fragments and bind parameters. That
-includes text columns with a non-default collation and binds whose type
-differs from the column's. On SQLite the nested verdict reads the physical
-row at the anchor and at each recursive step, because a projected row can
-lose the column's declared collation and type affinity; it therefore repeats
-the target's binds there, as on PostgreSQL. Composition limits still apply.
-Applications that snapshot generated policy SQL may need to refresh those
+**No action.** On PostgreSQL and SQL Server, a root closure whose target is
+itself a closure over built-in column tests and NULL checks can reuse the
+inner walk's three-valued result, with fewer SQL fragments and bind
+parameters. SQLite keeps the original rendering for nested closures: its
+compact inner walk deduplicates reached pointers without their truth under
+the pointer column's collation, which can differ from the original walk.
+Single-level closures keep their existing rendering on every backend. The
+policy admits the same rows as before on SQLite, PostgreSQL, and SQL Server,
+including text pointers and targets with declared collations and binds whose
+type differs from the column's. Where PostgreSQL or SQL Server cannot compare
+a pointer and key with different collations, both renderings fail the
+statement. Composition limits still apply. Applications that snapshot
+generated PostgreSQL or SQL Server policy SQL may need to refresh those
 snapshots. Refs #785.
 
 ## 0.204.0 to 0.205.0: generated Changed subscriptions

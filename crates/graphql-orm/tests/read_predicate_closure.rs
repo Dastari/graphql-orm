@@ -1395,8 +1395,10 @@ mod portable {
             )))
             .unwrap()
             .build_delete_sql();
+        // SQLite keeps the original nested rendering, with every copy of
+        // the TRUE and FALSE tests.
         let copies = match B::DIALECT {
-            DatabaseBackend::Sqlite => 2,
+            DatabaseBackend::Sqlite => 16,
             DatabaseBackend::Postgres => 4,
             DatabaseBackend::Mssql => 2,
             other => panic!("unsupported test backend: {other:?}"),

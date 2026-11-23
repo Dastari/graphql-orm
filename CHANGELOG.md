@@ -16,10 +16,11 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.211.0
 
-- **No action.** Directly nested closure read predicates over built-in column
-  tests can reuse the inner closure's scalar result, reducing SQL and bind
-  duplication. SQLite evaluates the verdict against physical rows to preserve
-  column collation and affinity (#785).
+- **No action.** On PostgreSQL and SQL Server, directly nested closure read
+  predicates over built-in column tests can reuse the inner closure's scalar
+  result, reducing SQL and bind duplication. SQLite keeps the original
+  rendering for nested closures. The admitted rows are unchanged on all three
+  backends (#785).
 
 ## Unreleased - ORM/macros 0.205.0
 

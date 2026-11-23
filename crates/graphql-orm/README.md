@@ -11,7 +11,7 @@ supersedes: []
 # `graphql-orm`
 
 Version 0.211.0 reduces SQL duplication for directly nested closure read
-predicates. See the [migration note](../../MIGRATION.md#02050-to-02110-directly-nested-closure-read-predicates).
+predicates on PostgreSQL and SQL Server. See the [migration note](../../MIGRATION.md#02050-to-02110-directly-nested-closure-read-predicates).
 
 Version 0.205.0 reduces per-entity compile work for generated Changed
 subscriptions by sharing their stream implementation. See the

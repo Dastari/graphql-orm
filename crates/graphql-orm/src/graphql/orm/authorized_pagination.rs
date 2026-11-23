@@ -2837,10 +2837,11 @@ impl ReadPredicate {
     /// pages, search and subscription delivery re-reads. A standalone
     /// closure can share the target SQL between the governed and reached rows
     /// on SQLite and SQL Server. PostgreSQL keeps one traversal join and can
-    /// use a single scalar truth test at each site. A root closure directly
-    /// wrapping a closure over built-in column tests can also reuse the inner
-    /// walk's scalar result. Other compositions keep the separate TRUE and
-    /// FALSE tests.
+    /// use a single scalar truth test at each site. On PostgreSQL and SQL
+    /// Server, a root closure directly wrapping a closure over built-in
+    /// column tests can also reuse the inner walk's scalar result. SQLite
+    /// renders nested closures in the original form. Other compositions keep
+    /// the separate TRUE and FALSE tests.
     /// SQLite and PostgreSQL render a
     /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
     /// common table expression inside a subquery, so there the walk is
@@ -2978,7 +2979,13 @@ impl ReadPredicate {
         predicate.column_tests_only = target.column_tests_only;
 
         let (compact_truth, mut compact_values) = match &target.policy {
-            Policy::Closure { scalar, .. } if target.column_tests_only => {
+            // SQLite keeps the original rendering for nested closures. Its
+            // compact inner walk deduplicates pointers without their truth
+            // under the pointer column's collation, which can drop a pointer
+            // the original walk follows.
+            Policy::Closure { scalar, .. }
+                if target.column_tests_only && dialect != DatabaseBackend::Sqlite =>
+            {
                 // A closure already returns nullable 0/1. Convert that
                 // scalar to the aggregate's 0/1/2 encoding without a
                 // second walk to find its FALSE rows. ISNULL avoids SQL
@@ -3007,13 +3014,9 @@ impl ReadPredicate {
             ),
             _ => (legacy_truth, legacy_values),
         };
-        let compact_sql = if dialect == DatabaseBackend::Postgres
-            || (dialect == DatabaseBackend::Sqlite && closures != 0)
-        {
-            // SQLite's nested anchor must read physical columns: a
-            // correlated UNION ALL over the outer projection can lose
-            // their collation and affinity. Both backends evaluate the
-            // scalar at the anchor and the recursive step in SQL order.
+        let compact_sql = if dialect == DatabaseBackend::Postgres {
+            // PostgreSQL evaluates the scalar at the anchor and the
+            // recursive step, in SQL order.
             compact_values.extend_from_within(..);
             render(&compact_truth, None)
         } else {
