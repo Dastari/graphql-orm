@@ -3117,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.205.0"
+version = "0.206.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.205.0"
+version = "0.206.0"
 dependencies = [
  "Inflector",
  "convert_case 0.7.1",

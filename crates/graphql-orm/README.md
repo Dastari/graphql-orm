@@ -10,9 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.205.0 exposes full backup and restore on explicitly typed SQLite
+Version 0.206.0 exposes full backup and restore on explicitly typed SQLite
 and PostgreSQL handles in multi-backend builds. See the
-[migration guide](../../MIGRATION.md#02040-to-02050-backend-typed-backup-runtime).
+[migration guide](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
+
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
 
 Version 0.204.0 adds an opt-in for databases whose backup and restore are
 owned by another product. See the [migration guide](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).

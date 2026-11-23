@@ -10,13 +10,22 @@ supersedes: []
 
 # Migration Guide
 
-## 0.204.0 to 0.205.0: backend-typed backup runtime
+## 0.205.0 to 0.206.0: backend-typed backup runtime
 
 **No action.** Upgrade ORM and macros together. SQLite and PostgreSQL
 `Database<B>` handles expose full backup and restore even when Cargo enables
 multiple ORM backends. Incremental backup still requires a single ORM backend
-with `change-journal`. Use backup 0.30.0 from the same reviewed workspace
+with `change-journal`: in a multi-backend build `ensure_change_journal_table`,
+`ensure_change_journal_recorder` and `export_changes*` exist but always return
+an error. Use backup 0.30.0 from the same reviewed workspace
 revision to select a typed adapter with `orm-sqlite` or `orm-postgres`.
+
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
 
 ## 0.203.0 to 0.204.0: externally managed backup and restore
 

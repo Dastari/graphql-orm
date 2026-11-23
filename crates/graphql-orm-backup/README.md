@@ -146,7 +146,9 @@ custom repository, disable defaults. The optional `orm-sqlite` or
 `orm-postgres` features select one ready-made ORM adapter. In a build with
 several ORM backends, pass an explicitly typed `Database<SqliteBackend>` or
 `Database<PostgresBackend>` matching that selection. Enable exactly one of
-these backup adapter features.
+these backup adapter features. The bare `orm` feature uses the ORM's default
+backend; if the workspace unifies several ORM backends, or the default is
+MSSQL, select `orm-sqlite` or `orm-postgres` instead.
 
 Version 0.11.1 aligns the package identity with the snapshot-format documentation
 added after the immutable 0.11.0 package tag. It introduces no new breaking
