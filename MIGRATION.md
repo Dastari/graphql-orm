@@ -15,9 +15,13 @@ supersedes: []
 **No action.** SQLite renders every closure read predicate, single-level and
 nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
 on 0.200.0 through 0.206.0 were exposed only if a SQLite closure walks a
-pointer column with a case-insensitive collation (for example `NOCASE`) into a
-case-sensitive key column; there, collation-equal pointers such as `'a'` and
-`'A'` could be followed differently from the original rendering.
+pointer column whose collation treats values as equal that the key column
+distinguishes, for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY`
+key. There, pointers such as `'a'` and `'A'`, or `'a'` and `'a '`, reached at
+the same depth were followed only once. An `Any` closure could then deny a
+row that the original rendering admits. A randomized search found no case
+that admitted extra rows, but over-admission is not proven impossible: SQLite
+does not guarantee which of several equal pointers it keeps.
 
 On PostgreSQL and SQL Server, a root closure whose target is itself a closure
 over built-in column tests and NULL checks can reuse the inner walk's

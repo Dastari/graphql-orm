@@ -2960,7 +2960,9 @@ impl ReadPredicate {
         // collation. The original tuple carries the target's truth, so two
         // collation-equal pointers with different truths are both followed.
         // A walk over `(pointer, depth)` alone keeps only one of them, and
-        // a case-sensitive key can name different rows for each.
+        // a key column whose collation distinguishes them (for example
+        // BINARY against a NOCASE or RTRIM pointer) names different rows
+        // for each.
         if dialect == DatabaseBackend::Sqlite {
             return Ok(predicate);
         }

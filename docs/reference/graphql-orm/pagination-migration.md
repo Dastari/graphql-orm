@@ -380,7 +380,9 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   search and subscription delivery re-reads. SQLite renders every closure,
   single-level and nested, in the original form: the recursive tuple carries
   the target's truth, so pointers that compare equal under the pointer
-  column's collation but carry different truths are all followed (#876). SQL
+  column's collation (for example `NOCASE` or `RTRIM`) but carry different
+  truths are all followed, even where the key column distinguishes them
+  (#876). SQL
   Server can project the governed and reached rows into one target
   expression for a standalone closure. PostgreSQL keeps the traversal join
   and can encode scalar truth at each site with a single target expression.
