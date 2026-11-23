@@ -1388,11 +1388,20 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         if version.trim().is_empty() || version.len() > 256 || description.len() > 4096 {
             return Err(rejection(RuntimeMigrationDiagnosticCode::LimitExceeded).into());
         }
-        if B::DIALECT != DatabaseBackend::Sqlite {
-            B::validate_owned_dependencies(self.database.pool(), ownership).await?;
-        }
+        // Preserve dependency-error precedence for existing plan shapes. Only
+        // the isolated SQLite drop can use the exact catalog check instead.
+        let dependencies = B::validate_owned_dependencies(self.database.pool(), ownership).await;
+        let dependencies = if B::DIALECT == DatabaseBackend::Sqlite {
+            dependencies
+        } else {
+            dependencies?;
+            Ok(())
+        };
         self.check_search_languages(target).await?;
-        let current = B::introspect_owned(self.database.pool()).await?;
+        let current = match B::introspect_owned(self.database.pool()).await {
+            Ok(current) => current,
+            Err(error) => return dependencies.and(Err(error)),
+        };
         let scoped = scoped_current(&current, ownership, options, target);
         let mut physical = build_migration_plan_views_with(
             B::DIALECT,
@@ -1401,8 +1410,8 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             DefaultEquivalence::TypedLiteralsV1,
         );
         let column_drop = isolated_sqlite_drop(B::DIALECT, &physical.steps);
-        if B::DIALECT == DatabaseBackend::Sqlite && column_drop.is_none() {
-            B::validate_owned_dependencies(self.database.pool(), ownership).await?;
+        if column_drop.is_none() {
+            dependencies?;
         }
         validate_owned_effects(
             B::DIALECT,

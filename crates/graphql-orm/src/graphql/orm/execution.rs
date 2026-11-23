@@ -984,7 +984,9 @@ where
         if let Some(plan) = owned {
             let current = super::migrations::introspect_owned_sqlite_connection(&mut tx).await?;
             plan.check_baseline(&current)?;
-            validate_owned_sqlite_plan(&mut tx, plan).await?;
+            if plan.sqlite_column_drop().is_none() {
+                validate_owned_sqlite_rebuild_plan(&mut tx, plan).await?;
+            }
         }
 
         let column_drop = if let Some((table, column)) = owned.and_then(OwnedPlannedMigration::sqlite_column_drop) {
@@ -993,7 +995,7 @@ where
             };
             let drop = super::migrations::sqlite_unique_rebuild::column_drop::prepare(
                 &mut tx, table, column, statement.as_ref(),
-            ).await?;
+            ).await.map_err(sqlx::Error::from)?;
             ensure_sqlite_migration_history(&mut tx).await?;
             Some(drop)
         } else {
@@ -1489,11 +1491,40 @@ pub(super) async fn validate_owned_sqlite_plan(
     connection: &mut sqlx::SqliteConnection,
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {
-    // The isolated native drop validates the full live catalog before any
-    // mutation. The lossy model restrictions below are needed for rebuilds.
-    if plan.sqlite_column_drop().is_some() {
-        return Ok(());
+    use super::migrations::sqlite_unique_rebuild::column_drop::{DropError, prepare};
+    use super::runtime_migration::{
+        RuntimeMigrationDiagnostic, RuntimeMigrationDiagnosticCode, RuntimeMigrationDiagnostics,
+    };
+
+    if let Some((table, column)) = plan.sqlite_column_drop() {
+        let [statement] = plan.statements() else {
+            return Err(
+                sqlx::Error::Protocol("invalid isolated SQLite column drop plan".into()).into(),
+            );
+        };
+        return prepare(connection, table, column, statement)
+            .await
+            .map(|_| ())
+            .map_err(|error| match error {
+                DropError::Refused { subject, .. } => {
+                    RuntimeMigrationDiagnostics(vec![RuntimeMigrationDiagnostic {
+                        code: RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+                        collection: None,
+                        subject: Some(subject),
+                    }])
+                    .into()
+                }
+                DropError::Database(error) => error.into(),
+            });
     }
+    validate_owned_sqlite_rebuild_plan(connection, plan).await
+}
+
+#[cfg(feature = "sqlite")]
+async fn validate_owned_sqlite_rebuild_plan(
+    connection: &mut sqlx::SqliteConnection,
+    plan: &OwnedPlannedMigration,
+) -> Result<(), RuntimeMigrationError> {
     super::owned_foreign_keys::validate_sqlite(connection, plan.ownership()).await?;
     use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
     use sqlx::Row;

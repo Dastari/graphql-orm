@@ -2508,12 +2508,13 @@ async fn sqlite_owned_column_drop_preserves_unrelated_index_and_incoming_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = sqlite().await;
     sqlx::raw_sql(
-        "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT NOT NULL, retired_payload TEXT);
+        "CREATE TABLE parent (id TEXT PRIMARY KEY NOT NULL, label TEXT NOT NULL, retired_payload TEXT);
          CREATE INDEX parent_label ON parent(label);
-         CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER
+         CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id TEXT
              REFERENCES parent(id) ON DELETE RESTRICT);
-         INSERT INTO parent VALUES (7, 'retained', 'retired');
-         INSERT INTO child VALUES (11, 7);",
+         INSERT INTO parent (rowid, id, label, retired_payload)
+             VALUES (-7, 'a', 'retained', 'retired'), (91, 'b', 'also retained', NULL);
+         INSERT INTO child VALUES (11, 'a'), (16, 'b');",
     )
     .execute(db.pool())
     .await?;
@@ -2555,16 +2556,21 @@ async fn sqlite_owned_column_drop_preserves_unrelated_index_and_incoming_key()
         .await?;
     assert_eq!(introspect_sqlite_schema(&db).await?, expected);
     assert_eq!(
-        sqlx::query_as::<_, (i64, String)>("SELECT id, label FROM parent")
-            .fetch_one(db.pool())
-            .await?,
-        (7, "retained".into()),
+        sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT rowid, id, label FROM parent ORDER BY rowid"
+        )
+        .fetch_all(db.pool())
+        .await?,
+        [
+            (-7, "a".into(), "retained".into()),
+            (91, "b".into(), "also retained".into())
+        ],
     );
     assert_eq!(
-        sqlx::query_as::<_, (i64, i64)>("SELECT id, parent_id FROM child")
-            .fetch_one(db.pool())
+        sqlx::query_as::<_, (i64, String)>("SELECT id, parent_id FROM child ORDER BY id")
+            .fetch_all(db.pool())
             .await?,
-        (11, 7),
+        [(11, "a".into()), (16, "b".into())],
     );
     Ok(())
 }
@@ -2575,9 +2581,8 @@ async fn sqlite_owned_column_drop_preserves_physical_options_and_host_objects()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = sqlite().await;
     sqlx::raw_sql(
-        "CREATE TABLE parent (
-             id INTEGER PRIMARY KEY, label TEXT NOT NULL, retired_payload TEXT
-         ) STRICT, WITHOUT ROWID;
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT NOT NULL, retired_payload TEXT)
+             STRICT, WITHOUT ROWID;
          CREATE INDEX parent_label ON parent(label COLLATE NOCASE DESC)
              WHERE length(label) > 0;
          CREATE TABLE child (
@@ -2589,15 +2594,31 @@ async fn sqlite_owned_column_drop_preserves_physical_options_and_host_objects()
          CREATE TRIGGER capture_label AFTER UPDATE OF label ON parent
              BEGIN INSERT INTO audit VALUES (NEW.label); END;
          CREATE VIEW labels AS SELECT label FROM parent;
-         INSERT INTO parent VALUES (7, 'retained', 'retired');
-         INSERT INTO child VALUES (11, 7);",
+         CREATE TABLE __graphql_orm_migrations (
+             version TEXT PRIMARY KEY, description TEXT NOT NULL,
+             applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, backend TEXT,
+             graphql_orm_version TEXT, source_schema_hash TEXT, target_schema_hash TEXT,
+             plan_hash TEXT, policy TEXT
+         );
+         INSERT INTO parent VALUES (7, 'retained', 'retired'), (14, 'also retained', NULL);
+         INSERT INTO child VALUES (11, 7), (16, 14);",
     )
     .execute(db.pool())
     .await?;
-    let catalog = "SELECT name, sql FROM main.sqlite_schema
-                   WHERE name IN ('parent_label', 'child', 'capture_label', 'labels')
-                   ORDER BY name";
-    let before: Vec<(String, String)> = sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    let catalog = "SELECT rowid, type, name, tbl_name, rootpage, sql
+                   FROM main.sqlite_schema ORDER BY rowid";
+    type CatalogRow = (i64, String, String, String, i64, Option<String>);
+    let mut expected_catalog: Vec<CatalogRow> =
+        sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    expected_catalog
+        .iter_mut()
+        .find(|row| row.2 == "parent")
+        .unwrap()
+        .5 = Some(
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT NOT NULL)
+             STRICT, WITHOUT ROWID"
+            .into(),
+    );
     let mut expected = introspect_sqlite_schema(&db).await?;
     let mut wanted = expected.clone();
     wanted.tables.retain(|table| table.table_name == "parent");
@@ -2636,8 +2657,8 @@ async fn sqlite_owned_column_drop_preserves_physical_options_and_host_objects()
         )
         .await?;
 
-    let after: Vec<(String, String)> = sqlx::query_as(catalog).fetch_all(db.pool()).await?;
-    assert_eq!(after, before);
+    let after: Vec<CatalogRow> = sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    assert_eq!(after, expected_catalog);
     assert_eq!(introspect_sqlite_schema(&db).await?, expected);
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(
@@ -2648,16 +2669,16 @@ async fn sqlite_owned_column_drop_preserves_physical_options_and_host_objects()
         (1, 1),
     );
     assert_eq!(
-        sqlx::query_as::<_, (i64, String)>("SELECT id, label FROM parent")
-            .fetch_one(db.pool())
+        sqlx::query_as::<_, (i64, String)>("SELECT id, label FROM parent ORDER BY id")
+            .fetch_all(db.pool())
             .await?,
-        (7, "retained".into()),
+        [(7, "retained".into()), (14, "also retained".into())],
     );
     assert_eq!(
-        sqlx::query_as::<_, (i64, i64)>("SELECT id, parent_id FROM child")
-            .fetch_one(db.pool())
+        sqlx::query_as::<_, (i64, i64)>("SELECT id, parent_id FROM child ORDER BY id")
+            .fetch_all(db.pool())
             .await?,
-        (11, 7),
+        [(11, 7), (16, 14)],
     );
     let mut tx = db.pool().begin().await?;
     sqlx::query("INSERT INTO child VALUES (12, 9)")
@@ -2678,6 +2699,66 @@ async fn sqlite_owned_column_drop_preserves_physical_options_and_host_objects()
             .fetch_one(db.pool())
             .await?,
         "changed",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_multi_column_drop_keeps_rebuild_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    sqlx::raw_sql(
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT, retired_a TEXT, retired_b TEXT);
+         CREATE INDEX parent_label ON parent(label);
+         INSERT INTO parent VALUES (7, 'retained', 'first', 'second');",
+    )
+    .execute(db.pool())
+    .await?;
+    let before = introspect_sqlite_schema(&db).await?;
+    let mut target = before.clone();
+    target.tables[0]
+        .columns
+        .retain(|column| !column.name.starts_with("retired_"));
+    let manager = db.schema();
+    let plan = manager
+        .plan_owned_migration(
+            "drop-two",
+            "drop two retired columns",
+            &OwnedSchemaModel::from(&target),
+            &ManagedTableSet::new(["parent".into()])?,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert_eq!(plan.steps().len(), 2);
+    assert!(
+        plan.statements()
+            .iter()
+            .any(|statement| statement.starts_with("SELECT graphql_orm_rebuild_table(")),
+        "{:?}",
+        plan.statements()
+    );
+    let error = manager
+        .apply_owned_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, RuntimeMigrationError::Database(sqlx::Error::Protocol(message))
+            if message.contains("SQLite live rebuild cannot preserve this physical schema")),
+        "{error:?}"
+    );
+    assert_eq!(introspect_sqlite_schema(&db).await?, before);
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>("SELECT retired_a, retired_b FROM parent")
+            .fetch_one(db.pool())
+            .await?,
+        ("first".into(), "second".into())
     );
     Ok(())
 }
@@ -2719,6 +2800,30 @@ async fn sqlite_owned_column_drop_preflights_live_dependencies_and_rolls_back()
     sqlx::query("CREATE VIEW retained_view AS SELECT retired_payload FROM parent")
         .execute(db.pool())
         .await?;
+    let error = manager
+        .plan_owned_migration(
+            "drop-retired",
+            "drop retired payload",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await
+        .unwrap_err();
+    let RuntimeMigrationError::Diagnostics(diagnostics) = error else {
+        panic!("expected a plan-time dependency diagnostic, got {error:?}");
+    };
+    assert_eq!(
+        diagnostics.0[0].code,
+        RuntimeMigrationDiagnosticCode::InvalidPhysicalContract
+    );
+    assert!(
+        diagnostics.0[0]
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.contains("retained_view")),
+        "{diagnostics:?}"
+    );
     let error = manager
         .apply_owned_migration(&plan, options.clone())
         .await

@@ -15,11 +15,16 @@ supersedes: []
 **No action.** Upgrade ORM and macros together. An owned SQLite plan whose
 only change is to drop a column now renders SQLite's native `DROP COLUMN`.
 The plan is destructive and still requires `ApplyOptions::allow_destructive`.
-Application checks the live foreign-key catalog and tests SQLite's native
-alterations against an empty copy of the schema. A trial rename identifies
+Planning and application check the live foreign-key catalog and test SQLite's
+native alterations against an empty copy of the schema. Planning reports
+detected dependencies as `InvalidPhysicalContract`. A trial rename identifies
 retained references that SQLite could silently rebind or ignore, including
 `UPDATE OF` trigger events. The live drop proceeds only when the checks
 verify that it preserves the retained physical schema.
+This narrows the [0.111.0 column-removal restrictions](#01110-sqlite-columncheckfk-rebuild-preservation)
+for the single-drop shape. Plans containing a drop and additional steps still
+rebuild or refuse. Run SQLite migrations with no TEMP objects on other
+connections, or use a dedicated migration connection with other connections closed.
 Refs #882.
 
 ## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates

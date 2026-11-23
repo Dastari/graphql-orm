@@ -31,10 +31,47 @@ async fn catalog(conn: &mut sqlx::SqliteConnection) -> Result<Vec<Object>, sqlx:
         .collect())
 }
 
-fn refused(dependency: impl std::fmt::Display) -> sqlx::Error {
-    sqlx::Error::Protocol(format!(
-        "UnsupportedCapability: SQLite column drop: {dependency}"
-    ))
+pub(crate) enum DropError {
+    Refused {
+        subject: String,
+        source: Option<sqlx::Error>,
+    },
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for DropError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl From<DropError> for sqlx::Error {
+    fn from(error: DropError) -> Self {
+        match error {
+            DropError::Database(error) => error,
+            DropError::Refused { subject, source } => {
+                let mut message = format!("UnsupportedCapability: SQLite column drop: {subject}");
+                if let Some(source) = source {
+                    message.push_str(&format!(": {source}"));
+                }
+                Self::Protocol(message)
+            }
+        }
+    }
+}
+
+fn refused(subject: impl Into<String>) -> DropError {
+    DropError::Refused {
+        subject: subject.into(),
+        source: None,
+    }
+}
+
+fn probe_refusal(subject: String, source: sqlx::Error) -> DropError {
+    DropError::Refused {
+        subject,
+        source: Some(source),
+    }
 }
 
 fn quoted(name: &str) -> String {
@@ -84,7 +121,7 @@ async fn foreign_key_dependency(
     conn: &mut sqlx::SqliteConnection,
     table: &str,
     column: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DropError> {
     let dependency: Option<(String, i64, String)> = sqlx::query_as(
         r#"SELECT m.name, f.id, f."from"
            FROM main.sqlite_schema m JOIN pragma_foreign_key_list(m.name, 'main') f
@@ -111,7 +148,7 @@ fn check_implicit_dependencies(
     ts: &[Token],
     table: &str,
     column: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DropError> {
     let names_table = ts.iter().any(|token| is_identifier(sql, token, table));
     if !names_table && object.tbl_name != table {
         return Ok(());
@@ -142,7 +179,7 @@ async fn check_bound_dependencies(
     before: &[Object],
     table: &str,
     column: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DropError> {
     if !before
         .iter()
         .any(|object| matches!(object.kind.as_str(), "view" | "trigger"))
@@ -163,9 +200,10 @@ async fn check_bound_dependencies(
         .execute(&mut *rename)
         .await
         .map_err(|error| {
-            refused(format!(
-                "cannot verify references to {table}.{column}: {error}"
-            ))
+            probe_refusal(
+                format!("cannot verify references to {table}.{column}"),
+                error,
+            )
         })?;
     let after = catalog(&mut rename).await?;
     for (prior, current) in before.iter().zip(&after) {
@@ -183,12 +221,12 @@ async fn check_bound_dependencies(
 async fn view_columns(
     conn: &mut sqlx::SqliteConnection,
     name: &str,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<String>, DropError> {
     sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'main') ORDER BY cid")
         .bind(name)
         .fetch_all(conn)
         .await
-        .map_err(|error| refused(format!("view {name}: {error}")))
+        .map_err(|error| probe_refusal(format!("view {name}"), error))
 }
 
 // Native ALTER resolves references in trigger expressions, but doesn't
@@ -197,7 +235,7 @@ async fn validate_trigger(
     conn: &mut sqlx::SqliteConnection,
     object: &Object,
     sql: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DropError> {
     let ts = tokens(sql)?;
     let event = ts
         .iter()
@@ -233,7 +271,7 @@ async fn validate_trigger(
     sqlx::query(&explain)
         .fetch_optional(conn)
         .await
-        .map_err(|error| refused(format!("trigger {}: {error}", object.name)))?;
+        .map_err(|error| probe_refusal(format!("trigger {}", object.name), error))?;
     Ok(())
 }
 
@@ -276,7 +314,7 @@ pub(crate) async fn prepare(
     table: &str,
     column: &str,
     statement: &str,
-) -> Result<PreparedDrop, sqlx::Error> {
+) -> Result<PreparedDrop, DropError> {
     for pragma in ["writable_schema", "legacy_alter_table"] {
         let enabled: i64 = sqlx::query_scalar(&format!("PRAGMA {pragma}"))
             .fetch_one(&mut *conn)
@@ -375,7 +413,7 @@ pub(crate) async fn prepare(
             .persistent(false)
             .execute(&mut probe)
             .await
-            .map_err(|error| refused(format!("{} {}: {error}", object.kind, object.name)))?;
+            .map_err(|error| probe_refusal(format!("{} {}", object.kind, object.name), error))?;
         if object.kind == "trigger" {
             triggers.push((object, sql));
         }
@@ -395,10 +433,24 @@ pub(crate) async fn prepare(
             if message.starts_with(&format!("error in table {table} after drop column")) {
                 let dependencies = table_dependencies(&retained, column);
                 if !dependencies.is_empty() {
-                    return refused(format!("{table}: {}: {error}", dependencies.join(", ")));
+                    return probe_refusal(format!("{table}: {}", dependencies.join(", ")), error);
                 }
             }
-            refused(format!("{table}.{column}: {error}"))
+            // Name dependencies from the catalog without copying SQLite's
+            // potentially SQL-bearing error text into the planning diagnostic.
+            let subject = objects
+                .iter()
+                .find(|object| {
+                    message.starts_with(&format!(
+                        "error in {} {} after drop column:",
+                        object.kind, object.name
+                    ))
+                })
+                .map_or_else(
+                    || format!("{table}.{column}"),
+                    |object| format!("{} {}", object.kind, object.name),
+                );
+            probe_refusal(subject, error)
         })?;
 
     let actual = catalog(&mut probe).await?;
@@ -442,7 +494,7 @@ fn verify_catalog(
     after: &[Object],
     table: &str,
     sql_after: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DropError> {
     for (prior, current) in before.iter_mut().zip(after) {
         if prior.kind == "table" && prior.name == table {
             prior.sql = Some(sql_after.into());
@@ -476,6 +528,7 @@ impl PreparedDrop {
             &self.table,
             &self.sql_after,
         )
+        .map_err(Into::into)
     }
 }
 
@@ -571,6 +624,7 @@ mod tests {
             .await
             .err()
             .unwrap_or_else(|| panic!("did not refuse {dependency}"));
+            let error = sqlx::Error::from(error);
             assert!(error.to_string().contains(dependency), "{error}");
             assert_eq!(before, catalog(&mut connection).await.unwrap());
         }
