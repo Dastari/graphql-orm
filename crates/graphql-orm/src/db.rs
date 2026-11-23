@@ -2369,9 +2369,18 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     ///
     /// Off by default. Enabling this refuses ORM backup, restore and restore
     /// fencing before database access. On SQL Server, ordinary queries and
-    /// writes use neither the restore marker nor its application lock. Set
-    /// this consistently on every ORM handle connected to the database. This
-    /// setting does not change schema ownership or grant write access.
+    /// writes use neither the restore marker nor its application lock.
+    ///
+    /// Set this on every handle: a default handle can still back up, restore,
+    /// or fence the same database where supported, and opted-in writers can
+    /// keep writing during that restore. On PostgreSQL and SQLite,
+    /// `Database::new(db.pool().clone())` drops this setting.
+    ///
+    /// Before opting in on an existing SQL Server database, call
+    /// [`Database::restore_in_progress`] on a default handle and resolve any
+    /// interrupted restore. Drop the marker only after confirming that the
+    /// database is fully restored, since opted-in handles skip the check.
+    /// This setting does not change schema ownership or grant write access.
     pub fn externally_managed_backup_restore(mut self, enabled: bool) -> Self {
         self.database = self
             .database

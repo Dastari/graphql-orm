@@ -1,7 +1,5 @@
 //! Fenced persistence of exact schema-validated UI-intent suggestions.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_support::{content_context, map_orm};
 use std::collections::BTreeMap;
 use std::sync::Arc;

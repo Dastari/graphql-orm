@@ -110,7 +110,7 @@ separate mandatory proofs.
 
 ## GraphQL management
 
-For SQLite and PostgreSQL, `OrmAiRulePolicyService` uses only generated
+`OrmAiRulePolicyService` uses only generated
 `graphql-orm` repositories and state-machine transactions. Compose
 `AiRuleQueryRoot` and `AiRuleMutationRoot`, then install the same service as
 `Arc<dyn AiRulePolicyService>`.

@@ -157,12 +157,22 @@ let database = Database::<MssqlBackend>::builder(pool)
     .build();
 ```
 
-Set it on every ORM handle connected to that database. The database handle
-and its pool handle run ordinary statements without checking or creating
+Set this on every ORM handle for the database, since a default handle can
+still back it up, restore it, or fence it where supported, and opted-in
+writers can keep writing during that restore. On PostgreSQL and SQLite,
+`Database::new(db.pool().clone())` drops the setting.
+
+The SQL Server database handle and its pool handle run ordinary statements
+without checking or requiring
 `dbo.__graphql_orm_restore_marker` and without acquiring a restore-fencing
 application lock. The other product is responsible for coordinating access
 during its restore. The setting leaves the schema policy and the pool's
 physical access mode in effect.
+
+Before opting in for an existing database, use a default handle to check
+`restore_in_progress()` and resolve any interrupted restore, or drop the
+marker table after independently confirming the database is fully restored.
+An opted-in handle skips that check and can serve partially restored data.
 
 Calling `restore_in_progress`, `ensure_no_restore_in_progress`,
 `begin_restore`, `resume_restore` or `database.pool().install_restore_marker()`
@@ -877,10 +887,10 @@ it, for review or for a host's own tooling.
 - Introspection reports column types with their parameters (`DECIMAL(19,4)`,
   `VARBINARY(MAX)`, `NVARCHAR(50)`), primary keys, unique constraints, foreign
   keys with their delete action, and ordinary and unique indexes with their
-  column order, descending columns and `IN`-list filters. Indexes that back a
+  column order, descending columns and `IN`-list and `IS NOT NULL` filters. Indexes that back a
   primary key or unique constraint are reported as key and unique columns
   instead. Included columns and spatial, XML and columnstore indexes are not
-  part of the model; a filter other than an `IN` list on one column is kept
+  part of the model; a filter outside those one-column forms is kept
   as text that never matches a declared index, so a plan replaces such an
   index rather than ignoring the filter. A table without a primary key
   reports none. Check constraints are not read: portable constraints are not
@@ -899,6 +909,24 @@ it, for review or for a host's own tooling.
   the live collation when it runs and adds `COLLATE` when it differs from
   the database default. It fails, rather than alter the column, when that
   name is not listed by `sys.fn_helpcollations()`.
+- `append_only = true` renders an update/delete trigger. The catalog
+  recognizes the generated, enabled trigger when its definition is visible.
+  SQL Server does not implement privileged append-only retention purge.
+- `exact_string_filters = true` applies binary, length-sensitive matching to
+  generated equality and membership filters for Unicode columns. The default
+  string filters, pattern matching, sort order, and uniqueness use the column's
+  collation. Plans also render `COLLATE Latin1_General_100_BIN2` on the
+  entity's generated Unicode key columns: primary keys, unique columns,
+  relation foreign-key sources and index members.
+  - SQL Server requires both sides of a string foreign key to share a
+    collation, so opt in the referencing and referenced entities together.
+  - On an existing table the planner emits `ALTER COLUMN … COLLATE`, which
+    SQL Server refuses on indexed or constrained columns. Drop the dependent
+    indexes, unique constraints or primary key, apply the step, and recreate
+    them.
+  - BIN2 makes uniqueness case-sensitive, which is stricter than the default,
+    so existing rows don't collide. Removing the option leaves the live BIN2
+    collation in place, and schema validation accepts it.
 - Search metadata statements are T-SQL. SQL Server full-text indexes are not
   created; the plan renders a comment for them.
 
@@ -913,7 +941,7 @@ encryption default, the explicit opt-ins, session reset between checkouts, pool
 timeouts and a `NOCOUNT ON` session default:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls --test mssql_transport -- --ignored --test-threads=1
+cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_owned_connections -- --ignored --test-threads=1 --skip mssql_notifications::
 ```
 
 The correctness regression executes error classification, decoding (including
@@ -1054,7 +1082,7 @@ Run the explicitly opted-in integration test against its self-provisioned,
 loopback-only, two-CPU/3-GiB disposable Docker SQL Server (no application DSN):
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --test mssql_notifications -- --ignored
+cargo test -p graphql-orm --no-default-features --features mssql --test mssql_owned_connections -- mssql_notifications:: --ignored
 ```
 
 On shared hosts use the host-required bounded Cargo wrapper. The test uses an

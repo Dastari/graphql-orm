@@ -183,7 +183,7 @@ def check_orm_split(old, new):
     split = [line for name in ORM_JOBS for line in orm_commands(new[name])]
     expected = orm_commands(qualified)
     # The SQLite migration API fixture command is byte-identical to the one the
-    # default suite's migration_api_compatibility_fixture runner executes.
+    # default suite's consumer_fixtures migration API runner executes.
     expected[expected.index("for backend in sqlite postgres mssql; do")] = "for backend in postgres mssql; do"
     # Runtime search coverage was added after the qualified snapshot.
     expected = [line.replace("--test runtime_relations -- --test-threads=1",
@@ -305,7 +305,7 @@ def main():
       - name: Verify TLS and retained query notifications on owned servers
         env:
           GRAPHQL_ORM_TEST_MSSQL_PULL: missing
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_owned_connections -- --ignored --test-threads=1
 """
             require(current in body, "complete owned MSSQL execution is required")
             body = body.replace(current, previous, 1)

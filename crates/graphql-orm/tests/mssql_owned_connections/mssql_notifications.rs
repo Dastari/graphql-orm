@@ -1,10 +1,8 @@
-#![cfg(feature = "mssql")]
 use graphql_orm::db::mssql::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
 };
 
-#[path = "support/owned_mssql.rs"]
-mod owned_mssql;
+use super::owned_mssql;
 use owned_mssql::{OwnedSqlServer, execute_batch};
 
 #[tokio::test]

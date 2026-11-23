@@ -1,7 +1,5 @@
 //! Bounded top-level coordination for sequential supervised mutations.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 mod native;
 
 use std::sync::Arc;

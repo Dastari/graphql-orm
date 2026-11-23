@@ -1,7 +1,5 @@
 //! Canonical protected-message preview representation and compatibility reads.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use serde_json::Value;
 
 use crate::AiError;

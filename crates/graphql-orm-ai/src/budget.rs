@@ -59,7 +59,6 @@ pub enum AiBudgetReservationState {
     Expired,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl AiBudgetReservationState {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -222,7 +221,6 @@ impl AiBudgetReservation {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_persisted(
         id: AiBudgetReservationId,

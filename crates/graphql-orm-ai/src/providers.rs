@@ -88,7 +88,7 @@ pub use openai::{
 
 #[cfg(all(
     feature = "provider-openai-core",
-    any(feature = "sqlite", feature = "postgres")
+    any(feature = "sqlite", feature = "postgres", feature = "mssql")
 ))]
 pub(crate) use openai_webhooks::webhook_receipt_identity;
 #[cfg(feature = "provider-openai-core")]

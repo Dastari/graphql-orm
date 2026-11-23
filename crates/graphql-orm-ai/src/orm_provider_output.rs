@@ -1,7 +1,5 @@
 //! Fenced, content-protected persistence for completed provider turns.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_support::map_orm;
 use std::sync::Arc;
 

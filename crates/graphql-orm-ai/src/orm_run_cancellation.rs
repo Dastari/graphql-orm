@@ -1,7 +1,6 @@
 //! ORM-backed owner-authorized durable run cancellation.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
 use crate::orm_support::{
@@ -17,7 +16,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionMode};
 use serde_json::json;
 use time::Duration;
 use uuid::Uuid;
@@ -77,7 +76,7 @@ impl Default for AiRunCancellationLimits {
 /// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
 /// such a credential would yield the full user behind it.
 pub struct OrmAiRunCancellationService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -92,7 +91,7 @@ impl OrmAiRunCancellationService {
     /// Creates an owner-authorized cancellation service.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -569,7 +568,7 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
 }
 
 async fn cancel_active_tool_calls(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
     maximum: usize,
     now: i64,
@@ -681,7 +680,7 @@ async fn cancel_active_tool_calls(
 }
 
 async fn cancel_subscription_wait(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
 ) -> Result<(), OrmPublicError> {
     let waiters = tx
@@ -762,7 +761,7 @@ async fn cancel_subscription_wait(
 }
 
 async fn cancel_background_submission(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
     now: i64,
 ) -> Result<(), OrmPublicError> {
@@ -812,7 +811,7 @@ async fn cancel_background_submission(
 }
 
 async fn append_cancelled_attempt_outcome(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     run: &AiRunRecord,
     now: i64,
 ) -> Result<(), OrmPublicError> {

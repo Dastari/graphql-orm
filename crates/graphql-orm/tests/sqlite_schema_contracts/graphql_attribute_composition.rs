@@ -5,7 +5,7 @@
 use graphql_orm::async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 
-#[path = "support/ui.rs"]
+#[path = "../support/ui.rs"]
 mod ui;
 
 /// `rename_fields` before `complex`, in one attribute.

@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use graphql_orm::prelude::*;
 
 #[cfg(feature = "postgres")]
-use std::process::Command;
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
 
 #[derive(
     GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq,
@@ -926,118 +927,15 @@ async fn sqlite_uncapped_internal_sentinels_preserve_exact_bounded_contracts()
 }
 
 #[cfg(feature = "postgres")]
-struct OwnedPostgres {
-    name: String,
-    owner_token: String,
-    url: String,
-}
-
-#[cfg(feature = "postgres")]
-impl Drop for OwnedPostgres {
-    fn drop(&mut self) {
-        let identity = Command::new("docker")
-            .args([
-                "inspect",
-                "--format",
-                "{{ index .Config.Labels \"graphql-orm.test-owner\" }}",
-                &self.name,
-            ])
-            .output();
-        if identity
-            .ok()
-            .filter(|output| output.status.success())
-            .is_some_and(|output| {
-                String::from_utf8_lossy(&output.stdout).trim() == self.owner_token
-            })
-        {
-            let _ = Command::new("docker")
-                .args(["rm", "--force", "--volumes", &self.name])
-                .output();
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl OwnedPostgres {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let token = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
-        let name = format!("graphql-orm-bounded-sentinel-{token}");
-        let password = format!("bounded_{token}");
-        let database = format!("bounded_{token}");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--name",
-                &name,
-                "--label",
-                &format!("graphql-orm.test-owner={token}"),
-                "--memory",
-                "4g",
-                "--memory-swap",
-                "4g",
-                "--publish",
-                "127.0.0.1::5432",
-                "--env",
-                "POSTGRES_USER=bounded_owner",
-                "--env",
-                &format!("POSTGRES_PASSWORD={password}"),
-                "--env",
-                &format!("POSTGRES_DB={database}"),
-                "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to start owned PostgreSQL 17: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        let mut owned = Self {
-            name,
-            owner_token: token,
-            url: String::new(),
-        };
-        for _ in 0..120 {
-            let ready = Command::new("docker")
-                .args([
-                    "exec",
-                    &owned.name,
-                    "pg_isready",
-                    "-h",
-                    "127.0.0.1",
-                    "-U",
-                    "bounded_owner",
-                ])
-                .output()?;
-            if ready.status.success() {
-                let port = Command::new("docker")
-                    .args(["port", &owned.name, "5432/tcp"])
-                    .output()?;
-                let published = String::from_utf8(port.stdout)?;
-                let port = published
-                    .lines()
-                    .find_map(|line| line.strip_prefix("127.0.0.1:"))
-                    .ok_or("owned PostgreSQL was not loopback-published")?;
-                owned.url =
-                    format!("postgres://bounded_owner:{password}@127.0.0.1:{port}/{database}");
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                return Ok(owned);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        Err("owned PostgreSQL 17 did not become ready".into())
-    }
-}
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 #[ignore = "creates and owns a disposable loopback-only PostgreSQL 17 container"]
 async fn postgres_uncapped_internal_sentinels_preserve_exact_bounded_contracts()
 -> Result<(), Box<dyn std::error::Error>> {
-    let owned = OwnedPostgres::start()?;
+    let owned = owned_postgres::OwnedPostgres::start_ready(
+        "bounded-sentinel",
+        owned_postgres::POSTGRES_IMAGE,
+    )
+    .await?;
     let database = Database::<PostgresBackend>::connect_postgres(&owned.url)
         .await?
         .with_schema_policy(SchemaPolicy::Managed);

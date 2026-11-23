@@ -1,7 +1,6 @@
 //! ORM-backed durable per-principal inbox streams.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
 use crate::orm_support::{map_orm, map_transaction, principal_identity, record_scope};
@@ -14,9 +13,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter};
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, MutationContext, TransactionMode};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast::error::RecvError;
@@ -47,7 +44,7 @@ pub(crate) struct PreparedAiInboxEvent {
 /// Appends one event and advances its principal stream in the caller's exact
 /// ORM transaction.
 pub(crate) async fn append_inbox_event(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     event: PreparedAiInboxEvent,
 ) -> Result<i64, OrmPublicError> {
     if !valid_event_type(&event.event_type)
@@ -193,7 +190,7 @@ impl Default for AiInboxPruningLimits {
 /// applicable scope policy, CAS cursor advance, event deletion, and redacted
 /// audit fact are evaluated in one state-machine transaction.
 pub struct OrmAiInboxPruningService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     clock: Arc<dyn Clock>,
     limits: AiInboxPruningLimits,
 }
@@ -201,7 +198,7 @@ pub struct OrmAiInboxPruningService {
 impl OrmAiInboxPruningService {
     /// Creates a bounded pruning worker.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         clock: Arc<dyn Clock>,
         limits: AiInboxPruningLimits,
     ) -> Self {
@@ -467,7 +464,7 @@ enum PruneStreamOutcome {
 /// through the resolver, which would yield the full user behind it. The page
 /// refuses the same credentials before any read, so both agree.
 pub struct OrmAiInboxService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
@@ -481,7 +478,7 @@ impl OrmAiInboxService {
     /// Creates a service with 30-second reauthorization and 100-event replay
     /// pages.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         principal_resolver: Arc<dyn CurrentPrincipalResolver>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
