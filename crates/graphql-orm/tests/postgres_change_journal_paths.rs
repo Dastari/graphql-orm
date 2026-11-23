@@ -397,7 +397,7 @@ async fn quoted_and_dotted_table_names_journal() -> Result<(), Box<dyn std::erro
         })
         .await?;
     assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0].primary_key, "pg1:71756f7465642d31");
+    assert_eq!(changes[0].primary_key, concat!("pg1:", "71756f7465642d31"));
     assert_eq!(changes[0].action, BackupChangeAction::Update);
     Ok(())
 }
