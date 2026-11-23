@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.28.1 to 0.29.0: externally managed backup and restore
+
+**No action.** No snapshot format or data migration is needed. Use backup
+0.29.0 and ORM 0.204.0 from the same reviewed workspace revision. The
+optional ORM integration returns `BACKUP_RESTORE_EXTERNALLY_MANAGED` if the
+host opts in on the database handle.
+See [restore semantics](docs/restore-semantics.md#externally-managed-databases).
+
 ## 0.28.0 to 0.28.1: read snapshot write refusal
 
 **No action.** Use backup 0.28.1 and ORM 0.191.0 from the same reviewed

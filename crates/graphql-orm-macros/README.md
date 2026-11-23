@@ -11,7 +11,10 @@ supersedes: []
 # `graphql-orm-macros`
 
 Version 0.211.0 aligns with the ORM's
-[nested closure rendering update](../../MIGRATION.md#02030-to-02110-directly-nested-closure-read-predicates).
+[nested closure rendering update](../../MIGRATION.md#02040-to-02110-directly-nested-closure-read-predicates).
+
+Version 0.204.0 aligns with the ORM runtime's
+[external backup and restore setting](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
 
 Version 0.203.0 adds SQL Server-only options to
 `backend_selected_graphql_entity` and opt-in exact string filters. See the

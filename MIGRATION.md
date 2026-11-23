@@ -10,13 +10,26 @@ supersedes: []
 
 # Migration Guide
 
-## 0.203.0 to 0.211.0: directly nested closure read predicates
+## 0.204.0 to 0.211.0: directly nested closure read predicates
 
 **No action.** A root closure whose target is itself a closure over built-in
 column tests and NULL checks can reuse the inner walk's three-valued result.
-The policy admits the same rows, with fewer SQL fragments and bind parameters.
-Composition limits still apply. Applications that snapshot generated policy
-SQL may need to refresh those snapshots.
+The policy admits the same rows with fewer SQL fragments and bind parameters.
+SQLite reads physical columns at the anchor and recursive step to preserve
+their declared collation and type affinity. Composition limits still apply.
+Applications that snapshot generated policy SQL may need to refresh those
+snapshots. Refs #785.
+
+## 0.203.0 to 0.204.0: externally managed backup and restore
+
+**No action.** The default backup and restore behavior stays the same. No
+data migration is needed. For a database whose backup and restore are owned
+by another product, opt in with
+`DatabaseBuilder::externally_managed_backup_restore(true)` on every handle.
+Backup, restore, and explicit restore-fencing operations return
+`BACKUP_RESTORE_EXTERNALLY_MANAGED`. Use the same reviewed workspace revision
+for ORM and backup 0.29.0 if you use its ORM adapter.
+See [backup ownership](docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore).
 
 ## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
 

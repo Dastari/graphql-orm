@@ -1208,3 +1208,109 @@ async fn a_failed_table_rolls_back_the_whole_snapshot_restore()
     );
     Ok(())
 }
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn externally_managed_database_refuses_backup_and_restore()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{
+        BackupRestoreExternallyManaged, ChangeWindow, restore_backup_rows,
+    };
+
+    #[cfg(feature = "postgres")]
+    let pool = owned_postgres::OwnedPostgres::pool("external-backup", 1).await?;
+    #[cfg(feature = "postgres")]
+    sqlx::query("SET statement_timeout = '5s'")
+        .execute(&pool)
+        .await?;
+    #[cfg(feature = "sqlite")]
+    let pool = setup_pool().await?;
+
+    let owned = Database::new(pool.clone());
+    let db = Database::builder(pool.clone())
+        .externally_managed_backup_restore(true)
+        .build();
+    apply_schema(&owned, "20261122_external_backup").await?;
+
+    let account = BackupRtAccount::insert(
+        &db,
+        CreateBackupRtAccountInput {
+            email: "external@example.com".into(),
+            password_hash: "preserved".into(),
+            reset_token: None,
+            profile: BackupProfile::default(),
+            preferences: None,
+            avatar: vec![],
+            nickname: None,
+            balance: Decimal::ZERO,
+            credit_limit: None,
+        },
+    )
+    .await?;
+    let schema = owned.schema_snapshot("20261122_external_backup", &graphql_orm_entity_metadata());
+    let entity = schema
+        .entities
+        .iter()
+        .find(|entity| entity.table_name == "backup_rt_accounts")
+        .unwrap();
+    let window = ChangeWindow {
+        after_sequence: None,
+        until: 0,
+    };
+    let mut snapshot = owned.begin_consistent_snapshot().await?;
+    let rows = BTreeMap::new();
+    let apply = RestoreContext::empty_database();
+    let dry_run = RestoreContext::dry_run();
+
+    for error in [
+        db.begin_consistent_snapshot()
+            .await
+            .err()
+            .expect("snapshot"),
+        db.export_table_rows(&mut snapshot, entity)
+            .await
+            .unwrap_err(),
+        db.export_changes(window.clone()).await.unwrap_err(),
+        db.export_changes_with_wait(window, std::time::Duration::ZERO)
+            .await
+            .unwrap_err(),
+        db.import_table_rows(entity, &[], &apply).await.unwrap_err(),
+        db.restore_backup_rows(&schema, &schema, &rows, &apply)
+            .await
+            .unwrap_err(),
+        restore_backup_rows(&db, &schema, &schema, &rows, &dry_run)
+            .await
+            .unwrap_err(),
+        db.restore_in_progress().await.unwrap_err(),
+        db.ensure_no_restore_in_progress().await.unwrap_err(),
+    ] {
+        let refusal = BackupRestoreExternallyManaged::from_error(&error).expect("coded refusal");
+        assert_eq!(refusal.code(), "BACKUP_RESTORE_EXTERNALLY_MANAGED");
+    }
+    assert_eq!(
+        owned.export_table_rows(&mut snapshot, entity).await?.len(),
+        1
+    );
+    drop(snapshot);
+    let preserved: String = sqlx::query_scalar("SELECT email FROM backup_rt_accounts")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(preserved, account.email);
+    #[cfg(feature = "sqlite")]
+    let markers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE name = '__graphql_orm_restore_marker'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    #[cfg(feature = "postgres")]
+    let markers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_class WHERE relname = '__graphql_orm_restore_marker'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(markers, 0);
+    Ok(())
+}

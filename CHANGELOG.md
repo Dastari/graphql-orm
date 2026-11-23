@@ -18,7 +18,16 @@ for historical context.
 
 - **No action.** Directly nested closure read predicates over built-in column
   tests can reuse the inner closure's scalar result, reducing SQL and bind
-  duplication (#785).
+  duplication. SQLite evaluates the verdict against physical rows to preserve
+  column collation and affinity (#785).
+
+## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
+
+- **Added (follow-up to #731).** Opt in per database when another product
+  owns backup and restore. The ORM and its backup adapter refuse backup and
+  restore before I/O. SQL Server queries and writes on opted-in handles
+  run without the restore marker or fencing lock.
+  [Migration](MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore)
 
 ## Unreleased - ORM/macros 0.203.0
 

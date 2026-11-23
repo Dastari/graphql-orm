@@ -383,11 +383,11 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   scalar truth at each site with a single target expression. When a root
   closure directly wraps another closure over built-in column comparisons and
   NULL tests, it can use the inner walk's nullable verdict as its target.
-  SQLite and SQL Server can share that verdict across the governed and reached
-  rows. PostgreSQL can use it once at each site. Other compositions use
-  separate TRUE and FALSE tests. Every test keeps the target's bind order.
-  Nested closures get distinct
-  names. The database evaluates the closure per row. Unsupported backends
+  SQL Server can share that verdict across the governed and reached rows.
+  SQLite and PostgreSQL can use it once at each site. SQLite reads the physical
+  row at each site to preserve column collation and affinity. Other
+  compositions use separate TRUE and FALSE tests. Every test keeps the
+  target's bind order. Nested closures get distinct names. The database evaluates the closure per row. Unsupported backends
   are refused with `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
