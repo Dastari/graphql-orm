@@ -60,6 +60,8 @@ struct ClosureParityNode {
     key_b: Option<i64>,
     ptr_a: Option<i64>,
     ptr_b: Option<i64>,
+    name: Option<String>,
+    label: Option<String>,
 }
 #[cfg(feature = "sqlite")]
 schema_roots! { query_custom_ops: [], entities: [ClosureParityNode] }
@@ -259,6 +261,8 @@ fn rows() -> Vec<Node> {
         key_b: Some(key.1),
         ptr_a: pointer.0,
         ptr_b: pointer.1,
+        name: (id % 3 != 0).then(|| if id % 2 == 0 { "abc" } else { "ABC" }.to_owned()),
+        label: (id % 5 != 0).then(|| "abc ".to_owned()),
     };
     for id in 1..=85_i64 {
         let parent = match id {
@@ -423,32 +427,44 @@ async fn fixture() -> (Database, FixtureOwner) {
                 .unwrap();
         }
     };
-    execute(
+    #[cfg(feature = "sqlite")]
+    let text_columns = "name TEXT COLLATE NOCASE NULL, label TEXT COLLATE RTRIM NULL";
+    #[cfg(feature = "postgres")]
+    let text_columns = r#"name TEXT COLLATE "C" NULL, label TEXT COLLATE "POSIX" NULL"#;
+    #[cfg(feature = "mssql")]
+    let text_columns = "name NVARCHAR(16) COLLATE Latin1_General_100_CI_AS NULL, \
+                        label NVARCHAR(16) COLLATE Latin1_General_100_CS_AS NULL";
+    execute(format!(
         "CREATE TABLE closure_parity_nodes (id BIGINT PRIMARY KEY, parent_id BIGINT NULL, \
          score BIGINT NULL, key_a BIGINT NULL, key_b BIGINT NULL, ptr_a BIGINT NULL, \
-         ptr_b BIGINT NULL)"
-            .to_owned(),
-    )
+         ptr_b BIGINT NULL, {text_columns})"
+    ))
     .await;
     let literal = |value: Option<i64>| value.map_or("NULL".to_owned(), |value| value.to_string());
+    // The generated fixture strings contain only ASCII letters and spaces.
+    let text_literal = |value: Option<&str>| {
+        value.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"))
+    };
     let values = rows()
         .iter()
         .map(|row| {
             format!(
-                "({}, {}, {}, {}, {}, {}, {})",
+                "({}, {}, {}, {}, {}, {}, {}, {}, {})",
                 row.id,
                 literal(row.parent_id),
                 literal(row.score),
                 literal(row.key_a),
                 literal(row.key_b),
                 literal(row.ptr_a),
-                literal(row.ptr_b)
+                literal(row.ptr_b),
+                text_literal(row.name.as_deref()),
+                text_literal(row.label.as_deref()),
             )
         })
         .collect::<Vec<_>>()
         .join(", ");
     execute(format!(
-        "INSERT INTO closure_parity_nodes (id, parent_id, score, key_a, key_b, ptr_a, ptr_b) VALUES {values}"
+        "INSERT INTO closure_parity_nodes (id, parent_id, score, key_a, key_b, ptr_a, ptr_b, name, label) VALUES {values}"
     ))
     .await;
     (db, owner)
@@ -591,6 +607,61 @@ async fn directly_nested_closures_agree_with_original_sql() {
                     }
                 }
             }
+        }
+    }
+
+    let text_eq = |column, value: &str| {
+        ReadPredicate::column::<B, Node>(
+            column,
+            ReadPredicateOp::Eq,
+            SqlValue::String(value.to_owned()),
+        )
+        .unwrap()
+    };
+    let score = ReadPredicate::column::<B, Node>("score", ReadPredicateOp::Eq, SqlValue::Float(5.0))
+        .unwrap();
+    let null = ReadPredicate::is_null::<B, Node>("name").unwrap();
+    let nested = |outer, inner, target, outer_depth, inner_depth| {
+        let closure = |quantifier, target, depth| {
+            ReadPredicate::related_closure_within::<B, Node>(
+                quantifier,
+                Keys::Parent.columns(),
+                target,
+                depth,
+            )
+            .unwrap()
+        };
+        closure(outer, closure(inner, target, inner_depth), outer_depth)
+    };
+    let cases = [
+        ("case folding", nested(All, All, text_eq("name", "abc"), 1, 1)),
+        ("trailing space", nested(All, All, text_eq("label", "abc"), 1, 1)),
+        ("case-sensitive label", nested(All, All, text_eq("label", "ABC "), 1, 1)),
+        ("float bind for integer column", nested(Any, Any, score.clone(), 1, 3)),
+        ("scalar negation", nested(All, Any, text_eq("name", "abc").not().unwrap(), 6, 1)),
+        ("null test", nested(Any, All, null.clone(), 1, 6)),
+        ("disjunction", nested(Any, Any, text_eq("name", "abc").or(null.clone()).unwrap(), 6, 1)),
+        ("conjunction", nested(All, All, score.and(null.not().unwrap()).unwrap(), 6, 6)),
+        ("complete cycle", nested(All, All, ReadPredicate::is_not_null::<B, Node>("id").unwrap(), 6, 6)),
+    ];
+    let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
+    for (name, candidate) in cases {
+        let original = candidate.clone().and(primary_key_present.clone()).unwrap();
+        let (before, before_bytes, _) = read(query(original)).await;
+        let (after, after_bytes, _) = read(query(candidate.clone())).await;
+        let (double_negated, _, _) = read(query(candidate.not().unwrap().not().unwrap())).await;
+        assert_eq!(before, after, "{name}");
+        assert_eq!(before, double_negated, "double negation of {name}");
+        assert!(after_bytes + 64 < before_bytes, "{name}");
+        // Row 61 has no parent, name 'ABC', and label 'abc '. Check an
+        // observable difference between the declared collations.
+        match name {
+            "case folding" | "trailing space" => {
+                assert_eq!(after.contains(&61), !cfg!(feature = "postgres"), "{name}");
+            }
+            "case-sensitive label" => assert!(!after.contains(&61), "{name}"),
+            "complete cycle" => assert!((80..=85).all(|id| after.contains(&id)), "{name}"),
+            _ => {}
         }
     }
     owner.cleanup().unwrap();

@@ -2989,8 +2989,12 @@ impl ReadPredicate {
             ),
             _ => (legacy_truth, legacy_values),
         };
-        let compact_sql = if dialect == DatabaseBackend::Postgres {
-            // PostgreSQL retains one traversal join and evaluates the
+        let compact_sql = if dialect == DatabaseBackend::Postgres
+            || (dialect == DatabaseBackend::Sqlite && closures != 0)
+        {
+            // SQLite's nested anchor must read physical columns: a
+            // correlated UNION ALL over the outer projection can lose
+            // their collation and affinity. Both backends evaluate the
             // scalar at the anchor and the recursive step in SQL order.
             compact_values.extend_from_within(..);
             render(&compact_truth, None)
