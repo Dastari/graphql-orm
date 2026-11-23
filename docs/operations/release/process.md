@@ -488,11 +488,11 @@ continue-on-error.
 
 ## Dependency disposition review
 
-The current exact-version dispositions are due **2026-12-04**. CI emits warning
-annotations beginning **2026-11-20**, fourteen days before that date, without
-failing an otherwise accepted graph. Expired dispositions fail beginning the day
-after their review date. A disposition that matches no finding across all eleven
-tracked locks also fails; there are no permanent or blanket exemptions.
+Each exact-version disposition has a `review_by` date in
+`dependency-audit-dispositions.json`. CI emits warning annotations starting
+fourteen days before each date. Expired dispositions fail beginning the day
+after their review date. A disposition that matches no finding across all
+tracked locks also fails.
 
 Before the review date, run `python3 scripts/check-dependency-audit.py` through
 the shared build-slot wrapper where required. Inspect the unfiltered JSON reports
