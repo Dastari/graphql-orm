@@ -1385,11 +1385,32 @@ mod portable {
         let (sql, binds) = EntityQuery::<ClosureNode>::new()
             .with_read_visibility(&ReadVisibility::Complete(any(
                 PARENT,
-                all(PARENT, score(ReadPredicateOp::Eq, 21)),
+                all(
+                    PARENT,
+                    and(
+                        score(ReadPredicateOp::Gte, 21),
+                        score(ReadPredicateOp::Ne, 22),
+                    ),
+                ),
             )))
             .unwrap()
             .build_delete_sql();
-        assert_eq!(binds.len(), 16, "{sql}");
+        // SQLite keeps the original nested rendering, with every copy of
+        // the TRUE and FALSE tests.
+        let copies = match B::DIALECT {
+            DatabaseBackend::Sqlite => 16,
+            DatabaseBackend::Postgres => 4,
+            DatabaseBackend::Mssql => 2,
+            other => panic!("unsupported test backend: {other:?}"),
+        };
+        let expected = (0..copies)
+            .flat_map(|_| [SqlValue::Int(21), SqlValue::Int(22)])
+            .collect::<Vec<_>>();
+        assert_eq!(binds, expected, "{sql}");
+        assert_eq!(
+            placeholder_positions(&sql),
+            (1..=2 * copies).collect::<Vec<_>>()
+        );
         assert!(sql.contains("__gom_closure_1") && sql.contains("__gom_closure_2"));
         // Composite keys join every column.
         let (sql, _) = EntityQuery::<ClosureNode>::new()
@@ -1408,8 +1429,10 @@ mod portable {
             .with_read_visibility(&ReadVisibility::Complete(all(PARENT, passes())))
             .unwrap()
             .build_delete_sql();
+        // SQLite keeps the original rendering: the TRUE and FALSE tests at
+        // the anchor and at the recursive step.
         let copies = if B::DIALECT == DatabaseBackend::Sqlite {
-            1
+            4
         } else {
             2
         };
@@ -1423,6 +1446,24 @@ mod portable {
             B::DIALECT,
             sql.len()
         );
+    }
+
+    #[test]
+    fn nested_closures_keep_original_evaluation_sites_for_filter_sql() {
+        let target = ReadPredicate::from_filter::<B, _>(&ClosureNodeWhereInput {
+            score: Some(IntFilter {
+                eq: Some(21),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        let (sql, binds) = EntityQuery::<ClosureNode>::new()
+            .with_read_visibility(&ReadVisibility::Complete(any(PARENT, all(PARENT, target))))
+            .unwrap()
+            .build_delete_sql();
+        assert_eq!(binds.len(), 16, "{sql}");
+        assert_eq!(placeholder_positions(&sql), (1..=16).collect::<Vec<_>>());
     }
 
     fn empty_score_list() -> ReadPredicate {

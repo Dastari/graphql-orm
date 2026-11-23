@@ -43,7 +43,26 @@ for historical context.
   `AgqlBindingAuthorizer::authorize_hook_operation` allows it. The default
   denies, so `ctx = None` calls stay refused until the host implements it.
   **No action.** See the
-  [migration guide](MIGRATION.md#02060-to-02140-explicit-authority-for-hooks-and-workers).
+  [migration guide](MIGRATION.md#02070-to-02140-explicit-authority-for-hooks-and-workers).
+## Unreleased - ORM/macros 0.207.0
+
+- **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite
+  closure read predicate (`related_closure_within` and its shorthands) could
+  reach a different verdict than the original rendering when its pointer
+  column's collation treats values as equal that the key column distinguishes,
+  for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY` key. The
+  compact walk deduplicated such pointers (`'a'` and `'A'`, or `'a'` and
+  `'a '`) at the same depth and followed only one of them, so an `Any`
+  closure could deny a row that the original rendering admits. A randomized
+  search found no over-admission, but it is not proven impossible, because
+  SQLite does not guarantee which equal pointer survives. SQLite now renders
+  every closure, single-level and nested, in the original form, byte for
+  byte as before 0.200.0. PostgreSQL and SQL Server are not affected.
+- **No action.** On PostgreSQL and SQL Server, directly nested closure read
+  predicates over built-in column tests can reuse the inner closure's scalar
+  result, reducing SQL and bind duplication. The admitted rows are unchanged
+  on all three backends (#785).
+
 ## Unreleased - ORM/macros 0.206.0 and backup 0.30.0
 
 - **Fixed (#870).** SQLite and PostgreSQL database handles expose the backup
