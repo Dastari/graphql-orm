@@ -372,19 +372,23 @@ impl<'a> AccessContext<'a> {
 }
 
 /// The authority of the GraphQL request whose generated mutation is running a
-/// mutation hook, presented to policies for that hook's nested writes and
-/// reads.
+/// mutation hook, presented to entity and row policies for that hook's nested
+/// writes and reads.
 ///
 /// The ORM creates one only when the host opted in with
 /// [`DatabaseBuilder::propagate_request_authority_to_hooks`](crate::db::DatabaseBuilder::propagate_request_authority_to_hooks),
-/// when a generated GraphQL mutation invokes the mutation hook, and presents
-/// it only on the policy checks of operations that hook makes through its
-/// [`MutationContext`](crate::graphql::orm::MutationContext). It is revoked
-/// when the hook invocation ends, including on an error or a dropped future.
+/// when a generated GraphQL mutation whose request is admitted to write the
+/// mutation's entity invokes the mutation hook. It is presented only on the
+/// entity and row checks of operations that hook makes through its
+/// [`MutationContext`](crate::graphql::orm::MutationContext), and it ends
+/// when the hook invocation ends, including on an error or a dropped future:
+/// every read checks that.
+///
 /// It is a typed copy of the request's identity, not the request: it holds no
-/// GraphQL `Context`, cannot be cloned or constructed by host code, and is
-/// never presented by a repository call, another transaction, a post-commit
-/// action or a later request.
+/// GraphQL `Context` and cannot be cloned or constructed by host code. It
+/// belongs to the transaction: no [`Database`](crate::db::Database) handle
+/// carries it, so it is never presented by a repository call, another
+/// transaction, a spawned task, a post-commit action or a later request.
 ///
 /// It grants nothing by itself. A policy that does not read it decides as it
 /// did before, and a policy that honours it applies the same checks it
@@ -429,20 +433,23 @@ impl HookRequestAuthority {
         self.live.store(false, std::sync::atomic::Ordering::Release);
     }
 
-    /// The originating request's subject, or `None` for a request that
-    /// presented no [`AuthSubject`].
+    /// The originating request's subject. `None` for a request that
+    /// presented no [`AuthSubject`], and once the hook invocation has ended:
+    /// liveness is checked on every call, so a reference kept across an
+    /// `await` yields nothing after revocation.
     pub fn subject(&self) -> Option<&AuthSubject> {
-        self.subject.as_ref()
+        self.subject.as_ref().filter(|_| self.is_live())
     }
 
     /// The originating request's accepted agql-auth identity, when the
     /// request carried one that passed
     /// [`AgqlAcceptedRequest::from_context`](crate::graphql::auth_agql::AgqlAcceptedRequest::from_context).
     /// It was accepted when the hook was invoked; current authority must
-    /// still be revalidated for every decision made on it.
+    /// still be revalidated for every decision made on it. `None` once the
+    /// hook invocation has ended.
     #[cfg(feature = "auth-agql")]
     pub fn agql_accepted_request(&self) -> Option<&crate::graphql::auth_agql::AgqlAcceptedRequest> {
-        self.agql_accepted.as_ref()
+        self.agql_accepted.as_ref().filter(|_| self.is_live())
     }
 }
 
@@ -479,8 +486,7 @@ impl<'a> PolicyAuthority<'a> {
     ) -> Self {
         Self {
             system,
-            // A revoked authority is never presented.
-            hook_request: hook_request.filter(|request| request.is_live()),
+            hook_request,
         }
     }
 
@@ -492,17 +498,22 @@ impl<'a> PolicyAuthority<'a> {
     }
 
     /// The originating request of the mutation hook making this call, when
-    /// the host opted in to propagating it. Always `None` inside a
+    /// the host opted in to propagating it. Presented to entity and row
+    /// decisions only; always `None` for a repository field decision and
+    /// inside a
     /// [`MutationContext::with_system_access`](crate::graphql::orm::MutationContext::with_system_access)
     /// scope, whose named access replaces it.
+    ///
+    /// Liveness is checked on every call: once the hook invocation has ended
+    /// this returns `None`, also for a value obtained before it ended.
     pub fn hook_request(self) -> Option<&'a HookRequestAuthority> {
-        self.hook_request
+        self.hook_request.filter(|request| request.is_live())
     }
 
-    /// Whether the call presents neither a named system access nor a hook's
-    /// originating request.
+    /// Whether the call presents neither a named system access nor a live
+    /// hook's originating request.
     pub fn is_none(self) -> bool {
-        self.system.is_none() && self.hook_request.is_none()
+        self.system.is_none() && self.hook_request().is_none()
     }
 }
 
@@ -889,6 +900,49 @@ mod tests {
         assert_eq!(
             render_scope_template("record.}.read", &[("id", "record-1")]),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod hook_request_authority_tests {
+    use super::*;
+
+    fn authority() -> HookRequestAuthority {
+        HookRequestAuthority {
+            subject: Some(AuthSubject::new("user-1")),
+            #[cfg(feature = "auth-agql")]
+            agql_accepted: None,
+            live: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// A value obtained before revocation yields nothing afterwards: every
+    /// read checks liveness, so a callback that suspends across the end of
+    /// the hook invocation cannot keep using the authority.
+    #[test]
+    fn revocation_is_checked_at_every_use() {
+        let request = authority();
+        let presented = PolicyAuthority::new(None, Some(&request));
+        let held = presented.hook_request().expect("live");
+        assert_eq!(
+            held.subject().map(|subject| subject.id.as_str()),
+            Some("user-1")
+        );
+        assert!(!presented.is_none());
+
+        request.revoke();
+        // The copy made before revocation, and the reference taken from it.
+        assert!(presented.hook_request().is_none());
+        assert!(presented.is_none());
+        assert!(held.subject().is_none());
+        // A system access is unaffected by a hook's revocation.
+        let system = SystemAccess::new("worker");
+        let both = PolicyAuthority::new(Some(&system), Some(&request));
+        assert!(both.hook_request().is_none());
+        assert_eq!(
+            both.system().map(|access| access.name.as_str()),
+            Some("worker")
         );
     }
 }

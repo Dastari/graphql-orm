@@ -638,7 +638,8 @@ caller's authority doesn't carry into a hook's writes. Two explicit authorities 
 ([strict authorization](../../docs/reference/graphql-orm/strict-authorization.md#repository-system-access)):
 a named `SystemAccess` for workers and hook scopes, and, with
 `DatabaseBuilder::propagate_request_authority_to_hooks(true)`, the originating request for a hook's
-nested writes. Policies receive both as a `PolicyAuthority` in their `*_with_authority` methods.
+nested writes. Policies receive them as a `PolicyAuthority` in their `*_with_authority` methods; the
+originating request reaches entity and row decisions only.
 
 - `ScopeEntityPolicy::new` refuses all of them as `UNAUTHENTICATED` by default, so a hook's cleanup
   makes the mutation fail. With the opt-in it holds the originating subject to its scope requirement

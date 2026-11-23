@@ -589,7 +589,7 @@ receives the existing arguments and a `PolicyAuthority`:
 | `PolicyAuthority` | Meaning |
 | --- | --- |
 | `system()` | The named `SystemAccess` of the handle or scope, the same value as `db.system_access()` |
-| `hook_request()` | The originating request of the mutation hook making the call, when the host opted in (below) |
+| `hook_request()` | The originating request of the mutation hook making the call, when the host opted in (below). Entity and row decisions only |
 | `is_none()` | Neither is presented |
 
 The default implementations ignore the authority and call the method without it, with the same
@@ -634,36 +634,54 @@ By default a mutation hook's nested writes present nothing of the request that c
 `DatabaseBuilder::propagate_request_authority_to_hooks(true)` (or
 `Database::with_request_authority_propagated_to_hooks(true)`) opts in on the handle the schema
 serves. A mutation hook that a generated GraphQL mutation invokes then presents a
-`HookRequestAuthority` on the policy checks of the operations it makes through its
-`MutationContext`, including the hooks those nested writes invoke in turn. It holds the request's
-`AuthSubject` (and, with `auth-agql`, its accepted identity), not the GraphQL `Context`. `ctx`
-stays `None` and the surface stays `Repository`.
+`HookRequestAuthority` on the **entity and row** policy checks of the operations it makes through
+its `MutationContext`, including the hooks those nested writes invoke in turn. It holds the
+request's `AuthSubject` (and, with `auth-agql`, its accepted identity), not the GraphQL `Context`.
+`ctx` stays `None` and the surface stays `Repository`.
 
 The opt-in grants nothing by itself; a policy decides on the authority:
 
 - `ScopeEntityPolicy` holds the originating subject to the same scope requirement as the
   request's own operations. A cleanup hook then succeeds for a caller holding the write scope and
   is still refused for one that does not, or without the opt-in.
-- A host `EntityPolicy`, `RowPolicy` or `FieldPolicy` reads `authority.hook_request()` as above.
-  One that overrides no `*_with_authority` method refuses the hook write as before.
-- `AgqlCurrentAuthorityPolicy` revalidates the originating identity's status and current
-  authority for every nested decision, as it does for a request, and asks
+- A host `EntityPolicy` or `RowPolicy` reads `authority.hook_request()` as above. One that
+  overrides no `*_with_authority` method refuses the hook write as before.
+- `AgqlCurrentAuthorityPolicy` is an entity policy. For every nested **entity** decision it
+  revalidates the originating identity's status and current authority around the binding check
+  and the business entity policy, as it does for a request, and asks
   `AgqlBindingAuthorizer::authorize_hook_operation` in place of `authorize`. Its default denies,
-  so the host also implements that method. See the
-  [agql-auth bridge](agql-auth-bridge.md#accepted-request-and-current-authority).
+  so the host also implements that method. Row decisions are not revalidated by the bridge,
+  for a hook write as for a request; they follow the entity decision of the same operation. See
+  the [agql-auth bridge](agql-auth-bridge.md#accepted-request-and-current-authority).
 
-The authority is bounded to that hook invocation on that mutation's transaction:
+The authority belongs to the hook's transaction, and to nothing else:
 
-- It is presented only by operations made through the hook's `MutationContext`. The handle
-  `MutationContext::database()` returns never presents it, so a repository call, a spawned task
-  or another transaction using that handle has no authority.
-- It is revoked when the hook invocation ends, including on an error or a dropped future. Nothing
-  kept past the hook presents it. Post-commit actions, later transactions and later requests
-  start with none.
+- **No `Database` handle carries it.** The handle `MutationContext::database()` returns, a clone
+  of it, and the `db` a policy callback receives all present no originating request. A
+  repository call, a `Database::transaction`, or a task spawned from the hook therefore has no
+  request authority, whichever handle it uses, also while the hook is still running.
+- **Only a generated GraphQL mutation attaches it,** and only when its request is admitted to
+  write the mutation's entity: the entity decision is asked once more, on the `GraphqlMutation`
+  surface, before each hook invocation that attaches it. `MutationContext::run_mutation_hook`,
+  which host code can call, runs the hook without it.
+- **It ends with the hook invocation,** including on an error or a dropped future, and every read
+  of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`
+  return `None` afterwards, also for a value obtained earlier. Post-commit actions, later
+  transactions and later requests start with none.
 - A hook invoked by a repository write or a worker's transaction has no originating request.
-- Only `MutationHook` invocations of statically generated mutations present it. A
-  `RuntimeMutationHook` of the runtime GraphQL surface does not.
 - Inside `MutationContext::with_system_access`, the scope's named access replaces it.
+
+What it does not cover:
+
+- **Repository field decisions.** `can_read_repository_field_with_authority` and
+  `can_write_repository_field_with_authority` receive the named system access only;
+  `hook_request()` is always `None` there. A hook write of a field with a declared policy key is
+  decided as before, by key, entity and field name or a named hook scope.
+- **`RuntimeMutationHook`.** Only `MutationHook` invocations of statically generated mutations
+  present the request. The runtime GraphQL surface does not.
+- **Policies wrapped by a companion crate** receive what that crate forwards. `graphql-orm-ai`
+  forwards host-owned repository field decisions on its internal handle to the host policy's
+  `*_with_authority` methods (AI 0.157.0); its own key-less fields are answered by the crate.
 
 A policy that honours the originating request trusts every installed mutation hook to act for
 the caller on the entities and rows that request could itself write. Decide per entity where a

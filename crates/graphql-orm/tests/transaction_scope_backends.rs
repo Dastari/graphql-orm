@@ -223,6 +223,31 @@ impl MutationHook for ScopeHook {
                     note: Some(note.into()),
                     ..Default::default()
                 };
+                // A task the hook spawns opens its own transaction on the
+                // handle the hook can reach, while the hook is still running.
+                // PostgreSQL lets it run beside the mutation's transaction; it
+                // presents no request, so the write is refused instead of
+                // committing apart from the mutation.
+                #[cfg(feature = "postgres")]
+                {
+                    let handle = hook_ctx.database().clone();
+                    let escaped = record(&format!("escaped-{}", event.id), &zone);
+                    let outcome = tokio::spawn(async move {
+                        handle
+                            .transaction(TransactionMode::Default, |tx| {
+                                Box::pin(async move {
+                                    tx.insert::<ScopedRecord>(escaped)
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    Ok(())
+                                })
+                            })
+                            .await
+                    })
+                    .await
+                    .expect("the spawned task ran");
+                    assert_eq!(rejected_code(outcome), OrmErrorCode::Forbidden);
+                }
                 let nested = async {
                     hook_ctx.insert::<ScopedRecord>(record(&id, &zone)).await?;
                     hook_ctx

@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.156.0 to 0.157.0: authority-aware host field decisions
+
+**No action** unless the host `FieldPolicy` overrides
+`can_read_repository_field_with_authority` or
+`can_write_repository_field_with_authority` (new in ORM 0.214.0). Those
+overrides now also decide the host-owned fields this crate reads and writes
+through its internal handle: fields of host entities, and any field that
+declares a policy key. A policy that refuses calls without an authority there
+must admit the access this crate presents, or keep allowing those fields.
+The crate's own key-less fields are still answered by the crate.
+
 ## 0.155.0 to 0.156.0: capability model-context benchmark
 
 **No action.** Upgrade together with AI tool profiles 0.28.0. Broker

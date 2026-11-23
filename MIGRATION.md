@@ -25,8 +25,9 @@ the schema serves. Then:
 
 - `ScopeEntityPolicy` applies its scope requirement to the originating
   subject for the hook's nested operations.
-- A host policy reads `PolicyAuthority::hook_request()` in a
-  `*_with_authority` method and decides. A policy that wraps another forwards
+- A host `EntityPolicy` or `RowPolicy` reads `PolicyAuthority::hook_request()`
+  in a `*_with_authority` method and decides. Repository field decisions do
+  not receive the request. A policy that wraps another forwards
   the authority to the inner policy's `*_with_authority` method.
 - Under `AgqlCurrentAuthorityPolicy`, also implement
   `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.

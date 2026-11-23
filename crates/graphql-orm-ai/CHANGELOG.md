@@ -10,6 +10,19 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.157.0
+
+Requires ORM 0.214.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change. See the
+[migration guide](MIGRATION.md#01560-to-01570-authority-aware-host-field-decisions).
+
+- **Fixed (#291):** the crate's internal database handle forwards
+  repository field decisions for fields the host owns to the host policy's
+  `can_read_repository_field_with_authority` and
+  `can_write_repository_field_with_authority`. A host refusal written in
+  those methods is no longer skipped on that handle. Decisions for the
+  crate's own key-less fields are unchanged.
+
 ## Unreleased - 0.156.0
 
 Model-context measurement for the fixed capability broker (#551). Requires AI

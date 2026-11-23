@@ -104,8 +104,9 @@ install or replace that row policy. Repository
 convenience calls with `ctx=None` deny under this wrapper. The one exception is
 opt-in: with `DatabaseBuilder::propagate_request_authority_to_hooks(true)`, a
 mutation hook's nested operation presents the originating request's accepted
-identity. The wrapper then revalidates status and current authority on that
-identity, as for a request, and asks
+identity on its entity decisions. The wrapper then revalidates status and
+current authority on that identity around the binding check and the business
+entity policy, as for a request, and asks
 `AgqlBindingAuthorizer::authorize_hook_operation` instead of `authorize`, because
 no GraphQL `Context` exists for the nested operation. Its default denies, so a
 host that wants hook writes admitted implements it; see

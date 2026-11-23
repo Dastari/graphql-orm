@@ -759,7 +759,9 @@ where
         use super::query::{RowCheckMode, VisibleRowScan};
         // The search executors do not receive the read predicate, so the row
         // callback stays the authority.
-        let mode = super::query::repository_read_plan::<T, B>(self.db, None).await?;
+        let mode =
+            super::query::repository_read_plan::<T, B>(super::core::PolicyView::of(self.db), None)
+                .await?;
         self.query.check_explicit_limit()?;
         // An empty page needs no read. Authorization, the read decision and
         // the limit are already checked, so a refused search is still refused.

@@ -1,10 +1,12 @@
 //! A mutation hook's nested writes can be authorized from the originating
 //! request, a worker presents a named system access, and a call with no
 //! authority stays distinguishable and deniable (#291). The propagated
-//! authority is opt-in and bounded to the hook invocation's own transaction.
+//! authority is opt-in, lives on the hook's transaction and is never carried
+//! by a `Database` handle.
 
 #![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 
+use graphql_orm::async_graphql::{Context, Object};
 use graphql_orm::futures::future::BoxFuture;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::prelude::*;
@@ -42,7 +44,48 @@ struct HookAudit {
     note: String,
 }
 
-schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [HookOrder, HookLine, HookAudit] }
+/// Host code that drives the hook dispatcher itself, as a custom resolver can.
+#[derive(Default)]
+struct HostMutation;
+#[graphql_orm_root_fields]
+#[Object]
+impl HostMutation {
+    /// Dispatch the order-delete hook on a transaction of the host's own,
+    /// through the public dispatcher or the generated-mutation one. Returns
+    /// whether the hook's cleanup was admitted; nothing is committed.
+    async fn host_dispatch(
+        &self,
+        ctx: &Context<'_>,
+        generated: bool,
+    ) -> graphql_orm::async_graphql::Result<bool> {
+        let db = ctx.data::<Database>()?;
+        let mut tx = MutationContext::begin(db, TransactionMode::Default)
+            .await
+            .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+        let event = MutationEvent {
+            phase: MutationPhase::Before,
+            action: ChangeAction::Deleted,
+            entity_name: "HookOrder",
+            table_name: "hook_orders",
+            metadata: HookOrder::metadata(),
+            id: "o1".into(),
+            changes: Vec::new(),
+            before_state: None,
+            after_state: None,
+        };
+        let outcome = if generated {
+            tx.__run_generated_mutation_hook(Some(ctx), &event).await
+        } else {
+            tx.run_mutation_hook(Some(ctx), &event).await
+        };
+        tx.rollback()
+            .await
+            .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+        Ok(outcome.is_ok())
+    }
+}
+
+schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [HookOrder, HookLine, HookAudit], extra_mutation_types: [HostMutation] }
 
 fn lines_of(order: &str) -> HookLineWhereInput {
     HookLineWhereInput {
@@ -65,20 +108,24 @@ fn new_line(id: &str) -> CreateHookLineInput {
 /// What the hook observed and kept while it ran.
 #[derive(Default)]
 struct Observed {
-    /// `MutationContext::database()` presented the request during the hook.
-    public_handle_presented: Vec<bool>,
-    /// The transaction's own policy handle presented it during the hook.
-    policy_handle_presented: Vec<bool>,
-    /// The same, inside a `with_system_access` scope.
-    scope_presented: Vec<(bool, Option<String>)>,
-    /// Whether a pool-level check on the public handle was admitted during
-    /// the hook, from the hook itself and from a task it spawned.
-    public_checks_admitted: Vec<bool>,
+    /// Whether the transaction's own policy check admitted a line write
+    /// during the hook.
+    transaction_check_admitted: Vec<bool>,
+    /// Whether any `Database` the hook can reach presented the request.
+    handles_presented: Vec<bool>,
+    /// Whether a check on such a handle was admitted during the hook, from
+    /// the hook itself and from a task it spawned.
+    handle_checks_admitted: Vec<bool>,
+    /// The refusal of a `Database::transaction` write and of a repository
+    /// write that a task spawned by the hook made on another database.
+    spawned_transaction: Vec<Option<OrmErrorCode>>,
+    /// Whether the transaction's own check was admitted inside a
+    /// `with_system_access` scope the policy does not know.
+    scope_check_admitted: Vec<bool>,
     /// Whether the post-commit action's handle was admitted.
     deferred_admitted: Vec<bool>,
     /// Handles the hook kept past its invocation.
-    kept_public: Option<Database>,
-    kept_policy: Option<Database>,
+    kept: Vec<Database>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -87,8 +134,24 @@ enum Cleanup {
     Plain,
     /// The same, and observe every handle the hook can reach.
     Probe,
-    /// Keep the policy handle, then never complete.
+    /// Keep every handle it can reach, then never complete.
     Hang,
+}
+
+fn write_line() -> (
+    Option<&'static async_graphql::Context<'static>>,
+    &'static str,
+    Option<&'static str>,
+    EntityAccessKind,
+    EntityAccessSurface,
+) {
+    (
+        None,
+        "HookLine",
+        None,
+        EntityAccessKind::Write,
+        EntityAccessSurface::Repository,
+    )
 }
 
 async fn admitted(db: &Database) -> bool {
@@ -108,6 +171,8 @@ async fn admitted(db: &Database) -> bool {
 struct CleanupHook {
     cleanup: Cleanup,
     observed: Arc<Mutex<Observed>>,
+    /// A second database with the same policy and opt-in.
+    side: Database,
 }
 impl MutationHook for CleanupHook {
     fn on_mutation<'a>(
@@ -140,27 +205,82 @@ impl MutationHook for CleanupHook {
                 return Ok(());
             }
             let order = event.id.clone();
+            // Every `Database` a hook can reach: the public handle, and the
+            // one the transaction's policy handle dereferences to.
+            let reachable = |hook_ctx: &MutationContext<'_>| {
+                let policy = hook_ctx.__policy();
+                [hook_ctx.database().clone(), Database::clone(&policy)]
+            };
             if self.cleanup == Cleanup::Hang {
-                self.observed.lock().unwrap().kept_policy =
-                    Some(hook_ctx.__policy_database().clone());
+                self.observed
+                    .lock()
+                    .unwrap()
+                    .kept
+                    .extend(reachable(hook_ctx));
                 graphql_orm::futures::future::pending::<()>().await;
             }
             if self.cleanup == Cleanup::Probe {
-                let public = hook_ctx.database().clone();
-                let policy = hook_ctx.__policy_database().clone();
-                let from_hook = admitted(&public).await;
-                let spawned = public.clone();
-                let from_task = tokio::spawn(async move { admitted(&spawned).await })
+                // The transaction's own check, which nothing can be written
+                // through and which cannot leave the hook: the handle is not
+                // `'static`, so it cannot be kept or moved into a task.
+                let (ctx, entity, key, kind, surface) = write_line();
+                let transaction_check = hook_ctx
+                    .__policy()
+                    .can_access_entity(ctx, entity, key, kind, surface)
                     .await
-                    .unwrap();
+                    .unwrap_or(false);
+                let handles = reachable(hook_ctx);
+                let mut checks = Vec::new();
+                let mut spawned_transaction = Vec::new();
+                for handle in &handles {
+                    checks.push(admitted(handle).await);
+                    let spawned = handle.clone();
+                    checks.push(
+                        tokio::spawn(async move { admitted(&spawned).await })
+                            .await
+                            .unwrap(),
+                    );
+                }
+                // A separate transaction a spawned task opens while the hook
+                // is still running. SQLite cannot begin one beside the open
+                // write transaction, so it runs on a second database with the
+                // same policy and opt-in; the owned PostgreSQL lane does it on
+                // the hook's own handle.
+                for direct in [false, true] {
+                    let side = self.side.clone();
+                    let write = async move {
+                        if direct {
+                            return HookLine::insert(&side, new_line("direct"))
+                                .await
+                                .map(|_| ())
+                                .map_err(|error| OrmPublicError::from_sqlx(&error).code);
+                        }
+                        match side
+                            .transaction(TransactionMode::Default, |tx| {
+                                Box::pin(async move {
+                                    tx.insert::<HookLine>(new_line("spawned"))
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    Ok(())
+                                })
+                            })
+                            .await
+                        {
+                            Ok(()) => Ok(()),
+                            Err(TransactionError::Rejected(error)) => Err(error.code),
+                            Err(other) => panic!("unexpected transaction outcome: {other:?}"),
+                        }
+                    };
+                    spawned_transaction.push(tokio::spawn(write).await.unwrap().err());
+                }
                 let in_scope = hook_ctx
                     .with_system_access(SystemAccess::new("probe-scope"), |tx| {
                         Box::pin(async move {
-                            let authority = tx.__policy_database().policy_authority();
-                            (
-                                authority.hook_request().is_some(),
-                                authority.system().map(|access| access.name.clone()),
-                            )
+                            let (ctx, entity, key, kind, surface) = write_line();
+                            tx.__policy()
+                                .can_access_entity(ctx, entity, key, kind, surface)
+                                .await
+                                .unwrap_or(false)
                         })
                     })
                     .await;
@@ -171,13 +291,14 @@ impl MutationHook for CleanupHook {
                     Ok::<(), String>(())
                 });
                 let mut observed = self.observed.lock().unwrap();
-                observed.public_handle_presented.push(presents(&public));
-                observed.policy_handle_presented.push(presents(&policy));
-                observed.scope_presented.push(in_scope);
-                observed.public_checks_admitted.push(from_hook);
-                observed.public_checks_admitted.push(from_task);
-                observed.kept_public = Some(public);
-                observed.kept_policy = Some(policy);
+                observed.transaction_check_admitted.push(transaction_check);
+                observed
+                    .handles_presented
+                    .extend(handles.iter().map(presents));
+                observed.handle_checks_admitted.extend(checks);
+                observed.spawned_transaction.extend(spawned_transaction);
+                observed.scope_check_admitted.push(in_scope);
+                observed.kept.extend(handles);
             }
             hook_ctx
                 .delete_where::<HookLine>(lines_of(&order))
@@ -240,6 +361,9 @@ type Asked = Arc<Mutex<Vec<(&'static str, &'static str, String)>>>;
 /// - a hook's originating request is admitted when its subject holds
 ///   `lines.write`;
 /// - a call that presents nothing is refused.
+///
+/// Repository field decisions are recorded and allowed: they receive the
+/// system access only.
 struct Explicit(Asked);
 impl Explicit {
     fn decide(
@@ -423,7 +547,10 @@ impl FieldPolicy for Explicit {
                 access.and_then(AccessContext::system).map(|a| &a.name),
                 authority.system().map(|a| &a.name)
             );
-            Ok(self.decide("field-write", authority, None, db, entity))
+            // A repository field decision never receives a hook's request.
+            assert!(authority.hook_request().is_none());
+            self.decide("field-write", authority, None, db, entity);
+            Ok(true)
         })
     }
 }
@@ -444,7 +571,7 @@ struct Fixture {
     asked: Asked,
 }
 
-async fn setup(policy: Policy, propagate: bool, cleanup: Cleanup) -> Fixture {
+async fn database(policy: Policy, propagate: bool, asked: &Asked) -> Database {
     let mut db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
         .unwrap();
@@ -460,7 +587,6 @@ async fn setup(policy: Policy, propagate: bool, cleanup: Cleanup) -> Fixture {
             .await
             .unwrap();
     }
-    let asked: Asked = Default::default();
     match policy {
         Policy::Scope => {
             db.set_entity_policy(ScopeEntityPolicy::new(&["shop.read"], &["shop.write"]))
@@ -475,14 +601,21 @@ async fn setup(policy: Policy, propagate: bool, cleanup: Cleanup) -> Fixture {
             db.set_field_policy(Explicit(asked.clone()));
         }
     }
+    // Off by default; the host opts in.
+    assert!(!db.propagates_request_authority_to_hooks());
+    db.with_request_authority_propagated_to_hooks(propagate)
+}
+
+async fn setup(policy: Policy, propagate: bool, cleanup: Cleanup) -> Fixture {
+    let asked: Asked = Default::default();
+    let mut db = database(policy, propagate, &asked).await;
+    let side = database(policy, propagate, &asked).await;
     let observed: Arc<Mutex<Observed>> = Default::default();
     db.set_mutation_hook(CleanupHook {
         cleanup,
         observed: observed.clone(),
+        side,
     });
-    // Off by default; the host opts in.
-    assert!(!db.propagates_request_authority_to_hooks());
-    let db = db.with_request_authority_propagated_to_hooks(propagate);
     Fixture {
         db,
         observed,
@@ -579,7 +712,7 @@ async fn scope_policy_refuses_hook_cleanup_the_caller_has_no_scope_for() {
 }
 
 #[tokio::test]
-async fn entity_row_and_field_policies_receive_the_hooks_originating_request() {
+async fn entity_and_row_policies_receive_the_hooks_originating_request() {
     let fixture = setup(Policy::Explicit, true, Cleanup::Plain).await;
     let response = delete_order(&fixture.db, subject(&["lines.write"])).await;
     assert!(succeeded(response));
@@ -591,7 +724,6 @@ async fn entity_row_and_field_policies_receive_the_hooks_originating_request() {
         // The nested hook invocation keeps the outer request.
         ("entity", "HookAudit"),
         ("row-write", "HookAudit"),
-        ("field-write", "HookAudit"),
     ] {
         assert!(
             asked.iter().any(|(asked_callback, asked_entity, label)| {
@@ -600,8 +732,21 @@ async fn entity_row_and_field_policies_receive_the_hooks_originating_request() {
             "{callback} {entity}: {asked:?}"
         );
     }
-    // Every nested check presented the request: none presented nothing.
-    assert!(asked.iter().all(|(_, _, label)| label == "hook=user-1"));
+    // Every nested entity and row check presented the request. Repository
+    // field decisions are not given it.
+    for (callback, _, label) in asked.iter() {
+        let expected = if *callback == "field-write" {
+            "none"
+        } else {
+            "hook=user-1"
+        };
+        assert_eq!(label, expected, "{callback}: {asked:?}");
+    }
+    assert!(
+        asked
+            .iter()
+            .any(|(callback, _, _)| *callback == "field-write")
+    );
 }
 
 #[tokio::test]
@@ -629,8 +774,8 @@ async fn without_the_opt_in_a_hook_write_presents_no_authority() {
     assert!(!succeeded(response));
     assert_untouched(&fixture.db).await;
     let observed = fixture.observed.lock().unwrap();
-    assert_eq!(observed.policy_handle_presented, [false]);
-    assert_eq!(observed.public_handle_presented, [false]);
+    assert_eq!(observed.transaction_check_admitted, [false]);
+    assert_eq!(observed.handles_presented, [false, false]);
     // The policy told the call apart as one that presented nothing.
     assert!(
         fixture
@@ -722,49 +867,57 @@ async fn a_worker_presents_a_named_system_access_to_entity_and_row_policies() {
 }
 
 #[tokio::test]
-async fn the_originating_request_is_presented_only_on_the_hooks_own_transaction() {
+async fn no_database_handle_carries_the_originating_request() {
     let fixture = setup(Policy::Explicit, true, Cleanup::Probe).await;
     let db = &fixture.db;
     let response = delete_order(db, subject(&["lines.write"])).await;
     assert!(succeeded(response));
     assert_cleaned(db).await;
 
-    let (kept_public, kept_policy) = {
+    let kept = {
         let observed = fixture.observed.lock().unwrap();
-        // During the hook, only the transaction's own policy handle presented
-        // the request; the handle the hook can pass on did not.
-        assert_eq!(observed.policy_handle_presented, [true]);
-        assert_eq!(observed.public_handle_presented, [false]);
-        // A pool-level call on that handle, from the hook or a task it
-        // spawned, presented nothing.
-        assert_eq!(observed.public_checks_admitted, [false, false]);
-        // A named scope replaced the request while it was open.
+        // During the hook the transaction's own check was admitted on the
+        // request, while neither `Database` the hook can reach (the public
+        // handle, and the one the policy handle dereferences to) presented it.
+        assert_eq!(observed.transaction_check_admitted, [true]);
+        assert_eq!(observed.handles_presented, [false, false]);
+        // A check on either handle, from the hook or from a task it spawned
+        // while it was running, presented nothing.
+        assert_eq!(observed.handle_checks_admitted, [false; 4]);
+        // A `Database::transaction` write and a repository write that a
+        // spawned task made while the hook was running were refused: no write
+        // that commits apart from the mutation runs on the caller's authority.
         assert_eq!(
-            observed.scope_presented,
-            [(false, Some("probe-scope".to_owned()))]
+            observed.spawned_transaction,
+            [Some(OrmErrorCode::Forbidden); 2]
         );
+        // A named scope replaced the request while it was open.
+        assert_eq!(observed.scope_check_admitted, [false]);
         // The post-commit action's handle presented nothing.
         assert_eq!(observed.deferred_admitted, [false]);
-        (
-            observed.kept_public.clone().unwrap(),
-            observed.kept_policy.clone().unwrap(),
-        )
+        observed.kept.clone()
     };
 
-    // After the hook, a handle it kept presents nothing: not even a clone of
-    // the transaction's policy handle.
-    for kept in [&kept_public, &kept_policy] {
+    // After the hook, the handles it kept still present nothing.
+    assert_eq!(kept.len(), 2);
+    for kept in &kept {
         assert!(kept.policy_authority().is_none());
         assert!(!admitted(kept).await);
         assert!(HookLine::insert(kept, new_line("k1")).await.is_err());
     }
 
-    // A later repository call, transaction or request starts with none.
+    // A later repository call or transaction starts with none.
     assert!(HookLine::insert(db, new_line("k2")).await.is_err());
     let outcome = db
         .transaction(TransactionMode::Default, |tx| {
             Box::pin(async move {
-                assert!(tx.__policy_database().policy_authority().is_none());
+                let (ctx, entity, key, kind, surface) = write_line();
+                assert!(
+                    !tx.__policy()
+                        .can_access_entity(ctx, entity, key, kind, surface)
+                        .await
+                        .unwrap()
+                );
                 tx.delete_where::<HookLine>(lines_of("o2"))
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -774,13 +927,23 @@ async fn the_originating_request_is_presented_only_on_the_hooks_own_transaction(
         .await;
     assert!(matches!(outcome, Err(TransactionError::Rejected(_))));
     assert_eq!(count(db, "hook_lines").await, 1);
+    // No label other than the hook's own checks ever named the request.
+    assert!(
+        fixture
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, label)| label == "hook=user-1")
+            .all(|(callback, _, _)| *callback != "field-write")
+    );
 }
 
 #[tokio::test]
 async fn a_repository_write_gives_its_hook_no_request_authority() {
     // The opt-in is on, but this order is deleted through the repository by
     // a worker: there is no originating request to present.
-    let fixture = setup(Policy::Explicit, true, Cleanup::Probe).await;
+    let fixture = setup(Policy::Explicit, true, Cleanup::Plain).await;
     let worker = fixture
         .db
         .clone()
@@ -788,20 +951,17 @@ async fn a_repository_write_gives_its_hook_no_request_authority() {
     HookOrder::delete_by_id(&worker, &"o1".to_owned())
         .await
         .unwrap();
-    let observed = fixture.observed.lock().unwrap();
-    assert_eq!(observed.policy_handle_presented, [false]);
+    let asked = fixture.asked.lock().unwrap();
+    assert!(!asked.is_empty());
     assert!(
-        fixture
-            .asked
-            .lock()
-            .unwrap()
+        asked
             .iter()
             .all(|(_, _, label)| !label.starts_with("hook="))
     );
 }
 
 #[tokio::test]
-async fn an_abandoned_hook_invocation_revokes_the_request() {
+async fn an_abandoned_hook_invocation_leaves_no_authority_behind() {
     let fixture = setup(Policy::Explicit, true, Cleanup::Hang).await;
     let db = fixture.db.clone();
     let request = tokio::time::timeout(
@@ -810,13 +970,71 @@ async fn an_abandoned_hook_invocation_revokes_the_request() {
     )
     .await;
     assert!(request.is_err(), "the hook never completes");
-    let kept = fixture
-        .observed
-        .lock()
-        .unwrap()
-        .kept_policy
-        .clone()
-        .unwrap();
-    assert!(kept.policy_authority().is_none());
-    assert!(!admitted(&kept).await);
+    let kept = fixture.observed.lock().unwrap().kept.clone();
+    assert_eq!(kept.len(), 2);
+    for kept in &kept {
+        assert!(kept.policy_authority().is_none());
+        assert!(!admitted(kept).await);
+    }
+}
+
+async fn host_dispatch(db: &Database, subject: AuthSubject, generated: bool) -> bool {
+    let response = schema_builder(db.clone())
+        .data(subject)
+        .finish()
+        .execute(format!(
+            "mutation {{ hostDispatch(generated: {generated}) }}"
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    response.data.into_json().unwrap()["hostDispatch"] == true
+}
+
+#[tokio::test]
+async fn the_public_dispatcher_issues_no_request_authority() {
+    // A custom resolver calls `run_mutation_hook` with its request on an
+    // opted-in database. The caller holds everything the policy asks of a
+    // hook's originating request, and the hook's cleanup is still refused.
+    let fixture = setup(Policy::Explicit, true, Cleanup::Plain).await;
+    assert!(!host_dispatch(&fixture.db, subject(&["lines.write"]), false).await);
+    {
+        let asked = fixture.asked.lock().unwrap();
+        assert!(
+            asked
+                .iter()
+                .any(|(_, entity, label)| *entity == "HookLine" && label == "none"),
+            "{asked:?}"
+        );
+        assert!(
+            asked
+                .iter()
+                .all(|(_, _, label)| !label.starts_with("hook="))
+        );
+    }
+    assert_untouched(&fixture.db).await;
+
+    let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
+    assert!(
+        !host_dispatch(
+            &fixture.db,
+            subject(&["orders.write", "lines.write"]),
+            false
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn request_authority_is_issued_only_to_a_request_admitted_to_the_mutation() {
+    // The generated-mutation dispatcher asks the entity write decision of the
+    // mutation's own entity again before it attaches the request. A caller
+    // who is not admitted to delete orders gets no authority from it, even
+    // though the same caller could write lines.
+    let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
+    assert!(!host_dispatch(&fixture.db, subject(&["lines.write"]), true).await);
+    // A caller admitted to the mutation is the case the opt-in is for.
+    assert!(host_dispatch(&fixture.db, subject(&["orders.write", "lines.write"]), true).await);
+    // Without the opt-in, nothing is attached for anyone.
+    let fixture = setup(Policy::PerEntity, false, Cleanup::Plain).await;
+    assert!(!host_dispatch(&fixture.db, subject(&["orders.write", "lines.write"]), true).await);
 }
