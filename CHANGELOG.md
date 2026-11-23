@@ -21,6 +21,17 @@ for historical context.
   duplication. SQLite evaluates the verdict against physical rows to preserve
   column collation and affinity (#785).
 
+## Unreleased - ORM/macros 0.205.0
+
+- **Changed (part of #677, #358).** Generated Changed subscriptions share
+  the runtime's stream and authorization code, reducing the work rustc does
+  for each entity with subscriptions enabled.
+  **No action.** See the
+  [migration guide](MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+- **Added.** Changed subscriptions support combining `changed_started = true`
+  with `key_only_deletes`. An authorized exact-key subscriber can request a
+  started frame and receive key-only `DELETED` frames with `started: false`.
+
 ## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
 
 - **Added (follow-up to #731).** Opt in per database when another product

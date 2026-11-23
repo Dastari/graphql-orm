@@ -10,6 +10,10 @@ use async_graphql::Context;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
+mod changed;
+#[doc(hidden)]
+pub use changed::{ChangedEventView, ChangedSubscriptionAdapter, open_generated_changed};
+
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod computed_field;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

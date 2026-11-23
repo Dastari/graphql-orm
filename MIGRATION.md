@@ -10,15 +10,26 @@ supersedes: []
 
 # Migration Guide
 
-## 0.204.0 to 0.211.0: directly nested closure read predicates
+## 0.205.0 to 0.211.0: directly nested closure read predicates
 
 **No action.** A root closure whose target is itself a closure over built-in
 column tests and NULL checks can reuse the inner walk's three-valued result.
-The policy admits the same rows with fewer SQL fragments and bind parameters.
-SQLite reads physical columns at the anchor and recursive step to preserve
-their declared collation and type affinity. Composition limits still apply.
+On SQLite, PostgreSQL, and SQL Server the policy admits the same rows as the
+original rendering, with fewer SQL fragments and bind parameters. That
+includes text columns with a non-default collation and binds whose type
+differs from the column's. On SQLite the nested verdict reads the physical
+row at the anchor and at each recursive step, because a projected row can
+lose the column's declared collation and type affinity; it therefore repeats
+the target's binds there, as on PostgreSQL. Composition limits still apply.
 Applications that snapshot generated policy SQL may need to refresh those
 snapshots. Refs #785.
+
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
 
 ## 0.203.0 to 0.204.0: externally managed backup and restore
 
