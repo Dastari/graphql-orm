@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.207.0 to 0.215.0: scoped SQLite column drop
+
+**No action.** Upgrade ORM and macros together. An owned SQLite plan whose
+only change is to drop a column now renders SQLite's native `DROP COLUMN`.
+The plan is destructive and still requires `ApplyOptions::allow_destructive`.
+Application checks the live foreign-key catalog and tests SQLite's native
+alterations against an empty copy of the schema. A trial rename identifies
+retained references that SQLite could silently rebind or ignore, including
+`UPDATE OF` trigger events. The live drop proceeds only when the checks
+verify that it preserves the retained physical schema.
+Refs #882.
+
 ## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
 
 **No action.** SQLite renders every closure read predicate, single-level and

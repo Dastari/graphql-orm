@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.215.0 aligns with the ORM's
+[scoped SQLite column drop](../../MIGRATION.md#02070-to-02150-scoped-sqlite-column-drop).
+
 Version 0.207.0 aligns with the ORM's
 [closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
 

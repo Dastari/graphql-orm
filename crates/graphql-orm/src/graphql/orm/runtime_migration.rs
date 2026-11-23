@@ -974,6 +974,26 @@ pub struct OwnedPlannedMigration {
     #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     equivalence: DefaultEquivalence,
 }
+fn isolated_sqlite_drop<'a>(
+    backend: DatabaseBackend,
+    steps: impl IntoIterator<Item = &'a OwnedMigrationStep>,
+) -> Option<(&'a str, &'a str)> {
+    if backend != DatabaseBackend::Sqlite {
+        return None;
+    }
+    let mut steps = steps.into_iter();
+    match (steps.next(), steps.next()) {
+        (
+            Some(OwnedMigrationStep::DropColumn {
+                table_name,
+                column_name,
+            }),
+            None,
+        ) => Some((table_name, column_name)),
+        _ => None,
+    }
+}
+
 impl OwnedPlannedMigration {
     /// Host version identifier.
     pub fn version(&self) -> &str {
@@ -1068,6 +1088,14 @@ impl OwnedPlannedMigration {
         Ok(())
     }
     #[cfg(feature = "sqlite")]
+    pub(super) fn sqlite_column_drop(&self) -> Option<(&str, &str)> {
+        (self.backend == "sqlite")
+            .then(|| {
+                isolated_sqlite_drop(DatabaseBackend::Sqlite, self.steps.iter().map(|s| &s.step))
+            })
+            .flatten()
+    }
+    #[cfg(feature = "sqlite")]
     pub(super) fn rebuilt_sqlite_tables(&self) -> impl Iterator<Item = &str> {
         self.ownership.tables().filter(|table| {
             let temporary = format!("__graphql_orm_{table}_new");
@@ -1133,6 +1161,10 @@ impl OwnedPlannedMigration {
             &self.target,
             &self.ownership,
             self.equivalence,
+            #[cfg(feature = "sqlite")]
+            self.sqlite_column_drop().map(|(table, _)| table),
+            #[cfg(not(feature = "sqlite"))]
+            None,
         )
         .map_err(Into::into)
     }
@@ -1316,6 +1348,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             target,
             ownership,
             DefaultEquivalence::TypedLiteralsV1,
+            None,
         )?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);
         Ok(validate_schema_views(
@@ -1355,23 +1388,38 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         if version.trim().is_empty() || version.len() > 256 || description.len() > 4096 {
             return Err(rejection(RuntimeMigrationDiagnosticCode::LimitExceeded).into());
         }
-        B::validate_owned_dependencies(self.database.pool(), ownership).await?;
+        if B::DIALECT != DatabaseBackend::Sqlite {
+            B::validate_owned_dependencies(self.database.pool(), ownership).await?;
+        }
         self.check_search_languages(target).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
+        let scoped = scoped_current(&current, ownership, options, target);
+        let mut physical = build_migration_plan_views_with(
+            B::DIALECT,
+            &scoped.borrowed(),
+            &target.borrowed(),
+            DefaultEquivalence::TypedLiteralsV1,
+        );
+        let column_drop = isolated_sqlite_drop(B::DIALECT, &physical.steps);
+        if B::DIALECT == DatabaseBackend::Sqlite && column_drop.is_none() {
+            B::validate_owned_dependencies(self.database.pool(), ownership).await?;
+        }
         validate_owned_effects(
             B::DIALECT,
             &current,
             target,
             ownership,
             DefaultEquivalence::TypedLiteralsV1,
+            column_drop.map(|(table, _)| table),
         )?;
-        let scoped = scoped_current(&current, ownership, options, target);
-        let physical = build_migration_plan_views_with(
-            B::DIALECT,
-            &scoped.borrowed(),
-            &target.borrowed(),
-            DefaultEquivalence::TypedLiteralsV1,
-        );
+        if let Some((table, column)) = column_drop {
+            let sqlite = DatabaseBackend::Sqlite;
+            physical.statements = vec![format!(
+                "ALTER TABLE main.{} DROP COLUMN {}",
+                sqlite.delimit_raw_identifier(table),
+                sqlite.delimit_raw_identifier(column),
+            )];
+        }
         if B::DIALECT == DatabaseBackend::Postgres {
             let steps = physical.steps.iter().map(StepRef::from).collect::<Vec<_>>();
             if let Some(overlong) = super::migrations::postgres_overlong_identifier(&steps) {
@@ -1593,6 +1641,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             target,
             ownership,
             DefaultEquivalence::TypedLiteralsV1,
+            None,
         )?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);
         let typed = DefaultEquivalence::TypedLiteralsV1;
@@ -1712,6 +1761,7 @@ fn validate_owned_effects(
     target: &OwnedSchemaModel,
     ownership: &ManagedTableSet,
     equivalence: DefaultEquivalence,
+    isolated_sqlite_drop_table: Option<&str>,
 ) -> Result<(), RuntimeMigrationDiagnostics> {
     if target
         .tables
@@ -1767,7 +1817,9 @@ fn validate_owned_effects(
         // Unmanaged incoming dependencies prevent destructive/structural target changes.
         if !ownership.contains(&table.table_name) {
             for foreign_key in &table.foreign_keys {
-                if ownership.contains(&foreign_key.target_table) {
+                if ownership.contains(&foreign_key.target_table)
+                    && isolated_sqlite_drop_table != Some(foreign_key.target_table.as_str())
+                {
                     let unchanged = current
                         .tables
                         .iter()

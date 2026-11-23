@@ -2501,3 +2501,284 @@ async fn postgres_owned_real_text_defaults_apply_certify_and_rollback_atomically
     owned.cleanup()?;
     Ok(())
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_column_drop_preserves_unrelated_index_and_incoming_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    sqlx::raw_sql(
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT NOT NULL, retired_payload TEXT);
+         CREATE INDEX parent_label ON parent(label);
+         CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER
+             REFERENCES parent(id) ON DELETE RESTRICT);
+         INSERT INTO parent VALUES (7, 'retained', 'retired');
+         INSERT INTO child VALUES (11, 7);",
+    )
+    .execute(db.pool())
+    .await?;
+    let mut expected = introspect_sqlite_schema(&db).await?;
+    expected
+        .tables
+        .iter_mut()
+        .find(|table| table.table_name == "parent")
+        .unwrap()
+        .columns
+        .retain(|column| column.name != "retired_payload");
+    let ownership = ManagedTableSet::new(["parent".into(), "child".into()])?;
+    let manager = db.schema();
+    let plan = manager
+        .plan_owned_migration(
+            "drop-retired",
+            "drop retired payload",
+            &OwnedSchemaModel::from(&expected),
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert_eq!(plan.steps().len(), 1);
+    assert_eq!(plan.steps()[0].risk(), MigrationRisk::Destructive);
+    assert!(
+        manager
+            .apply_owned_migration(&plan, Default::default())
+            .await
+            .is_err()
+    );
+    manager
+        .apply_owned_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(introspect_sqlite_schema(&db).await?, expected);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String)>("SELECT id, label FROM parent")
+            .fetch_one(db.pool())
+            .await?,
+        (7, "retained".into()),
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>("SELECT id, parent_id FROM child")
+            .fetch_one(db.pool())
+            .await?,
+        (11, 7),
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_column_drop_preserves_physical_options_and_host_objects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    sqlx::raw_sql(
+        "CREATE TABLE parent (
+             id INTEGER PRIMARY KEY, label TEXT NOT NULL, retired_payload TEXT
+         ) STRICT, WITHOUT ROWID;
+         CREATE INDEX parent_label ON parent(label COLLATE NOCASE DESC)
+             WHERE length(label) > 0;
+         CREATE TABLE child (
+             id INTEGER PRIMARY KEY,
+             parent_id INTEGER REFERENCES parent(id) ON UPDATE CASCADE
+                 ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED
+         );
+         CREATE TABLE audit (label TEXT);
+         CREATE TRIGGER capture_label AFTER UPDATE OF label ON parent
+             BEGIN INSERT INTO audit VALUES (NEW.label); END;
+         CREATE VIEW labels AS SELECT label FROM parent;
+         INSERT INTO parent VALUES (7, 'retained', 'retired');
+         INSERT INTO child VALUES (11, 7);",
+    )
+    .execute(db.pool())
+    .await?;
+    let catalog = "SELECT name, sql FROM main.sqlite_schema
+                   WHERE name IN ('parent_label', 'child', 'capture_label', 'labels')
+                   ORDER BY name";
+    let before: Vec<(String, String)> = sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    let mut expected = introspect_sqlite_schema(&db).await?;
+    let mut wanted = expected.clone();
+    wanted.tables.retain(|table| table.table_name == "parent");
+    wanted.tables[0]
+        .columns
+        .retain(|column| column.name != "retired_payload");
+    expected
+        .tables
+        .iter_mut()
+        .find(|table| table.table_name == "parent")
+        .unwrap()
+        .columns
+        .retain(|column| column.name != "retired_payload");
+
+    let manager = db.schema();
+    let plan = manager
+        .plan_owned_migration(
+            "drop-retired",
+            "drop retired payload",
+            &OwnedSchemaModel::from(&wanted),
+            &ManagedTableSet::new(["parent".into()])?,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert_eq!(
+        plan.statements(),
+        [r#"ALTER TABLE main."parent" DROP COLUMN "retired_payload""#]
+    );
+    manager
+        .apply_owned_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let after: Vec<(String, String)> = sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    assert_eq!(after, before);
+    assert_eq!(introspect_sqlite_schema(&db).await?, expected);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT wr, strict FROM pragma_table_list WHERE schema='main' AND name='parent'",
+        )
+        .fetch_one(db.pool())
+        .await?,
+        (1, 1),
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String)>("SELECT id, label FROM parent")
+            .fetch_one(db.pool())
+            .await?,
+        (7, "retained".into()),
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>("SELECT id, parent_id FROM child")
+            .fetch_one(db.pool())
+            .await?,
+        (11, 7),
+    );
+    let mut tx = db.pool().begin().await?;
+    sqlx::query("INSERT INTO child VALUES (12, 9)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE parent SET id=9, label='changed' WHERE id=7")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT parent_id FROM child WHERE id=11")
+            .fetch_one(db.pool())
+            .await?,
+        9,
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT label FROM audit")
+            .fetch_one(db.pool())
+            .await?,
+        "changed",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_column_drop_preflights_live_dependencies_and_rolls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    sqlx::raw_sql(
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT, retired_payload TEXT);
+         INSERT INTO parent VALUES (7, 'retained', 'retired');",
+    )
+    .execute(db.pool())
+    .await?;
+    let before = introspect_sqlite_schema(&db).await?;
+    let mut target = before.clone();
+    target.tables[0]
+        .columns
+        .retain(|column| column.name != "retired_payload");
+    let manager = db.schema();
+    let ownership = ManagedTableSet::new(["parent".into()])?;
+    let target = OwnedSchemaModel::from(&target);
+    let options = ApplyOptions {
+        allow_destructive: true,
+        ..Default::default()
+    };
+    let plan = manager
+        .plan_owned_migration(
+            "drop-retired",
+            "drop retired payload",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    // Views are absent from the modeled baseline. The dependency check must use
+    // the catalog under the transaction's write reservation.
+    sqlx::query("CREATE VIEW retained_view AS SELECT retired_payload FROM parent")
+        .execute(db.pool())
+        .await?;
+    let error = manager
+        .apply_owned_migration(&plan, options.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("view retained_view"),
+        "{error:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM main.sqlite_schema WHERE name='__graphql_orm_migrations'",
+        )
+        .fetch_one(db.pool())
+        .await?,
+        0,
+    );
+
+    sqlx::raw_sql(
+        "DROP VIEW retained_view;
+         CREATE TABLE __graphql_orm_migrations (
+             version TEXT PRIMARY KEY, description TEXT NOT NULL,
+             applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TRIGGER fail_history_insert BEFORE INSERT ON __graphql_orm_migrations
+         BEGIN SELECT RAISE(ABORT, 'history insert after drop'); END;",
+    )
+    .execute(db.pool())
+    .await?;
+    let catalog = "SELECT name, sql FROM main.sqlite_schema ORDER BY name";
+    let schema_before: Vec<(String, Option<String>)> =
+        sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    let error = manager
+        .apply_owned_migration(&plan, options)
+        .await
+        .unwrap_err();
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("history insert after drop"),
+        "{error:?}"
+    );
+    let schema_after: Vec<(String, Option<String>)> =
+        sqlx::query_as(catalog).fetch_all(db.pool()).await?;
+    assert_eq!(schema_after, schema_before);
+    assert_eq!(introspect_sqlite_schema(&db).await?, before);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String, String)>("SELECT id, label, retired_payload FROM parent")
+            .fetch_one(db.pool())
+            .await?,
+        (7, "retained".into(), "retired".into()),
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM __graphql_orm_migrations")
+            .fetch_one(db.pool())
+            .await?,
+        0,
+    );
+    Ok(())
+}
