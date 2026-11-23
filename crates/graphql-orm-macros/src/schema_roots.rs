@@ -244,7 +244,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! {
                 ::graphql_orm::graphql::orm::InterpretationEntity::of::<#entity, #backend_marker>(
                     #entity::__GOM_INTERPRETATION_SOURCE,
-                )
+                ).with_changed_replay(#entity::__GOM_CHANGED_REPLAY)
             }
         })
         .collect::<Vec<_>>();
@@ -254,7 +254,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 ::graphql_orm::graphql::orm::ClientEntitySource::of::<#entity, #backend_marker>(
                     #entity::__GOM_CHANGED_ROOT_NAME,
                     #entity::__GOM_CHANGED_STARTED_SIGNAL,
-                )
+                ).with_changed_replay(#entity::__GOM_CHANGED_REPLAY)
             }
         });
         quote! {

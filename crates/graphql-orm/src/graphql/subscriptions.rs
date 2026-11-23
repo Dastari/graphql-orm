@@ -12,7 +12,19 @@ use std::sync::Arc;
 
 mod changed;
 #[doc(hidden)]
-pub use changed::{ChangedEventView, ChangedSubscriptionAdapter, open_generated_changed};
+pub use changed::{
+    ChangedEventView, ChangedSubscriptionAdapter, open_generated_changed,
+    open_generated_changed_after,
+};
+
+pub(crate) mod replay;
+pub use replay::SUBSCRIPTION_REPLAY_RESET;
+#[doc(hidden)]
+pub use replay::{ChangedReplaySize, publish_changed_replay};
+
+/// Interpretation version of opted-in generated Changed cursors.
+#[doc(hidden)]
+pub const CHANGED_REPLAY_CURSOR_FORMAT: u32 = replay::CURSOR_FORMAT;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod computed_field;
@@ -224,6 +236,7 @@ pub struct SubscriptionEvent<E: Clone, B: OrmBackend = DefaultBackend> {
     /// Whether a generated delete supplied its trusted final preimage.
     pub trusted_delete: bool,
     sources: Vec<SubscriptionEventSource<B>>,
+    replay_position: Option<replay::Position>,
 }
 impl<E: Clone, B: OrmBackend> std::fmt::Debug for SubscriptionEvent<E, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -243,6 +256,7 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
             keys,
             trusted_delete,
             sources,
+            replay_position: None,
         })
     }
     /// Check every source and require the public provenance to match its witness.

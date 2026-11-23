@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.205.0 to 0.213.0: generated Changed replay
+
+**No action.** Upgrade ORM and macros together. No data migration is needed.
+To adopt replay, set `changed_started = true, changed_replay = true` on the
+entity. Update clients to save `Cursor`, resume with `After` and resubscribe
+without a cursor before refetching on `SUBSCRIPTION_REPLAY_RESET`. Operation
+catalogue 0.13.0 describes the replay window in exported client metadata.
+[Changed replay reference](docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 ## 0.204.0 to 0.205.0: generated Changed subscriptions
 
 **No action.** Upgrade ORM and macros together. Generated Changed

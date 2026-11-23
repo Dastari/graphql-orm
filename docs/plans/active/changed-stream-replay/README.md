@@ -3,7 +3,7 @@ title: Changed stream replay plan
 kind: plan
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-23
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -12,7 +12,7 @@ supersedes: []
 
 Design plan for [#668](https://github.com/Dastari/graphql-orm/issues/668):
 an opt-in event cursor and bounded replay for generated `<Entity>Changed`
-streams. This plan holds the design. Nothing here is implemented yet.
+streams. This plan records the design and remaining review gates.
 
 ## Outcome
 
@@ -244,9 +244,11 @@ passes cursors and the reset error through unchanged.
 
 ## Current checkpoint
 
-Design written; no code. Revised 2026-11-19 against current source: the
-catalogue mode, ordering wording, #666 status, started-frame requirement,
-cursor key and reset timing. Next boundary: the breaking batch carrying #666
-reaches `main` (or the work targets `next/breaking`). Then the maintainer
-reviews this design (retention caps and defaults, the attribute name, the
-reset code name) before an implementation PR on the ORM/macros line.
+The implementation is ready for qualification and independent authorization
+review. It uses the shared Changed release path and fixed caps of 128 events,
+2 MiB of accounted witness storage, and two minutes. An authenticated,
+unexpired resume waits for the authority tick before replay or a capacity
+reset. The
+[Changed reference](../../../reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+describes the wire contract. Next gate is independent authorization review
+before the plan moves to the completed index.

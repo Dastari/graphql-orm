@@ -2,8 +2,9 @@
 
 use super::{
     ChangedPayload, SubscriptionEvent, SubscriptionKeySet, admit_generated_operation,
-    admit_subscription_keys, authorize_subscription_fields, authorize_subscription_key_fields,
-    authorize_subscription_keys, authorize_subscription_row, continuity_events,
+    admit_subscription_keys, authority_check_end, authority_recheck_delay,
+    authorize_subscription_fields, authorize_subscription_key_fields, authorize_subscription_keys,
+    authorize_subscription_row, continuity_events, lag_end, replay,
     validate_subscription_selection, watch_subscription_authority,
 };
 use crate::db::{Database, request_database};
@@ -18,7 +19,12 @@ use crate::graphql::{
     },
 };
 use async_graphql::{Context, OutputType, Result};
-use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
+use futures::{
+    StreamExt,
+    future::BoxFuture,
+    stream::{self, BoxStream},
+};
+use std::sync::Arc;
 
 /// Borrowed event metadata used to verify the generated emission witness.
 #[doc(hidden)]
@@ -45,6 +51,7 @@ pub trait ChangedSubscriptionAdapter<B: OrmBackend>: 'static {
     const ENTITY_NAME: &'static str;
     const ENTITY_FIELD: &'static str;
     const KEY_ONLY_DELETES: bool;
+    const REPLAY_ROOT: Option<&'static str> = None;
 
     fn key_values(key: &Self::Key) -> Vec<SqlValue>;
     fn row_key_values(row: &Self::Row) -> Vec<SqlValue>;
@@ -52,12 +59,30 @@ pub trait ChangedSubscriptionAdapter<B: OrmBackend>: 'static {
     fn view(event: &Self::Event) -> ChangedEventView<'_, Self::Row>;
     /// Build the authorized row payload, or a key-only delete when row is absent.
     fn payload(event: &Self::Event, row: Option<Self::Row>) -> Self::Payload;
+
+    fn with_replay_cursor(payload: Self::Payload, _cursor: String) -> Self::Payload {
+        payload
+    }
     fn started_payload() -> Option<Self::Payload>;
     fn authorize_resolver(ctx: &Context<'_>) -> Result<()>;
     fn authorize_operation(ctx: &Context<'_>) -> Result<()>;
 }
 
 type ChangedStream<'a, T> = BoxStream<'a, Result<ChangedPayload<T>>>;
+
+enum Frame<T> {
+    Witness(T),
+    Started,
+}
+
+type Witness<E, B> = SubscriptionEvent<E, B>;
+type Frames<T> = BoxStream<'static, Result<Frame<T>>>;
+
+#[derive(Clone)]
+struct Cursor<T> {
+    ring: Arc<replay::ChangedReplay<T>>,
+    binding: [u8; 32],
+}
 
 /// Open a generated Changed stream. The boxed boundary keeps the stream and
 /// its authorization futures out of downstream resolver type checking.
@@ -68,6 +93,23 @@ pub fn open_generated_changed<'a, B, E>(
     key: Option<E::Key>,
     keys: Option<Vec<E::Key>>,
     started: bool,
+) -> BoxFuture<'a, Result<ChangedStream<'a, E::Payload>>>
+where
+    B: OrmBackend,
+    E: ChangedSubscriptionAdapter<B>,
+{
+    open_generated_changed_after::<B, E>(ctx, filter, key, keys, started, None)
+}
+
+/// Open an opted-in Changed stream, optionally resuming from a cursor.
+#[doc(hidden)]
+pub fn open_generated_changed_after<'a, B, E>(
+    ctx: &'a Context<'_>,
+    filter: Option<SubscriptionFilterInput>,
+    key: Option<E::Key>,
+    keys: Option<Vec<E::Key>>,
+    started: bool,
+    after: Option<String>,
 ) -> BoxFuture<'a, Result<ChangedStream<'a, E::Payload>>>
 where
     B: OrmBackend,
@@ -89,26 +131,117 @@ where
             keys.map(|keys| keys.iter().map(E::key_values).collect()),
         )?;
         let actions = filter.and_then(|filter| filter.actions);
-        let rx = db
-            .ensure_event_sender::<SubscriptionEvent<E::Event, B>>()
-            .subscribe();
+        let (frames, cursor): (_, Option<Cursor<_>>) = if let Some(root) = E::REPLAY_ROOT {
+            let binding = replay::binding(
+                ctx.data_opt::<crate::graphql::auth::AuthSubject>(),
+                root,
+                key.as_ref()
+                    .map(|key| RelationKey::from_sql_values(&E::key_values(key))),
+                keys.as_deref(),
+                actions.as_deref(),
+            );
+            let cursor = open_replay::<B, E>(db, ctx, binding, after, started).await?;
+            (cursor.0, Some(cursor.1))
+        } else {
+            let receiver = db.ensure_event_sender::<Witness<E::Event, B>>().subscribe();
+            (
+                stream::iter(started.then_some(Ok(Frame::Started)))
+                    .chain(continuity_events(receiver).map(|item| item.map(Frame::Witness)))
+                    .boxed(),
+                None,
+            )
+        };
 
-        let events = continuity_events(rx).filter_map(move |result| {
-            filter_event::<B, E>(db, ctx, result, key.clone(), keys.clone(), actions.clone())
+        let events = frames.filter_map(move |result| {
+            let key = key.clone();
+            let keys = keys.clone();
+            let actions = actions.clone();
+            let cursor = cursor.clone();
+            async move {
+                let witness = match result {
+                    Ok(Frame::Witness(witness)) => witness,
+                    Ok(Frame::Started) => {
+                        return ChangedPayload::prepare(E::started_payload()?, ctx)
+                            .await
+                            .map(Ok);
+                    }
+                    Err(error) => return Some(Err(error)),
+                };
+                if cursor.is_some() && witness.replay_position.is_none() {
+                    // A host-injected unsequenced witness breaks continuity.
+                    return Some(Err(lag_end()));
+                }
+                filter_event::<B, E>(db, ctx, witness, key, keys, actions, cursor.as_ref()).await
+            }
         });
-        let started_frame =
-            futures::stream::iter(started.then_some(())).filter_map(move |()| async move {
-                ChangedPayload::prepare(E::started_payload()?, ctx)
-                    .await
-                    .map(Ok)
-            });
         let events = watch_subscription_authority(
-            started_frame.chain(events),
+            events,
             db.subscription_authority_recheck_interval(),
             move || check_stream_authority::<B, E>(db, ctx),
         );
         Ok(events.boxed())
     })
+}
+
+async fn open_replay<B, E>(
+    db: &Database<B>,
+    ctx: &Context<'_>,
+    binding: [u8; 32],
+    after: Option<String>,
+    started: bool,
+) -> Result<(Frames<Witness<E::Event, B>>, Cursor<Witness<E::Event, B>>)>
+where
+    B: OrmBackend,
+    E: ChangedSubscriptionAdapter<B>,
+{
+    let (ring, mut sender) = db.changed_replay::<Witness<E::Event, B>>();
+    let after = if let Some(token) = after {
+        let position = ring
+            .open(&token, &binding)
+            .filter(|position| !ring.expired(*position))
+            .ok_or_else(replay::reset)?;
+        drop(sender);
+
+        // Defer both successful and capacity-evicted resumptions. An early
+        // successful replay or started frame would also disclose eviction.
+        tokio::time::sleep(authority_recheck_delay(
+            db.subscription_authority_recheck_interval(),
+        ))
+        .await;
+        check_stream_authority::<B, E>(db, ctx)
+            .await
+            .map_err(authority_check_end)?;
+
+        let (current, channel) = db.changed_replay();
+        if !Arc::ptr_eq(&current, &ring) {
+            return Err(replay::reset());
+        }
+        sender = channel;
+        Some(position)
+    } else {
+        None
+    };
+    let (receiver, last) = ring.subscribe(&sender, after).ok_or_else(replay::reset)?;
+    let replay = stream::unfold(after.and_then(|pos| pos.sequence.checked_add(1)), {
+        let ring = ring.clone();
+        move |next| {
+            let ring = ring.clone();
+            async move {
+                let next = next.filter(|&next| next <= last)?;
+                match ring.get(next) {
+                    Some(witness) => Some((Ok(Frame::Witness(witness)), next.checked_add(1))),
+                    None => Some((Err(lag_end()), None)),
+                }
+            }
+        }
+    });
+    let frames = replay
+        .chain(stream::iter(
+            (started || after.is_some()).then_some(Ok(Frame::Started)),
+        ))
+        .chain(continuity_events(receiver).map(|item| item.map(Frame::Witness)))
+        .boxed();
+    Ok((frames, Cursor { ring, binding }))
 }
 
 async fn ensure_entity_access<B: OrmBackend, E: ChangedSubscriptionAdapter<B>>(
@@ -129,20 +262,16 @@ async fn ensure_entity_access<B: OrmBackend, E: ChangedSubscriptionAdapter<B>>(
 async fn filter_event<B, E>(
     db: &Database<B>,
     ctx: &Context<'_>,
-    result: Result<SubscriptionEvent<E::Event, B>>,
+    witness: SubscriptionEvent<E::Event, B>,
     key: Option<E::Key>,
     keys: Option<SubscriptionKeySet>,
     actions: Option<Vec<ChangeAction>>,
+    cursor: Option<&Cursor<Witness<E::Event, B>>>,
 ) -> Option<Result<ChangedPayload<E::Payload>>>
 where
     B: OrmBackend,
     E: ChangedSubscriptionAdapter<B>,
 {
-    // Lost continuity or a closed source yields one error and ends the stream.
-    let witness = match result {
-        Ok(witness) => witness,
-        Err(error) => return Some(Err(error)),
-    };
     // Cover all dropped events, including diagnostics from host policy checks.
     let errors_before = match buffered_errors::count(ctx) {
         Ok(count) => count,
@@ -155,6 +284,7 @@ where
         key.as_ref(),
         keys.as_deref(),
         actions.as_deref(),
+        cursor,
     )
     .await;
     if delivered.is_none()
@@ -172,6 +302,7 @@ async fn prepare_event<B, E>(
     key: Option<&E::Key>,
     keys: Option<&std::collections::HashSet<RelationKey>>,
     actions: Option<&[ChangeAction]>,
+    cursor: Option<&Cursor<Witness<E::Event, B>>>,
 ) -> Option<ChangedPayload<E::Payload>>
 where
     B: OrmBackend,
@@ -191,9 +322,21 @@ where
     }
     let exact_key = key.is_some() || keys.is_some();
     let authorize = || authorize_event::<B, E>(db, ctx, witness, &view, &key_matches, exact_key);
+    let payload = |row| {
+        let payload = E::payload(event, row);
+        match cursor {
+            Some(cursor) => {
+                let token = cursor
+                    .ring
+                    .seal(witness.replay_position?, &cursor.binding)?;
+                Some(E::with_replay_cursor(payload, token))
+            }
+            None => Some(payload),
+        }
+    };
     match authorize().await {
         Ok(row) => {
-            let prepared = ChangedPayload::prepare(E::payload(event, Some(row)), ctx).await?;
+            let prepared = ChangedPayload::prepare(payload(Some(row))?, ctx).await?;
             // Serialization can await host code. Recheck the entire release contract.
             authorize()
                 .await
@@ -216,7 +359,7 @@ where
                 .await
                 .map_err(relation_authorization_error)
                 .ok()?;
-            let prepared = ChangedPayload::prepare(E::payload(event, None), ctx).await?;
+            let prepared = ChangedPayload::prepare(payload(None)?, ctx).await?;
             authorize()
                 .await
                 .map_err(relation_authorization_error)

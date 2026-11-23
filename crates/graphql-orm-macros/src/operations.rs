@@ -1579,6 +1579,17 @@ fn generate_graphql_operations_unfiltered(
         ));
     }
 
+    if let Some(span) = entity_meta.changed_replay
+        && (!entity_meta.changed_started
+            || crate::entity::has_repository_entity_attribute(&input.attrs))
+    {
+        return Err(syn::Error::new(
+            span,
+            "changed_replay requires a GraphQL entity with changed_started = true",
+        ));
+    }
+    let changed_replay = entity_meta.changed_replay.is_some();
+
     let query_shape_enabled = |shape: &str| {
         entity_meta
             .query_shapes
@@ -2757,12 +2768,48 @@ fn generate_graphql_operations_unfiltered(
             .unwrap_or_default(),
     );
     let changed_started_signal = entity_meta.changed_started;
+    let replay_publisher = if changed_replay {
+        let row_fields = fields.iter().map(|field| &field.ident);
+        let key_heap = if has_composite_primary_key {
+            let parts = primary_key_fields.iter().map(|field| &field.field_name);
+            quote! { #( .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.key.#parts)) )* }
+        } else {
+            quote! {}
+        };
+        quote! {
+            #[doc(hidden)]
+            fn __gom_publish_changed_replay(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                event: ::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>,
+            ) {
+                use ::graphql_orm::graphql::subscriptions::ChangedReplaySize;
+                let payload = event.event.as_ref();
+                let row_bytes = payload.entity.as_ref().map_or(0usize, |row| {
+                    0usize #( .saturating_add(ChangedReplaySize::replay_heap_bytes(&row.#row_fields)) )*
+                });
+                let event_bytes = ChangedReplaySize::replay_heap_bytes(&payload.id)
+                    .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.source_entity))
+                    .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.source_id))
+                    .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.path))
+                    .saturating_add(row_bytes)
+                    #key_heap;
+                ::graphql_orm::graphql::subscriptions::publish_changed_replay(db, event, event_bytes);
+            }
+        }
+    } else {
+        quote! {}
+    };
     let subscription_key_method = quote! {
         #[doc(hidden)]
         pub const __GOM_CHANGED_ROOT_NAME: &'static str = #subscription_name;
 
         #[doc(hidden)]
         pub const __GOM_CHANGED_STARTED_SIGNAL: bool = #changed_started_signal;
+
+        #[doc(hidden)]
+        pub const __GOM_CHANGED_REPLAY: bool = #changed_replay;
+
+        #replay_publisher
 
         #[doc(hidden)]
         pub const __GOM_INTERPRETATION_SOURCE: &'static str = #interpretation_source;
@@ -2827,10 +2874,17 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     };
-    let queue_subscription_witness =
-        subscription_witness_emission(quote! { hook_ctx.queue_event(witness); });
-    let emit_subscription_witness =
-        subscription_witness_emission(quote! { db.emit_event(witness); });
+    let queue_witness = if changed_replay {
+        quote! { hook_ctx.queue_changed_replay(witness, Self::__gom_publish_changed_replay); }
+    } else {
+        quote! { hook_ctx.queue_event(witness); }
+    };
+    let queue_subscription_witness = subscription_witness_emission(queue_witness.clone());
+    let emit_subscription_witness = subscription_witness_emission(if changed_replay {
+        quote! { Self::__gom_publish_changed_replay(db, witness); }
+    } else {
+        quote! { db.emit_event(witness); }
+    });
     let propagated_witness_emission = if crate::entity::has_repository_entity_attribute(
         &input.attrs,
     ) {
@@ -2842,7 +2896,7 @@ fn generate_graphql_operations_unfiltered(
                 event.entity = ::std::option::Option::None;
                 if let ::std::option::Option::Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
                     event, Self::__gom_subscription_key_values(parent_entity), false, provenance,
-                ) { hook_ctx.queue_event(witness); }
+                ) { #queue_witness }
             }
         }
     };
@@ -4368,6 +4422,44 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
+    let subscription_after_arg_name = apply_graphql_case("after", argument_case);
+    let (
+        subscription_after_arg,
+        open_changed,
+        after_arg,
+        frame_cursor,
+        cursor_none,
+        replay_adapter,
+    ) = if changed_replay {
+        (
+            quote! {
+                #[__gom_catalogue_type(Option<String>)]
+                #[graphql(name = #subscription_after_arg_name, desc = "Resume from an opaque Changed cursor on the same server")]
+                after: ::std::option::Option<::std::string::String>,
+            },
+            quote! { open_generated_changed_after },
+            quote! { , after },
+            quote! { pub cursor: ::std::option::Option<::std::string::String>, },
+            quote! { cursor: ::std::option::Option::None, },
+            quote! {
+                const REPLAY_ROOT: ::std::option::Option<&'static str> = ::std::option::Option::Some(#subscription_name);
+
+                fn with_replay_cursor(mut payload: Self::Payload, cursor: ::std::string::String) -> Self::Payload {
+                    payload.cursor = ::std::option::Option::Some(cursor);
+                    payload
+                }
+            },
+        )
+    } else {
+        (
+            quote! {},
+            quote! { open_generated_changed },
+            quote! {},
+            quote! {},
+            quote! {},
+            quote! {},
+        )
+    };
     let changed_payload_value = if changed_started {
         quote! { #changed_frame::from(__gom_event) }
     } else {
@@ -4396,6 +4488,7 @@ fn generate_graphql_operations_unfiltered(
             pub struct #changed_frame {
                 /// True only on the started frame, which carries no change.
                 pub started: bool,
+                #frame_cursor
                 pub action: ::std::option::Option<::graphql_orm::graphql::orm::ChangeAction>,
                 #[graphql(name = #change_kind_field_name)]
                 pub change_kind: ::std::option::Option<::graphql_orm::graphql::orm::ChangeKind>,
@@ -4417,6 +4510,7 @@ fn generate_graphql_operations_unfiltered(
                 fn from(event: #changed_event) -> Self {
                     Self {
                         started: false,
+                        #cursor_none
                         action: ::std::option::Option::Some(event.action),
                         change_kind: ::std::option::Option::Some(event.change_kind),
                         id: ::std::option::Option::Some(event.id),
@@ -4434,6 +4528,7 @@ fn generate_graphql_operations_unfiltered(
                 fn __gom_started() -> Self {
                     Self {
                         started: true,
+                        #cursor_none
                         action: ::std::option::Option::None,
                         change_kind: ::std::option::Option::None,
                         id: ::std::option::Option::None,
@@ -5802,6 +5897,7 @@ fn generate_graphql_operations_unfiltered(
                     #[__gom_catalogue_type(Option<Vec<#key_type>>)]
                     #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: ::std::option::Option<::std::vec::Vec<#key_type>>,
                     #subscription_started_arg
+                    #subscription_after_arg
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>>>> {
                     // Keep the adapter local so private entity and key types stay private.
                     struct #adapter;
@@ -5815,6 +5911,7 @@ fn generate_graphql_operations_unfiltered(
                         const ENTITY_NAME: &'static str = #entity_name_lit;
                         const ENTITY_FIELD: &'static str = #entity_result_field_name;
                         const KEY_ONLY_DELETES: bool = #key_only_deletes;
+                        #replay_adapter
 
                         fn key_values(key: &Self::Key) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
                             #struct_name::__gom_key_values(key)
@@ -5875,8 +5972,8 @@ fn generate_graphql_operations_unfiltered(
                         }
                     }
 
-                    ::graphql_orm::graphql::subscriptions::open_generated_changed::<#backend_marker, #adapter>(
-                        ctx, _filter, key, keys, #started_arg,
+                    ::graphql_orm::graphql::subscriptions::#open_changed::<#backend_marker, #adapter>(
+                        ctx, _filter, key, keys, #started_arg #after_arg,
                     ).await
                 }
             }

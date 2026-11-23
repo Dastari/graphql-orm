@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.213.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 Version 0.205.0 reduces per-entity compile work for generated Changed
 subscriptions by sharing their stream implementation. See the
 [migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).

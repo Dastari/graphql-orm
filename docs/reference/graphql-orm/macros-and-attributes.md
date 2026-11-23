@@ -1543,8 +1543,8 @@ Unkeyed subscriptions, and subscriptions that pass only `Key`, behave as before.
 
 ### Delivery and continuity
 
-Generated `Changed` subscriptions are process-local and best effort. Each event is delivered at
-most once, nothing is persisted, and nothing is replayed after a reconnect. Each entity type has
+Generated `Changed` subscriptions are process-local. By default they deliver
+each event at most once and reconnects start a fresh live stream. Each entity type has
 one bounded broadcast channel. Its capacity, `Database::event_channel_capacity()`, defaults to
 `DEFAULT_EVENT_CHANNEL_CAPACITY` (256) events. Change it with `set_event_channel_capacity` or the
 builder's `event_channel_capacity`, before the first subscription or event.
@@ -1574,11 +1574,63 @@ policy-suppressed and propagated subscriptions all behave the same way:
   is correct, but a host with bulk writers should either raise `event_channel_capacity` above its
   largest burst or expect every subscriber to resync. Clients should add jitter to their
   resubscribe and refetch so they don't all arrive at the same moment.
-- A subscriber whose authority is revoked mid-stream still has its events skipped silently.
-  [#276](https://github.com/Dastari/graphql-orm/issues/276) tracks ending the stream instead.
+- Per-event row, field and provenance denials skip the event silently. The
+  independent authority tick ends a stream with `FORBIDDEN` if the subscriber
+  loses authority to observe the entity.
 - The `GraphQLOperations` resolver method returns
   `Stream<Item = async_graphql::Result<ChangedPayload<_>>>`. The SDL type of the subscription field
-  is unchanged.
+  is unchanged for entities using the default delivery mode.
+
+### Bounded replay
+
+Set `changed_started = true, changed_replay = true` on a generated GraphQL
+entity. A live or replayed change can then return a `Cursor` string. Save the
+cursor of the last event applied. On reconnect, pass it as `After` with the
+same authenticated identity, key selection and action filter. Use the schema's
+configured argument and field names. The server replays the available events
+the subscriber may read now, sends one `Started: true` frame with a null
+cursor, and continues live. With no `After`, request `Started: true` to confirm
+that the live subscription is listening before fetching initial state.
+
+Each entity has one ring shared by all subscriptions of a `Database` and its
+clones. It retains up to 128 events and 2 MiB of accounted witness storage.
+Cursors and ring entries expire after two minutes. Oldest entries are evicted
+first. A witness that exceeds the budget still travels live and creates a
+replay gap. A reconnect holds at most one retained witness at a time and scans
+at most one ring window.
+
+Replay covers ORM events published on that handle family. Its internal
+sequence increases in publication order after commit. Concurrent writes can
+publish in a different order from database commits. SQLite, PostgreSQL and
+SQL Server use the same publication rule. Cursors hide the sequence and are
+sealed for the stream and its subscriber binding. A restart, another replica,
+another database handle family or local channel replacement invalidates them.
+
+Replay and live events use the same checks for current resolver, entity, row,
+field, key and provenance authority. A retained update uses the current row.
+A retained delete uses its trusted preimage only with current preimage
+authority. The same exact-key and key-field checks apply to key-only deletes.
+For custom owned Rust field types, implement the hidden
+`graphql_orm::graphql::subscriptions::ChangedReplaySize` trait with an upper
+bound on retained heap storage. Values whose storage cannot be bounded, such
+as a JSON object in a retained delete preimage, create a replay gap.
+
+`SUBSCRIPTION_REPLAY_RESET` ends a resume whose cursor is malformed, expired,
+belongs to another stream or epoch, or precedes a retention gap. It carries
+no change or skipped count. Resumes with a valid, unexpired cursor wait for
+the independent, jittered authority recheck before releasing either replay or
+a capacity reset. Its base interval is 30 seconds and can be set with
+`Database::with_subscription_authority_recheck_interval`. Allow time for the
+recheck within the two-minute window when configuring replay. Current
+subscriber authority takes precedence at that check.
+If the stream loses continuity after opening, it ends with
+`SUBSCRIPTION_CONTINUITY_LOST` as usual.
+
+On a reset, discard the cursor, subscribe without `After`, wait for the
+requested started frame, then refetch the displayed state. If an already
+open stream loses continuity, a client can first attempt one resume using
+its last applied cursor. Keep using record versions or idempotent updates
+when applying changes to refetched state.
 
 ## Post-commit notifications
 

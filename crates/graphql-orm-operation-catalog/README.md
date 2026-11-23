@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.13.0 adds optional replay-window facts to client metadata for
+opted-in generated Changed streams.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 Version `0.11.0` adds two opt-in pieces and changes no existing descriptor,
 wire format or fingerprint. No data migration is needed.
 

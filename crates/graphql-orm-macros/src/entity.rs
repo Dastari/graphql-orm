@@ -77,6 +77,7 @@ pub(crate) struct EntityMetadata {
     /// `changed_started = true`: the `Changed` root accepts `Started: true`
     /// and then sends one started frame before any event (#341).
     pub(crate) changed_started: bool,
+    pub(crate) changed_replay: Option<proc_macro2::Span>,
     /// `aggregate_source = true`: the aggregate root returns
     /// `<Entity>AggregateResultRow`, whose `SourceEntity` field's type names
     /// the entity (#372).
@@ -309,6 +310,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.changed_started = lit.value;
+                } else if meta.path.is_ident("changed_replay") {
+                    let lit: syn::LitBool = meta.value()?.parse()?;
+                    if lit.value {
+                        metadata.changed_replay = Some(lit.span());
+                    }
                 } else if meta.path.is_ident("lifetime") {
                     if metadata.lifetime.is_some() {
                         return Err(meta.error("lifetime may only be declared once per entity"));

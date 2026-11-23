@@ -105,6 +105,12 @@ impl TemporalValue {
         }
     }
 
+    pub(crate) fn text_capacity(&self) -> usize {
+        match &self.text {
+            TemporalText::Input(text) | TemporalText::Chrono(text) => text.capacity(),
+        }
+    }
+
     #[cfg(feature = "mssql")]
     pub(crate) fn is_chrono(&self) -> bool {
         matches!(self.text, TemporalText::Chrono(_))
@@ -1020,15 +1026,16 @@ trait PostCommitActionRunner<B: OrmBackend>: Send {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-struct DeferredEvent<T, const COMMIT_ONLY: bool>
+struct DeferredEvent<T, B: OrmBackend, const COMMIT_ONLY: bool>
 where
     T: Clone + Send + Sync + 'static,
 {
     event: T,
+    publish: fn(&crate::db::Database<B>, T),
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, COMMIT_ONLY>
+impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, B, COMMIT_ONLY>
 where
     B: OrmBackend,
     T: Clone + Send + Sync + 'static,
@@ -1038,7 +1045,7 @@ where
     }
 
     fn emit(self: Box<Self>, db: &crate::db::Database<B>) {
-        db.emit_event(self.event);
+        (self.publish)(db, self.event);
     }
 }
 
@@ -2272,7 +2279,22 @@ where
     {
         if super::ensure_write_allowed().is_ok() {
             self.deferred_events
-                .push(Box::new(DeferredEvent::<T, false> { event }));
+                .push(Box::new(DeferredEvent::<T, B, false> {
+                    event,
+                    publish: crate::db::Database::emit_event,
+                }));
+        }
+    }
+
+    /// Queue an opted-in Changed witness for publication only after commit.
+    #[doc(hidden)]
+    pub fn queue_changed_replay<T>(&mut self, event: T, publish: fn(&crate::db::Database<B>, T))
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        if super::ensure_write_allowed().is_ok() {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, B, true> { event, publish }));
         }
     }
 
@@ -2292,7 +2314,10 @@ where
                 .insert((std::any::TypeId::of::<T>(), key))
         {
             self.deferred_events
-                .push(Box::new(DeferredEvent::<T, true> { event }));
+                .push(Box::new(DeferredEvent::<T, B, true> {
+                    event,
+                    publish: crate::db::Database::emit_event,
+                }));
         }
     }
 

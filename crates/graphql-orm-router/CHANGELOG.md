@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.17.1
+
+- **Test coverage (#668).** The WebSocket gateway smoke test exercises
+  forwarding an opaque resume cursor to a subgraph and passing back its
+  change, started and reset-required frames.
+
 ## Unreleased - 0.17.0 (breaking release)
 
 The router part of the single breaking release. See the

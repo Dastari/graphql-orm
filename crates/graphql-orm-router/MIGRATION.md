@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.17.0 to 0.17.1: Changed replay gateway coverage
+
+**No action.** The router forwards the optional resume argument and
+the subgraph's change, started and reset-required frames through the
+existing WebSocket transport.
+
 ## 0.16.8 to 0.17.0: breaking release
 
 Router 0.16.8 to 0.17.0. It ships in the workspace's single breaking release;

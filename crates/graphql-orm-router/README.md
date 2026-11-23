@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.17.1 adds WebSocket regression coverage for subgraph Changed replay
+arguments, cursor and started frames, and the reset-required error.
+
 Version 0.17.0 (**breaking release**) enforces the composed `@authenticated`
 and `@requiresScopes` directives on every selected field, not only root
 fields, before any downstream request: nested object fields, interface and
