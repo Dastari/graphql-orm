@@ -70,9 +70,11 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.209.0, `graphql-orm-macros` 0.209.0**; **`graphql-orm-operation-catalog` 0.13.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; **`graphql-orm-ai` 0.155.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.209.0, `graphql-orm-macros` 0.209.0**; **`graphql-orm-operation-catalog` 0.13.0**; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.29.0**; `graphql-orm-ai-tool-profiles` 0.27.1; `graphql-orm-ai` 0.155.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-- **No action** — ORM/macros 0.209.0 and operation catalogue 0.13.0: opt-in `update_expected_version = "required"` and `update_assurance(select, levels)` on generated updates. The catalogue lists conditional assurance levels. Other entities are unchanged (#851). [Migration](../../MIGRATION.md#02040-to-02090-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130)
+- **No action** — ORM/macros 0.209.0 and operation catalogue 0.13.0: opt-in `update_expected_version = "required"` and `update_assurance(select, levels)` on generated updates. The catalogue lists conditional assurance levels. Other entities are unchanged (#851). [Migration](../../MIGRATION.md#02050-to-02090-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130)
+- **No action** — ORM/macros 0.205.0 share the generated Changed stream implementation to reduce compile work (part of #677 and #358). [Migration](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions)
+- **No action** — ORM/macros 0.205.0 support combining `changed_started = true` and `key_only_deletes` on generated Changed subscriptions. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-02050)
 - **No action** — ORM/macros 0.204.0 and backup 0.29.0 add an opt-in for
   databases whose backup and restore are owned by another product.
   [ORM migration](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore) · [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0281-to-0290-externally-managed-backup-and-restore)

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.204.0 to 0.209.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+## 0.205.0 to 0.209.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
 
 **No action.** Both features are opt-in, and no data migration is needed.
 Entities that declare neither option generate byte-identical SDL, operation
@@ -47,6 +47,13 @@ selector. Host SQL in a filter or policy predicate runs inside the same
 transaction, and any write it makes rolls back on refusal.
 See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
 and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
 
 ## 0.203.0 to 0.204.0: externally managed backup and restore
 

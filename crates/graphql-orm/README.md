@@ -13,7 +13,11 @@ supersedes: []
 Version 0.209.0 adds two opt-in options for generated updates. One makes
 `ExpectedVersion` required. The other selects assurance per request from the
 typed patch and the locked row. Other entities are unchanged. See the
-[migration guide](../../MIGRATION.md#02040-to-02090-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+[migration guide](../../MIGRATION.md#02050-to-02090-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
 
 Version 0.204.0 adds an opt-in for databases whose backup and restore are
 owned by another product. See the [migration guide](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
