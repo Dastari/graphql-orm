@@ -1121,6 +1121,10 @@ struct CommitOnlyEventKeys(
 );
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Default)]
+struct HoldEventsUntilCommit;
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
     pub(crate) tx: B::Transaction<'tx>,
@@ -2334,7 +2338,18 @@ where
         }));
     }
 
+    /// Keep every queued event in the transaction until commit, including
+    /// events queued by a hook that explicitly drains the queue.
+    #[doc(hidden)]
+    pub fn __hold_events_until_commit(&mut self) {
+        self.extensions
+            .get_or_insert_default::<HoldEventsUntilCommit>();
+    }
+
     pub fn emit_queued_events(&mut self) {
+        if self.extensions.get::<HoldEventsUntilCommit>().is_some() {
+            return;
+        }
         for event in self
             .deferred_events
             .extract_if(.., |event| !event.requires_commit())

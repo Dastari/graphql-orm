@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.217.0
+
+- **Added (#353).** Generated creates can opt into typed child lists on
+  collection relations. The ORM binds the relation keys, authorizes each row,
+  and commits the parent and up to 50 children in one transaction.
+  [Migration](MIGRATION.md#02110-to-02170-generated-nested-create)
+
 ## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
 
 - **Fixed (#883).** Described roots returning a registered generated entity

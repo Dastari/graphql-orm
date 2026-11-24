@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.211.0 to 0.217.0: Generated nested create
+
+**No action** unless opting in (#353). Add `nested_create` to the parent
+collection relation and declare the child's `nested_create_keys`. For an
+opted-in parent, regenerate the SDL and catalogues and update clients using
+GraphQL variables to name the new `Create<Entity>WithChildrenInput` type.
+The standalone child create keeps its shape. See
+[creating a parent with child rows](docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
+
 ## 0.210.0 to 0.211.0: Described root result metadata
 
 **No action.** Described roots returning an entity registered in
