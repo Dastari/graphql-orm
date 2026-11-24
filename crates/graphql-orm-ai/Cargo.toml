@@ -46,7 +46,7 @@ provider-tls-ring = [
 ]
 provider-tls-native = ["reqwest?/native-tls"]
 local-harness = []
-provider-codex-app-server = ["dep:base64"]
+provider-codex-app-server = ["dep:base64", "tokio/io-util"]
 provider-grok-acp = []
 
 [dependencies]

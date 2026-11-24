@@ -1,18 +1,20 @@
 //! Entity references on the adapters that deliver a request to a local
-//! process and may send resolved data: the JSON-lines local harness and Grok
-//! ACP. The Codex app-server adapter sends markers only.
+//! process and may send resolved data.
 //!
 //! Each test registers the real adapter with the runtime, drives it through
 //! `AiProviderCallExecutor`, and asserts on the bytes the adapter's own
-//! protocol code wrote for the process: the harness stdin frame and the
-//! frames the Grok wire process wrote.
+//! protocol code wrote for the process.
 
 use super::*;
+
+#[cfg(feature = "provider-codex-app-server")]
+#[path = "entity_reference_codex_tests.rs"]
+mod codex;
 
 /// Rewrites a plan sealed for the fixture's mock provider as one for a
 /// local-process adapter, which registers as [`ProviderKind::LocalHarness`].
 /// The Grok tests seal their own plan with the registration's tools.
-#[cfg(feature = "local-harness")]
+#[cfg(any(feature = "local-harness", feature = "provider-codex-app-server"))]
 fn for_local_process(mut plan: AiProviderCallPlan) -> AiProviderCallPlan {
     plan.provider_kind = ProviderKind::LocalHarness;
     plan.budget.provider_kind = ProviderKind::LocalHarness;
@@ -61,6 +63,7 @@ async fn persisted_state(fixture: &Fixture) -> String {
         AiBudgetReservationRecord,
         AiInboxEventRecord,
         AiProviderBackgroundSubmissionRecord,
+        crate::orm_provider_session::AiProviderSessionBindingRecord,
         AiStoredProviderResponseRecord,
         AiApprovalRecord,
         AiProposalRecord,
@@ -69,6 +72,50 @@ async fn persisted_state(fixture: &Fixture) -> String {
         AiSubscriptionWaiterRecord,
     );
     state
+}
+
+#[cfg(any(feature = "provider-grok-acp", feature = "provider-codex-app-server"))]
+async fn insert_retained_input_message(fixture: &Fixture) {
+    let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should exist");
+    let update = AiSessionRecord::compare_and_swap(
+        &fixture.database,
+        &session.id,
+        session.row_version,
+        AiSessionRecordWhereInput::default(),
+        UpdateAiSessionRecordInput {
+            message_head: Some(1),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("session watermark update should succeed");
+    assert!(matches!(update, ConditionalUpdateOutcome::Updated(_)));
+    AiMessageRecord::insert(
+        &fixture.database,
+        CreateAiMessageRecordInput {
+            id: fixture.lease.input_message_id(),
+            session_id: fixture.lease.session_id().0,
+            sequence: 1,
+            message_role: "user".to_owned(),
+            author_principal_kind: Some("user".to_owned()),
+            author_subject: Some(fixture.principal.subject().to_owned()),
+            client_message_id: Some(Uuid::new_v4()),
+            content_hash: Some("c".repeat(64)),
+            run_id: Some(fixture.lease.run_id().0),
+            provider_kind: None,
+            provider_model: None,
+            protected_preview: None,
+            block_count: 1,
+            completion_state: "complete".to_owned(),
+            finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            content_purged_at: None,
+        },
+    )
+    .await
+    .expect("input message should insert");
 }
 
 #[cfg(feature = "local-harness")]
@@ -683,47 +730,7 @@ mod grok_acp {
             .expect("provider should validate"),
         );
         let references = references_for(MockProvider::new(Vec::new()), Some(provider)).await;
-        let fixture = &references.fixture;
-        let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
-            .await
-            .expect("session lookup should succeed")
-            .expect("session should exist");
-        let update = AiSessionRecord::compare_and_swap(
-            &fixture.database,
-            &session.id,
-            session.row_version,
-            AiSessionRecordWhereInput::default(),
-            UpdateAiSessionRecordInput {
-                message_head: Some(1),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("session watermark update should succeed");
-        assert!(matches!(update, ConditionalUpdateOutcome::Updated(_)));
-        AiMessageRecord::insert(
-            &fixture.database,
-            CreateAiMessageRecordInput {
-                id: fixture.lease.input_message_id(),
-                session_id: fixture.lease.session_id().0,
-                sequence: 1,
-                message_role: "user".to_owned(),
-                author_principal_kind: Some("user".to_owned()),
-                author_subject: Some(fixture.principal.subject().to_owned()),
-                client_message_id: Some(Uuid::new_v4()),
-                content_hash: Some("c".repeat(64)),
-                run_id: Some(fixture.lease.run_id().0),
-                provider_kind: None,
-                provider_model: None,
-                protected_preview: None,
-                block_count: 1,
-                completion_state: "complete".to_owned(),
-                finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
-                content_purged_at: None,
-            },
-        )
-        .await
-        .expect("input message should insert");
+        insert_retained_input_message(&references.fixture).await;
         let lease = Arc::new(Mutex::new(references.fixture.lease.clone()));
         Grok {
             references,
