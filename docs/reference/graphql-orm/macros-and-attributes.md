@@ -1803,3 +1803,15 @@ bare names, retain their spelling across modules/crates, and compare
 `catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
 or your catalogue accessor). See the
 [migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).
+
+
+## SQL Server parameter types
+
+On a SQL Server entity, describe the physical type of a persisted field with
+`#[graphql_orm(mssql_type = "VARCHAR(32)")]` or
+`#[graphql_orm(mssql_type = "INT")]`. String fields accept VARCHAR and NVARCHAR
+with a valid length or MAX. Integer fields accept TINYINT, SMALLINT, INT and
+BIGINT. Nullable fields accept the same declarations. The declaration also
+overrides the column type in schema metadata and generated DDL even with
+typed binding disabled. The [SQL Server pool reference](mssql.md#typed-column-parameters)
+lists which operands use the declared type and which retain Unicode binding.

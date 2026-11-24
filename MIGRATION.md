@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
+
+**No action.** Upgrade ORM and macros together. SQL Server keeps the
+existing Unicode string and BIGINT binds by default. To use each declared
+type, add the matching `mssql_type` field attribute and enable
+`MssqlPoolOptions::typed_parameters(true)` for the corresponding database.
+The attribute overrides generated DDL independently of the pool setting.
+Printable ASCII VARCHAR operands in ordinary comparison filters can use the
+declared type. Authorization predicates, patterns, and non-ASCII text retain
+Unicode binding. Generated unsigned operands outside their SQL Server range
+return `INVALID_INPUT`. SQL Server ALTER COLUMN planning parses the column
+identifier for its collation lookup.
+See [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
 ## 0.213.0 to 0.214.0: agql-auth v0.27.0
 
 **Action needed** for hosts with direct `agql-auth` dependencies. Upgrade

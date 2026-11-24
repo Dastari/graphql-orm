@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.160.0 to 0.161.0
+
+**No action.** AI 0.161.0 uses ORM 0.215.0. The change adapts one SQL Server
+internal call to the ORM's string-filter renderer and has no AI schema, data or
+public API migration. See the
+[workspace migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers).
+
 ## 0.159.0 to 0.160.0
 
 **Action needed.** Move direct Auth dependencies to the published `v0.27.0`

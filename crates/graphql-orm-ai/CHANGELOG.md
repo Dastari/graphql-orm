@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.161.0
+
+- **Changed (#522).** The SQL Server expired-lease prefilter passes an empty
+  declared type to ORM 0.215.0's string-filter renderer. Behaviour is
+  unchanged.
+  [Migration](MIGRATION.md#01600-to-01610)
+
 ## Unreleased - 0.160.0
 
 - **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag

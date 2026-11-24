@@ -1885,6 +1885,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) db_column: Option<String>,
     pub(crate) decimal: Option<(u8, u8)>,
     pub(crate) mssql_money: bool,
+    pub(crate) mssql_type: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) classification: Option<String>,
     pub(crate) non_exportable: bool,
@@ -2070,6 +2071,7 @@ impl Default for FieldMetadata {
             db_column: None,
             decimal: None,
             mssql_money: false,
+            mssql_type: None,
             description: None,
             classification: None,
             non_exportable: false,
@@ -2703,6 +2705,12 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
+                        } else if nested.path.is_ident("mssql_type") {
+                            if meta.mssql_type.is_some() {
+                                return Err(nested.error("mssql_type may only be declared once per field"));
+                            }
+                            let lit: syn::LitStr = nested.value()?.parse()?;
+                            meta.mssql_type = Some(parse_mssql_type(&lit)?);
                         } else if nested.path.is_ident("mssql_money") {
                             if meta.mssql_money {
                                 return Err(syn::Error::new(nested.path.span(), "mssql_money may only be declared once per field"));
@@ -3180,6 +3188,33 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
     }
 
     let field_type = option_inner_type(&field.ty).unwrap_or(&field.ty);
+    if let Some(sql_type) = &meta.mssql_type {
+        let field_kind = type_path_last_ident(field_type).map(|name| name.to_string());
+        let compatible = if sql_type.contains("VARCHAR(") {
+            field_kind.as_deref() == Some("String")
+        } else {
+            matches!(
+                field_kind.as_deref(),
+                Some(
+                    "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+                )
+            )
+        };
+        if !compatible
+            || meta.skip_db
+            || meta.is_relation
+            || meta.is_boolean_field
+            || meta.is_json_field
+            || meta.is_date_field
+            || meta.filterable.as_deref() == Some("date")
+            || meta.spatial.is_some()
+        {
+            return Err(syn::Error::new_spanned(
+                field,
+                "mssql_type requires a persisted String for VARCHAR/NVARCHAR or an integer for TINYINT/SMALLINT/INT/BIGINT",
+            ));
+        }
+    }
     let is_decimal = type_path_last_ident(field_type).is_some_and(|ident| ident == "Decimal");
     if meta.mssql_money {
         if !is_decimal {
@@ -4056,7 +4091,14 @@ fn generate_entity_tokens(
     let entity_name_lit = struct_name.to_string();
     if backend != BackendKind::Mssql {
         for field in fields {
-            if parse_field_metadata(field)?.mssql_money {
+            let meta = parse_field_metadata(field)?;
+            if meta.mssql_type.is_some() {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "mssql_type requires backend = \"mssql\"",
+                ));
+            }
+            if meta.mssql_money {
                 return Err(syn::Error::new_spanned(
                     field,
                     "mssql_money requires backend = \"mssql\"",
@@ -4443,6 +4485,7 @@ fn generate_entity_tokens(
     let mut search_column_names: Vec<String> = Vec::new();
     let mut projected_column_names = std::collections::HashSet::new();
     let sql_table = backend_render_identifier_path(backend, &table_name);
+    let mut mssql_parameter_types = Vec::new();
     let mut column_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut constraint_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut primary_key_cols: Vec<String> = Vec::new();
@@ -5704,6 +5747,7 @@ fn generate_entity_tokens(
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let mut sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
         if backend == BackendKind::Mssql
+            && field_meta.mssql_type.is_none()
             && sql_type == "NVARCHAR(MAX)"
             && is_plain_string_type(field_type)
             && !field_meta.is_json_field
@@ -5942,6 +5986,9 @@ fn generate_entity_tokens(
         let is_sortable = field_meta.sortable && field_meta.order;
         let is_date_time = field_meta.is_date_field;
 
+        if let Some(sql_type) = &field_meta.mssql_type {
+            mssql_parameter_types.push(quote! { (#db_col_sql, #sql_type) });
+        }
         column_defs.push(quote! {
             ::graphql_orm::graphql::orm::ColumnDef {
                 name: #db_col,
@@ -6001,6 +6048,23 @@ fn generate_entity_tokens(
                 // Unqualified, or `row.<column>` for the row `_gom_table`
                 // names, the column delimited as generated DDL and DML
                 // address it (#796).
+                let (bind_start, bind_types) = match &field_meta.mssql_type {
+                    Some(sql_type)
+                        if matches!(sql_type.as_str(), "TINYINT" | "SMALLINT" | "INT") =>
+                    {
+                        (
+                            quote! { let bind_start = values.len(); },
+                            quote! {
+                                for value in &mut values[bind_start..] {
+                                    *value = ::std::mem::replace(
+                                        value, ::graphql_orm::graphql::orm::SqlValue::Null
+                                    ).with_mssql_type(#sql_type);
+                                }
+                            },
+                        )
+                    }
+                    _ => (quote! {}, quote! {}),
+                };
                 filter_to_sql.push(quote! {
                     {
                         let __gom_bound_column;
@@ -6012,7 +6076,9 @@ fn generate_entity_tokens(
                             }
                             None => #db_col_sql,
                         };
+                        #bind_start
                         #sql_gen
+                        #bind_types
                     }
                 });
                 filter_to_entity_match.push(entity_match_gen);
@@ -6729,6 +6795,12 @@ fn generate_entity_tokens(
                 &[#(#persisted_field_rust_names),*];
         }
     };
+    let parameter_types_impl = (!mssql_parameter_types.is_empty()).then(|| {
+        quote! {
+            const MSSQL_PARAMETER_TYPES: &'static [(&'static str, &'static str)] =
+                &[#(#mssql_parameter_types),*];
+        }
+    });
     if schema_only {
         return Ok(quote! {
             #schema_entity_composed
@@ -6749,6 +6821,7 @@ fn generate_entity_tokens(
                 const PRIMARY_KEYS: &'static [&'static str] = &[#(#primary_key_literals),*];
                 const SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
                 const DEFAULT_SORT: &'static str = #default_sort;
+                #parameter_types_impl
 
                 fn column_names() -> &'static [&'static str] {
                     &[#(#columns_array),*]
@@ -7412,6 +7485,7 @@ fn generate_entity_tokens(
             const PRIMARY_KEYS: &'static [&'static str] = &[#(#primary_key_literals),*];
             const SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
             const DEFAULT_SORT: &'static str = #default_sort;
+            #parameter_types_impl
 
             fn column_names() -> &'static [&'static str] {
                 &[#(#columns_array),*]
@@ -8004,7 +8078,7 @@ fn projection_lookup_sql_value(
     argument: &syn::Ident,
 ) -> proc_macro2::TokenStream {
     let ty = option_inner_type(&field.field.ty).unwrap_or(&field.field.ty);
-    if chrono_temporal_type(ty).is_some() || field.meta.is_date_field {
+    let value = if chrono_temporal_type(ty).is_some() || field.meta.is_date_field {
         scalar_text_bind_tokens(ty, &field.meta, quote! { #argument })
     } else if is_byte_vec_type(ty) {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(#argument.clone()) }
@@ -8028,6 +8102,10 @@ fn projection_lookup_sql_value(
                 ::graphql_orm::graphql::orm::SqlValue::String(#argument.to_string())
             },
         }
+    };
+    match &field.meta.mssql_type {
+        Some(sql_type) => quote! { (#value).with_mssql_type(#sql_type) },
+        None => value,
     }
 }
 
@@ -8331,18 +8409,27 @@ fn generate_filter_field(
             Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "string" => {
+            let sql_type = field_meta.mssql_type.as_deref().unwrap_or("");
             let input = quote! {
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
             };
-            let render = if backend == BackendKind::Mssql && exact_string_filters {
-                quote! { ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter }
+            let render_call = if backend == BackendKind::Mssql && exact_string_filters {
+                quote! {
+                    ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
+                }
             } else {
-                quote! { ::graphql_orm::graphql::orm::__gom_render_string_filter }
+                quote! {
+                    ::graphql_orm::graphql::orm::__gom_render_string_filter(
+                        f, #backend_expr, #db_col, #sql_type, &mut conditions, &mut values,
+                    );
+                }
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    #render(f, #backend_expr, #db_col, &mut conditions, &mut values);
+                    #render_call
                 }
             };
             let value_expr = if is_option_type(field_type) {
@@ -9214,11 +9301,49 @@ fn is_plain_string_type(ty: &syn::Type) -> bool {
 }
 
 /// Convert Rust type to the configured backend SQL type string
+fn parse_mssql_type(lit: &syn::LitStr) -> syn::Result<String> {
+    let value = lit.value();
+    let value = value.trim().to_ascii_uppercase();
+    if matches!(value.as_str(), "BIGINT" | "INT" | "SMALLINT" | "TINYINT") {
+        return Ok(value);
+    }
+    if let Some((base, length)) = value.split_once('(')
+        && let Some(length) = length.strip_suffix(')')
+    {
+        let base = base.trim();
+        let maximum = match base {
+            "VARCHAR" => 8000,
+            "NVARCHAR" => 4000,
+            _ => 0,
+        };
+        let length = length.trim();
+        if maximum != 0 {
+            if length == "MAX" {
+                return Ok(format!("{base}(MAX)"));
+            }
+            if let Ok(length) = length.parse::<u16>()
+                && (1..=maximum).contains(&length)
+            {
+                return Ok(format!("{base}({length})"));
+            }
+        }
+    }
+    Err(syn::Error::new_spanned(
+        lit,
+        "expected TINYINT, SMALLINT, INT, BIGINT, VARCHAR(n|MAX), or NVARCHAR(n|MAX)",
+    ))
+}
+
 pub(crate) fn rust_type_to_sql_type(
     backend: BackendKind,
     ty: &syn::Type,
     meta: &FieldMetadata,
 ) -> String {
+    if backend == BackendKind::Mssql
+        && let Some(sql_type) = &meta.mssql_type
+    {
+        return sql_type.clone();
+    }
     // Handle Option<T> by unwrapping
     let inner_type = if is_option_type(ty) {
         if let syn::Type::Path(type_path) = ty {
