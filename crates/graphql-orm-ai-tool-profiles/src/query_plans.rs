@@ -15,9 +15,9 @@ use graphql_orm_operation_catalog::{
     AiMutationExecutionPolicy, GeneratedGraphqlOperationCategory, GraphqlAggregateOperator,
     GraphqlOperationKind, GraphqlSemanticCatalog, GraphqlSemanticClassification,
     GraphqlSemanticCollectionBound, GraphqlSemanticExport, GraphqlSemanticFieldMetadata,
-    GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipCardinality,
-    GraphqlSemanticRelationshipDescriptor, GraphqlSemanticTypeRef,
-    GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
+    GraphqlSemanticOperationDescriptor, GraphqlSemanticOperationSource,
+    GraphqlSemanticRelationshipCardinality, GraphqlSemanticRelationshipDescriptor,
+    GraphqlSemanticTypeRef, GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -767,7 +767,7 @@ struct CompiledVariableSchema {
 
 // The compiler supplies these keys from the finished SDL and admitted
 // semantic metadata. Each cache shares one schema, catalogue and limits.
-type VariableSchemaKey = (String, Option<String>);
+type VariableSchemaKey = (String, Option<String>, bool);
 type VariableSchemaCache = BTreeMap<VariableSchemaKey, Arc<CompiledVariableSchema>>;
 
 #[derive(Clone, Default)]
@@ -815,10 +815,15 @@ impl AiGraphqlQueryCapability {
         &self,
         graphql_type: &str,
         description: Option<&str>,
+        server_keyset_page: bool,
     ) -> Result<Arc<CompiledVariableSchema>, AiError> {
         const MAXIMUM_CACHED_VARIABLE_SCHEMAS: usize = 128;
 
-        let key = (graphql_type.to_owned(), description.map(str::to_owned));
+        let key = (
+            graphql_type.to_owned(),
+            description.map(str::to_owned),
+            server_keyset_page,
+        );
         let mut cache = self
             .variable_schemas
             .0
@@ -827,15 +832,33 @@ impl AiGraphqlQueryCapability {
         if let Some(compiled) = cache.get(&key) {
             return Ok(Arc::clone(compiled));
         }
-        let value = finish_json_schema(input_type_schema(
-            &self.schema,
-            &self.semantic_catalog,
-            graphql_type,
-            description,
-            self.limits,
-            0,
-            &mut Vec::new(),
-        )?)?;
+        let value = if server_keyset_page {
+            // The compiler supplies only a limit. The resolver applies its
+            // page cap and the schema supplies the other input defaults.
+            let maximum = self
+                .limits
+                .maximum_list_items
+                .min(self.limits.maximum_result_records);
+            let mut value = json!({
+                "type": "object",
+                "properties": { "limit": bounded_integer_schema(1, i64::from(maximum)) },
+                "required": ["limit"],
+                "additionalProperties": false,
+            });
+            insert_description(&mut value, description)?;
+            value
+        } else {
+            input_type_schema(
+                &self.schema,
+                &self.semantic_catalog,
+                graphql_type,
+                description,
+                self.limits,
+                0,
+                &mut Vec::new(),
+            )?
+        };
+        let value = finish_json_schema(value)?;
         let validator = jsonschema::validator_for(&value)
             .map_err(|_| configuration_error("compiled variable schema is invalid"))?;
         let compiled = Arc::new(CompiledVariableSchema { value, validator });
@@ -1164,7 +1187,7 @@ impl AiGraphqlQueryCapability {
             plan.maximum_items,
             self.output.requires_root_bound(),
             inject_root_bound,
-            "root",
+            generated_keyset_page_argument(&self.schema, &self.operation),
         )?;
 
         let (projection, disclosure) = match &self.output {
@@ -6336,7 +6359,7 @@ impl<'a> CompileContext<'a> {
         maximum_items: Option<u32>,
         expect_bound: bool,
         inject_bound: bool,
-        path: &str,
+        server_keyset_page: Option<&str>,
     ) -> Result<Vec<String>, AiError> {
         if expect_bound != maximum_items.is_some() {
             return Err(input_error(
@@ -6370,7 +6393,12 @@ impl<'a> CompileContext<'a> {
             }
         }
         let mut values = supplied.clone();
-        if let Some(maximum) = maximum_items.filter(|_| inject_bound) {
+        let injected_maximum = maximum_items.filter(|_| inject_bound);
+        let server_keyset_page = server_keyset_page.filter(|_| injected_maximum.is_some());
+        if server_keyset_page.is_some_and(|name| supplied.contains_key(name)) {
+            return Err(input_error("keyset page argument is server-owned"));
+        }
+        if let Some(maximum) = injected_maximum {
             inject_page_limit(&self.capability.schema, schema_fields, &mut values, maximum)?;
         }
         if values.keys().any(|name| !schema_fields.contains_key(name)) {
@@ -6388,7 +6416,11 @@ impl<'a> CompileContext<'a> {
                 .get(name.as_str())
                 .map(|field| field.description.as_str())
                 .or(schema.description.as_deref());
-            let compiled = self.capability.variable_schema(&schema.ty, description)?;
+            let compiled = self.capability.variable_schema(
+                &schema.ty,
+                description,
+                server_keyset_page == Some(name.as_str()),
+            )?;
             if !compiled.validator.is_valid(&value) {
                 return Err(input_error(
                     "query argument does not match its GraphQL type",
@@ -6402,7 +6434,6 @@ impl<'a> CompileContext<'a> {
                 .insert(variable.clone(), compiled.value.clone());
             rendered.push(format!("{name}: ${variable}"));
             self.arguments += 1;
-            let _ = path;
         }
         Ok(rendered)
     }
@@ -6488,7 +6519,7 @@ impl<'a> CompileContext<'a> {
                 relationship_plan.maximum_items,
                 collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
                 collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
-                &format!("{entity_name}.{}", field.field_name),
+                None,
             )?;
             ancestry.push(relationship.target.clone());
             let nested_plan = EntityPlanRef {
@@ -6924,6 +6955,47 @@ fn semantic_list_bound(type_ref: &GraphqlSemanticTypeRef) -> Result<u32, AiError
             "semantic collection relationship has no positive bound",
         )),
     }
+}
+
+// Scope the generated helper to the operation's direct page argument. The
+// same input type can be used by a handwritten argument on the same schema.
+fn generated_keyset_page_argument<'a>(
+    schema: &FinishedSchema,
+    operation: &'a GraphqlSemanticOperationDescriptor,
+) -> Option<&'a str> {
+    if operation.source != GraphqlSemanticOperationSource::Generated
+        || operation.kind != GraphqlOperationKind::Query
+        || operation.generated_category != Some(GeneratedGraphqlOperationCategory::KeysetList)
+    {
+        return None;
+    }
+    let argument = operation.arguments.iter().find(|argument| {
+        argument.graphql_name.eq_ignore_ascii_case("page")
+            && matches!(
+                &argument.type_ref,
+                GraphqlSemanticTypeRef::Named {
+                    name,
+                    kind: graphql_orm_operation_catalog::GraphqlSemanticTypeKind::Object,
+                    nullable: false,
+                } if name == "KeysetPageInput"
+            )
+    })?;
+    let Some(SchemaType::InputObject(fields)) = schema.types.get("KeysetPageInput") else {
+        return None;
+    };
+    let canonical_shape = fields.len() == 3
+        && [
+            ("after", "String", false),
+            ("limit", "Int", false),
+            ("includeTotalCount", "Boolean!", true),
+        ]
+        .into_iter()
+        .all(|(name, ty, has_default)| {
+            fields
+                .get(name)
+                .is_some_and(|field| field.ty == ty && field.has_default == has_default)
+        });
+    canonical_shape.then_some(argument.graphql_name.as_str())
 }
 
 fn inject_page_limit(
@@ -8774,6 +8846,134 @@ mod tests {
         )
     }
 
+    #[test]
+    fn keyset_page_provenance_preserves_capability_fingerprints_and_custom_disclosure() {
+        let (sdl, base) = input_collision_fixture(false);
+        let sdl = sdl.replace(
+            "type Query {",
+            "type Query {
+                SubscriptionsKeyset(Page: KeysetPageInput!): SubscriptionConnection!
+                LookupSubscription(criteria: KeysetPageInput!): Subscription!
+             ",
+        ) + "\ninput KeysetPageInput { after: String, limit: Int, includeTotalCount: Boolean! = false }";
+        let keyset_type = GraphqlSemanticTypeRef::named(
+            "KeysetPageInput",
+            GraphqlSemanticTypeKind::Object,
+            false,
+        );
+        let argument = |name: &str| GraphqlSemanticArgumentDescriptor {
+            graphql_name: name.to_owned(),
+            description: "Page settings.".to_owned(),
+            type_ref: keyset_type.clone(),
+        };
+        let keyset = GraphqlSemanticOperationDescriptor::generated(
+            GraphqlOperationKind::Query,
+            GeneratedGraphqlOperationCategory::KeysetList,
+            "Subscription",
+            "SubscriptionsKeyset",
+            "Read a bounded keyset page.",
+            vec![argument("Page")],
+            GraphqlSemanticTypeRef::named(
+                "SubscriptionConnection",
+                GraphqlSemanticTypeKind::Object,
+                false,
+            ),
+            true,
+        )
+        .unwrap();
+        let custom = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "LookupSubscription",
+            "Read a matching subscription.",
+            vec![argument("criteria")],
+            GraphqlSemanticTypeRef::named("Subscription", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .unwrap();
+        let semantics = GraphqlSemanticCatalog::compose_descriptors(
+            base.entities,
+            base.operations.into_iter().chain([keyset, custom]),
+        )
+        .unwrap();
+        let catalog = input_collision_capabilities(&sdl, &semantics);
+        let capability = |root| {
+            catalog
+                .capabilities()
+                .find(|capability| capability.field_name() == root)
+                .unwrap()
+        };
+        let offset = capability("Subscriptions");
+        let keyset = capability("SubscriptionsKeyset");
+        let custom = capability("LookupSubscription");
+
+        // Recorded against the same catalogue and SDL before enabling keyset execution.
+        assert_eq!(
+            catalog.fingerprint(),
+            "9a07bed884292370bc8b29787dce261694183ee5e4ea7f89ffeda4646d8ed922"
+        );
+        assert_eq!(
+            offset.fingerprint(),
+            "b8007a33fe106c81c80249b6ea9b0b70fc1d6877045076b875e71f4232b031df"
+        );
+        assert_eq!(
+            keyset.fingerprint(),
+            "3bf02694833da0381fb8aef491b877260a59f5a13229855ee6ddbe53c1ffbc53"
+        );
+        assert_eq!(
+            custom.fingerprint(),
+            "8f06bd91404a3f0604c8691324f2ee70c619426888bf1e47fb23871185bcf0ab"
+        );
+
+        let page_plan = json!({
+            "arguments": {},
+            "relationshipArguments": {},
+            "relationshipMaximumItems": {},
+            "selections": ["id"],
+            "maximumItems": 2,
+        });
+        for capability in [offset, keyset] {
+            let compiled = capability.compile_compact(page_plan.clone()).unwrap();
+            assert_eq!(compiled.variables(), &json!({"v0": {"limit": 2}}));
+        }
+        let custom_plan = json!({
+            "arguments": {"criteria": {}},
+            "relationshipArguments": {},
+            "relationshipMaximumItems": {},
+            "selections": ["id"],
+        });
+        assert!(custom.compile_compact(custom_plan.clone()).is_ok());
+        for field in ["after", "limit", "includeTotalCount"] {
+            assert!(
+                custom.compact_argument_schema()["properties"]["arguments"]["properties"]
+                    ["criteria"]["properties"]
+                    .get(field)
+                    .is_none()
+            );
+        }
+        let mut denied = custom_plan.clone();
+        denied["arguments"]["criteria"] = json!({"limit": 1});
+        assert!(custom.compile_compact(denied).is_err());
+
+        let declared = input_collision_capabilities_with(
+            &sdl,
+            &semantics,
+            AiCustomInputDisclosure::new()
+                .with_exportable_field("KeysetPageInput", "after")
+                .unwrap(),
+        )
+        .unwrap();
+        let custom = declared
+            .capabilities()
+            .find(|capability| capability.field_name() == "LookupSubscription")
+            .unwrap();
+        let mut declared_plan = custom_plan;
+        declared_plan["arguments"]["criteria"] = json!({"after": "cursor"});
+        assert_eq!(
+            custom.compile_compact(declared_plan).unwrap().variables(),
+            &json!({"v0": {"after": "cursor"}})
+        );
+    }
+
     fn input_collision_plan(pascal: bool) -> Value {
         let selections =
             ["Id", "Name", "CustomerId", "PlanName"].map(|name| input_collision_name(name, pascal));
@@ -9850,7 +10050,7 @@ mod tests {
                     None,
                     false,
                     false,
-                    "root"
+                    None
                 )
                 .is_ok(),
             accepted
@@ -9875,15 +10075,23 @@ mod tests {
             cloned.compact_argument_schema.validator("invalid").unwrap(),
         ));
 
-        let integer = capability.variable_schema("Int!", Some("integer")).unwrap();
-        let reused = cloned.variable_schema("Int!", Some("integer")).unwrap();
+        let integer = capability
+            .variable_schema("Int!", Some("integer"), false)
+            .unwrap();
+        let reused = cloned
+            .variable_schema("Int!", Some("integer"), false)
+            .unwrap();
         assert!(Arc::ptr_eq(&integer, &reused));
         assert!(reused.validator.is_valid(&json!(42)));
         assert!(!reused.validator.is_valid(&json!("42")));
 
-        let text = cloned.variable_schema("String!", Some("integer")).unwrap();
+        let text = cloned
+            .variable_schema("String!", Some("integer"), false)
+            .unwrap();
         assert!(text.validator.is_valid(&json!("42")));
-        let renamed = cloned.variable_schema("Int!", Some("renamed")).unwrap();
+        let renamed = cloned
+            .variable_schema("Int!", Some("renamed"), false)
+            .unwrap();
         assert_eq!(renamed.value["description"], "renamed");
     }
 
@@ -10461,7 +10669,7 @@ mod tests {
                         None,
                         false,
                         false,
-                        "root"
+                        None
                     )
                     .is_err()
             );

@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.209.0, `graphql-orm-macros` 0.209.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.209.0**; **`graphql-orm-macros` 0.209.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.29.0**; **`graphql-orm-ai` 0.157.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — AI tool profiles 0.29.0 accepts the server-injected page limit in generated keyset-list plans (#881). Capability fingerprints stay stable. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0290-generated-keyset-page-limits)
 - **Action needed** for stores upgrading from a pre-0.83 AI schema with
   the legacy approval lookup index. AI 0.157.0 checks the live index and
   refuses duplicate tool-call keys before DDL. ORM/macros 0.209.0 expose
