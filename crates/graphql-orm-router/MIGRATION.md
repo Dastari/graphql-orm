@@ -15,7 +15,8 @@ supersedes: []
 **Action needed** for hosts using the `auth-agql` feature. Move direct Auth
 dependencies to the published `v0.27.0` Git tag in the same upgrade and
 refresh the host lockfile. The router's Auth provider and scope matcher use
-types from that source.
+types from that source. Run `cargo tree -i agql-auth` in the host workspace
+to verify that only one Auth version and source is resolved.
 
 The host-provided Auth validator now requires both access markers
 (`typ = "access"` and `purpose = "access_token"`) and rejects legacy array
@@ -25,9 +26,10 @@ whole segments.
 **Action needed** for hosts using file-configured `exactOnlyScopePatterns`,
 `with_exact_only_scope_patterns`, or equivalent configuration. In-segment
 wildcards now match literally. Rewrite raw-prefix patterns such as `records*`
-as whole-segment patterns such as `records.*` to protect the subtree. The
-router fails closed at file configuration load if a wildcard is embedded in a
-segment of an exact-only pattern.
+as whole-segment patterns such as `records.*` to protect the subtree.
+`AgqlScopeMatcher::hierarchical` rejects embedded wildcards in exact-only
+patterns for both file configuration and programmatic setup. Hosts are
+responsible for validating opaque matchers passed to `AgqlScopeMatcher::new`.
 
 **Action needed** for hosts building Auth guards. Every Auth user and
 principal guard now fails closed for delegated tokens or tokens carrying an

@@ -301,8 +301,10 @@ grants remain valid. Configured super-scopes remain excluded by default and
 become valid only when `allowSuperScopesForExactOnly` is explicitly enabled;
 membership in `superScopes` and `exactOnlyScopes` is exact and case-sensitive.
 In `exactOnlyScopePatterns`, use wildcards as whole segments, such as
-`records.*`. The router rejects in-segment wildcards such as `records*` at
-configuration load. Lists are normalized and deduplicated at startup. The
+`records.*`. `AgqlScopeMatcher::hierarchical` rejects in-segment wildcards such
+as `records*` for both file configuration and programmatic setup. Hosts are
+responsible for validating opaque matchers passed to `AgqlScopeMatcher::new`.
+File configuration lists are normalized and deduplicated at startup. The
 router applies this one matcher to fixed and rendered operation requirements.
 Resolver guards remain authoritative.
 

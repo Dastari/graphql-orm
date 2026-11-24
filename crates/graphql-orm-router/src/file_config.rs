@@ -6,9 +6,7 @@ use std::{
 use serde::Deserialize;
 
 #[cfg(feature = "auth-agql")]
-use agql_auth::{
-    HierarchicalScopeMatch, HierarchicalScopeOptions, HierarchicalScopeValidationWarning,
-};
+use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 
 #[cfg(feature = "auth-agql")]
 use crate::AgqlScopeMatcher;
@@ -516,22 +514,6 @@ fn build_hierarchical_scope_matcher(
             "scopeMatcher hierarchical options are invalid: {error}"
         ))
     })?;
-    let wildcard = matcher.options().wildcard.as_str();
-    // Auth warns for both whole-segment and embedded wildcards. The latter
-    // now match literally and can silently remove an exact-only requirement.
-    for warning in matcher.validation_warnings() {
-        if let HierarchicalScopeValidationWarning::WildcardExactOnlyPattern { pattern } = warning
-            && pattern
-                .split(separator)
-                .any(|segment| segment != wildcard && segment.contains(wildcard))
-        {
-            return Err(invalid(format!(
-                "scopeMatcher exactOnlyScopePatterns entry {pattern:?} embeds wildcard {wildcard:?} \
-                 in a segment. Rewrite it with the wildcard as a whole segment, such as \
-                 `records{separator}{wildcard}`."
-            )));
-        }
-    }
     Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::hierarchical(matcher)?)))
 }
 
@@ -563,7 +545,6 @@ fn validate_scope_syntax(separator: char, wildcard: &str) -> Result<(), RouterEr
     // value can introduce either one.
     crate::agql::validate_hierarchical_syntax(separator, wildcard)?;
     if wildcard.is_empty()
-        || wildcard.contains(separator)
         || wildcard
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())

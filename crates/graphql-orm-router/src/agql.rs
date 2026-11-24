@@ -4,7 +4,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agql_auth::{AccessTokenValidator, AuthError, HierarchicalScopeMatch, ScopeMatch};
+use agql_auth::{
+    AccessTokenValidator, AuthError, HierarchicalScopeMatch, HierarchicalScopeValidationWarning,
+    ScopeMatch,
+};
 
 use crate::{
     AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, RouterError,
@@ -109,28 +112,49 @@ impl AgqlScopeMatcher {
     /// a rendered scope. For example, separator `-` turns the value `a-b` into
     /// two segments. Use [`hierarchical`](Self::hierarchical) for an `agql-auth`
     /// hierarchical matcher, which refuses that syntax. Pass only matchers
-    /// whose separators and wildcards lie outside the template value
-    /// characters to this constructor.
+    /// whose syntax preserves scope-template boundaries and exact-only
+    /// requirements to this constructor.
     pub fn new(matcher: Arc<dyn ScopeMatch>) -> Self {
         Self { matcher }
     }
 
-    /// Adapts an `agql-auth` hierarchical matcher after checking that its
-    /// separator and wildcard cannot appear inside a scope-template value.
+    /// Adapts an `agql-auth` hierarchical matcher after checking its
+    /// scope-template syntax and exact-only patterns.
     ///
     /// # Errors
     ///
     /// Returns [`RouterErrorKind::InvalidConfiguration`] when the separator is
-    /// an ASCII letter, digit, `-` or `_`, or the wildcard consists only of
-    /// those characters.
+    /// an ASCII letter, digit, `-` or `_`, the wildcard consists only of
+    /// those characters or contains the separator, or an exact-only pattern
+    /// embeds the wildcard within a segment.
     pub fn hierarchical(matcher: HierarchicalScopeMatch) -> Result<Self, RouterError> {
-        let options = matcher.options();
-        validate_hierarchical_syntax(options.separator, &options.wildcard)?;
+        let separator = matcher.options().separator;
+        let wildcard = matcher.options().wildcard.as_str();
+        validate_hierarchical_syntax(separator, wildcard)?;
+        // Auth warns for both whole-segment and embedded wildcards. Embedded
+        // wildcards now match literally and can remove an exact-only requirement.
+        for warning in matcher.validation_warnings() {
+            if let HierarchicalScopeValidationWarning::WildcardExactOnlyPattern { pattern } =
+                warning
+                && pattern
+                    .split(separator)
+                    .any(|segment| segment != wildcard && segment.contains(wildcard))
+            {
+                return Err(RouterError::new(
+                    RouterErrorKind::InvalidConfiguration,
+                    format!(
+                        "scopeMatcher exactOnlyScopePatterns entry {pattern:?} embeds wildcard {wildcard:?} \
+                         in a segment. Rewrite it with the wildcard as a whole segment, such as \
+                         `records{separator}{wildcard}`."
+                    ),
+                ));
+            }
+        }
         Ok(Self::new(Arc::new(matcher)))
     }
 }
 
-/// Refuses hierarchical syntax that a scope-template value could contain.
+/// Requires unambiguous segment syntax outside scope-template values.
 pub(crate) fn validate_hierarchical_syntax(
     separator: char,
     wildcard: &str,
@@ -145,6 +169,12 @@ pub(crate) fn validate_hierarchical_syntax(
         return Err(RouterError::new(
             RouterErrorKind::InvalidConfiguration,
             "scope matcher wildcard must contain a character other than a letter, digit, `-` or `_`",
+        ));
+    }
+    if wildcard.contains(separator) {
+        return Err(RouterError::new(
+            RouterErrorKind::InvalidConfiguration,
+            "scope matcher wildcard must not contain the separator",
         ));
     }
     Ok(())
@@ -173,7 +203,7 @@ fn map_agql_error(error: AuthError) -> AuthenticationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agql_auth::{HierarchicalScopeMatch, LegacyScopeClaims};
+    use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions, LegacyScopeClaims};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
     use serde_json::json;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -182,7 +212,6 @@ mod tests {
 
     #[test]
     fn hierarchical_adapter_refuses_syntax_inside_template_values() {
-        use agql_auth::HierarchicalScopeOptions;
         assert!(AgqlScopeMatcher::hierarchical(HierarchicalScopeMatch::with_defaults()).is_ok());
         for options in [
             HierarchicalScopeOptions::default().with_separator('-'),
@@ -206,6 +235,59 @@ mod tests {
             HierarchicalScopeMatch::new(HierarchicalScopeOptions::default().with_separator('-'))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn hierarchical_adapter_refuses_embedded_exact_only_wildcards() {
+        for (wildcard, pattern) in [
+            ("*", "records*"),
+            ("*", "*records"),
+            ("*", "records*archive*"),
+            ("**", "records.***"),
+        ] {
+            let matcher = HierarchicalScopeMatch::new(
+                HierarchicalScopeOptions::default()
+                    .with_wildcard(wildcard)
+                    .with_super_scopes(["root.admin"])
+                    .with_exact_only_scope_patterns([pattern]),
+            )
+            .unwrap();
+            let error = AgqlScopeMatcher::hierarchical(matcher).unwrap_err();
+            assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+            let message = error.to_string();
+            assert!(message.contains(&format!("entry {pattern:?} embeds wildcard {wildcard:?}")));
+            assert!(message.contains(&format!("`records.{wildcard}`")));
+        }
+    }
+
+    #[test]
+    fn hierarchical_adapter_refuses_wildcard_containing_separator() {
+        let matcher =
+            HierarchicalScopeMatch::new(HierarchicalScopeOptions::default().with_wildcard("*.*"))
+                .unwrap();
+        let error = AgqlScopeMatcher::hierarchical(matcher).unwrap_err();
+        assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+        assert!(
+            error
+                .to_string()
+                .contains("wildcard must not contain the separator")
+        );
+    }
+
+    #[test]
+    fn hierarchical_adapter_preserves_whole_segment_exact_only_policy() {
+        let matcher = HierarchicalScopeMatch::new(
+            HierarchicalScopeOptions::default()
+                .with_super_scopes(["root.admin"])
+                .with_exact_only_scope_patterns(["records.*"]),
+        )
+        .unwrap();
+        let matcher = AgqlScopeMatcher::hierarchical(matcher).unwrap();
+        let required = "records.archive.read";
+        assert!(matcher.matches(required, required));
+        assert!(!matcher.matches("records.*", required));
+        assert!(!matcher.matches("root.admin", required));
+        assert!(matcher.matches("root.admin", "reports.read"));
     }
 
     #[test]
@@ -553,6 +635,7 @@ mod tests {
                     accepted,
                     !is_plain_scope_character(separator)
                         && !wildcard.chars().all(is_plain_scope_character)
+                        && !wildcard.contains(separator)
                 );
                 if !accepted {
                     return Ok(());
