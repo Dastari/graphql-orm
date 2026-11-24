@@ -1695,14 +1695,26 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                 static TYPES: ::std::sync::OnceLock<
                     Box<[::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata]>
                 > = ::std::sync::OnceLock::new();
-                TYPES.get_or_init(|| vec![
+                TYPES.get_or_init(|| {
+                    <Self as ::graphql_orm::graphql::orm::GraphqlCustomOperationMetadata>
+                        ::graphql_custom_result_type_sources()
+                        .into_iter()
+                        .map(|source| source.metadata().clone())
+                        .collect()
+                })
+            }
+
+            fn graphql_custom_result_type_sources(
+            ) -> ::std::vec::Vec<::graphql_orm::graphql::orm::GraphqlSemanticEntitySource> {
+                vec![
                     #(
-                        <#result_types as
-                            ::graphql_orm::graphql::orm::GraphqlSemanticResultTypeMetadata>
-                            ::graphql_semantic_result_type()
-                            .clone()
+                        ::graphql_orm::graphql::orm::GraphqlSemanticEntitySource::of::<#result_types>(
+                            <#result_types as
+                                ::graphql_orm::graphql::orm::GraphqlSemanticResultTypeMetadata>
+                                ::graphql_semantic_result_type(),
+                        )
                     ),*
-                ].into_boxed_slice())
+                ]
             }
         }
     }

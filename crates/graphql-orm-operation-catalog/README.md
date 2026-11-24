@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.14.0 uses Rust type provenance to resolve described root
+results during static schema composition (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
 Version `0.13.0` adds `GraphqlConditionalAssurance` and
 `conditional_assurance()` on generated and resolved operation descriptors. A
 generated update that selects its assurance level per request lists every

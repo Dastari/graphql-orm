@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.210.0 to 0.211.0: Described root result metadata
+
+**No action.** Described roots returning an entity registered in
+`schema_roots!` use the same schema-bound semantic metadata as the
+generated roots (#883). Operation catalogue 0.14.0 uses local Rust type
+identity to detect conflicting declarations. Existing valid SDL and
+fingerprints retain their values.
+
 ## 0.209.0 to 0.210.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
 
 **No action.** Both features are opt-in, and no data migration is needed.
