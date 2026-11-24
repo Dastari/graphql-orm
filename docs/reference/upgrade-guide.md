@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.215.0**; **`graphql-orm-macros` 0.215.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.161.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.215.0**; **`graphql-orm-macros` 0.215.0**; **`graphql-orm-operation-catalog` 0.15.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.161.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
 
 - **No action** — Operation catalogue 0.15.0 marks field-policy-guarded relationships as `subgraph_only` (#544). [Migration](../../MIGRATION.md#operation-catalogue-0150)
 - **No action** — ORM/macros 0.215.0 adds opt-in declared SQL Server parameter types and parses column identifiers in the ALTER COLUMN collation lookup (#522, #849). [Migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers)
