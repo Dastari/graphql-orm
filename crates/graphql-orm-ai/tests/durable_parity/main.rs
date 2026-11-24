@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 #[path = "../support/durable_database.rs"]
 mod durable_database;
+#[cfg(feature = "mssql")]
+mod mssql_run_candidates;
 #[cfg(feature = "postgres")]
 use durable_database::OwnedPostgres;
 use durable_database::{apply_parity_migration, owned_database};
