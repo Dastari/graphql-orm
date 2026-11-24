@@ -230,6 +230,11 @@ variables schema, disclosure shape, limits, and plan fingerprint. Registration
 is discovery only; a fresh target/current-principal policy and the ordinary
 resolver remain authoritative at execution.
 
+For generated offset and keyset list roots, use `maximumItems` to request a
+page size. The compiler supplies the GraphQL page argument, and the resolver
+applies the schema's maximum page limit. Generated keyset plans read from the
+start of the connection with the default count behavior.
+
 The compact selection schema is one finite string enum of public paths, so
 adding deep relationships does not recursively duplicate either the nested
 field map or scalar descriptions at every reachable path. Public scalar and
