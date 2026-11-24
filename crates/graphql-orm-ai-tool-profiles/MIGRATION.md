@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.30.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, plan schemas, catalogue contents and
+broker describe output are unchanged. Existing bindings and stored indexes
+remain valid. No schema or data migration is needed.
+
 ## 0.29.0 generated keyset page limits
 
 **No action.** The planner now validates the server-injected `limit` on the

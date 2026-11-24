@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.161.0 to 0.162.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, provider definitions, describe output
+and existing bindings stay unchanged. No AI schema module or data migration
+is needed.
+
 ## 0.160.0 to 0.161.0
 
 **No action.** AI 0.161.0 uses ORM 0.215.0. The change adapts one SQL Server
