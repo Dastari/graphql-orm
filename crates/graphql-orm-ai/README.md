@@ -11,7 +11,7 @@ supersedes: []
 # graphql-orm-ai
 
 AI 0.161.0 uses the ORM's exact string filters to seek on SQL Server run-state
-indexes (#867). See the [migration guide](MIGRATION.md#01600-to-01610).
+indexes (#867). See the [migration guide](MIGRATION.md#01580-to-01610).
 
 AI 0.157.0 supports upgrading the pre-0.83 approval lookup index to the
 unique tool-call key with live schema verification and duplicate preflight.

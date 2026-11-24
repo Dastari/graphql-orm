@@ -12,7 +12,10 @@ supersedes: []
 
 Version 0.216.0 selects the ORM's seek-capable exact string filter renderer for
 declared SQL Server BIN2 Unicode key columns (#867).
-[Migration](../../MIGRATION.md#02150-to-02160-sql-server-exact-string-filter-seeks)
+[Migration](../../MIGRATION.md#02120-to-02160-sql-server-exact-string-filter-seeks)
+
+Version 0.212.0 aligns with the ORM's
+[scoped SQLite column drop](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
 
 Version 0.211.0 records the Rust type of described root results for
 schema catalogue composition (#883).

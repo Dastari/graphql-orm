@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.160.0 to 0.161.0
+## 0.158.0 to 0.161.0
 
 **No action.** The ORM now supplies the seek predicate for SQL Server run-state
 filters (#867). This update requires no additional schema or data migration.

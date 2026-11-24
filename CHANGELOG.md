@@ -18,7 +18,15 @@ for historical context.
 
 - **Fixed (#867).** Generated exact SQL Server equality and membership filters
   include a seek predicate for Unicode key columns declared with BIN2 collation.
-  [Migration](MIGRATION.md#02150-to-02160-sql-server-exact-string-filter-seeks)
+  [Migration](MIGRATION.md#02120-to-02160-sql-server-exact-string-filter-seeks)
+
+## Unreleased - ORM/macros 0.212.0
+
+- **Fixed (#882).** An admitted owned SQLite migration with a single column
+  drop can preserve unrelated indexes and incoming foreign keys using native
+  `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
+  drop and history updates commit together.
+  [Migration](MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
 
 ## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
 
