@@ -7,7 +7,11 @@
 
 use super::*;
 
-#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+#[cfg(any(
+    feature = "local-harness",
+    feature = "provider-grok-acp",
+    feature = "provider-codex-app-server"
+))]
 #[path = "entity_reference_local_transport_tests.rs"]
 mod local_transport;
 
@@ -1083,4 +1087,202 @@ async fn debug_output_of_resolved_values_is_redacted() {
         serde_json::to_string(&dispatch.into_unavailable_request()).expect("request serializes");
     assert_handles_only("a withheld request", &withheld);
     assert!(withheld.contains(r#""status":"unavailable""#));
+}
+
+struct DirectProvider(MockProvider);
+
+#[async_trait]
+impl AiProvider for DirectProvider {
+    fn provider_kind(&self) -> ProviderKind {
+        self.0.provider_kind()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.0.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        dispatch: ModelDispatchRequest,
+        context: ProviderRequestContext,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.0.stream(dispatch, context).await
+    }
+
+    async fn stream_with_dynamic_tools(
+        &self,
+        dispatch: ModelDispatchRequest,
+        context: ProviderRequestContext,
+        _responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.0.stream(dispatch, context).await
+    }
+
+    async fn submit_background(
+        &self,
+        dispatch: ModelDispatchRequest,
+        context: ProviderRequestContext,
+        binding: ProviderBackgroundBinding,
+    ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        self.0.submit_background(dispatch, context, binding).await
+    }
+}
+
+struct NoDirectToolCalls;
+
+#[async_trait]
+impl ProviderDynamicToolResponder for NoDirectToolCalls {
+    async fn respond(
+        &self,
+        _call: ProviderDynamicToolCall,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        panic!("the direct-provider test never invokes an application tool")
+    }
+}
+
+fn direct_context(plan: &AiProviderCallPlan) -> ProviderRequestContext {
+    let budget = &plan.budget;
+    let now = OffsetDateTime::now_utc();
+    let proof = AiBudgetReservation::new_reserved_with_reasoning_effort(
+        AiBudgetReservationId::new(),
+        budget.run_id,
+        budget.attempt_id,
+        budget.lease_generation,
+        budget.provider_kind.clone(),
+        &budget.model,
+        budget.reasoning_effort,
+        &budget.pricing_policy_version,
+        AiBudgetAmounts {
+            input_tokens: plan.request.conservative_egress_bytes(),
+            output_tokens: 100,
+            runs: 1,
+            ..Default::default()
+        },
+        budget.expires_at,
+    )
+    .unwrap()
+    .authorize_provider_call_with_reasoning_effort(
+        budget.run_id,
+        budget.attempt_id,
+        budget.lease_generation,
+        &budget.provider_kind,
+        &budget.model,
+        budget.reasoning_effort,
+        100,
+        0,
+        now,
+    )
+    .unwrap();
+    let authorize = |manifest: &AiEgressManifest| {
+        AiEgressDecision::allow(manifest, "test-policy", "test-user")
+            .authorize(manifest)
+            .unwrap()
+    };
+    let mut manifests = plan.transfers.iter();
+    let manifest = manifests.next().unwrap();
+    let mut context = ProviderRequestContext::new(
+        budget.session_id,
+        budget.run_id,
+        &plan.correlation_id,
+        proof,
+        manifest.clone(),
+        authorize(manifest),
+    )
+    .unwrap();
+    for manifest in manifests {
+        context = context
+            .with_authorized_transfer(manifest.clone(), authorize(manifest))
+            .unwrap();
+    }
+    context
+}
+
+async fn assert_direct_markers(fixture: &Fixture, plan: &AiProviderCallPlan) {
+    let runtime = &fixture.runtime;
+    let kind = &plan.provider_kind;
+    let request = || plan.request.clone();
+    let context = || direct_context(plan);
+    let responder = Arc::new(NoDirectToolCalls);
+    assert!(matches!(
+        runtime.dispatch_provider(kind, request(), context()).await,
+        AiProviderDispatchOutcome::Dispatched(_)
+    ));
+    let _ = runtime
+        .stream_provider(kind, request(), context())
+        .await
+        .unwrap();
+    assert!(matches!(
+        runtime
+            .dispatch_provider_with_dynamic_tools(kind, request(), context(), responder.clone())
+            .await,
+        AiProviderDispatchOutcome::Dispatched(_)
+    ));
+    let _ = runtime
+        .stream_provider_with_dynamic_tools(kind, request(), context(), responder)
+        .await
+        .unwrap();
+    let binding = ProviderBackgroundBinding::new(
+        Uuid::new_v4(),
+        "test-submission".into(),
+        "mock-profile".into(),
+    );
+    let result = runtime
+        .submit_provider_background(kind, request(), context(), binding)
+        .await
+        .unwrap();
+    assert_handles_only("background acknowledgement", &format!("{result:?}"));
+}
+
+#[tokio::test]
+async fn direct_provider_apis_keep_markers_on_retry_and_replayed_history() {
+    let mock = MockProvider::new(text_turn())
+        .with_capabilities(ProviderCapabilities {
+            streaming: true,
+            custom_tools: true,
+            parallel_tool_calls: true,
+            stateless_continuation: true,
+            background: true,
+            local: true,
+            maximum_context_tokens: Some(1_000_000),
+            maximum_output_tokens: Some(100),
+            ..Default::default()
+        })
+        .with_event_batches(
+            std::iter::once(tool_turn()).chain(std::iter::repeat_n(text_turn(), 12)),
+        )
+        .with_background_submission(
+            "resp-direct",
+            "queued",
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .with_wire_capture();
+    let references =
+        references_for(mock.clone(), Some(Arc::new(DirectProvider(mock.clone())))).await;
+    let ToolLoop {
+        mut references,
+        continuation,
+        batch_lease,
+        ..
+    } = tool_loop_on(references, |plan| plan, &|| mock.captured_wire()).await;
+    references.fixture.lease = batch_lease;
+    let initial = with_reference(plan(&references.fixture), &references.registry);
+    let replay = continuation_plan(&references.fixture, continuation, 2);
+    assert_direct_markers(&references.fixture, &initial).await;
+    references.access.store(false, Ordering::SeqCst);
+    assert_direct_markers(&references.fixture, &initial).await;
+    assert_direct_markers(&references.fixture, &replay).await;
+    assert_eq!(
+        references.calls.load(Ordering::SeqCst),
+        1,
+        "only the executor resolved"
+    );
+    let wire = mock.captured_wire();
+    assert_eq!(wire.len(), 16);
+    for request in &wire[1..] {
+        assert_unavailable(request);
+    }
+    assert_handles_only(
+        "persisted checkpoints",
+        &stored_checkpoints(&references.fixture).await,
+    );
 }

@@ -1,7 +1,5 @@
 //! Protected fenced persistence for provisional visible provider batches.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_support::map_orm;
 use std::sync::Arc;
 

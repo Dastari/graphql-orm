@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.202.0 to 0.206.0: SQL Server parameter types and column identifiers
+## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 
 **No action.** Upgrade ORM and macros together. SQL Server keeps the
 existing Unicode string and BIGINT binds by default. To use each declared
@@ -23,6 +23,222 @@ Unicode binding. Generated unsigned operands outside their SQL Server range
 return `INVALID_INPUT`. SQL Server ALTER COLUMN planning parses the column
 identifier for its collation lookup.
 See [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+## 0.213.0 to 0.214.0: agql-auth v0.27.0
+
+**Action needed** for hosts with direct `agql-auth` dependencies. Upgrade
+ORM/macros together and choose the same Auth Git tag in the same upgrade:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.27.0", version = "0.27.0" }
+```
+
+Refresh the host lockfile and run `cargo tree -i agql-auth` with the host's
+deployment features enabled. Cargo reports an ambiguous package specification
+if multiple sources resolve in that graph. The tag resolves to
+`71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+Cargo considers a different tag or a `rev` selector a different source, even
+at the same commit. This matters when passing `AuthPrincipal` to
+`auth_bundle_from_principal` or using the AI and router Auth integration types.
+
+Auth 0.27 requires `typ = "access"` and `purpose = "access_token"` by default,
+rejects legacy array scope claims by default, and requires the `Bearer` scheme
+for Authorization values. Access tokens from the default 0.26 issuer already
+carry both access markers. Hierarchical scope wildcards match whole segments.
+Rewrite raw-prefix grants such as `records*` as `records.*` when they should
+grant the whole subtree. API-token services reject a mismatched audience or
+configured resource. An audience-bound token requires a declared audience.
+Without a configured resource, the host still enforces the token's resource
+binding.
+
+**Action needed** for hosts using `with_exact_only_scope_patterns` or
+equivalent configuration. In-segment wildcards now match literally. Rewrite
+raw-prefix patterns such as `records*` as whole-segment patterns such as
+`records.*` to protect the subtree.
+
+**Action needed** for hosts building Auth guards. Every Auth user and
+principal guard now fails closed for delegated tokens or tokens carrying an
+`actor` claim unless the guard calls `.allow_delegated()`. Opt in on each
+guard that is intended to accept these tokens. The Auth `RequireAll*` guards
+and `has_all_scopes` helpers also fail closed on empty lists. Supply a
+non-empty list where scopes or roles are required.
+
+Hosts using Auth's rotating JWKS cache should explicitly set
+`stale_policy: StaleKeyPolicy::Reject` to preserve fail-closed refresh behavior.
+The new default, `UseStale`, permits cached keys after a failed refresh until
+the cache TTL plus the one-hour default `max_stale` window. A host requiring
+token confirmation must use a validator entry point that passes the verified
+confirmation material.
+
+Auth issuers must update their stores and rollout procedures. Auth 0.27 adds
+user-wide refresh-session revocation and a default 90-day absolute lifetime for
+new session families. Existing records without a family deadline end at their
+recorded expiry. Completing a password reset revokes the user's refresh
+sessions. Session-bound delegation requires a current enabled parent. Rehydrated
+delegations retain their bindings, are capped at the earlier of parent and
+delegated expiry, and intersect current grants with the original delegation's
+grant ceiling. Pre-0.27 persisted delegation references lack the ceiling and
+must be replaced through fresh authorization. Host token-status and current
+authority checks still apply to accepted requests.
+
+The ORM has no schema or data migration for this pin. For Auth-owned stores,
+validators and login flows, follow the
+[Auth 0.27 migration guide](https://github.com/Dastari/agql-auth/blob/v0.27.0/MIGRATION.md#0260-to-0270-security-hardening).
+
+## 0.212.0 to 0.213.0: Test harness coordination
+
+**No action.** Upgrade the ORM and macros together. This release fixes
+parallel test execution in the workspace (#887, #888).
+
+## 0.211.0 to 0.212.0: scoped SQLite column drop
+
+**No action.** Upgrade ORM and macros together. An owned SQLite plan whose
+only change is to drop a column now renders SQLite's native `DROP COLUMN`.
+The plan is destructive and still requires `ApplyOptions::allow_destructive`.
+Planning and application check the live foreign-key catalog and test SQLite's
+native alterations against an empty copy of the schema. Planning reports
+detected dependencies as `InvalidPhysicalContract`. A trial rename identifies
+retained references that SQLite could silently rebind or ignore, including
+`UPDATE OF` trigger events. The live drop proceeds only when the checks
+verify that it preserves the retained physical schema.
+This narrows the [0.111.0 column-removal restrictions](#01110-sqlite-columncheckfk-rebuild-preservation)
+for the single-drop shape. Plans containing a drop and additional steps still
+rebuild or refuse. Run SQLite migrations with no TEMP objects on other
+connections, or use a dedicated migration connection with other connections closed.
+Refs #882.
+
+## 0.210.0 to 0.211.0: Described root result metadata
+
+**No action.** Described roots returning an entity registered in
+`schema_roots!` use the same schema-bound semantic metadata as the
+generated roots (#883). Operation catalogue 0.14.0 uses local Rust type
+identity to detect conflicting declarations. Existing valid SDL and
+fingerprints retain their values.
+
+## 0.209.0 to 0.210.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+
+**No action.** Both features are opt-in, and no data migration is needed.
+Entities that declare neither option generate byte-identical SDL, operation
+and semantic catalogues and fingerprints. Upgrade ORM and macros together.
+
+To opt in, restrict the entity's roots with `mutation_shapes` so it generates
+neither `update_many` nor `upsert`. Then add
+`update_expected_version = "required"`, `update_assurance(select, levels)` or
+both. The update's `ExpectedVersion` becomes `Int!`, so clients that omit it
+must send it. A declared selection changes the update's operation and
+router-export fingerprints. Regenerate exported SDL and catalogues, and
+re-approve any bindings to that operation. Install `AssuranceEnforcement`
+before you enable `update_assurance`: without it, every update of the entity
+is refused with `AUTHORIZATION_MISCONFIGURED`.
+
+The derive also refuses either option on an entity with a relation declaring
+`on_delete = "set_null"`. Use `restrict` or `cascade` instead. The runtime IR
+conversion (`RuntimeSchema::from_static_entities*`) refuses the entity.
+
+Some schema configuration bypasses the checks, and the derive cannot see it,
+so avoid it:
+
+- Do not declare database-only foreign keys that set the table's keys to null.
+- Do not map a guarded table through another entity or a separate migration
+  plan. It could install its own `SET NULL` key or expose its own update.
+- Do not use runtime IR over a guarded table that you write by hand or
+  deserialize. It bypasses these protections.
+
+The caller can observe the level a selector chooses, because the update either
+succeeds or is refused for step-up. Write selectors that branch only on the
+patch and on fields the writing principal may read. A selector error or panic
+reaches the client only as `INTERNAL_ERROR`. No ORM write runs before the
+selector. Host SQL in a filter or policy predicate runs inside the same
+transaction, and any write it makes rolls back on refusal.
+See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
+and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+## 0.208.0 to 0.209.0: external migration preflight
+
+**No action.** Upgrade ORM and macros together. Hosts applying DDL externally
+can call `database.schema().preflight_unique_indexes(&plan).await?` before any
+migration statements. Use a connection that can read all affected rows and
+quiesce concurrent writes and schema changes through application. Repeated
+keys return `UniqueIndexDuplicates`. No data migration is needed for this API.
+
+## 0.207.0 to 0.208.0: bounded set-based deletes
+
+**No action.** Upgrade ORM and macros together. Opt in per entity to call
+`MutationContext::delete_keys_set_bounded` or `delete_where_set_bounded`
+inside a `StateMachine` transaction. Existing delete APIs keep their
+behavior. Review the
+[set-delete contract](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+before implementing `SetDeleteEntity`.
+
+## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
+
+**No action.** SQLite renders every closure read predicate, single-level and
+nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
+on 0.200.0 through 0.206.0 were exposed only if a SQLite closure walks a
+pointer column whose collation treats values as equal that the key column
+distinguishes, for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY`
+key. There, pointers such as `'a'` and `'A'`, or `'a'` and `'a '`, reached at
+the same depth were followed only once. An `Any` closure could then deny a
+row that the original rendering admits. A randomized search found no case
+that admitted extra rows, but over-admission is not proven impossible: SQLite
+does not guarantee which of several equal pointers it keeps.
+
+On PostgreSQL and SQL Server, a root closure whose target is itself a closure
+over built-in column tests and NULL checks can reuse the inner walk's
+three-valued result, with fewer SQL fragments and bind parameters. PostgreSQL
+and SQL Server single-level closures keep their 0.200.0 rendering. The policy
+admits the same rows as the original rendering on SQLite, PostgreSQL, and SQL
+Server, including text pointers and targets with declared collations and
+binds whose type differs from the column's. Where PostgreSQL or SQL Server
+cannot compare a pointer and key with different collations, both renderings
+fail the statement. Composition limits still apply. Applications that
+snapshot generated policy SQL may need to refresh those snapshots. Refs #785.
+
+## 0.205.0 to 0.206.0: backend-typed backup runtime
+
+**No action.** Upgrade ORM and macros together. SQLite and PostgreSQL
+`Database<B>` handles expose full backup and restore even when Cargo enables
+multiple ORM backends. Incremental backup still requires a single ORM backend
+with `change-journal`: in a multi-backend build `ensure_change_journal_table`,
+`ensure_change_journal_recorder` and `export_changes*` exist but always return
+an error. Use backup 0.30.0 from the same reviewed workspace
+revision to select a typed adapter with `orm-sqlite` or `orm-postgres`.
+
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
+
+## 0.203.0 to 0.204.0: externally managed backup and restore
+
+**No action.** The default backup and restore behavior stays the same. No
+data migration is needed. For a database whose backup and restore are owned
+by another product, opt in with
+`DatabaseBuilder::externally_managed_backup_restore(true)` on every handle.
+Backup, restore, and explicit restore-fencing operations return
+`BACKUP_RESTORE_EXTERNALLY_MANAGED`. Use the same reviewed workspace revision
+for ORM and backup 0.29.0 if you use its ORM adapter.
+See [backup ownership](docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore).
+
+## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
+
+**Action needed** for SQL Server hosts with `append_only = true` entities.
+Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
+both operations. Before applying a plan, review cleanup jobs and foreign-key
+cascades that delete rows from these tables. Change or disable those paths
+and rehearse the migration on a copy. There is no trigger opt-out while an
+entity remains append-only. Remove `append_only = true` only if the entity
+should no longer have the append-only contract.
+
+**Action needed** for SQL Server hosts whose declarations can resolve to the
+same physical table. Regenerate the plan and resolve any identifier conflict
+before applying it. Use one declaration for each physical table, including
+when an unqualified name and a `dbo`-qualified name refer to the same object.
+
+**No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
+together. No physical schema or data migration is required on these backends.
 
 ## 0.201.0 to 0.202.0: test and repository hygiene
 

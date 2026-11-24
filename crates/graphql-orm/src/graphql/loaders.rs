@@ -813,7 +813,7 @@ pub fn relation_key_projection(
 
 #[doc(hidden)]
 pub fn relation_key_filter(
-    columns: &[&'static str],
+    columns: &[&str],
     parent_values: &[Vec<crate::graphql::orm::SqlValue>],
 ) -> crate::graphql::orm::FilterExpression {
     relation_key_filter_with_types(columns, parent_values, |_| None)
@@ -830,7 +830,7 @@ fn relation_parameter_type<T: RelationTarget<B>, B: OrmBackend>(
 }
 
 fn relation_key_filter_with_types(
-    columns: &[&'static str],
+    columns: &[&str],
     parent_values: &[Vec<crate::graphql::orm::SqlValue>],
     parameter_type: impl Fn(&str) -> Option<&'static str>,
 ) -> crate::graphql::orm::FilterExpression {

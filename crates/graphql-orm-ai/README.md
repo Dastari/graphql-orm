@@ -10,11 +10,41 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.160.0 uses published `agql-auth` `v0.27.0` and ORM 0.214.0. Hosts that
+pass Auth types must adopt the same Git tag.
+See the [migration guide](MIGRATION.md#01590-to-01600).
+
+AI 0.159.0 adds opt-in resolved entity-reference delivery for Codex app-server.
+The host process must implement the consuming dispatch hook. Direct runtime
+dispatch methods always send unavailable markers. Review local process
+retention before opting in. See the
+[migration guide](MIGRATION.md#01580-to-01590).
+
+AI 0.157.0 supports upgrading the pre-0.83 approval lookup index to the
+unique tool-call key with live schema verification and duplicate preflight.
+See the [migration guide](MIGRATION.md#01560-to-01570).
+
+AI 0.156.0 adds a model-context benchmark for the fixed capability broker and,
+with AI tool profiles 0.28.0, keeps per-call broker costs flat for a host that
+supplies one index. No API, binding or schema change. See the
+[benchmark results](docs/capability-discovery-and-execution.md#model-context-benchmark)
+and the [migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
+
+AI 0.155.0 supports composing the exported AI roots directly through
+`schema_roots!` in camelCase and PascalCase. Compose `AiUsageQueryRoot` only
+when the schema omits `AiQueryRoot`, which already includes usage reporting.
+See the [migration guide](MIGRATION.md#01540-to-01550).
+
 AI 0.153.0 binds compaction to the session's pinned provider and model, checks
 the lease before adopting tool checkpoints, and reads restore facts in bounded
 pages. See [migration guidance](MIGRATION.md#01520-to-01530).
 
-AI 0.152.0 adds an opt-in for resolved [entity references](docs/entity-references.md#adapters-for-a-local-process) on the local-harness and Grok ACP adapters. It is off by default: a registration opts in with `with_resolved_entity_reference_delivery` and a freshness bound, and until then, and always on the Codex app-server adapter and the direct runtime dispatch methods, every reference is the unavailable marker. No signature, GraphQL SDL or schema change. See the [migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters) before opting in: a local process retains what it is sent.
+AI 0.152.0 added opt-in resolved [entity references](docs/entity-references.md#adapters-for-a-local-process)
+for the local-harness and Grok ACP adapters. Hosts opt in per registration
+with `with_resolved_entity_reference_delivery` and a freshness bound.
+Review local process retention before enabling delivery. See the
+[migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters).
+
 Version 0.151.2 emits fixed skill content-protection reason codes in debug
 tracing and reuses compiled proposal validators.
 See the [migration guide](MIGRATION.md#01512-skill-content-protection-diagnostics).
@@ -347,8 +377,11 @@ lockfile and verify that it resolves one Auth source. The workspace release
 manifest records the locked Auth commit.
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
-or `mssql`. MSSQL currently has schema/compile support only where ORM write
-parity is incomplete. This unpublished crate has no docs.rs page; package docs
+or `mssql`. AI 0.154.0 adds durable services for externally provisioned SQL
+Server schemas. AI 0.158.0 adds claim and recovery run-state indexes to that
+external schema plan.
+Review the [deployment requirements and capability
+matrix](docs/backend-capability-matrix.md#sql-server-deployment). Package docs
 and rustdoc are available from the pinned repository revision.
 Upgrade deliberately: review all pinned companions' migration guides and
 changelogs, update them to one reviewed revision, and run recovery-path tests
@@ -653,7 +686,7 @@ See the [session reliability adoption contract](docs/session-reliability-adoptio
 | --- | --- | --- |
 | `sqlite` | Yes | Managed schema and runtime lane. |
 | `postgres` | No | PostgreSQL lane. |
-| `mssql` | No | Schema/compile lane; check the capability matrix. |
+| `mssql` | No | Durable runtime on an externally provisioned SQL Server schema. |
 | `provider-*` | No | Opt-in OpenAI, Anthropic, xAI, Ollama, or managed OpenAI-compatible adapters. |
 | `local-harness` | No | Installed sandboxed JSON-lines v2 driver; not a generic subprocess launcher. |
 | `provider-codex-app-server` | No | Experimental local adapter; deployment owns sandboxing, credentials, and network policy. |

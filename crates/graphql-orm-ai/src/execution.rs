@@ -1,6 +1,5 @@
 //! Authenticated application GraphQL execution contracts.
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::AiError;
 use crate::sha256::valid_sha256;
 use std::any::Any;
@@ -226,7 +225,6 @@ impl AiToolExecutionProvenance {
         self.effect_lease_generation
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_effect_execution(
         mut self,
         lease: &crate::AiRunLease,
@@ -296,7 +294,6 @@ impl AiToolExecutionProvenance {
         self.provider_cursor_fingerprint.as_deref()
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_provider_cursor_fingerprint(
         mut self,
         fingerprint: String,
@@ -344,7 +341,6 @@ impl AiToolExecutionProvenance {
         self.authorization_state_digest.as_deref()
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_provider_call(
         lease: &crate::AiRunLease,
         provider: &crate::AiProviderCallResult,
@@ -434,7 +430,6 @@ impl AiToolExecutionProvenance {
     // Derived only from the completed trusted runtime result. Keep the exact current policy
     // fields that the owning bridge placed on its actual executor binding, including for
     // unapproved effects; current disclosure policy remains an independent recheck.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_completed_authorization(
         mut self,
         policy_version: &str,
@@ -445,7 +440,6 @@ impl AiToolExecutionProvenance {
         self
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn original_invocation(&self) -> Self {
         let mut original = self.clone();
         original.approval_id = None;

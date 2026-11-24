@@ -1,7 +1,6 @@
 //! Protected generated-ORM persistence for bounded subscription waits.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
 use crate::orm_support::{
@@ -15,7 +14,7 @@ use futures::StreamExt;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionMode};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -490,12 +489,12 @@ impl OrmAiSubscriptionWaitService {
     }
 
     /// Returns the underlying generated-ORM database.
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         self.run_service.database()
     }
 
     /// The crate's internal handle: the host handle behind the custody field policy.
-    pub(crate) fn custody_database(&self) -> &Database<DefaultWriteBackend> {
+    pub(crate) fn custody_database(&self) -> &Database<AiOrmBackend> {
         self.run_service.custody_database()
     }
 
@@ -3436,7 +3435,7 @@ fn validate_claimed_waiter(
 }
 
 async fn quarantine_waiter_candidate(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     waiter: &AiSubscriptionWaiterRecord,
     run: Option<&AiRunRecord>,
 ) -> Result<(), OrmPublicError> {

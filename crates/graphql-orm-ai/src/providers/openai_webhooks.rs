@@ -217,12 +217,10 @@ impl OpenAiVerifiedWebhookEvent {
         self.received_at
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn receipt_key(&self) -> &str {
         &self.receipt_key
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) const fn receipt_id(&self) -> uuid::Uuid {
         self.receipt_id
     }

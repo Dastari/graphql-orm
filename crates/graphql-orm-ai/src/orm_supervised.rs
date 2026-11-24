@@ -1,7 +1,5 @@
 //! Protected same-attempt resumption of one approved supervised mutation.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use std::sync::Arc;
 
 use crate::{

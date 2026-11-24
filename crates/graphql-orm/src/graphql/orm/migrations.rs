@@ -35,7 +35,7 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
-/// Two declarations that resolve to the same PostgreSQL table identifier.
+/// Two declarations that resolve to the same physical table identifier.
 /// Planning refuses the target before emitting any DDL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableIdentifierConflict {
@@ -49,7 +49,7 @@ impl std::fmt::Display for TableIdentifierConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "tables {} and {} resolve to the same PostgreSQL identifier",
+            "tables {} and {} resolve to the same physical identifier",
             self.table, self.other_table
         )
     }
@@ -81,7 +81,11 @@ impl TableIdentifierConflict {
 /// no row data.
 ///
 /// The check covers a `CREATE UNIQUE INDEX` step on a table that exists
-/// before the plan, over columns that exist before the plan. It follows the
+/// before the plan, over columns that exist before the plan. It reads keys
+/// with their pre-plan types and collations. If the plan changes a key's type
+/// or collation, duplicates introduced by that change are caught by the
+/// database at `CREATE UNIQUE INDEX`, and managed transactional apply rolls
+/// back. The preflight follows the
 /// backend's own uniqueness rule for `NULL`: PostgreSQL and SQLite treat
 /// `NULL` keys as distinct, so rows with a `NULL` key column are ignored;
 /// SQL Server treats them as equal, so they are compared. A unique index over
@@ -196,7 +200,7 @@ pub(super) async fn unique_index_duplicates<B: super::OrmBackend>(
         if index.predicate.as_ref().is_some_and(|predicate| {
             predicate.column.is_empty()
                 && (backend != DatabaseBackend::Mssql
-                    || validate_mssql_step_predicates(step).is_err()
+                    || validate_mssql_step(step).is_err()
                     || added_columns
                         .iter()
                         .any(|(table, _)| *table == table_name.as_str()))
@@ -247,12 +251,18 @@ pub(super) fn table_identifier_conflict<'a>(
     backend: DatabaseBackend,
     tables: impl IntoIterator<Item = &'a str>,
 ) -> Option<TableIdentifierConflict> {
-    if backend != DatabaseBackend::Postgres {
-        return None;
-    }
     let mut seen = std::collections::BTreeMap::new();
     for table in tables {
-        let parts = super::dialect::postgres_resolved_identifier_parts(table);
+        let parts = match backend {
+            DatabaseBackend::Postgres => super::dialect::postgres_resolved_identifier_parts(table),
+            DatabaseBackend::Mssql => {
+                let Some((schema, table)) = backend.mssql_schema_and_table(table) else {
+                    continue;
+                };
+                vec![schema, table]
+            }
+            _ => return None,
+        };
         if let Some(other) = seen.insert(parts, table) {
             return Some(TableIdentifierConflict {
                 table: other.to_owned(),
@@ -1228,11 +1238,46 @@ fn render_append_only_statements(
             format!("DROP TRIGGER IF EXISTS {name} ON {table}"),
             format!("DROP FUNCTION IF EXISTS {name}()"),
         ],
-        (DatabaseBackend::Mysql | DatabaseBackend::Mssql, _) => vec![format!(
+        (DatabaseBackend::Mssql, _) => {
+            let Some((trigger, table)) = mssql_append_only_identifiers(table_name) else {
+                return vec![INVALID_MSSQL_APPEND_ONLY_SQL.to_owned()];
+            };
+            if retention_purge {
+                return vec![INVALID_MSSQL_APPEND_ONLY_SQL.to_owned()];
+            }
+            if enabled {
+                vec![format!(
+                    "CREATE OR ALTER {}",
+                    mssql_append_only_body(&trigger, &table)
+                )]
+            } else {
+                vec![format!("DROP TRIGGER IF EXISTS {trigger}")]
+            }
+        }
+        (DatabaseBackend::Mysql, _) => vec![format!(
             "-- append-only enforcement is not supported on {}",
             backend.name()
         )],
     }
+}
+
+const INVALID_MSSQL_APPEND_ONLY_SQL: &str = "THROW 50000, 'SQL Server append-only triggers require a local table and no retention purge', 1";
+
+fn mssql_append_only_identifiers(table_name: &str) -> Option<(String, String)> {
+    let backend = DatabaseBackend::Mssql;
+    let (schema, table) = backend.mssql_schema_and_table(table_name)?;
+    let schema = backend.delimit_raw_identifier(&schema);
+    let table = format!("{schema}.{}", backend.delimit_raw_identifier(&table));
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(table.as_bytes()));
+    let trigger = format!("{schema}.[graphql_orm_append_only_{}]", &hash[..32]);
+    Some((trigger, table))
+}
+
+fn mssql_append_only_body(trigger: &str, table: &str) -> String {
+    format!(
+        "TRIGGER {trigger} ON {table} AFTER UPDATE, DELETE AS BEGIN SET NOCOUNT ON; THROW 50000, N'append-only entity', 1; END"
+    )
 }
 
 fn constraint_comment(expression: &str) -> String {
@@ -1767,7 +1812,7 @@ pub(super) fn validate_migration_step_capabilities<'a>(
     }
     if backend == DatabaseBackend::Mssql {
         for step in &steps {
-            validate_mssql_step_predicates(step)?;
+            validate_mssql_step(step)?;
         }
     }
     Ok(())
@@ -1860,6 +1905,20 @@ pub(super) fn postgres_overlong_identifier(
 
 /// PostgreSQL silently truncates identifiers longer than `NAMEDATALEN - 1`.
 const POSTGRES_MAX_IDENTIFIER_BYTES: usize = 63;
+const MSSQL_BIN2_TYPE_SUFFIX: &str = " COLLATE Latin1_General_100_BIN2";
+
+pub(super) fn mssql_column_types_match(current: &str, target: &str) -> bool {
+    // A declaration that omits collation adopts the live column's collation.
+    // A declaration that explicitly asks for BIN2 must match the catalog.
+    let current = if target.ends_with(MSSQL_BIN2_TYPE_SUFFIX) {
+        current
+    } else {
+        current
+            .strip_suffix(MSSQL_BIN2_TYPE_SUFFIX)
+            .unwrap_or(current)
+    };
+    current.eq_ignore_ascii_case(target)
+}
 
 pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
@@ -1888,12 +1947,17 @@ pub(super) fn column_changed_with(
         if backend == DatabaseBackend::Postgres {
             !postgres_types_equivalent(&before.sql_type, &after.sql_type)
         } else {
-            !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+            !mssql_column_types_match(&before.sql_type, &after.sql_type)
         }
     } else {
         before.sql_type != after.sql_type
     };
-    if before.name != after.name
+    let name_changed = if backend == DatabaseBackend::Mssql {
+        backend.identifier_part_name(&before.name) != backend.identifier_part_name(&after.name)
+    } else {
+        before.name != after.name
+    };
+    if name_changed
         || sql_type_changed
         || before.nullable != after.nullable
         || before.is_primary_key != after.is_primary_key
@@ -2132,15 +2196,22 @@ pub(super) fn diff_schema_views_with(
         }
 
         let target_table = target_tables[table_name];
+        let column_key = |column: &ColumnModel| {
+            if backend == DatabaseBackend::Mssql {
+                backend.identifier_part_name(&column.name)
+            } else {
+                column.name.clone()
+            }
+        };
         let current_columns = table
             .columns
             .iter()
-            .map(|column| (column.name.clone(), column))
+            .map(|column| (column_key(column), column))
             .collect::<std::collections::BTreeMap<_, _>>();
         let target_columns = target_table
             .columns
             .iter()
-            .map(|column| (column.name.clone(), column))
+            .map(|column| (column_key(column), column))
             .collect::<std::collections::BTreeMap<_, _>>();
 
         for (column_name, column) in &target_columns {
@@ -2156,7 +2227,7 @@ pub(super) fn diff_schema_views_with(
             if !target_columns.contains_key(column_name) {
                 steps.push(OwnedMigrationStep::DropColumn {
                     table_name: table_name.clone(),
-                    column_name: column_name.clone(),
+                    column_name: column.name.clone(),
                 });
                 continue;
             }
@@ -2795,7 +2866,35 @@ impl std::fmt::Display for InvalidMssqlIndexPredicate {
 
 impl std::error::Error for InvalidMssqlIndexPredicate {}
 
-fn validate_mssql_step_predicates(step: &StepRef<'_>) -> crate::Result<()> {
+fn refused_mssql_step_sql(error: sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::Protocol(_) => INVALID_MSSQL_APPEND_ONLY_SQL,
+        _ => INVALID_MSSQL_FILTER_SQL,
+    }
+}
+
+fn validate_mssql_step(step: &StepRef<'_>) -> crate::Result<()> {
+    let append_only = match step {
+        StepRef::CreateTable(table) if table.append_only => {
+            Some((table.table_name, table.retention_purge))
+        }
+        StepRef::SetAppendOnly {
+            table_name,
+            retention_purge,
+            ..
+        } => Some((*table_name, *retention_purge)),
+        _ => None,
+    };
+    if append_only.is_some_and(|(table, retention)| {
+        retention
+            || DatabaseBackend::Mssql
+                .mssql_schema_and_table(table)
+                .is_none()
+    }) {
+        return Err(sqlx::Error::Protocol(
+            "SQL Server append-only triggers require a local table and no retention purge".into(),
+        ));
+    }
     let indexes = match step {
         StepRef::CreateTable(table) => table.indexes.as_slice(),
         StepRef::CreateIndex { index, .. } => std::slice::from_ref(index),
@@ -2873,6 +2972,9 @@ fn render_index_predicate(
     {
         // Introspection retained the catalog's opaque filter verbatim.
         return (*filter).to_string();
+    }
+    if predicate.values.is_empty() {
+        return format!("{} IS NOT NULL", backend.quote_identifier(predicate.column));
     }
     let values = predicate
         .values
@@ -3218,6 +3320,16 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
     if column.is_empty() {
         return None;
     }
+    if tokens.len() == 4
+        && structural_ident(tokens.get(1), "is")
+        && structural_ident(tokens.get(2), "not")
+        && structural_ident(tokens.get(3), "null")
+    {
+        return Some(IndexPredicateModel {
+            column: column.clone(),
+            values: Vec::new(),
+        });
+    }
     let mut offset = 1;
     let is_in = structural_ident(tokens.get(offset), "in");
     if is_in {
@@ -3275,6 +3387,18 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
         column: column.clone(),
         values,
     })
+}
+
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[test]
+fn parses_non_null_index_predicate_without_accepting_other_conditions() {
+    for expression in [r#""ref" IS NOT NULL"#, "(ref IS NOT NULL)"] {
+        let predicate = parse_closed_set_index_predicate(expression).unwrap();
+        assert_eq!(predicate.column, "ref");
+        assert!(predicate.values.is_empty());
+    }
+    assert!(parse_closed_set_index_predicate("ref IS NULL").is_none());
+    assert!(parse_closed_set_index_predicate("ref IS NOT NULL OR id IS NOT NULL").is_none());
 }
 
 #[cfg(feature = "sqlite")]
@@ -3844,7 +3968,7 @@ fn render_sqlite_table_rebuild_statements(
 /// an error. Use [`try_render_migration_step`] to receive the error in Rust.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     try_render_migration_step(backend, step)
-        .unwrap_or_else(|_| vec![INVALID_MSSQL_FILTER_SQL.to_owned()])
+        .unwrap_or_else(|error| vec![refused_mssql_step_sql(error).to_owned()])
 }
 
 /// Render one step and reject invalid SQL Server index predicates.
@@ -3854,7 +3978,7 @@ pub fn try_render_migration_step(
 ) -> crate::Result<Vec<String>> {
     let step = StepRef::from(step);
     if backend == DatabaseBackend::Mssql {
-        validate_mssql_step_predicates(&step)?;
+        validate_mssql_step(&step)?;
     }
     Ok(render_migration_step_view(backend, &step))
 }
@@ -4203,7 +4327,7 @@ fn render_mssql_alter_column(
         after.sql_type
     );
     let nullability = if after.nullable { "NULL" } else { "NOT NULL" };
-    if !mssql_character_type(&after.sql_type) {
+    if after.sql_type.ends_with(MSSQL_BIN2_TYPE_SUFFIX) || !mssql_character_type(&after.sql_type) {
         return format!("{head} {nullability}");
     }
     // `sp_executesql` gives the variables their own scope, so a plan that runs
@@ -4510,14 +4634,14 @@ pub(super) fn render_owned_plan_steps(
     target_for_backend: &SchemaRef<'_>,
     steps: &[OwnedMigrationStep],
 ) -> Vec<String> {
+    if backend == DatabaseBackend::Mssql
+        && let Some(error) = steps
+            .iter()
+            .find_map(|step| validate_mssql_step(&StepRef::from(step)).err())
+    {
+        return vec![refused_mssql_step_sql(error).to_owned()];
+    }
     match backend {
-        DatabaseBackend::Mssql
-            if steps
-                .iter()
-                .any(|step| validate_mssql_step_predicates(&StepRef::from(step)).is_err()) =>
-        {
-            vec![INVALID_MSSQL_FILTER_SQL.to_owned()]
-        }
         DatabaseBackend::Sqlite => {
             let current_tables = current
                 .tables
@@ -6670,7 +6794,8 @@ pub async fn introspect_mssql_schema(
                             + CONVERT(varchar(10), NUMERIC_SCALE) + ')'
                         ELSE DATA_TYPE END AS data_type,
                     IS_NULLABLE AS is_nullable,
-                    COLUMN_DEFAULT AS column_default
+                    COLUMN_DEFAULT AS column_default,
+                    COLLATION_NAME AS collation_name
              FROM INFORMATION_SCHEMA.COLUMNS
              WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2
              ORDER BY ORDINAL_POSITION",
@@ -6812,11 +6937,18 @@ pub async fn introspect_mssql_schema(
             .map(|row| {
                 let raw_name = super::MssqlBackend::try_get_string(&row, "column_name")?;
                 let name = DatabaseBackend::Mssql.delimit_raw_identifier(&raw_name);
+                let mut sql_type = super::MssqlBackend::try_get_string(&row, "data_type")?;
+                let collation = row.try_get::<Option<String>, _>("collation_name")?;
+                if collation
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Latin1_General_100_BIN2"))
+                {
+                    sql_type.push_str(MSSQL_BIN2_TYPE_SUFFIX);
+                }
                 Ok(ColumnModel {
                     is_primary_key: primary_keys.iter().any(|column| column == &name),
                     is_unique: unique_columns.contains(&name),
                     name,
-                    sql_type: super::MssqlBackend::try_get_string(&row, "data_type")?,
+                    sql_type,
                     spatial: None,
                     nullable: super::MssqlBackend::try_get_string(&row, "is_nullable")? == "YES",
                     default: row.try_get::<Option<String>, _>("column_default")?,
@@ -6825,6 +6957,38 @@ pub async fn introspect_mssql_schema(
             .collect::<crate::Result<Vec<_>>>()?;
 
         let indexes = introspect_mssql_indexes(pool, &table_path).await?;
+
+        let (trigger_name, trigger_table) = mssql_append_only_identifiers(&table_path)
+            .expect("catalog tables have a schema and table component");
+        let trigger_rows = super::MssqlBackend::fetch_rows(
+            pool,
+            "SELECT OBJECT_DEFINITION(object_id) AS definition FROM sys.triggers
+             WHERE parent_id = OBJECT_ID(@P1) AND name = @P2
+               AND is_disabled = 0 AND is_instead_of_trigger = 0
+               AND is_not_for_replication = 0",
+            &[
+                SqlValue::String(table_path.clone()),
+                SqlValue::String(DatabaseBackend::Mssql.table_name_part(&trigger_name)),
+            ],
+        )
+        .await?;
+        let body = mssql_append_only_body(&trigger_name, &trigger_table);
+        let append_only = trigger_rows
+            .first()
+            .map(|row| row.try_get::<Option<String>, _>("definition"))
+            .transpose()?
+            .flatten()
+            .is_some_and(|actual| {
+                // SQL Server strips OR ALTER and retains its whitespace when
+                // storing the module. Compare the complete remaining body.
+                actual
+                    .strip_prefix("CREATE")
+                    .or_else(|| actual.strip_prefix("ALTER"))
+                    .map(str::trim_start)
+                    .is_some_and(|stored| {
+                        stored.strip_prefix("OR ALTER ").unwrap_or(stored) == body
+                    })
+            });
 
         tables.push(TableModel {
             entity_name: raw_table_name.clone(),
@@ -6844,7 +7008,7 @@ pub async fn introspect_mssql_schema(
             composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
-            append_only: false,
+            append_only,
             retention_purge: false,
             check_constraints: Vec::new(),
         });
@@ -7012,6 +7176,13 @@ fn parse_mssql_in_filter(filter: &str) -> Option<super::owned_schema::IndexPredi
         Some(inner.replace("]]", "]"))
     }
     let filter = unwrap(filter);
+    if let Some(name) = filter.strip_suffix(" IS NOT NULL") {
+        return Some(super::owned_schema::IndexPredicateModel {
+            column: bracketed(name)?,
+            values: Vec::new(),
+        });
+    }
+
     // `[column] IN ('a', 'b')`.
     if let [name, list] = split_outside_quotes(filter, " IN ")?.as_slice() {
         let list = list.trim().strip_prefix('(')?.strip_suffix(')')?;
@@ -7166,6 +7337,7 @@ mod mssql_index_predicate_tests {
                 vec!["new", "it's open"],
             ),
             ("([State] IN (N'a,b',N'c'))", "State", vec!["a,b", "c"]),
+            ("([Ref] IS NOT NULL)", "Ref", vec![]),
             // Non-ASCII and punctuation inside a bracketed column name (#782).
             ("([列]=N'新')", "列", vec!["新"]),
             ("([列] IN (N'新', N'旧'))", "列", vec!["新", "旧"]),
@@ -7191,7 +7363,6 @@ mod mssql_index_predicate_tests {
     #[test]
     fn other_filters_never_read_as_a_declared_predicate() {
         for filter in [
-            "([Ref] IS NOT NULL)",
             "([A]='x' OR [B]='y')",
             "([A]='x' AND [A]='y')",
             "([A]>(1))",
@@ -7282,6 +7453,55 @@ mod mssql_index_predicate_tests {
 impl IntrospectionBackend for super::MssqlBackend {
     async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel> {
         introspect_mssql_schema(pool).await
+    }
+
+    async fn introspect_schema_including(
+        pool: &Self::Pool,
+        declared_tables: &[&str],
+    ) -> crate::Result<SchemaModel> {
+        let mut schema = Self::introspect_schema(pool).await?;
+        let backend = DatabaseBackend::Mssql;
+        let paths = declared_tables
+            .iter()
+            .copied()
+            .filter_map(|path| Some((backend.mssql_schema_and_table(path)?, path)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let declared_path = |catalog: &str| {
+            backend
+                .mssql_schema_and_table(catalog)
+                .and_then(|key| paths.get(&key).copied())
+        };
+        // Direct catalog inspection keeps its quoted physical names. Planner
+        // comparisons use the declaration's table path and ordinary column names.
+        let column_name =
+            |catalog: &str| backend.raw_name_in_declared_form(&backend.table_name_part(catalog));
+        for table in &mut schema.tables {
+            let Some(path) = declared_path(&table.table_name) else {
+                continue;
+            };
+            table.table_name = path.to_owned();
+            table.primary_key = column_name(&table.primary_key);
+            for key in table
+                .primary_keys
+                .iter_mut()
+                .chain(table.composite_unique_indexes.iter_mut().flatten())
+            {
+                *key = column_name(key);
+            }
+            for column in &mut table.columns {
+                column.name = column_name(&column.name);
+            }
+            for foreign_key in &mut table.foreign_keys {
+                if let Some(path) = declared_path(&foreign_key.target_table) {
+                    foreign_key.target_table = path.to_owned();
+                }
+                for pair in &mut foreign_key.column_pairs {
+                    pair.source_column = column_name(&pair.source_column);
+                    pair.target_column = column_name(&pair.target_column);
+                }
+            }
+        }
+        Ok(schema)
     }
 }
 

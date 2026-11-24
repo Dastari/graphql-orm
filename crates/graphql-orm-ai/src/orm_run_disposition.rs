@@ -1,7 +1,6 @@
 //! ORM-backed owner-authorized disposition of failed runs.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
 use crate::orm_support::{
@@ -16,7 +15,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::UuidFilter;
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionMode};
 use serde_json::json;
 use time::Duration;
 use uuid::Uuid;
@@ -75,7 +74,7 @@ impl Default for AiRunDispositionLimits {
 /// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
 /// such a credential would yield the full user behind it.
 pub struct OrmAiRunDispositionService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -89,7 +88,7 @@ pub struct OrmAiRunDispositionService {
 impl OrmAiRunDispositionService {
     /// Creates an owner-authorized failure-disposition service.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,

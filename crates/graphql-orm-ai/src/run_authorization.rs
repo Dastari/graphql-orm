@@ -1,12 +1,10 @@
 //! Explicit host-issued authorization for durable AI work.
 
 use crate::AiError;
-#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 use agql_auth::PrincipalReferenceKind;
 use agql_auth::{AuthPrincipal, Clock, PrincipalReference};
 use async_trait::async_trait;
 use std::sync::Arc;
-#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 use time::Duration;
 use uuid::Uuid;
 
@@ -49,7 +47,7 @@ pub trait AiRunAuthorizationIssuer: Send + Sync {
 /// admitting service's reference, projected when a projection is installed.
 // MSSQL exposes the configuration type, but durable admission is not implemented there.
 #[cfg_attr(
-    not(any(test, feature = "sqlite", feature = "postgres")),
+    not(any(test, feature = "sqlite", feature = "postgres", feature = "mssql")),
     expect(dead_code, reason = "MSSQL has no durable run admission service")
 )]
 pub struct AiRunAuthorization {
@@ -65,7 +63,6 @@ impl AiRunAuthorization {
 
     /// `admitted` is the reference the service would persist without an
     /// issuer: `principal.reference()`, or its namespace projection.
-    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn issue(
         &self,
         principal: &AuthPrincipal,

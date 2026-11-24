@@ -1,7 +1,8 @@
 use graphql_orm::prelude::*;
 
 pub fn project_direct_host_principal(principal: &agql_auth::AuthPrincipal) -> AuthSubject {
-    graphql_orm::graphql::auth_agql::auth_subject_from_principal(principal)
+    let (subject, _) = graphql_orm::graphql::auth_agql::auth_bundle_from_principal(principal);
+    subject
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]

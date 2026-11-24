@@ -1,5 +1,6 @@
 //! Provider-profile endpoint identity and credential authority tests.
 
+use crate::AiOrmBackend;
 use std::sync::Mutex;
 
 use agql_auth::{
@@ -177,6 +178,8 @@ fn service(
             clock_skew: Duration::seconds(30),
             allowed_amr: vec!["otp".to_owned()],
             allowed_acr: vec!["urn:test:loa:2".to_owned()],
+            required_amr: Vec::new(),
+            required_context: None,
             match_mode: AssuranceMatchMode::All,
         },
         Arc::new(FixedClock::new(now())),
@@ -932,11 +935,11 @@ async fn inaccessible_profile_ids_are_masked_like_missing_ids() {
 }
 
 struct PossiblyFilteredProfiles;
-impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for PossiblyFilteredProfiles {
+impl graphql_orm::graphql::orm::RowPolicy<AiOrmBackend> for PossiblyFilteredProfiles {
     fn can_read_row<'a>(
         &'a self,
         _: Option<&'a async_graphql::Context<'_>>,
-        _: &'a Database<DefaultWriteBackend>,
+        _: &'a Database<AiOrmBackend>,
         entity: &'static str,
         _: Option<&'static str>,
         _: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -947,7 +950,7 @@ impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for PossiblyFilte
     fn can_write_row<'a>(
         &'a self,
         _: Option<&'a async_graphql::Context<'_>>,
-        _: &'a Database<DefaultWriteBackend>,
+        _: &'a Database<AiOrmBackend>,
         _: &'static str,
         _: Option<&'static str>,
         _: graphql_orm::graphql::orm::EntityAccessSurface,

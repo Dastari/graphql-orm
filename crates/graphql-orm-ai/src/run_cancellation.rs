@@ -1,12 +1,10 @@
 //! Owner-authorized durable agent-run cancellation contracts.
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use std::time::Duration as StdDuration;
 
 use agql_auth::AuthPrincipal;
 use async_graphql::{InputObject, SimpleObject};
 use async_trait::async_trait;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -63,7 +61,6 @@ pub trait AiRunCancellationService: Send + Sync {
 /// authority and is safe to share between the request service and workers.
 #[derive(Clone, Debug)]
 pub struct AiRunCancellationHub {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     sender: broadcast::Sender<AiRunId>,
 }
 
@@ -75,18 +72,16 @@ impl AiRunCancellationHub {
                 "invalid run cancellation notification capacity".to_owned(),
             ));
         }
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         {
             let (sender, _) = broadcast::channel(capacity);
             Ok(Self { sender })
         }
-        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
         {
             Ok(Self {})
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn notify(&self, run_id: AiRunId) {
         let _ = self.sender.send(run_id);
     }
@@ -96,7 +91,6 @@ impl AiRunCancellationHub {
     /// Subscribe before the durable cancellation check: a request that is
     /// recorded and announced after that check but before the wait would
     /// otherwise be missed until the wait times out.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn subscribe(&self) -> AiRunCancellationSubscription {
         AiRunCancellationSubscription {
             receiver: self.sender.subscribe(),
@@ -105,12 +99,10 @@ impl AiRunCancellationHub {
 }
 
 /// A wake-up subscription taken before the durable cancellation check.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) struct AiRunCancellationSubscription {
     receiver: broadcast::Receiver<AiRunId>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl AiRunCancellationSubscription {
     /// Waits for a wake-up for `run_id` announced since the subscription was
     /// taken, or for `maximum_wait`.
@@ -146,7 +138,6 @@ pub struct AiRunCancellation {
 }
 
 impl AiRunCancellation {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) const fn new(
         session_id: AiSessionId,
         run_id: AiRunId,
@@ -182,7 +173,7 @@ impl AiRunCancellation {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

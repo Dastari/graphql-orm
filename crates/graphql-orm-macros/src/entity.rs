@@ -18,6 +18,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) description: Option<String>,
     pub(crate) classification: String,
     pub(crate) default_sort: Option<String>,
+    pub(crate) exact_string_filters: bool,
     pub(crate) order_expressions: Vec<OrderExpressionMetadata>,
     pub(crate) schema_policy: Option<String>,
     pub(crate) auth: Option<String>,
@@ -80,6 +81,31 @@ pub(crate) struct EntityMetadata {
     /// `<Entity>AggregateResultRow`, whose `SourceEntity` field's type names
     /// the entity (#372).
     pub(crate) aggregate_source: bool,
+    /// `update_expected_version = "required"`: the generated update's
+    /// `ExpectedVersion` argument is non-null (#851).
+    pub(crate) update_expected_version_required: Option<proc_macro2::Span>,
+    /// `update_assurance(select = "...", levels = "...")`: the generated
+    /// update selects its assurance level per request (#851).
+    pub(crate) update_assurance: Option<UpdateAssuranceMetadata>,
+}
+
+/// A declared conditional update-assurance selector.
+#[derive(Clone)]
+pub(crate) struct UpdateAssuranceMetadata {
+    /// Path of `fn(UpdateAssuranceInput<'_, Entity, UpdateEntityInput>) -> async_graphql::Result<&'static str>`.
+    pub(crate) select: syn::Path,
+    /// Declared assurance policy IDs, in declaration order.
+    pub(crate) levels: Vec<String>,
+    pub(crate) span: proc_macro2::Span,
+}
+
+/// Whether `value` is a valid assurance policy ID (the registry's rule).
+fn is_assurance_policy_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+        })
 }
 
 /// A declared lifetime (expiry) field.
@@ -142,6 +168,7 @@ pub(crate) struct ConditionalIndexMetadata {
     pub(crate) unique: bool,
     pub(crate) predicate_field: Option<String>,
     pub(crate) predicate_values: Vec<String>,
+    pub(crate) predicate_not_null: bool,
 }
 
 #[derive(Clone)]
@@ -278,6 +305,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         return Err(meta.error("mutation_error_codes may only be declared once"));
                     }
                     metadata.mutation_error_codes = true;
+                } else if meta.path.is_ident("exact_string_filters") {
+                    let value: syn::LitBool = meta.value()?.parse()?;
+                    metadata.exact_string_filters = value.value;
                 } else if meta.path.is_ident("retention_purge") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -304,6 +334,69 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.changed_started = lit.value;
+                } else if meta.path.is_ident("update_expected_version") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("update_expected_version requires a GraphQL entity"));
+                    }
+                    if metadata.update_expected_version_required.is_some() {
+                        return Err(meta.error("update_expected_version may only be declared once per entity"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    if lit.value() != "required" {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "update_expected_version accepts only \"required\"; omit it to keep ExpectedVersion optional",
+                        ));
+                    }
+                    metadata.update_expected_version_required = Some(lit.span());
+                } else if meta.path.is_ident("update_assurance") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("update_assurance requires a GraphQL entity"));
+                    }
+                    if metadata.update_assurance.is_some() {
+                        return Err(meta.error("update_assurance may only be declared once per entity"));
+                    }
+                    let span = meta.path.span();
+                    let mut select = None;
+                    let mut levels: Option<Vec<String>> = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("select") {
+                            if select.is_some() {
+                                return Err(option.error("update_assurance select may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            select = Some(lit.parse::<syn::Path>()?);
+                        } else if option.path.is_ident("levels") {
+                            if levels.is_some() {
+                                return Err(option.error("update_assurance levels may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            let mut parsed = Vec::new();
+                            for level in lit.value().split(',').map(str::trim) {
+                                if !is_assurance_policy_id(level) {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        "update_assurance levels must be comma-separated assurance policy IDs (ASCII letters, digits, - _ . : /, at most 128 bytes each)",
+                                    ));
+                                }
+                                if parsed.iter().any(|existing| existing == level) {
+                                    return Err(syn::Error::new(lit.span(), "update_assurance levels must not repeat a level"));
+                                }
+                                parsed.push(level.to_owned());
+                            }
+                            levels = Some(parsed);
+                        } else {
+                            return Err(option.error("unsupported update_assurance option; expected select or levels"));
+                        }
+                        Ok(())
+                    })?;
+                    let select = select.ok_or_else(|| {
+                        syn::Error::new(span, "update_assurance requires select = \"<path to selector fn>\"")
+                    })?;
+                    let levels = levels.ok_or_else(|| {
+                        syn::Error::new(span, "update_assurance requires levels = \"<policy id>,<policy id>\"")
+                    })?;
+                    metadata.update_assurance = Some(UpdateAssuranceMetadata { select, levels, span });
                 } else if meta.path.is_ident("lifetime") {
                     if metadata.lifetime.is_some() {
                         return Err(meta.error("lifetime may only be declared once per entity"));
@@ -826,6 +919,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                             let value = option.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             index.predicate_field = Some(lit.value());
+                        } else if option.path.is_ident("predicate_not_null") {
+                            let value: syn::LitBool = option.value()?.parse()?;
+                            index.predicate_not_null = value.value;
                         } else if option.path.is_ident("predicate_values") {
                             let value = option.value()?;
                             index.predicate_values = parse_string_array_expr(
@@ -842,11 +938,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     })?;
                     if index.columns.is_empty()
                         || index.predicate_field.is_none()
-                        || index.predicate_values.is_empty()
+                        || index.predicate_not_null != index.predicate_values.is_empty()
                     {
                         return Err(syn::Error::new(
                             meta.path.span(),
-                            "conditional_index requires columns, predicate_field, and predicate_values",
+                            "conditional_index requires columns, predicate_field, and either predicate_values or predicate_not_null = true",
                         ));
                     }
                     metadata.conditional_indexes.push(index);
@@ -3862,6 +3958,21 @@ fn generate_entity_tokens(
     let identity_only = identity_names.is_some();
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
+    // #851: a guarded entity says so through `DatabaseSchema`, and every
+    // typed metadata constructor then records its table, so conversions that
+    // would serve it without the update checks (the runtime IR) refuse it.
+    // Other entities emit nothing.
+    let guarded_update_schema_method = if entity_meta.update_expected_version_required.is_some()
+        || entity_meta.update_assurance.is_some()
+    {
+        quote::quote! {
+            fn __gom_guarded_update() -> bool {
+                true
+            }
+        }
+    } else {
+        quote::quote! {}
+    };
     let backend = resolve_backend(
         entity_meta.backend.as_deref(),
         struct_name.span(),
@@ -4261,10 +4372,16 @@ fn generate_entity_tokens(
     }
 
     for conditional in &entity_meta.conditional_indexes {
-        if backend == BackendKind::Mssql {
+        if backend != BackendKind::Mssql && conditional.predicate_not_null {
             return Err(syn::Error::new_spanned(
                 struct_name,
-                "conditional indexes are supported only for sqlite and postgres",
+                "predicate_not_null is currently supported on SQL Server only",
+            ));
+        }
+        if backend == BackendKind::Mssql && !conditional.predicate_not_null {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "SQL Server conditional indexes require predicate_not_null = true",
             ));
         }
         let mut db_columns = Vec::new();
@@ -4309,10 +4426,17 @@ fn generate_entity_tokens(
             })?;
         let predicate_meta = parse_field_metadata(predicate_field)?;
         let predicate_type = option_inner_type(&predicate_field.ty).unwrap_or(&predicate_field.ty);
-        if predicate_meta.is_relation || predicate_meta.skip_db || !is_string_type(predicate_type) {
+        if predicate_meta.is_relation
+            || predicate_meta.skip_db
+            || (!conditional.predicate_not_null && !is_string_type(predicate_type))
+        {
             return Err(syn::Error::new_spanned(
                 predicate_field,
-                "conditional_index predicate_field must be a persisted String or Option<String>",
+                if conditional.predicate_not_null {
+                    "conditional_index predicate_field must be persisted"
+                } else {
+                    "conditional_index predicate_field must be a persisted String or Option<String>"
+                },
             ));
         }
         let predicate_column = predicate_meta
@@ -4349,7 +4473,11 @@ fn generate_entity_tokens(
         } else {
             quote! { ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#columns),*]) }
         };
-        index_defs.push(quote! { #base.where_in(#predicate_column, &[#(#values),*]) });
+        index_defs.push(if conditional.predicate_not_null {
+            quote! { #base.where_not_null(#predicate_column) }
+        } else {
+            quote! { #base.where_in(#predicate_column, &[#(#values),*]) }
+        });
     }
 
     // Collect field info
@@ -5626,6 +5754,9 @@ fn generate_entity_tokens(
             && mssql_key_fields.contains(&rust_name)
         {
             sql_type = MSSQL_INDEXABLE_STRING.to_string();
+            if entity_meta.exact_string_filters {
+                sql_type.push_str(" COLLATE Latin1_General_100_BIN2");
+            }
         }
         let decimal_tokens = field_meta
             .decimal
@@ -5911,6 +6042,7 @@ fn generate_entity_tokens(
                     &quote! { __gom_column },
                     filter_type,
                     &field_meta,
+                    entity_meta.exact_string_filters,
                 )?;
                 where_input_fields.push(input_field);
                 // Unqualified, or `row.<column>` for the row `_gom_table`
@@ -6697,6 +6829,7 @@ fn generate_entity_tokens(
             }
 
             impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                #guarded_update_schema_method
                 fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
                     static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
                         #(#column_defs),*
@@ -7423,6 +7556,7 @@ fn generate_entity_tokens(
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                #guarded_update_schema_method
             fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
                 static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
                     #(#column_defs),*
@@ -7989,6 +8123,7 @@ fn generate_filter_field(
     db_col: &proc_macro2::TokenStream,
     filter_type: &str,
     field_meta: &FieldMetadata,
+    exact_string_filters: bool,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
@@ -8279,11 +8414,22 @@ fn generate_filter_field(
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
             };
-            let sql = quote! {
-                if let Some(ref f) = self.#filter_field_name {
+            let render_call = if backend == BackendKind::Mssql && exact_string_filters {
+                quote! {
+                    ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
+                }
+            } else {
+                quote! {
                     ::graphql_orm::graphql::orm::__gom_render_string_filter(
                         f, #backend_expr, #db_col, #sql_type, &mut conditions, &mut values,
                     );
+                }
+            };
+            let sql = quote! {
+                if let Some(ref f) = self.#filter_field_name {
+                    #render_call
                 }
             };
             let value_expr = if is_option_type(field_type) {
@@ -9125,6 +9271,9 @@ fn mssql_indexed_fields(
         }
     }
     for index in &entity_meta.indexes {
+        names.extend(index.columns.iter().cloned());
+    }
+    for index in &entity_meta.conditional_indexes {
         names.extend(index.columns.iter().cloned());
     }
     // Composite unique members may name a field or its column.
