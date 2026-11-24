@@ -1,7 +1,9 @@
 use std::{
     fs::{File, OpenOptions},
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::OnceLock,
 };
 
 // trybuild's heartbeat lock can be stolen from a live but descheduled process.
@@ -18,11 +20,29 @@ impl Deref for UiTests {
     }
 }
 
-pub fn lock_path() -> PathBuf {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-    target.join("graphql-orm-ui.lock")
+pub fn lock_path() -> &'static Path {
+    #[derive(serde::Deserialize)]
+    struct CargoMetadata {
+        target_directory: PathBuf,
+    }
+
+    static LOCK_PATH: OnceLock<PathBuf> = OnceLock::new();
+    LOCK_PATH.get_or_init(|| {
+        // Resolve the target the same way as trybuild, including Cargo config.
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let output = Command::new(cargo)
+            .args(["metadata", "--no-deps", "--format-version=1"])
+            .output()
+            .expect("run Cargo metadata for the UI target directory");
+        assert!(
+            output.status.success(),
+            "Cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: CargoMetadata =
+            serde_json::from_slice(&output.stdout).expect("Cargo metadata for the UI target");
+        metadata.target_directory.join("graphql-orm-ui.lock")
+    })
 }
 
 pub fn lock_project() -> File {

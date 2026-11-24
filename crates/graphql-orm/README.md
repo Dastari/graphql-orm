@@ -14,6 +14,9 @@ Version 0.214.0 aligns the `auth-agql` bridge with published `agql-auth`
 `v0.27.0`. Hosts that pass Auth types must adopt the same Git tag.
 See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
 
+Version 0.213.0 fixes races in compile UI and consumer fixture test setup
+(#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
+
 Version 0.212.0 supports a scoped SQLite column drop in owned migrations
 with unrelated indexes and incoming foreign keys. See the
 [migration note](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).

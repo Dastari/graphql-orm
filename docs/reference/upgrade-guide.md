@@ -70,10 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.212.0**; **`graphql-orm-macros` 0.212.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.159.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.214.0**; **`graphql-orm-macros` 0.214.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.160.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.18.0**.
 
 - **Action needed** — ORM/macros 0.214.0, AI 0.160.0 and router 0.18.0 use `agql-auth` `v0.27.0` (#857). Upgrade direct Auth dependencies with these packages and review the Auth store and validator changes. [ORM migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01590-to-01600) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0170-to-0180-agql-auth-v0270)
-
+- **No action** — ORM/macros 0.213.0 fixes parallel compile UI and consumer fixture setup (#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
 - **No action** — AI 0.159.0 adds opt-in resolved entity-reference delivery
   for Codex app-server (#721).
   [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01580-to-01590)

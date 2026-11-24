@@ -71,6 +71,11 @@ The ORM has no schema or data migration for this pin. For Auth-owned stores,
 validators and login flows, follow the
 [Auth 0.27 migration guide](https://github.com/Dastari/agql-auth/blob/v0.27.0/MIGRATION.md#0260-to-0270-security-hardening).
 
+## 0.212.0 to 0.213.0: Test harness coordination
+
+**No action.** Upgrade the ORM and macros together. This release fixes
+parallel test execution in the workspace (#887, #888).
+
 ## 0.211.0 to 0.212.0: scoped SQLite column drop
 
 **No action.** Upgrade ORM and macros together. An owned SQLite plan whose
