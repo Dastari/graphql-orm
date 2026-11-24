@@ -19,7 +19,6 @@ fn server_only_relation_keys_are_narrow_and_explicit() {
     cases.compile_fail("tests/ui/server_only_keys/readable_target.rs");
     cases.compile_fail("tests/ui/server_only_keys/related_filter.rs");
     cases.compile_fail("tests/ui/server_only_keys/schema_entity_without_skip.rs");
-    cases.compile_fail("tests/ui/server_only_keys/search_private_field.rs");
     cases.compile_fail("tests/ui/server_only_keys/search_relation.rs");
     cases.compile_fail("tests/ui/server_only_keys/self_target_readable.rs");
     cases.compile_fail("tests/ui/server_only_keys/skip_db_source.rs");

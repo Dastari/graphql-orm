@@ -806,21 +806,21 @@ The private column appears in no generated SDL type, `WhereInput`,
 `OrderByInput`, create or update input, `Changed` payload or filter, semantic
 or resolver catalogue entry, or client metadata. The relation's client key
 mapping is `no_exposed_key`. Neither the source nor the target gains a filter,
-ordering or subscription capability. The macro refuses:
-
-- the declaration together with `filter` (related-row filters),
-  `order_aggregate`, `search_relation` or `propagate_change = "up"`, because
-  each would evaluate the join outside the relation field or needs public
-  subscribable keys;
-- any relation's `search_relation(fields = [...])` that names a `private` field
-  of its target, because a search document would publish it.
+ordering or subscription capability. The macro refuses the declaration
+together with `filter` (related-row filters), `order_aggregate`,
+`search_relation` or `propagate_change = "up"`, because each would evaluate
+the join outside the relation field or needs public subscribable keys.
 
 Converting such an entity into a runtime GraphQL schema reports the private
 column as unsupported, as for any statically unreadable column. The ORM cannot
 see surfaces the host writes itself. Handwritten resolvers and object fields,
-custom roots, trusted `order_expression` SQL, repository helpers and
-host-owned `SimpleObject` getters on metadata-only entities can still read or
-order by the column, and keeping them private is the host's responsibility.
+custom roots, trusted `order_expression` SQL, repository helpers, search
+documents and host-owned `SimpleObject` getters on metadata-only entities can
+still read, order by or publish the column, and keeping them private is the
+host's responsibility. In particular, a `search_relation(fields = [...])` on
+another relation that copies a server-only key column into a search document
+defeats its privacy: searching for the value reveals which rows hold it. (A
+column declared searchable on its own entity is never certified server-only.)
 
 `tests/server_only_relation_keys.rs` runs the matrix on SQLite and test-owned
 PostgreSQL and SQL Server in every `AuthorizationMode`, over the loader and

@@ -4851,7 +4851,6 @@ fn generate_entity_tokens(
     let mut managed_version_api_name: Option<String> = None;
     let mut repository_field_policy_defs = Vec::new();
     let mut persisted_field_rust_names = Vec::new();
-    let mut private_field_rust_names: Vec<String> = Vec::new();
     let mut search_relation_field_checks = Vec::new();
     let mut search_relation_traversal_checks = Vec::new();
     let mut subscription_field_policy_arms = Vec::new();
@@ -5247,11 +5246,6 @@ fn generate_entity_tokens(
                             search_field.value(),
                             target_type,
                         );
-                        let private_message = format!(
-                            "search_relation field `{}` is private on `{}`; a search document would publish it",
-                            search_field.value(),
-                            target_type,
-                        );
                         search_relation_field_checks.push(
                             ::quote::quote_spanned! {search_field.span()=>
                                 const _: () = ::std::assert!(
@@ -5260,13 +5254,6 @@ fn generate_entity_tokens(
                                         #search_field,
                                     ),
                                     #message,
-                                );
-                                const _: () = ::std::assert!(
-                                    !::graphql_orm::graphql::orm::generated_field_names_contain(
-                                        #search_target::__GOM_PRIVATE_FIELD_NAMES,
-                                        #search_field,
-                                    ),
-                                    #private_message,
                                 );
                             },
                         );
@@ -5748,9 +5735,6 @@ fn generate_entity_tokens(
                 .unwrap_or_else(|| quote! { None });
             let sensitive = field_meta.sensitive;
             persisted_field_rust_names.push(rust_name.clone());
-            if field_meta.is_private {
-                private_field_rust_names.push(rust_name.clone());
-            }
             repository_field_policy_defs.push(quote! {
                 ::graphql_orm::graphql::orm::RepositoryFieldPolicyDef {
                     rust_name: #rust_name,
@@ -7148,11 +7132,6 @@ fn generate_entity_tokens(
             #[doc(hidden)]
             pub const __GOM_PERSISTED_FIELD_NAMES: &'static [&'static str] =
                 &[#(#persisted_field_rust_names),*];
-            /// Rust names of persisted fields declared `private`, which no
-            /// other derive may copy into a public surface.
-            #[doc(hidden)]
-            pub const __GOM_PRIVATE_FIELD_NAMES: &'static [&'static str] =
-                &[#(#private_field_rust_names),*];
         }
     };
     let parameter_types_impl = (!mssql_parameter_types.is_empty()).then(|| {

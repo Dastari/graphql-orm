@@ -72,7 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.215.0**; **`graphql-orm-macros` 0.215.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
 
-- **No action** — ORM/macros 0.228.0 adds the opt-in `server_only_key` relation option: a composite relation joins on a private partition key that stays off every GraphQL surface. A `search_relation` that copies a private target field no longer compiles (#898). [Migration](../../MIGRATION.md#02270-to-02280-server-only-relation-join-keys)
+- **No action** — ORM/macros 0.228.0 adds the opt-in `server_only_key` relation option: a composite relation joins on a private partition key that stays off every GraphQL surface. (#898). [Migration](../../MIGRATION.md#02270-to-02280-server-only-relation-join-keys)
 - **No action** — AI tool profiles 0.30.0 and AI 0.162.0 speed up capability catalogue compilation without changing fingerprints, provider definitions or describe output (#865). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0300-capability-catalogue-compilation)
 - **No action** — ORM/macros 0.215.0 adds opt-in declared SQL Server parameter types and parses column identifiers in the ALTER COLUMN collation lookup (#522, #849). [Migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers)
 - **No action** — AI 0.161.0 uses ORM 0.215.0 and adapts one internal SQL Server call; no AI migration (#522). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01600-to-01610)

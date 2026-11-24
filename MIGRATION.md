@@ -12,17 +12,11 @@ supersedes: []
 
 ## 0.227.0 to 0.228.0: server-only relation join keys
 
-**No action**, unless a `search_relation` copies a private target field (see
-below). Upgrade ORM and macros together. `server_only_key` is a new,
+**No action.** Upgrade ORM and macros together. `server_only_key` is a new,
 opt-in relation option; existing relations, their checks and their SQL are
 unchanged. Hand-written `GeneratedRelationReadability` implementations keep
 compiling: the new `SERVER_ONLY_COLUMNS` constant defaults to empty, so they
 cannot be a server-only target until they list the column.
-
-A `search_relation` that copies a field declared `#[graphql_orm(private)]` on
-its target no longer compiles, because the search document would publish the
-private value. Remove the field from `fields`, or make it readable on the
-target if it is meant to be public.
 See [server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
 
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers

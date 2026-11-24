@@ -26,8 +26,6 @@ for historical context.
   refused at compile time, as are floating-point key members, a source member
   with `skip_db` or a read transform, and a target column that any field
   exposes or that belongs to the primary key.
-- **Fixed (#898).** `search_relation(fields = [...])` refuses a field declared
-  `private` on its target, which a search document would otherwise publish.
   [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
 
 ## Unreleased - ORM/macros 0.215.0
