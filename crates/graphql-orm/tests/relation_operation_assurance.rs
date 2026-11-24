@@ -117,6 +117,7 @@ pub struct AssuranceShelf {
 
 schema_roots! {
     backend: "sqlite",
+    schema_policy: "managed",
     entities: [AssuranceEntry, AssuranceFolder, AssuranceShelf],
 }
 
