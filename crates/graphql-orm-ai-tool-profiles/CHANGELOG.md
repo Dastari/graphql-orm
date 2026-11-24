@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.30.0
+
+- Validate filter roles and index generated-input ownership once per target
+  when compiling capability catalogues (#865). Capability fingerprints,
+  plan schemas and model-facing output stay byte-identical.
+  [Migration](MIGRATION.md#0300-capability-catalogue-compilation)
+
 ## Unreleased - 0.29.0
 
 - Generated keyset-list plans now accept the page limit injected by the
