@@ -37,6 +37,13 @@ pub trait DatabaseSchema {
     fn check_constraints() -> &'static [super::core::CheckConstraintDef] {
         &[]
     }
+    /// Whether the entity's generated update requires `ExpectedVersion` or
+    /// selects assurance per request (#851). Derive output overrides it;
+    /// metadata built through a typed constructor then records the table.
+    #[doc(hidden)]
+    fn __gom_guarded_update() -> bool {
+        false
+    }
 }
 
 pub trait EntityRelations {

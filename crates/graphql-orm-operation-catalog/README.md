@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version `0.13.0` adds `GraphqlConditionalAssurance` and
+`conditional_assurance()` on generated and resolved operation descriptors. A
+generated update that selects its assurance level per request lists every
+possible level and marks the selection as conditional. The declaration is
+advisory: the owning service enforces the selected level. The declaration is
+part of the operation and router-export fingerprints. Descriptors without one
+keep their fingerprints and debug output. No data migration is needed. See
+[conditional assurance](../../docs/architecture/operation-assurance.md#conditional-assurance-on-generated-updates).
+
 Version `0.11.0` adds two opt-in pieces and changes no existing descriptor,
 wire format or fingerprint. No data migration is needed.
 

@@ -1,0 +1,17 @@
+error: update_assurance levels must be comma-separated assurance policy IDs (ASCII letters, digits, - _ . : /, at most 128 bytes each)
+ --> tests/ui/update_assurance_invalid_options.rs:7:50
+  |
+7 |     update_assurance(select = "select", levels = "write,with space")
+  |                                                  ^^^^^^^^^^^^^^^^^^
+
+error: update_assurance requires select = "<path to selector fn>"
+  --> tests/ui/update_assurance_invalid_options.rs:21:5
+   |
+21 |     update_assurance(levels = "write")
+   |     ^^^^^^^^^^^^^^^^
+
+error: update_expected_version accepts only "required"; omit it to keep ExpectedVersion optional
+  --> tests/ui/update_assurance_invalid_options.rs:32:61
+   |
+32 | #[graphql_entity(table = "notes", update_expected_version = "optional")]
+   |                                                             ^^^^^^^^^^

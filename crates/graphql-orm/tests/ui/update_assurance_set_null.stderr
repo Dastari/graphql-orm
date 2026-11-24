@@ -1,0 +1,5 @@
+error: update_expected_version = "required" cannot be combined with relation `owner` declaring on_delete = "set_null": deleting the related row would rewrite this row without its ExpectedVersion or assurance selection. Use restrict or cascade
+  --> tests/ui/update_assurance_set_null.rs:22:31
+   |
+22 |     update_expected_version = "required"
+   |                               ^^^^^^^^^^

@@ -3039,6 +3039,18 @@ impl RuntimeSchema {
             // backup enablement/ordering, and non-managed schema ownership. Dropping these
             // silently would let a structural fingerprint claim equivalence between schemas
             // with different security or persistence behavior.
+            // #851: the runtime IR has neither a required ExpectedVersion nor
+            // conditional update assurance, so a runtime update would rewrite
+            // these rows without them.
+            if super::is_guarded_update_table(entity.table_name) {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                    "update_expected_version and update_assurance are not represented in the runtime IR"
+                        .to_string(),
+                    &cid,
+                    None,
+                ));
+            }
             if entity.read_policy.is_some() || entity.write_policy.is_some() {
                 diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                     RuntimeSchemaDiagnosticCode::UnsupportedCapability,
