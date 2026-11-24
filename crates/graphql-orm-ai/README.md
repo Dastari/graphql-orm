@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.159.0 uses published `agql-auth` `v0.27.0` and ORM 0.213.0. Hosts that
+pass Auth types must adopt the same Git tag.
+See the [migration guide](MIGRATION.md#01580-to-01590).
+
 AI 0.157.0 supports upgrading the pre-0.83 approval lookup index to the
 unique tool-call key with live schema verification and duplicate preflight.
 See the [migration guide](MIGRATION.md#01560-to-01570).

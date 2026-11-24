@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.159.0
+
+- **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag
+  when constructing principals, principal references and assurance policies for AI.
+  [Migration](MIGRATION.md#01580-to-01590)
+
 ## Unreleased - 0.158.0
 
 - **Action needed.** Apply the checked SQL Server schema upgrade so claim and

@@ -10,6 +10,53 @@ supersedes: []
 
 # Migration Guide
 
+## 0.212.0 to 0.213.0: agql-auth v0.27.0
+
+**Action needed** for hosts with direct `agql-auth` dependencies. Upgrade
+ORM/macros together and choose the same Auth Git tag in the same upgrade:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.27.0", version = "0.27.0" }
+```
+
+Refresh the host lockfile and check that `cargo tree -d -i agql-auth` reports
+no duplicate. The tag resolves to `71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+Cargo considers a different tag or a `rev` selector a different source, even
+at the same commit. This matters when passing `AuthPrincipal` to
+`auth_bundle_from_principal` or using the AI and router Auth integration types.
+
+Auth 0.27 requires `typ = "access"` and `purpose = "access_token"` by default,
+rejects legacy array scope claims by default, and requires the `Bearer` scheme
+for Authorization values. Access tokens from the default 0.26 issuer already
+carry both access markers. Hierarchical scope wildcards match whole segments.
+Rewrite raw-prefix grants such as `records*` as `records.*` when they should
+grant the whole subtree. API-token services reject a mismatched audience or
+configured resource. An audience-bound token requires a declared audience.
+Without a configured resource, the host still enforces the token's resource
+binding.
+
+Hosts using Auth's rotating JWKS cache should explicitly set
+`stale_policy: StaleKeyPolicy::Reject` to preserve fail-closed refresh behavior.
+The new default, `UseStale`, permits cached keys after a failed refresh until
+the cache TTL plus the one-hour default `max_stale` window. A host requiring
+token confirmation must use a validator entry point that passes the verified
+confirmation material.
+
+Auth issuers must update their stores and rollout procedures. Auth 0.27 adds
+user-wide refresh-session revocation and a default 90-day absolute lifetime for
+new session families. Existing records without a family deadline end at their
+recorded expiry. Completing a password reset revokes the user's refresh
+sessions. Session-bound delegation requires a current enabled parent. Rehydrated
+delegations retain their bindings, are capped at the earlier of parent and
+delegated expiry, and intersect current grants with the original delegation's
+grant ceiling. Pre-0.27 persisted delegation references lack the ceiling and
+must be replaced through fresh authorization. Host token-status and current
+authority checks still apply to accepted requests.
+
+The ORM has no schema or data migration for this pin. For Auth-owned stores,
+validators and login flows, follow the
+[Auth 0.27 migration guide](https://github.com/Dastari/agql-auth/blob/v0.27.0/MIGRATION.md#0260-to-0270-security-hardening).
+
 ## 0.211.0 to 0.212.0: scoped SQLite column drop
 
 **No action.** Upgrade ORM and macros together. An owned SQLite plan whose

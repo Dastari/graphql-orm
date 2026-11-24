@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## 0.158.0 to 0.159.0
+
+**Action needed.** Move direct Auth dependencies to the published `v0.27.0`
+Git tag in the same upgrade and refresh the host lockfile. AI's principal and
+assurance APIs use types from that source. `RecentMfaPolicy` struct literals
+must now set `required_amr` and `required_context`. Auth denies accepted MFA
+with no recorded method. AI continues to refuse delegated credentials for
+durable work and rehydrates current authority at execution checkpoints.
+
+AI 0.159.0 uses ORM 0.213.0. There is no AI schema or AI data migration for this
+update. See the [workspace migration](../../MIGRATION.md#02120-to-02130-agql-auth-v0270)
+for Auth store and token changes.
+
 ## 0.157.0 to 0.158.0
 
 **Action needed** on SQL Server. Generate the external schema plan for

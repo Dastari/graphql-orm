@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.213.0 stays aligned with ORM 0.213.0 for the Auth update.
+See the [migration guide](../../MIGRATION.md#02120-to-02130-agql-auth-v0270).
+
 Version 0.212.0 aligns with the ORM's
 [scoped SQLite column drop](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
 

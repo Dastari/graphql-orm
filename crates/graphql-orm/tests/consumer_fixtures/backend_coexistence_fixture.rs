@@ -46,6 +46,26 @@ fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
         "/tests/fixtures/backend-coexistence/Cargo.toml"
     );
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let duplicates = std::process::Command::new(&cargo)
+        .args([
+            "tree",
+            "--locked",
+            "--manifest-path",
+            manifest,
+            "-p",
+            "auth-service",
+            "-d",
+            "-i",
+            "agql-auth",
+        ])
+        .output()
+        .expect("check auth-service for duplicate Auth sources");
+    assert!(
+        duplicates.status.success(),
+        "cargo tree could not select one Auth source:\n{}",
+        String::from_utf8_lossy(&duplicates.stderr)
+    );
+
     let output = std::process::Command::new(cargo)
         .args([
             "metadata",

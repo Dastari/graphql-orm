@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.18.0
+
+- **Action needed (#857).** The `auth-agql` feature uses published
+  `agql-auth` `v0.27.0`, including its stricter validator defaults.
+  [Migration](MIGRATION.md#0170-to-0180-agql-auth-v0270)
+
 ## Unreleased - 0.17.0 (breaking release)
 
 The router part of the single breaking release. See the

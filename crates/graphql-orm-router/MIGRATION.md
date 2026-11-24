@@ -10,6 +10,23 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.17.0 to 0.18.0: agql-auth v0.27.0
+
+**Action needed** for hosts using the `auth-agql` feature. Move direct Auth
+dependencies to the published `v0.27.0` Git tag in the same upgrade and
+refresh the host lockfile. The router's Auth provider and scope matcher use
+types from that source.
+
+The host-provided Auth validator now requires both access markers
+(`typ = "access"` and `purpose = "access_token"`) and rejects legacy array
+scope claims by default. With the Auth hierarchical matcher, wildcards match
+whole segments. If the host uses Auth's rotating JWKS cache, set
+`stale_policy: StaleKeyPolicy::Reject` to preserve its prior fail-closed default
+when refreshing keys fails. Review the
+[workspace migration](../../MIGRATION.md#02120-to-02130-agql-auth-v0270)
+before deploying validators alongside older issuers. No router data migration
+is needed.
+
 ## 0.16.8 to 0.17.0: breaking release
 
 Router 0.16.8 to 0.17.0. It ships in the workspace's single breaking release;

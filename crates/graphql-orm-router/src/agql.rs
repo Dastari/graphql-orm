@@ -233,7 +233,7 @@ mod tests {
             &signing_key,
             json!({
                 "sub": "agql-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
-                "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
+                "typ": "access", "purpose": "access_token", "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
                 "iat": now, "exp": now + 60, "scope": "products.*"
             }),
         );
@@ -250,7 +250,7 @@ mod tests {
             &signing_key,
             json!({
                 "sub": "agql-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
-                "roles": [], "scopes": ["products.read"],
+                "typ": "access", "purpose": "access_token", "roles": [], "scopes": ["products.read"],
                 "iss": "https://issuer.test", "aud": "graphql-router",
                 "iat": now, "exp": now + 60
             }),
@@ -274,7 +274,7 @@ mod tests {
             &signing_key,
             json!({
                 "sub": "agql-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
-                "roles": [], "scopes": [], "scope": "products.read",
+                "typ": "access", "purpose": "access_token", "roles": [], "scopes": [], "scope": "products.read",
                 "iss": "https://issuer.test", "aud": "graphql-router",
                 "iat": now, "exp": now + 60
             }),
@@ -319,7 +319,7 @@ mod tests {
                 &signing_key,
                 json!({
                     "sub": "clock-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
-                    "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
+                    "typ": "access", "purpose": "access_token", "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
                     "iat": seconds, "exp": seconds + 60, "scope": "products.read"
                 }),
             );
@@ -454,7 +454,7 @@ mod tests {
             .as_secs();
         let claims = json!({
             "sub": "agql-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
-            "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
+            "typ": "access", "purpose": "access_token", "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
             "iat": now, "exp": now + 60, "scope": "products.read"
         });
         // The hand-written header is otherwise accepted.
