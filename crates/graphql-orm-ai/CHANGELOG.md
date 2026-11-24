@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.158.0
+
+- **Action needed.** Apply the checked SQL Server schema upgrade so claim and
+  expired-lease recovery candidate reads can seek on run state (#848).
+- **Action needed.** Drain workers on all backends before opening the successor
+  epoch under AI schema module 0.85.0.
+
 ## Unreleased - 0.157.0
 
 - **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier
