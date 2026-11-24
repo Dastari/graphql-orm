@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -722,6 +722,79 @@ The macro validates:
 
 Target columns are metadata literals used for generated SQL. Invalid target names are caught by the
 database when the generated query runs.
+
+### Server-only partition keys
+
+A readable relation normally needs every key column to be GraphQL-readable on
+both entities (see [field authority for read arguments](#field-authority-for-read-arguments)):
+the related row would otherwise reveal a hidden value. A partition key that must
+never reach GraphQL can still narrow a composite join when each such pair is
+declared explicitly:
+
+```rust,ignore
+#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone, Debug)]
+#[graphql(complex)]
+#[graphql_entity(table = "records", plural = "Records")]
+pub struct Record {
+    #[primary_key]
+    pub id: String,
+    pub subject_id: Option<String>,
+    pub group_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub partition_id: String,
+
+    #[graphql(skip)]
+    #[relation(
+        target = "Subject",
+        from = ["subject_id", "partition_id", "group_id"],
+        to = ["id", "partition_id", "group_id"],
+        server_only_key(from = "partition_id", to = "partition_id"),
+        emit_fk = false
+    )]
+    pub subject: Option<Subject>,
+}
+```
+
+Each `server_only_key` names one `from`/`to` pair of the relation, in the same
+position. Its source member is exempt from the readability rule, and its target
+column must be server-only on the target: declared `#[graphql_orm(private)]` and
+not reopened for reads, filters, ordering, subscriptions or inputs, and not a
+primary-key member. The target's generated `GeneratedRelationReadability`
+metadata proves this at compile time, across crates too; a hand-written target
+that does not list the column in `SERVER_ONLY_COLUMNS` is refused. Every other
+pair keeps the ordinary readability checks, and at least one pair must stay
+public.
+
+Generated traversal always binds the complete tuple on the server: to-one,
+nullable and to-many fields, relation `where`/`orderBy`/`page` arguments, page
+windows and counts, and the batched `RelationLoader` path. A target in another
+partition is absent, so a to-one field is `null` and a to-many field is empty,
+with no error, the same as a missing or row-denied target. Source and target
+entity access, auth modes, operation scopes and assurance, row visibility and
+field policies apply exactly as for any other relation; an entity-level target
+denial is still the `FORBIDDEN` refusal described under
+[denied and absent relation targets](#denied-and-absent-relation-targets), and
+no message names the key.
+
+The private column appears in no SDL type, `WhereInput`, `OrderByInput`,
+create or update input, `Changed` payload or filter, semantic or resolver
+catalogue entry, or client metadata; the relation's client key mapping is
+`no_exposed_key`. Neither the source nor the target gains a filter, ordering
+or subscription capability. The macro refuses the declaration together with
+`filter` (related-row filters), `order_aggregate`, `search_relation` and
+`propagate_change = "up"`, because each would evaluate the join outside the
+relation field or needs public subscribable keys. Converting such an entity
+into a runtime GraphQL schema reports the private column as unsupported, as
+for any statically unreadable column.
+
+The relation does reveal what any join reveals: a related row is returned only
+when its partition equals the source's. Declare a server-only pair only where
+that equality, for rows the caller may already read, is acceptable.
+`tests/server_only_relation_keys.rs` runs the matrix on SQLite and test-owned
+PostgreSQL and SQL Server in every `AuthorizationMode`, including a caller
+admitted to both rows of a cross-partition pair, and
+`tests/ui/server_only_keys/` holds the compile-time refusals.
 
 ## Conditional Polymorphic Relations
 

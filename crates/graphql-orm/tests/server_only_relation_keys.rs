@@ -1,0 +1,868 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
+#![cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+//! Generated relations that join on a complete tuple whose partition member is
+//! a server-only column (#898).
+//!
+//! A forward and a device each carry a private `tenant_id`. Both relations
+//! join on `(device, organisation_id, tenant_id)` and declare the tenant pair
+//! `server_only_key`. The tenant column is absent from every public surface,
+//! yet every traversal (to-one, nullable, to-many, paged and batched) uses the
+//! complete tuple, so a device with the same organisation in another tenant is
+//! never related, even for a caller who may read both rows on their own.
+//!
+//! SQLite runs directly. PostgreSQL and SQL Server use a test-owned container:
+//!
+//! ```sh
+//! cargo test -p graphql-orm --no-default-features --features postgres --test server_only_relation_keys -- --ignored
+//! cargo test -p graphql-orm --no-default-features --features mssql --test server_only_relation_keys -- --ignored
+//! ```
+
+use graphql_orm::async_graphql::SimpleObject;
+use graphql_orm::prelude::*;
+use serde_json::{Value, json};
+
+#[path = "support/graphql_case.rs"]
+mod graphql_case;
+use graphql_case::{argument_name as a, field_name as f, resolver_name as r};
+
+#[cfg(feature = "mssql")]
+#[path = "support/owned_mssql.rs"]
+mod owned_mssql;
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "partitioned_devices",
+        plural = "PartitionedDevices",
+        read_policy = "partitioned.device.read",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "partitioned_devices",
+        plural = "PartitionedDevices",
+        read_policy = "partitioned.device.read",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "partitioned_devices",
+        plural = "PartitionedDevices",
+        read_policy = "partitioned.device.read",
+        default_sort = "id ASC"
+    )
+)]
+pub struct PartitionedDevice {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[filterable(type = "string")]
+    pub organisation_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub tenant_id: String,
+    #[filterable(type = "string")]
+    pub label: String,
+    pub blocked: bool,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(
+        target = "PartitionedForward",
+        from = ["id", "organisation_id", "tenant_id"],
+        to = ["device_id", "organisation_id", "tenant_id"],
+        server_only_key(from = "tenant_id", to = "tenant_id"),
+        multiple,
+        emit_fk = false
+    )]
+    pub forwards: Vec<PartitionedForward>,
+}
+
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "partitioned_forwards",
+        plural = "PartitionedForwards",
+        read_policy = "partitioned.forward.read",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "partitioned_forwards",
+        plural = "PartitionedForwards",
+        read_policy = "partitioned.forward.read",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "partitioned_forwards",
+        plural = "PartitionedForwards",
+        read_policy = "partitioned.forward.read",
+        default_sort = "id ASC"
+    )
+)]
+pub struct PartitionedForward {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[filterable(type = "string")]
+    pub organisation_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub tenant_id: String,
+    #[filterable(type = "string")]
+    pub device_id: Option<String>,
+    #[filterable(type = "string")]
+    pub label: String,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(
+        target = "PartitionedDevice",
+        from = ["device_id", "organisation_id", "tenant_id"],
+        to = ["id", "organisation_id", "tenant_id"],
+        server_only_key(from = "tenant_id", to = "tenant_id"),
+        emit_fk = false
+    )]
+    pub device: Option<PartitionedDevice>,
+}
+
+#[cfg(feature = "sqlite")]
+schema_roots! {
+    backend: "sqlite",
+    query_custom_ops: [],
+    entities: [PartitionedDevice, PartitionedForward],
+    client_metadata: true,
+}
+#[cfg(feature = "postgres")]
+schema_roots! {
+    backend: "postgres",
+    query_custom_ops: [],
+    entities: [PartitionedDevice, PartitionedForward],
+    client_metadata: true,
+}
+#[cfg(feature = "mssql")]
+schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_writable",
+    query_custom_ops: [],
+    entities: [PartitionedDevice, PartitionedForward],
+    client_metadata: true,
+}
+
+#[cfg(feature = "sqlite")]
+type Backend = SqliteBackend;
+#[cfg(feature = "postgres")]
+type Backend = PostgresBackend;
+#[cfg(feature = "mssql")]
+type Backend = MssqlBackend;
+
+const TENANT_A: &str = "tenant-a";
+const TENANT_B: &str = "tenant-b";
+const ORGANISATION: &str = "org-shared";
+
+/// Callers and the tenants each is admitted to. `no-devices` is admitted to
+/// both tenants but denied the device entity.
+fn admitted_tenants(subject: &str) -> &'static [&'static str] {
+    match subject {
+        "both" | "no-devices" => &[TENANT_A, TENANT_B],
+        "only-a" => &[TENANT_A],
+        _ => &[],
+    }
+}
+
+fn subject(ctx: Option<&async_graphql::Context<'_>>) -> String {
+    ctx.and_then(|ctx| ctx.auth_subject_opt())
+        .map(|subject| subject.id)
+        .unwrap_or_default()
+}
+
+/// Complete SQL visibility over the private tenant column, plus a blocked
+/// flag on devices. No callback can widen it.
+struct TenantRows;
+
+/// `tenant_id` is one of `tenants`. Every caller in this fixture is admitted
+/// to at least one tenant.
+fn tenant_predicate<T: Entity + 'static>(tenants: &[&str]) -> async_graphql::Result<ReadPredicate> {
+    let tenant = |tenant: &str| {
+        ReadPredicate::column::<Backend, T>(
+            "tenant_id",
+            ReadPredicateOp::Eq,
+            SqlValue::String(tenant.to_owned()),
+        )
+    };
+    let (first, rest) = tenants
+        .split_first()
+        .ok_or_else(|| async_graphql::Error::new("no admitted tenant"))?;
+    rest.iter().try_fold(tenant(first)?, |predicate, next| {
+        predicate.or(tenant(next)?)
+    })
+}
+
+impl RowPolicy<Backend> for TenantRows {
+    fn read_visibility_capability(
+        &self,
+        _: &'static str,
+        _: Option<&'static str>,
+    ) -> ReadVisibilityCapability {
+        ReadVisibilityCapability::Complete
+    }
+
+    fn read_visibility<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        entity: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        let tenants = admitted_tenants(&subject(ctx));
+        Box::pin(async move {
+            let predicate =
+                match entity {
+                    "PartitionedDevice" => tenant_predicate::<PartitionedDevice>(tenants)?.and(
+                        ReadPredicate::column::<Backend, PartitionedDevice>(
+                            "blocked",
+                            ReadPredicateOp::Eq,
+                            SqlValue::Bool(false),
+                        )?,
+                    )?,
+                    "PartitionedForward" => tenant_predicate::<PartitionedForward>(tenants)?,
+                    _ => return Err(async_graphql::Error::new("unexpected entity")),
+                };
+            Ok(ReadVisibility::Complete(predicate))
+        })
+    }
+
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        // Complete visibility never reaches the callback; refuse if it does.
+        Box::pin(async { Ok(false) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+/// Every entity is readable, except devices for `no-devices`.
+struct Entities;
+
+impl EntityPolicy<Backend> for Entities {
+    fn can_access_entity<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<Backend>,
+        entity: &'static str,
+        _: Option<&'static str>,
+        kind: EntityAccessKind,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let allowed = kind == EntityAccessKind::Read
+            && !(entity == "PartitionedDevice" && subject(ctx) == "no-devices");
+        Box::pin(async move { Ok(allowed) })
+    }
+}
+
+/// `(id, organisation_id, tenant_id, label, blocked)`.
+const DEVICES: [(&str, &str, &str, &str, bool); 3] = [
+    ("dev-a", ORGANISATION, TENANT_A, "device in a", false),
+    ("dev-b", ORGANISATION, TENANT_B, "device in b", false),
+    (
+        "dev-blocked",
+        ORGANISATION,
+        TENANT_A,
+        "blocked device",
+        true,
+    ),
+];
+
+/// `(id, organisation_id, tenant_id, device_id, label)`.
+const FORWARDS: [(&str, &str, &str, Option<&str>, &str); 5] = [
+    // Positive control: the same tenant and organisation.
+    (
+        "fwd-same",
+        ORGANISATION,
+        TENANT_A,
+        Some("dev-a"),
+        "same partition",
+    ),
+    // The regression: tenant A stores the ID of a device in tenant B.
+    (
+        "fwd-cross",
+        ORGANISATION,
+        TENANT_A,
+        Some("dev-b"),
+        "cross partition",
+    ),
+    // The target row exists in the same partition but is denied.
+    (
+        "fwd-denied",
+        ORGANISATION,
+        TENANT_A,
+        Some("dev-blocked"),
+        "denied target",
+    ),
+    // A nullable key member: no relation.
+    ("fwd-unlinked", ORGANISATION, TENANT_A, None, "no device"),
+    ("fwd-b", ORGANISATION, TENANT_B, Some("dev-b"), "tenant b"),
+];
+
+struct Fixture {
+    db: Database<Backend>,
+    #[cfg(feature = "mssql")]
+    owner: owned_mssql::OwnedSqlServer,
+}
+
+impl Fixture {
+    fn finish(self) -> TestResult {
+        #[cfg(feature = "mssql")]
+        {
+            let Self { db, mut owner } = self;
+            drop(db);
+            owner.cleanup()?;
+        }
+        #[cfg(not(feature = "mssql"))]
+        drop(self);
+        Ok(())
+    }
+}
+
+fn boolean(value: bool) -> &'static str {
+    match (cfg!(feature = "postgres"), value) {
+        (true, true) => "TRUE",
+        (true, false) => "FALSE",
+        (false, true) => "1",
+        (false, false) => "0",
+    }
+}
+
+fn quoted(value: Option<&str>) -> String {
+    value.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"))
+}
+
+async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    // The pool keeps the owned container alive; it is removed when the last clone drops.
+    #[cfg(feature = "postgres")]
+    let db =
+        Database::new(owned_postgres::OwnedPostgres::pool("server-only-relation-keys", 4).await?);
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    {
+        let plan = db
+            .schema()
+            .plan_migration_to_entities(
+                "server-only-relation-keys-init",
+                "server-only relation keys test",
+                &[
+                    PartitionedDevice::metadata(),
+                    PartitionedForward::metadata(),
+                ],
+            )
+            .await?;
+        db.schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await?;
+    }
+    #[cfg(feature = "mssql")]
+    let (db, owner) = {
+        let owner = owned_mssql::OwnedSqlServer::start().await?;
+        owned_mssql::execute_batch(
+            &owner.connection_string,
+            "CREATE TABLE partitioned_devices (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
+             organisation_id NVARCHAR(64) NOT NULL, tenant_id NVARCHAR(64) NOT NULL, \
+             label NVARCHAR(64) NOT NULL, blocked BIT NOT NULL); \
+             CREATE TABLE partitioned_forwards (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
+             organisation_id NVARCHAR(64) NOT NULL, tenant_id NVARCHAR(64) NOT NULL, \
+             device_id NVARCHAR(64) NULL, label NVARCHAR(64) NOT NULL);",
+        )
+        .await?;
+        let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
+            &owner.connection_string,
+        )
+        .await?;
+        let db = Database::builder(pool)
+            .schema_policy(SchemaPolicy::ExternalWritable)
+            .build();
+        (db, owner)
+    };
+    // Constant fixture rows, rendered once for every backend.
+    let devices = format!(
+        "INSERT INTO partitioned_devices (id, organisation_id, tenant_id, label, blocked) VALUES {}",
+        DEVICES
+            .iter()
+            .map(|(id, organisation, tenant, label, blocked)| format!(
+                "('{id}', '{organisation}', '{tenant}', '{label}', {})",
+                boolean(*blocked)
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let forwards = format!(
+        "INSERT INTO partitioned_forwards (id, organisation_id, tenant_id, device_id, label) VALUES {}",
+        FORWARDS
+            .iter()
+            .map(|(id, organisation, tenant, device, label)| format!(
+                "('{id}', '{organisation}', '{tenant}', {}, '{label}')",
+                quoted(*device)
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    for statement in [devices, forwards] {
+        sqlx::query(&statement).execute(db.pool()).await?;
+    }
+    #[cfg(feature = "mssql")]
+    owned_mssql::execute_batch(&owner.connection_string, &format!("{devices}; {forwards};"))
+        .await?;
+    Ok(Fixture {
+        db,
+        #[cfg(feature = "mssql")]
+        owner,
+    })
+}
+
+/// A database clone with the policies installed under `mode`.
+fn configured(db: &Database<Backend>, mode: AuthorizationMode) -> Database<Backend> {
+    let mut db = db.clone().with_authorization_mode(mode);
+    db.set_entity_policy(Entities);
+    db.set_row_policy(TenantRows);
+    db
+}
+
+async fn execute(db: &Database<Backend>, user: &str, query: &str) -> async_graphql::Response {
+    schema_builder(db.clone())
+        .finish()
+        .execute(async_graphql::Request::new(query).data(AuthSubject::new(user)))
+        .await
+}
+
+async fn data(db: &Database<Backend>, user: &str, query: String) -> Result<Value, String> {
+    let response = execute(db, user, &query).await;
+    if !response.errors.is_empty() {
+        return Err(format!("{query}: {:?}", response.errors));
+    }
+    response.data.into_json().map_err(|error| error.to_string())
+}
+
+/// The forward `id` and its related device id (or null), through the root
+/// single read.
+async fn forward_device(
+    db: &Database<Backend>,
+    user: &str,
+    forward: &str,
+) -> Result<Value, String> {
+    let root = r("partitionedForward");
+    let value = data(
+        db,
+        user,
+        format!(
+            "{{ {root}({}: {forward:?}) {{ {} {} {{ {} {} }} }} }}",
+            a("id"),
+            f("id"),
+            f("device"),
+            f("id"),
+            f("label"),
+        ),
+    )
+    .await?;
+    Ok(value[root].clone())
+}
+
+async fn device_by_id(db: &Database<Backend>, user: &str, device: &str) -> Result<Value, String> {
+    let root = r("partitionedDevice");
+    let value = data(
+        db,
+        user,
+        format!("{{ {root}({}: {device:?}) {{ {} }} }}", a("id"), f("id")),
+    )
+    .await?;
+    Ok(value[root][f("id")].clone())
+}
+
+fn device_of(forward: &Value) -> Value {
+    forward[f("device")]
+        .get(f("id"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// The related forward ids of one device, by connection and in one batched
+/// list read, with and without a page window.
+async fn device_forwards(
+    db: &Database<Backend>,
+    user: &str,
+    device: &str,
+    paged: bool,
+) -> Result<(Vec<String>, i64), String> {
+    let root = r("partitionedDevice");
+    let page = if paged {
+        format!("({}: {{ limit: 10, offset: 0 }})", a("page"))
+    } else {
+        String::new()
+    };
+    let value = data(
+        db,
+        user,
+        format!(
+            "{{ {root}({}: {device:?}) {{ {}{page} {{ edges {{ node {{ {} }} }} pageInfo {{ totalCount }} }} }} }}",
+            a("id"),
+            f("forwards"),
+            f("id"),
+        ),
+    )
+    .await?;
+    let connection = &value[root][f("forwards")];
+    let ids = connection["edges"]
+        .as_array()
+        .ok_or_else(|| format!("no edges: {value}"))?
+        .iter()
+        .map(|edge| {
+            edge["node"][f("id")]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    let total = connection["pageInfo"]["totalCount"].as_i64().unwrap_or(-1);
+    Ok((ids, total))
+}
+
+const MODES: [AuthorizationMode; 3] = [
+    AuthorizationMode::LegacyPermissive,
+    AuthorizationMode::DeclaredPoliciesRequired,
+    AuthorizationMode::ExplicitPolicyForAllExposedOperations,
+];
+
+async fn complete_tuple_joins_in_every_mode(base: &Database<Backend>) -> TestResult {
+    for mode in MODES {
+        let db = configured(base, mode);
+        let context = |what: &str| format!("{mode:?}: {what}");
+
+        // Independent read admission to both rows of the regression pair.
+        assert_eq!(
+            forward_device(&db, "both", "fwd-cross").await?[f("id")],
+            json!("fwd-cross"),
+            "{}",
+            context("forward readable")
+        );
+        assert_eq!(
+            device_by_id(&db, "both", "dev-b").await?,
+            json!("dev-b"),
+            "{}",
+            context("device readable")
+        );
+        // Same organisation, device ID stored on the forward, other tenant: null.
+        assert_eq!(
+            device_of(&forward_device(&db, "both", "fwd-cross").await?),
+            Value::Null,
+            "{}",
+            context("cross-partition relation")
+        );
+        // Positive control.
+        let same = forward_device(&db, "both", "fwd-same").await?;
+        assert_eq!(
+            device_of(&same),
+            json!("dev-a"),
+            "{}",
+            context("same partition")
+        );
+        assert_eq!(same[f("device")][f("label")], json!("device in a"));
+        // An existing same-partition target denied by row visibility.
+        assert_eq!(
+            device_of(&forward_device(&db, "both", "fwd-denied").await?),
+            Value::Null,
+            "{}",
+            context("denied target")
+        );
+        // A null key member.
+        assert_eq!(
+            device_of(&forward_device(&db, "both", "fwd-unlinked").await?),
+            Value::Null,
+            "{}",
+            context("nullable key")
+        );
+        // A caller admitted only to tenant A cannot see the B device at all.
+        assert_eq!(device_by_id(&db, "only-a", "dev-b").await?, Value::Null);
+        assert_eq!(
+            device_of(&forward_device(&db, "only-a", "fwd-cross").await?),
+            Value::Null
+        );
+        assert_eq!(
+            device_of(&forward_device(&db, "only-a", "fwd-same").await?),
+            json!("dev-a")
+        );
+
+        // One batched list read resolves every forward's relation.
+        let root = r("partitionedForwards");
+        let listed = data(
+            &db,
+            "both",
+            format!(
+                "{{ {root} {{ edges {{ node {{ {} {} {{ {} }} }} }} }} }}",
+                f("id"),
+                f("device"),
+                f("id"),
+            ),
+        )
+        .await?;
+        let related = listed[root]["edges"]
+            .as_array()
+            .ok_or("no forwards")?
+            .iter()
+            .map(|edge| {
+                (
+                    edge["node"][f("id")]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    device_of(&edge["node"]),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            related,
+            vec![
+                ("fwd-b".to_owned(), json!("dev-b")),
+                ("fwd-cross".to_owned(), Value::Null),
+                ("fwd-denied".to_owned(), Value::Null),
+                ("fwd-same".to_owned(), json!("dev-a")),
+                ("fwd-unlinked".to_owned(), Value::Null),
+            ],
+            "{}",
+            context("batched to-one")
+        );
+
+        // To-many in both loader shapes: the cross-tenant forward stores
+        // dev-b's ID but belongs to neither device's partition.
+        for paged in [false, true] {
+            assert_eq!(
+                device_forwards(&db, "both", "dev-a", paged).await?,
+                (vec!["fwd-same".to_owned()], 1),
+                "{}",
+                context("to-many dev-a")
+            );
+            assert_eq!(
+                device_forwards(&db, "both", "dev-b", paged).await?,
+                (vec!["fwd-b".to_owned()], 1),
+                "{}",
+                context("to-many dev-b")
+            );
+        }
+
+        // An entity-level target denial is the documented FORBIDDEN refusal on
+        // the relation path; the parent stays and nothing names the tenant.
+        let response = execute(
+            &db,
+            "no-devices",
+            &format!(
+                "{{ {}({}: \"fwd-same\") {{ {} {} {{ {} }} }} }}",
+                r("partitionedForward"),
+                a("id"),
+                f("id"),
+                f("device"),
+                f("id"),
+            ),
+        )
+        .await;
+        let errors = format!("{:?}", response.errors).to_ascii_lowercase();
+        assert!(
+            errors.contains("forbidden"),
+            "{}: {errors}",
+            context("entity denial")
+        );
+        assert!(!errors.contains("tenant"), "{errors}");
+        let value = response.data.into_json()?;
+        assert_eq!(value[r("partitionedForward")][f("id")], json!("fwd-same"));
+        assert_eq!(device_of(&value[r("partitionedForward")]), Value::Null);
+    }
+    Ok(())
+}
+
+async fn private_key_has_no_public_surface(base: &Database<Backend>) -> TestResult {
+    let db = configured(base, AuthorizationMode::default());
+    let sdl = schema_builder(db.clone())
+        .finish()
+        .sdl()
+        .to_ascii_lowercase();
+    assert!(sdl.contains("organisation"), "fixture sanity: {sdl}");
+    assert!(!sdl.contains("tenant"), "private key in SDL:\n{sdl}");
+
+    // Selecting, filtering and ordering by it are all unknown to the schema.
+    for query in [
+        format!(
+            "{{ {} {{ edges {{ node {{ tenantId }} }} }} }}",
+            r("partitionedForwards")
+        ),
+        format!(
+            "{{ {}({}: {{ tenantId: {{ eq: \"{TENANT_B}\" }} }}) {{ edges {{ node {{ {} }} }} }} }}",
+            r("partitionedForwards"),
+            a("where"),
+            f("id"),
+        ),
+        format!(
+            "{{ {}({}: [{{ tenantId: ASC }}]) {{ edges {{ node {{ {} }} }} }} }}",
+            r("partitionedDevices"),
+            a("orderBy"),
+            f("id"),
+        ),
+        format!(
+            "{{ {}({}: \"dev-a\") {{ {}({}: {{ tenantId: {{ eq: \"{TENANT_B}\" }} }}) {{ edges {{ node {{ {} }} }} }} }} }}",
+            r("partitionedDevice"),
+            a("id"),
+            f("forwards"),
+            a("where"),
+            f("id"),
+        ),
+    ] {
+        let response = execute(&db, "both", &query).await;
+        assert!(!response.errors.is_empty(), "{query} was accepted");
+        assert_eq!(response.data.into_json()?, Value::Null, "{query}");
+    }
+
+    // Descriptive catalogues never name it either.
+    let catalogues = [
+        serde_json::to_string(graphql_orm_semantic_catalog())?,
+        serde_json::to_string(graphql_orm_resolver_catalog().map_err(|error| error.to_string())?)?,
+        serde_json::to_string(graphql_orm_client_metadata())?,
+    ];
+    for catalogue in catalogues {
+        assert!(
+            !catalogue.to_ascii_lowercase().contains("tenant"),
+            "private key in catalogue: {catalogue}"
+        );
+    }
+    // The operation catalogue publishes no tenant field, argument, type or
+    // description. Its host-side schema signature, a fingerprint input that
+    // lists every persisted field, records the column as private and without
+    // any surface.
+    for operation in graphql_orm_operation_catalog().operations() {
+        let generated = operation.generated();
+        let public = std::iter::once(generated.field_name().to_owned())
+            .chain([
+                generated.description().to_owned(),
+                generated.graphql_result_type().to_owned(),
+            ])
+            .chain(generated.arguments().iter().flat_map(|argument| {
+                [
+                    argument.graphql_name().to_owned(),
+                    argument.description().to_owned(),
+                    argument.graphql_type().to_owned(),
+                ]
+            }))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        assert!(!public.contains("tenant"), "{public}");
+        for line in generated
+            .schema_signature()
+            .lines()
+            .filter(|line| line.contains("tenant"))
+        {
+            for marker in [
+                "output=false",
+                "create=false",
+                "update=false",
+                "private=true",
+                "filter=false",
+                "order=false",
+                "subscribe=false",
+            ] {
+                assert!(line.contains(marker), "{marker} missing: {line}");
+            }
+        }
+    }
+    // The public half of the key does not make the relation batchable by
+    // clients: its key mapping stays unexposed.
+    let metadata = serde_json::to_string(graphql_orm_client_metadata())?;
+    assert!(!metadata.contains("\"batchable\""), "{metadata}");
+    assert!(metadata.contains("\"no_exposed_key\""), "{metadata}");
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn server_only_partition_keys_on_sqlite() -> TestResult {
+    let fixture = fixture().await?;
+    complete_tuple_joins_in_every_mode(&fixture.db).await?;
+    private_key_has_no_public_surface(&fixture.db).await?;
+    fixture.finish()
+}
+
+#[cfg(not(feature = "sqlite"))]
+#[tokio::test]
+#[ignore = "starts a test-owned database container"]
+async fn server_only_partition_keys_on_an_owned_database() -> TestResult {
+    let fixture = fixture().await?;
+    complete_tuple_joins_in_every_mode(&fixture.db).await?;
+    private_key_has_no_public_surface(&fixture.db).await?;
+    fixture.finish()
+}

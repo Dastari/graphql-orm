@@ -3,8 +3,8 @@ use crate::backend::{backend_marker_tokens, backend_render_identifier_path, reso
 use crate::entity::{
     RelationConditionMetadata, RelationConditionValue, collect_parsed_fields,
     graphql_relation_target_checks, has_graphql_complex, parse_entity_metadata,
-    relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
-    validate_graphql_relation_keys,
+    relation_change_propagation_tokens, relation_delete_policy_tokens,
+    relation_server_only_key_mask, resolver_auth_mode_tokens, validate_graphql_relation_keys,
 };
 use crate::naming::graphql_field_name;
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -330,6 +330,7 @@ pub(crate) fn generate_graphql_relations(
             ));
         }
 
+        let server_only_keys = relation_server_only_key_mask(meta, &from_cols, &to_cols)?;
         validate_graphql_relation_keys(
             backend,
             struct_name,
@@ -338,6 +339,7 @@ pub(crate) fn generate_graphql_relations(
             &parsed_fields,
             &from_cols,
             &to_cols,
+            &server_only_keys,
         )?;
         relation_target_checks.push(graphql_relation_target_checks(
             backend,
@@ -345,6 +347,7 @@ pub(crate) fn generate_graphql_relations(
             field,
             meta,
             &to_cols,
+            &server_only_keys,
         )?);
         let mut source_field_idents = Vec::with_capacity(from_cols.len());
         let mut source_kinds = Vec::with_capacity(from_cols.len());

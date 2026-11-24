@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.228.0 adds the `server_only_key(from, to)` relation option.
+See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
 Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
 column types with the `mssql_type` field attribute.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).

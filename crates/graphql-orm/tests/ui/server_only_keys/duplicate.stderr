@@ -1,0 +1,5 @@
+error: duplicate server_only_key
+  --> tests/ui/server_only_keys/duplicate.rs:27:9
+   |
+27 |         server_only_key(from = "partition", to = "partition"),
+   |         ^^^^^^^^^^^^^^^

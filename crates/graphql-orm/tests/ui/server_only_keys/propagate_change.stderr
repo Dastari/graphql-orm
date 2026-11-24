@@ -1,0 +1,5 @@
+error: server_only_key relations cannot propagate Changed events; generated propagation authorizes public subscribable keys only
+  --> tests/ui/server_only_keys/propagate_change.rs:26:9
+   |
+26 |         server_only_key(from = "partition", to = "partition"),
+   |         ^^^^^^^^^^^^^^^
