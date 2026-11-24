@@ -10,10 +10,22 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.209.0 adds two opt-in options for generated updates. One makes
+Version 0.210.0 adds two opt-in options for generated updates. One makes
 `ExpectedVersion` required. The other selects assurance per request from the
 typed patch and the locked row. Other entities are unchanged. See the
-[migration guide](../../MIGRATION.md#02050-to-02090-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+[migration guide](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+
+Version 0.209.0 aligns with the ORM runtime's
+[external migration preflight API](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
+Version 0.208.0 generates the adapter for opt-in
+[bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes).
+
+Version 0.207.0 aligns with the ORM's
+[closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
+Version 0.206.0 aligns with the ORM runtime's
+[backend-typed backup API](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
 
 Version 0.205.0 reduces per-entity compile work for generated Changed
 subscriptions by sharing their stream implementation. See the

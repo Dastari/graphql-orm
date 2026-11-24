@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.209.0, operation catalogue 0.13.0
+## Unreleased - ORM/macros 0.210.0, operation catalogue 0.13.0
 
 - **Added (#851).** `#[graphql_entity(update_expected_version = "required")]`
   makes the generated update's `ExpectedVersion` non-null (`Int!`) in the SDL
@@ -42,6 +42,46 @@ for historical context.
   refuses such entities, whichever typed constructor built their metadata.
   Entities that opt into neither keep byte-identical SDL, catalogues,
   fingerprints and debug output.
+
+## Unreleased - ORM/macros 0.209.0
+
+- `SchemaManager::preflight_unique_indexes` exposes the read-only duplicate-key
+  check to hosts using external migration tools, including SQL Server (#878).
+  [Migration](MIGRATION.md#02080-to-02090-external-migration-preflight)
+
+## Unreleased - ORM/macros 0.208.0
+
+- **Added (#852).** Typed transactions can delete a bounded key set or scalar
+  filter match with one DELETE for opted-in mutable entities. The operation
+  checks row write authorization and exact cardinality, runs per-row delete
+  hooks and queues the generated change notifications.
+  [Migration](MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
+
+## Unreleased - ORM/macros 0.207.0
+
+- **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite
+  closure read predicate (`related_closure_within` and its shorthands) could
+  reach a different verdict than the original rendering when its pointer
+  column's collation treats values as equal that the key column distinguishes,
+  for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY` key. The
+  compact walk deduplicated such pointers (`'a'` and `'A'`, or `'a'` and
+  `'a '`) at the same depth and followed only one of them, so an `Any`
+  closure could deny a row that the original rendering admits. A randomized
+  search found no over-admission, but it is not proven impossible, because
+  SQLite does not guarantee which equal pointer survives. SQLite now renders
+  every closure, single-level and nested, in the original form, byte for
+  byte as before 0.200.0. PostgreSQL and SQL Server are not affected.
+- **No action.** On PostgreSQL and SQL Server, directly nested closure read
+  predicates over built-in column tests can reuse the inner closure's scalar
+  result, reducing SQL and bind duplication. The admitted rows are unchanged
+  on all three backends (#785).
+
+## Unreleased - ORM/macros 0.206.0 and backup 0.30.0
+
+- **Fixed (#870).** SQLite and PostgreSQL database handles expose the backup
+  runtime in multi-backend builds. The ready-made backup adapter and object
+  index use the handle selected by their own feature.
+  [Migration](MIGRATION.md#02050-to-02060-backend-typed-backup-runtime)
 
 ## Unreleased - ORM/macros 0.205.0
 

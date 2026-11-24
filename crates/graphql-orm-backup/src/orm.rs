@@ -7,8 +7,7 @@
 //! object metadata. Host applications supply entity metadata and column names;
 //! this module stays free of application domain assumptions.
 //!
-//! The `orm` feature requires the host application to enable exactly one
-//! `graphql-orm` backend feature (`sqlite` or `postgres`).
+//! Select the adapter backend with `orm-sqlite` or `orm-postgres`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,12 +15,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     BackupRestoreExternallyManaged, BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy,
-    EntityBackupDescriptor, EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
-    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode, ensure_sql_write_allowed,
-    stable_schema_hash,
+    DatabaseBackend, EntityBackupDescriptor, EntityMetadata, GraphqlOrmBackupRuntime,
+    GraphqlOrmSchemaSnapshot, OrmBackend, RestoreContext as OrmRestoreContext,
+    RestoreMode as OrmRestoreMode, ensure_sql_write_allowed, stable_schema_hash,
 };
 use graphql_orm::sqlx::Row as _;
 use graphql_orm_storage::{BlobStore, StorageByteStream};
@@ -34,6 +32,15 @@ use crate::{
     RestoreMode, collect_backup_stream,
 };
 
+#[cfg(feature = "orm-sqlite")]
+type AdapterBackend = graphql_orm::SqliteBackend;
+#[cfg(feature = "orm-postgres")]
+type AdapterBackend = graphql_orm::PostgresBackend;
+#[cfg(not(any(feature = "orm-sqlite", feature = "orm-postgres")))]
+type AdapterBackend = graphql_orm::DefaultBackend;
+
+type Database = graphql_orm::db::Database<AdapterBackend>;
+
 fn require_orm_backup_restore(database: &Database) -> Result<(), BackupError> {
     if database.backup_restore_is_externally_managed() {
         Err(BackupRestoreExternallyManaged.into())
@@ -42,7 +49,7 @@ fn require_orm_backup_restore(database: &Database) -> Result<(), BackupError> {
     }
 }
 
-/// [`GraphqlOrmBackupAdapter`] over a `graphql-orm` [`Database`].
+/// [`GraphqlOrmBackupAdapter`] over a `graphql-orm` [`Database`](graphql_orm::db::Database).
 ///
 /// Full export and restore delegate to the `GraphqlOrmBackupRuntime`
 /// implementation shipped with `graphql-orm`. Incremental export and restore
@@ -210,9 +217,9 @@ impl OrmBackupAdapter {
                 .cmp(&left.restore_order)
                 .then_with(|| right.table_name.cmp(&left.table_name))
         });
-        let backend = graphql_orm::graphql::orm::current_backend();
+        let backend = AdapterBackend::DIALECT;
 
-        if backend == graphql_orm::graphql::orm::DatabaseBackend::Sqlite {
+        if backend == DatabaseBackend::Sqlite {
             self.clear_restore_target_without_foreign_keys(&descriptors)
                 .await
         } else {
@@ -345,9 +352,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
             .begin()
             .await
             .map_err(database_error("begin target preflight"))?;
-        if graphql_orm::graphql::orm::current_backend()
-            == graphql_orm::graphql::orm::DatabaseBackend::Postgres
-        {
+        if AdapterBackend::DIALECT == DatabaseBackend::Postgres {
             graphql_orm::sqlx::query("SET LOCAL row_security = off")
                 .execute(&mut *tx)
                 .await
@@ -875,8 +880,8 @@ fn database_error(operation: &str) -> impl Fn(graphql_orm::Error) -> BackupError
 }
 
 fn quote_table_identifier(identifier: &str) -> String {
-    let backend = graphql_orm::graphql::orm::current_backend();
-    if backend == graphql_orm::graphql::orm::DatabaseBackend::Postgres {
+    let backend = AdapterBackend::DIALECT;
+    if backend == DatabaseBackend::Postgres {
         backend.render_table_identifier_path(identifier)
     } else {
         quote_identifier(identifier)
