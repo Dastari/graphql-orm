@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.211.0 uses schema-bound semantic metadata for described roots
+returning a registered generated entity (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
 Version 0.210.0 adds two opt-in options for generated updates. One makes
 `ExpectedVersion` required. The other selects assurance per request from the
 typed patch and the locked row. Other entities are unchanged. See the
