@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.227.0 enforces target query assurance on indirect runtime GraphQL
+reads and generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02270-indirect-query-assurance).
+
 Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
 column identifier parsing in ALTER COLUMN collation lookups.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).

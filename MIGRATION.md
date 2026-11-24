@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.227.0: Indirect query assurance
+
+**Action needed.** If you require assurance on a runtime collection query or
+a generated entity query, handle `STEP_UP_REQUIRED` on indirect reads of the
+same data. Runtime node lookups and relation layers, including mutation payload
+relations, now check the target collection's query requirements before database
+access. Generated Federation `_entities` checks every enabled query root for the
+entity, in addition to its existing single-read and `_entities` checks.
+Complete step-up before retrying a refused request. Hosts without query assurance
+can upgrade without changing their queries or policies.
+
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 
 **No action.** Upgrade ORM and macros together. SQL Server keeps the

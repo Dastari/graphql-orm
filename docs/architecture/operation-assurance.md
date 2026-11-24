@@ -131,10 +131,12 @@ preserves existing schemas.
 Enforcement keys on the exact root coordinate. A resolver that runs below
 another root passes its own coordinate to `enforce_operation_assurance`.
 Generated Federation entity resolvers, emitted for an entity's
-`federation_key`, run below `_entities`: they enforce the entity's get-by-id
-query root and any classification registered for `_entities`. A handwritten
-`#[graphql(entity)]` resolver gets no assurance check from the ORM. Generated
-dependent deletes use their own delete root.
+`federation_key` or `node_id`, run below `_entities`. After resolver auth and
+single-read scopes, they enforce the entity's get-by-id coordinate, every
+enabled generated query root for the entity, and any classification registered
+for `_entities`. All required policies must pass before a database lookup.
+A handwritten `#[graphql(entity)]` resolver gets no assurance check from the
+ORM. Generated dependent deletes use their own delete root.
 
 ## Runtime GraphQL Roots
 
@@ -148,6 +150,13 @@ or resolver callback. The resolver repeats the check as defence in depth and
 returns the pre-pass refusal. Subscriptions are checked before registration. `RuntimeGraphqlComposer::register_assurance_operations` adds
 module roots as `runtime` origin operations and host fields as `custom`
 operations. Coordinates the builder already holds keep their registration.
+
+The planner also enforces the target collection's query roots for a resolved
+`node` lookup and for each relation layer. These checks use the configured
+query names, and a requirement on any one of them applies to the indirect read.
+This includes relation filters and relations selected in mutation and live
+subscription payloads. The check precedes database admission and host read
+authorization for the affected root. Unregistered query coordinates pass.
 See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).
 
 ## Authoritative Server Enforcement

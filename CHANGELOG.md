@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.227.0
+
+- **Security fix (#902).** Runtime node lookups and relation layers enforce the
+  target collection's query assurance before database access. Generated
+  Federation lookups enforce assurance on every enabled query root of the
+  entity. [Migration](MIGRATION.md#02270-indirect-query-assurance)
+
 ## Unreleased - ORM/macros 0.215.0
 
 - **Added (#522).** SQL Server pools can opt in to binding the SQL types

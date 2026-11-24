@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.227.0 enforces assurance on every enabled entity query root in
+generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02270-indirect-query-assurance).
+
 Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
 column types with the `mssql_type` field attribute.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).

@@ -567,6 +567,16 @@ fn entity_read_body(
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             #single_read_field,
         )?;
+        for &__gom_query_root in #struct_name::__GOM_QUERY_ROOT_FIELDS {
+            // The single-read coordinate is checked above, even when disabled.
+            if __gom_query_root != #single_read_field {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
