@@ -6,7 +6,9 @@ use std::{
 use serde::Deserialize;
 
 #[cfg(feature = "auth-agql")]
-use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
+use agql_auth::{
+    HierarchicalScopeMatch, HierarchicalScopeOptions, HierarchicalScopeValidationWarning,
+};
 
 #[cfg(feature = "auth-agql")]
 use crate::AgqlScopeMatcher;
@@ -514,6 +516,22 @@ fn build_hierarchical_scope_matcher(
             "scopeMatcher hierarchical options are invalid: {error}"
         ))
     })?;
+    let wildcard = matcher.options().wildcard.as_str();
+    // Auth warns for both whole-segment and embedded wildcards. The latter
+    // now match literally and can silently remove an exact-only requirement.
+    for warning in matcher.validation_warnings() {
+        if let HierarchicalScopeValidationWarning::WildcardExactOnlyPattern { pattern } = warning
+            && pattern
+                .split(separator)
+                .any(|segment| segment != wildcard && segment.contains(wildcard))
+        {
+            return Err(invalid(format!(
+                "scopeMatcher exactOnlyScopePatterns entry {pattern:?} embeds wildcard {wildcard:?} \
+                 in a segment. Rewrite it with the wildcard as a whole segment, such as \
+                 `records{separator}{wildcard}`."
+            )));
+        }
+    }
     Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::hierarchical(matcher)?)))
 }
 
@@ -1579,6 +1597,64 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("auth-agql"));
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn hierarchical_file_matcher_requires_whole_segment_wildcards_in_exact_only_patterns() {
+        let environment =
+            |name: &str| Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()));
+        for (syntax, invalid_pattern, valid_pattern, required, super_scope, ordinary) in [
+            (
+                "",
+                "payments*",
+                "payments.*",
+                "payments.credentials.release",
+                "root.admin",
+                "orders.read",
+            ),
+            (
+                r#""separator": ":", "wildcard": "**","#,
+                "payments:account**:release",
+                "payments:**:release",
+                "payments:account:release",
+                "root:admin",
+                "orders:read",
+            ),
+        ] {
+            let json = FILE.replacen(
+                "\"authentication\":",
+                &format!(
+                    r#""scopeMatcher": {{
+                        "kind": "hierarchical",
+                        {syntax}
+                        "superScopes": ["{super_scope}"],
+                        "exactOnlyScopePatterns": ["{invalid_pattern}"]
+                    }},
+                    "authentication":"#,
+                ),
+                1,
+            );
+            let error = RouterFileConfig::from_json(&json)
+                .unwrap()
+                .into_router_config_with(environment)
+                .unwrap_err();
+            assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+            let message = error.to_string();
+            assert!(message.contains("exactOnlyScopePatterns"), "{message}");
+            assert!(message.contains(invalid_pattern), "{message}");
+            assert!(message.contains("whole segment"), "{message}");
+
+            let json = json.replace(invalid_pattern, valid_pattern);
+            let config = RouterFileConfig::from_json(&json)
+                .unwrap()
+                .into_router_config_with(environment)
+                .unwrap();
+            assert!(config.scope_matcher.matches(super_scope, ordinary));
+            assert!(!config.scope_matcher.matches(super_scope, required));
+            assert!(!config.scope_matcher.matches(valid_pattern, required));
+            assert!(config.scope_matcher.matches(required, required));
+        }
     }
 
     #[cfg(feature = "auth-agql")]

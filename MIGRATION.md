@@ -19,8 +19,10 @@ ORM/macros together and choose the same Auth Git tag in the same upgrade:
 agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.27.0", version = "0.27.0" }
 ```
 
-Refresh the host lockfile and check that `cargo tree -d -i agql-auth` reports
-no duplicate. The tag resolves to `71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+Refresh the host lockfile and run `cargo tree -i agql-auth` with the host's
+deployment features enabled. Cargo reports an ambiguous package specification
+if multiple sources resolve in that graph. The tag resolves to
+`71a3acee5942bd5b6aac57dcaccbb6391b383880`.
 Cargo considers a different tag or a `rev` selector a different source, even
 at the same commit. This matters when passing `AuthPrincipal` to
 `auth_bundle_from_principal` or using the AI and router Auth integration types.
@@ -34,6 +36,18 @@ grant the whole subtree. API-token services reject a mismatched audience or
 configured resource. An audience-bound token requires a declared audience.
 Without a configured resource, the host still enforces the token's resource
 binding.
+
+**Action needed** for hosts using `with_exact_only_scope_patterns` or
+equivalent configuration. In-segment wildcards now match literally. Rewrite
+raw-prefix patterns such as `records*` as whole-segment patterns such as
+`records.*` to protect the subtree.
+
+**Action needed** for hosts building Auth guards. Every Auth user and
+principal guard now fails closed for delegated tokens or tokens carrying an
+`actor` claim unless the guard calls `.allow_delegated()`. Opt in on each
+guard that is intended to accept these tokens. The Auth `RequireAll*` guards
+and `has_all_scopes` helpers also fail closed on empty lists. Supply a
+non-empty list where scopes or roles are required.
 
 Hosts using Auth's rotating JWKS cache should explicitly set
 `stale_policy: StaleKeyPolicy::Reject` to preserve fail-closed refresh behavior.

@@ -20,7 +20,23 @@ types from that source.
 The host-provided Auth validator now requires both access markers
 (`typ = "access"` and `purpose = "access_token"`) and rejects legacy array
 scope claims by default. With the Auth hierarchical matcher, wildcards match
-whole segments. If the host uses Auth's rotating JWKS cache, set
+whole segments.
+
+**Action needed** for hosts using file-configured `exactOnlyScopePatterns`,
+`with_exact_only_scope_patterns`, or equivalent configuration. In-segment
+wildcards now match literally. Rewrite raw-prefix patterns such as `records*`
+as whole-segment patterns such as `records.*` to protect the subtree. The
+router fails closed at file configuration load if a wildcard is embedded in a
+segment of an exact-only pattern.
+
+**Action needed** for hosts building Auth guards. Every Auth user and
+principal guard now fails closed for delegated tokens or tokens carrying an
+`actor` claim unless the guard calls `.allow_delegated()`. Opt in on each
+guard that is intended to accept these tokens. The Auth `RequireAll*` guards
+and `has_all_scopes` helpers also fail closed on empty lists. Supply a
+non-empty list where scopes or roles are required.
+
+If the host uses Auth's rotating JWKS cache, set
 `stale_policy: StaleKeyPolicy::Reject` to preserve its prior fail-closed default
 when refreshing keys fails. Review the
 [workspace migration](../../MIGRATION.md#02120-to-02130-agql-auth-v0270)
