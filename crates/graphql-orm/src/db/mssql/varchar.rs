@@ -4,8 +4,55 @@ use super::{MssqlClient, StatementFailure, statement_failure};
 use crate::graphql::orm::{
     DatabaseBackend, MssqlParameterType, SqlToken, SqlTokenKind, SqlValue, scan_sql,
 };
-use std::{collections::HashMap, fmt::Write, ops::Range};
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    ops::Range,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tiberius::Query;
+
+const MAX_CACHED_TABLES: usize = 128;
+const COLLATION_CACHE_TTL: Duration = Duration::from_secs(300);
+// Each operand adds several references and conversions to both proof branches.
+const MAX_MEMBERSHIP_OPERANDS: usize = 32;
+
+type Collations = HashMap<String, String>;
+
+struct CachedCollations {
+    expires_at: Instant,
+    columns: Arc<Collations>,
+}
+
+#[derive(Default)]
+pub(super) struct CollationCache(Mutex<HashMap<String, CachedCollations>>);
+
+impl CollationCache {
+    fn get(&self, table: &str) -> Option<Arc<Collations>> {
+        let entries = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let entry = entries.get(table)?;
+        (entry.expires_at > Instant::now()).then(|| Arc::clone(&entry.columns))
+    }
+
+    fn insert(&self, table: &str, columns: Arc<Collations>) {
+        let mut entries = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if entries.len() == MAX_CACHED_TABLES
+            && !entries.contains_key(table)
+            && let Some((oldest, _)) = entries.iter().min_by_key(|(_, entry)| entry.expires_at)
+        {
+            let oldest = oldest.clone();
+            entries.remove(&oldest);
+        }
+        entries.insert(
+            table.to_owned(),
+            CachedCollations {
+                expires_at: Instant::now() + COLLATION_CACHE_TTL,
+                columns,
+            },
+        );
+    }
+}
 
 struct Operand {
     span: Range<usize>,
@@ -25,6 +72,7 @@ struct ComparisonSelect<'a> {
 
 pub(super) async fn render(
     client: &mut MssqlClient,
+    cache: &CollationCache,
     sql: &str,
     values: &[SqlValue],
 ) -> Result<Option<String>, StatementFailure> {
@@ -34,6 +82,9 @@ pub(super) async fn render(
     let Some(select) = ComparisonSelect::parse(sql, values) else {
         return Ok(None);
     };
+    if let Some(collations) = cache.get(select.table) {
+        return Ok(select.with_conversion(sql, &collations));
+    }
 
     let mut query = Query::new(
         "SELECT c.name, c.collation_name FROM sys.columns AS c \
@@ -55,26 +106,30 @@ pub(super) async fn render(
             };
         }
     };
-    let collations: HashMap<_, _> = rows
+    let collations = rows
         .iter()
         .filter_map(|row| {
             let column = row.try_get::<&str, _>(0).ok()??;
             let collation = row.try_get::<&str, _>(1).ok()??;
-            compatible_collation(collation).then_some((column, collation))
+            compatible_collation(collation).then(|| (column.to_owned(), collation.to_owned()))
         })
         .collect();
+    let collations = Arc::new(collations);
+    cache.insert(select.table, Arc::clone(&collations));
     Ok(select.with_conversion(sql, &collations))
 }
 
 fn compatible_collation(name: &str) -> bool {
     // SQL collations can use different comparison rules for VARCHAR and
     // NVARCHAR even when each operand has a perfect code-page round trip.
-    // Legacy BIN collations also use different algorithms. Use Windows
-    // linguistic collations and the code-point-based BIN2 collations.
+    // Binary collations can distinguish byte sequences that decode to the
+    // same Unicode text. Use Windows linguistic collations.
     !name.is_empty()
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && !name.to_ascii_uppercase().starts_with("SQL_")
-        && !name.split('_').any(|part| part.eq_ignore_ascii_case("BIN"))
+        && !name
+            .split('_')
+            .any(|part| part.eq_ignore_ascii_case("BIN") || part.eq_ignore_ascii_case("BIN2"))
 }
 
 fn varchar_width(value: &SqlValue) -> Option<Option<usize>> {
@@ -109,12 +164,13 @@ fn varchar_width(value: &SqlValue) -> Option<Option<usize>> {
 impl<'a> ComparisonSelect<'a> {
     fn parse(sql: &'a str, values: &[SqlValue]) -> Option<Self> {
         let mut tokens = Vec::new();
-        scan_sql(DatabaseBackend::Mssql, sql, |token| {
-            if token.kind != SqlTokenKind::Comment {
-                tokens.push(token);
-            }
-        })
-        .ok()?;
+        scan_sql(DatabaseBackend::Mssql, sql, |token| tokens.push(token)).ok()?;
+        if tokens
+            .iter()
+            .any(|token| token.kind == SqlTokenKind::Comment)
+        {
+            return None;
+        }
         let word = |token: &SqlToken| &sql[token.start..token.end];
         if !word(tokens.first()?).eq_ignore_ascii_case("SELECT") {
             return None;
@@ -137,7 +193,22 @@ impl<'a> ComparisonSelect<'a> {
                 ";" => return None,
                 _ if text.eq_ignore_ascii_case("SELECT") => {
                     // The generated unqualified paging order uses (SELECT 1).
-                    filter_end?;
+                    let order = filter_end?;
+                    if index != order + 3
+                        || !word(&tokens[order]).eq_ignore_ascii_case("ORDER")
+                        || !word(&tokens[order + 1]).eq_ignore_ascii_case("BY")
+                        || word(&tokens[order + 2]) != "("
+                        || word(tokens.get(index + 1)?) != "1"
+                        || word(tokens.get(index + 2)?) != ")"
+                    {
+                        return None;
+                    }
+                }
+                _ if ["UNION", "EXCEPT", "INTERSECT", "COLLATE", "CASE"]
+                    .iter()
+                    .any(|keyword| text.eq_ignore_ascii_case(keyword)) =>
+                {
+                    return None;
                 }
                 _ if depth == 0 && text.eq_ignore_ascii_case("FROM") => {
                     if from.replace(index).is_some() {
@@ -180,8 +251,7 @@ impl<'a> ComparisonSelect<'a> {
         let start = table_tokens.first()?.start;
         let end = table_tokens.last()?.end;
         let table = &sql[start..end];
-        // Ignore exotic spellings where copying the full table spelling into
-        // OBJECT_ID could resolve a different name (for example, inline comments).
+        // Only copy a contiguous table name into OBJECT_ID.
         if table_tokens
             .windows(2)
             .any(|pair| pair[0].end != pair[1].start)
@@ -193,7 +263,7 @@ impl<'a> ComparisonSelect<'a> {
         (!comparisons.is_empty()).then_some(Self { table, comparisons })
     }
 
-    fn with_conversion(self, sql: &str, collations: &HashMap<&str, &str>) -> Option<String> {
+    fn with_conversion(self, sql: &str, collations: &Collations) -> Option<String> {
         let mut output = String::new();
         let mut copied = 0;
         let table = self.table.replace('\'', "''");
@@ -203,7 +273,7 @@ impl<'a> ComparisonSelect<'a> {
             };
             let column = comparison.column.replace('\'', "''");
             // Check the physical collation again under the query's schema
-            // stability lock, in case DDL changed it since the lookup.
+            // stability lock, since a pool's cached result may predate DDL.
             let mut proof = format!(
                 "ISNULL((SELECT TOP (1) c.collation_name FROM sys.columns AS c \
                  WHERE c.object_id = OBJECT_ID(N'{table}', N'U') AND c.system_type_id = 167 \
@@ -366,6 +436,9 @@ fn list_parameters<'a>(sql: &str, tokens: &'a [SqlToken]) -> Option<(Vec<&'a Sql
     }
     let mut parameters = Vec::new();
     while let [parameter, separator, rest @ ..] = list {
+        if parameters.len() == MAX_MEMBERSHIP_OPERANDS {
+            return None;
+        }
         placeholder_index(sql, parameter)?;
         parameters.push(parameter);
         match text(separator) {
@@ -382,4 +455,87 @@ fn boolean_boundary(sql: &str, tokens: &[SqlToken]) -> bool {
         let text = &sql[token.start..token.end];
         text == ")" || text.eq_ignore_ascii_case("AND") || text.eq_ignore_ascii_case("OR")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphql::{filters::StringFilter, orm::__gom_render_string_filter};
+
+    fn typed_value() -> SqlValue {
+        let mut values = Vec::new();
+        __gom_render_string_filter(
+            &StringFilter {
+                eq: Some("café".into()),
+                ..Default::default()
+            },
+            DatabaseBackend::Mssql,
+            "code",
+            "VARCHAR(32)",
+            &mut Vec::new(),
+            &mut values,
+        );
+        values.pop().unwrap()
+    }
+
+    #[test]
+    fn only_windows_linguistic_collations_are_eligible() {
+        for name in [
+            "SQL_Latin1_General_CP1_CI_AS",
+            "Latin1_General_BIN",
+            "Japanese_XJIS_100_BIN2",
+            "Latin1_General_100_BIN2_UTF8",
+            "latin1_general_bin2",
+        ] {
+            assert!(!compatible_collation(name), "{name}");
+        }
+        for name in ["Latin1_General_100_CI_AS_SC_UTF8", "Greek_100_CI_AS"] {
+            assert!(compatible_collation(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn parser_requires_a_direct_unqualified_comparison() {
+        let values = [typed_value()];
+        for sql in [
+            "SELECT id FROM dbo.Items WHERE code = @P1",
+            "SELECT [id] FROM [dbo].[Items] WHERE ([code] = @P1) ORDER BY (SELECT 1) OFFSET 0 ROWS",
+        ] {
+            assert!(ComparisonSelect::parse(sql, &values).is_some(), "{sql}");
+        }
+        for sql in [
+            "SELECT id FROM dbo.Items /* comment */ WHERE code = @P1",
+            "SELECT id FROM dbo.Items WHERE code = @P1 -- comment",
+            "SELECT id FROM dbo.Items JOIN Extra ON Items.id = Extra.id WHERE code = @P1",
+            "SELECT id FROM dbo.Items WHERE code = @P1 AND EXISTS (SELECT 1 FROM Extra)",
+            "SELECT id FROM dbo.Items WHERE code = @P1 ORDER BY (SELECT MAX(id) FROM Extra)",
+            "SELECT id FROM dbo.Items WHERE code = @P1 UNION SELECT id FROM Extra",
+            "SELECT id FROM dbo.Items WHERE Items.code = @P1",
+            "SELECT id FROM dbo.Items AS i WHERE i.code = @P1",
+            "SELECT id FROM dbo.Items WHERE code COLLATE Latin1_General_BIN = @P1",
+            "SELECT id FROM dbo.Items WHERE code = @P1 COLLATE Latin1_General_BIN",
+            "SELECT id FROM dbo.Items WHERE CASE WHEN 1 = 1 AND code = @P1 THEN 1 END = 1",
+        ] {
+            assert!(ComparisonSelect::parse(sql, &values).is_none(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn membership_rewrite_has_an_operand_limit() {
+        let values = vec![typed_value(); 2000];
+        for operator in ["IN", "NOT IN"] {
+            for (count, eligible) in [(32, true), (33, false), (2000, false)] {
+                let parameters = (1..=count)
+                    .map(|n| format!("@P{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!("SELECT id FROM dbo.Items WHERE code {operator} ({parameters})");
+                assert_eq!(
+                    ComparisonSelect::parse(&sql, &values[..count]).is_some(),
+                    eligible,
+                    "{operator} with {count} operands",
+                );
+            }
+        }
+    }
 }

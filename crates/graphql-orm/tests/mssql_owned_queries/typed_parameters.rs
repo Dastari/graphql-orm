@@ -25,6 +25,9 @@ struct ParameterItem {
     #[graphql_orm(mssql_type = "VARCHAR(32)")]
     #[filterable(type = "string")]
     utf8_code: Option<String>,
+    #[graphql_orm(mssql_type = "VARCHAR(32)")]
+    #[filterable(type = "string")]
+    greek_code: Option<String>,
     #[graphql_orm(mssql_type = "NVARCHAR(40)")]
     #[filterable(type = "string")]
     label: String,
@@ -53,6 +56,7 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
                 code varchar(32) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
                 windows_code varchar(32) COLLATE Latin1_General_100_CI_AS_SC NULL,
                 utf8_code varchar(32) COLLATE Latin1_General_100_CI_AS_SC_UTF8 NULL,
+                greek_code varchar(32) COLLATE Greek_100_CI_AS NULL,
                 label nvarchar(40) NOT NULL,
                 score smallint NULL,
                 attempts smallint NULL
@@ -71,7 +75,7 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
                 (10005, 'cafe', N'unaccented'), (10007, 'missing', N'null code');
              UPDATE dbo.ParameterItems SET windows_code = code, utf8_code = code;
              UPDATE dbo.ParameterItems SET windows_code = NULL WHERE id = 10007;
-             UPDATE dbo.ParameterItems SET utf8_code = N'東京 😀' WHERE id = 10000;
+             UPDATE dbo.ParameterItems SET utf8_code = N'東京 😀', greek_code = N'καφές' WHERE id = 10000;
              UPDATE dbo.ParameterItems SET utf8_code = REPLICATE(N'é', 16) WHERE id = 10001;
              CREATE UNIQUE INDEX IX_ParameterItems_code ON dbo.ParameterItems(code);
              CREATE INDEX IX_ParameterItems_windows_code ON dbo.ParameterItems(windows_code);
@@ -92,25 +96,47 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
             .unwrap();
 
         let (conditions, binds) = code_filter("item-42").to_sql_conditions();
-        let marker = format!("/* {identifier}_parameter_plan */");
+        let marker = format!("{identifier}_parameter_plan");
         let sql = format!(
-            "SELECT id FROM dbo.ParameterItems WHERE {} {marker}",
+            "SELECT id, 1 AS [{marker}] FROM dbo.ParameterItems WHERE {}",
             conditions.join(" AND ")
         );
         let rows = pool.fetch_rows(&sql, &binds).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 42);
-        let plan = lookup_plan(&pool, &format!("%{marker}%")).await;
+        let (plan, logical_reads) = lookup_plan(&pool, &marker).await;
         assert!(plan.contains("PhysicalOp=\"Index Scan\""), "{plan}");
+        eprintln!("{identifier} IX_ParameterItems_code scan, {logical_reads} logical reads");
         assert!(
             plan.contains("Index=\"[IX_ParameterItems_code]\""),
             "{plan}"
         );
+        if !typed {
+            // Reproduce the 0.215.0 parameter-side conversion on a SQL_ collation.
+            let rows = pool
+                .fetch_rows(
+                    "SELECT id, 1 AS [v215_parameter_plan] FROM dbo.ParameterItems
+                     WHERE code = CONVERT(varchar(32), @P1)",
+                    &binds,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 42);
+            let (plan, logical_reads) = lookup_plan(&pool, "v215_parameter_plan").await;
+            assert!(plan.contains("PhysicalOp=\"Index Seek\""), "{plan}");
+            assert!(
+                plan.contains("Index=\"[IX_ParameterItems_code]\""),
+                "{plan}"
+            );
+            eprintln!("0.215.0 IX_ParameterItems_code seek, {logical_reads} logical reads");
+        }
 
         for (index, (condition, expected)) in [
             (string_comparison("café", false), vec![10000]),
             (string_comparison("東京 😀", true), vec![10000]),
+            (string_comparison("CAFÉ", false), vec![10000]),
             (string_comparison("東京", false), vec![]),
+            (string_comparison("😀", false), vec![]),
             (string_comparison(&"é".repeat(17), true), vec![]),
             (string_comparison(&"é".repeat(4001), true), vec![]),
         ]
@@ -118,9 +144,9 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
         .enumerate()
         {
             let (conditions, binds) = condition.to_sql_conditions();
-            let marker = format!("/* {identifier}_varchar_{index} */");
+            let marker = format!("{identifier}_varchar_{index}");
             let sql = format!(
-                "SELECT id FROM dbo.ParameterItems WHERE {} {marker}",
+                "SELECT id, 1 AS [{marker}] FROM dbo.ParameterItems WHERE {}",
                 conditions.join(" AND ")
             );
             let rows = pool.fetch_rows(&sql, &binds).await.unwrap();
@@ -130,13 +156,13 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
                     .collect::<Vec<_>>(),
                 expected,
             );
-            let plan = lookup_plan(&pool, &format!("%{marker}%")).await;
+            let (plan, logical_reads) = lookup_plan(&pool, &marker).await;
             assert_eq!(
                 plan.to_ascii_lowercase().contains("convert(varchar("),
                 typed,
                 "{plan}",
             );
-            if index < 2 && typed {
+            if index < 2 {
                 let index_name = [
                     "IX_ParameterItems_windows_code",
                     "IX_ParameterItems_utf8_code",
@@ -147,6 +173,9 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
                     .filter(|operator| operator.contains(&operator_prefix))
                     .map(|operator| operator.split_once('>').unwrap().0)
                     .collect::<Vec<_>>();
+                eprintln!(
+                    "{identifier} {index_name} {operations:?}, {logical_reads} logical reads"
+                );
                 assert!(
                     operations
                         .iter()
@@ -159,6 +188,28 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
         assert_membership_matches(&pool).await;
 
         let db = Database::<MssqlBackend>::new(pool);
+        let matches = ParameterItem::query(&db)
+            .filter(ParameterItemWhereInput {
+                greek_code: Some(StringFilter {
+                    eq: Some("ΚΑΦΈΣ".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(
+            matches.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [10000]
+        );
+        let (generated, _) = lookup_plan(db.pool(), "greek_code").await;
+        assert_eq!(
+            generated.to_ascii_lowercase().contains("convert(varchar("),
+            typed,
+            "{generated}",
+        );
+
         let matches = ParameterItem::query(&db)
             .filter(ParameterItemWhereInput {
                 id: Some(IntFilter {
@@ -187,6 +238,10 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
         );
 
         assert_unicode_predicates(&db).await;
+
+        if typed {
+            assert_cached_collation_is_rechecked(connection, db.pool()).await;
+        }
 
         for (sql_type, input, parameter_type) in [
             ("INT", SqlValue::Int(42), "int"),
@@ -245,6 +300,7 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
             code: "crème".into(),
             windows_code: None,
             utf8_code: None,
+            greek_code: None,
             label: "雪 😀".into(),
             score: Some(-12),
             attempts: Some(3),
@@ -276,6 +332,7 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
             code: "overflow".into(),
             windows_code: None,
             utf8_code: None,
+            greek_code: None,
             label: "overflow".into(),
             score: None,
             attempts: Some(u64::MAX),
@@ -309,6 +366,28 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
             attempts: Some(Some(attempts)),
             ..Default::default()
         };
+        let by_id = ParameterItem::update_by_id(&db, &10006, input.clone())
+            .await
+            .map_err(OrmPublicError::from);
+        let transactional_by_id = db
+            .transaction(TransactionMode::StateMachine, |context| {
+                let input = input.clone();
+                Box::pin(async move {
+                    context
+                        .update_by_id::<ParameterItem>(&10006, input)
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(|error| error.public_error().clone());
+        for result in [by_id, transactional_by_id] {
+            if should_error {
+                assert_eq!(result.err().unwrap().code, OrmErrorCode::InvalidInput);
+            } else {
+                assert!(result.unwrap().is_none());
+            }
+        }
         let standalone = ParameterItem::update_where(&db, no_target.clone(), input.clone())
             .await
             .map_err(OrmPublicError::from);
@@ -451,20 +530,63 @@ fn code_filter(code: &str) -> ParameterItemWhereInput {
     }
 }
 
-async fn lookup_plan(pool: &MssqlPool, marker: &str) -> String {
+async fn lookup_plan(pool: &MssqlPool, marker: &str) -> (String, i64) {
     let rows = pool
         .fetch_rows(
-            "SELECT TOP (1) CONVERT(nvarchar(max), p.query_plan) AS plan_xml
+            "SELECT TOP (1) CONVERT(nvarchar(max), p.query_plan) AS plan_xml, s.last_logical_reads
          FROM sys.dm_exec_query_stats AS s
          CROSS APPLY sys.dm_exec_sql_text(s.sql_handle) AS t
          CROSS APPLY sys.dm_exec_query_plan(s.plan_handle) AS p
-         WHERE t.text LIKE @P1
+         WHERE CHARINDEX(@P1, SUBSTRING(
+             t.text, (s.statement_start_offset / 2) + 1,
+             (CASE s.statement_end_offset WHEN -1 THEN DATALENGTH(t.text)
+                  ELSE s.statement_end_offset END - s.statement_start_offset) / 2 + 1
+         )) > 0
          ORDER BY s.last_execution_time DESC",
             &[SqlValue::String(marker.into())],
         )
         .await
         .unwrap();
-    rows[0].try_get("plan_xml").unwrap()
+    let row = rows
+        .first()
+        .unwrap_or_else(|| panic!("no cached plan containing {marker}"));
+    (
+        row.try_get("plan_xml").unwrap(),
+        row.try_get("last_logical_reads").unwrap(),
+    )
+}
+
+async fn assert_cached_collation_is_rechecked(connection: &str, pool: &MssqlPool) {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        execute_batch(
+            connection,
+            "DROP INDEX IX_ParameterItems_windows_code ON dbo.ParameterItems;
+             ALTER TABLE dbo.ParameterItems ALTER COLUMN windows_code
+                 varchar(32) COLLATE Latin1_General_100_BIN2 NULL;",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let (conditions, binds) = string_comparison("CAFÉ", false).to_sql_conditions();
+    let rows = pool
+        .fetch_rows(
+            &format!(
+                "SELECT id, 1 AS [stale_collation_plan] FROM dbo.ParameterItems WHERE {}",
+                conditions.join(" AND "),
+            ),
+            &binds,
+        )
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+    let (plan, _) = lookup_plan(pool, "stale_collation_plan").await;
+    assert!(
+        plan.to_ascii_lowercase().contains("convert(varchar("),
+        "expected the cached case-insensitive collation to produce a conversion branch: {plan}",
+    );
 }
 
 fn string_comparison(value: &str, utf8: bool) -> ParameterItemWhereInput {

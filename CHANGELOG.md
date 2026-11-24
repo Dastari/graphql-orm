@@ -16,12 +16,15 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.223.0
 
-- **Fixed (#860).** Opt-in SQL Server VARCHAR comparisons use the physical
-  column collation and require an exact code-page round trip. Eligible Windows
-  collations support non-ASCII operands, including CP1252 and UTF-8.
-  Comparisons that cannot be proven equivalent retain Unicode binding.
-- **Fixed (#860).** SQL Server bulk updates validate unsigned operands before
-  selecting targets, including requests that would affect zero rows.
+- **Fixed (#860).** SQL Server's opt-in typed parameters preserve Unicode
+  results under legacy `SQL_` collations such as the common default
+  `SQL_Latin1_General_CP1_CI_AS`. In 0.215.0, ASCII VARCHAR conversion could
+  change results, especially for `ne` and `not_in`. These predicates lose the
+  0.215.0 conversion-based index seek. Review affected plans if you relied on
+  that seek. Eligible direct VARCHAR reads use a cached per-table catalog
+  lookup and an in-statement collation and code-page round-trip check.
+- **Fixed (#860).** SQL Server repository updates validate unsigned operands
+  before selecting targets, including requests that would affect zero rows.
 
 ## Unreleased - ORM/macros 0.215.0
 

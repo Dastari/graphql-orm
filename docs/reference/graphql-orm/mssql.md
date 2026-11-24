@@ -854,20 +854,25 @@ operands that exceed their declared integer range are refused with
 
 Ordinary generated VARCHAR equality, inequality and membership filters can
 use a parameter-side VARCHAR conversion for a direct single-table read.
-SQL Server looks up the physical column collation and checks that the entire
-operand round-trips byte for byte through a conversion under that collation.
+On a cache miss, SQL Server looks up the table's physical VARCHAR collations
+in `sys.columns`. Each pool caches results for up to 128 tables for five
+minutes. The read statement checks the physical collation again under its
+schema stability lock, so a stale cached collation falls back to Unicode.
+SQL Server also checks that the entire operand round-trips byte for byte.
 This allows values such as `café` in a compatible Windows CP1252 collation
-and Unicode text in UTF-8 collations. The conversion accounts for the encoded
-byte length even when it exceeds the declared column width.
+and Unicode text in compatible UTF-8 collations. The conversion accounts for
+the encoded byte length even when it exceeds the declared column width.
 
-SQL Server's legacy `SQL_` collations can compare VARCHAR and NVARCHAR
-differently even for a lossless conversion. Those collations, legacy BIN
-collations, and comparisons without an exact conversion or a provable
-physical column retain Unicode binding. NVARCHAR columns, undeclared types,
-pattern operands (`contains`, `starts_with`, `ends_with`, `LIKE` and similarity),
-write values, transactional reads, key and cursor lookups, and authorization
-predicates also use Unicode parameters. Generated bulk updates validate
-unsigned inputs even when they would affect zero rows.
+Legacy `SQL_` collations can compare VARCHAR and NVARCHAR differently even
+for a lossless conversion. Binary collations (BIN and BIN2, including BIN2
+UTF-8) can also distinguish encoded bytes that decode to the same Unicode
+text. These collations, comparisons without proof, and membership lists
+with more than 32 operands retain Unicode binding. NVARCHAR columns,
+undeclared types, pattern operands (`contains`, `starts_with`, `ends_with`,
+`LIKE` and similarity), write values, transactional reads, key and cursor
+lookups, and authorization predicates also use Unicode parameters. Generated
+repository updates validate unsigned inputs even when they would affect zero
+rows.
 
 ### Native temporal parameters
 

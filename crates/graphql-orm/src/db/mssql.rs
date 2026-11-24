@@ -376,6 +376,7 @@ struct MssqlPoolInner {
     config: Config,
     access_mode: MssqlAccessMode,
     options: MssqlPoolOptions,
+    varchar_collations: varchar::CollationCache,
     idle: Mutex<Vec<IdleClient>>,
     permits: Arc<Semaphore>,
 }
@@ -548,6 +549,7 @@ impl MssqlPool {
                 access_mode,
                 permits: Arc::new(Semaphore::new(options.max_connections)),
                 options,
+                varchar_collations: varchar::CollationCache::default(),
                 idle: Mutex::new(Vec::new()),
             }),
         }
@@ -596,7 +598,12 @@ impl MssqlPool {
             .bounded(async {
                 let converted = if self.options().typed_parameters {
                     catch_driver_panic(
-                        varchar::render(&mut lease.client, sql, values),
+                        varchar::render(
+                            &mut lease.client,
+                            &self.inner.varchar_collations,
+                            sql,
+                            values,
+                        ),
                         StatementFailure::from,
                     )
                     .await?

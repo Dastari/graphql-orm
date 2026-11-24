@@ -12,11 +12,18 @@ supersedes: []
 
 ## 0.215.0 to 0.223.0: SQL Server VARCHAR and bulk update validation
 
-**No action.** Upgrade ORM and macros together. With
-`MssqlPoolOptions::typed_parameters(true)`, ordinary VARCHAR comparisons can
-use the physical column's code page when the value round-trips exactly and
-the collation preserves Unicode comparison rules. Legacy SQL collations
-retain Unicode binding. Bulk updates now return `INVALID_INPUT` for out-of-range
+**Action needed** if you rely on the 0.215.0 VARCHAR index seek under a
+legacy `SQL_` collation. Review affected query plans before upgrading. With
+`MssqlPoolOptions::typed_parameters(true)`, 0.215.0 converted ASCII operands
+to VARCHAR even under common defaults such as `SQL_Latin1_General_CP1_CI_AS`.
+VARCHAR and NVARCHAR can match different rows under those collations,
+especially for `ne` and `not_in`. This release restores Unicode comparison
+results and those columns lose the 0.215.0 conversion-based seek.
+
+Upgrade ORM and macros together. Eligible direct reads look up the table's
+physical VARCHAR collations on a per-pool cache miss. Compatible Windows
+linguistic collations can use a parameter-side conversion after an exact
+round-trip check. Repository updates return `INVALID_INPUT` for out-of-range
 unsigned values before selecting targets, even when no rows would be updated.
 See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
 
