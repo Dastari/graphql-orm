@@ -223,7 +223,7 @@ where
     B: OrmBackend,
 {
     // Relation text is a traversal into the target: its auth mode and
-    // operation scopes apply as they do to the relation field itself.
+    // operation scopes and assurance apply as they do to the relation field itself.
     if let SearchAccess::Graphql(ctx) = access {
         T::authorize_search_relation_targets(ctx)?;
     }
@@ -326,7 +326,8 @@ where
 /// `auth` mode and its `operation_authorization` declarations: a to-many traversal requires the
 /// `list` category and a to-one traversal the `single_read` category. A
 /// category declared with scope templates cannot be bound during traversal
-/// and refuses it.
+/// and refuses it. For generated query roots, traversal also enforces operation
+/// assurance after auth and scopes.
 #[doc(hidden)]
 pub trait RelationTraversalAuthorization {
     fn authorize_relation_traversal(
@@ -335,8 +336,8 @@ pub trait RelationTraversalAuthorization {
     ) -> async_graphql::Result<()>;
 }
 
-/// Enforce the target entity's auth mode and operation scopes for one
-/// relation traversal. Failures are sanitized and fail closed.
+/// Enforce the target entity's auth mode, operation scopes and assurance for
+/// one relation traversal.
 #[doc(hidden)]
 pub fn authorize_relation_target<T>(
     ctx: &async_graphql::Context<'_>,

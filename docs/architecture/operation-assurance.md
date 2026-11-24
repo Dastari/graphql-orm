@@ -128,13 +128,25 @@ Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which
 preserves existing schemas.
 
-Enforcement keys on the exact root coordinate. A resolver that runs below
-another root passes its own coordinate to `enforce_operation_assurance`.
+Enforcement keys on exact root coordinates. A resolver that runs below a
+root passes the applicable coordinates to `enforce_operation_assurance`.
 Generated Federation entity resolvers, emitted for an entity's
 `federation_key`, run below `_entities`: they enforce the entity's get-by-id
 query root and any classification registered for `_entities`. A handwritten
 `#[graphql(entity)]` resolver gets no assurance check from the ORM. Generated
 dependent deletes use their own delete root.
+
+## Generated Relation Traversal
+
+Generated relation traversal checks every generated query coordinate of the
+target entity after its auth mode and operation scopes and before any target
+row read, existence check, or count. The coordinates cover list, get-by-id,
+keyset, scan, search, and aggregate wherever generated. A requirement on any
+one coordinate applies to all generated relation paths into that target,
+including nested fields and connections, related-row filters, relation-count
+ordering, search relation sources, and relation fields in mutation results.
+Unregistered and unclassified query coordinates carry no requirement.
+Generated Changed streams reject relation selections before registration.
 
 ## Runtime GraphQL Roots
 

@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.215.0 to 0.226.0: Relation target assurance
+
+**Action needed.** If you require assurance on any generated query root,
+clients traversing relations into that root's entity must satisfy the same
+policy. Handle `STEP_UP_REQUIRED` on relation fields, mutation result
+selections, and queries using related-row filters, relation-count ordering,
+or related search sources. Related reads can be issued again after step-up.
+If a relation field in a mutation result needs step-up, refresh it with a
+separate query since the mutation may already have committed. Upgrade ORM
+and macros together.
+
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 
 **No action.** Upgrade ORM and macros together. SQL Server keeps the
