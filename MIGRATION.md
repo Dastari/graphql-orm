@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.207.0 to 0.215.0: scoped SQLite column drop
+## 0.209.0 to 0.212.0: scoped SQLite column drop
 
 **No action.** Upgrade ORM and macros together. An owned SQLite plan whose
 only change is to drop a column now renders SQLite's native `DROP COLUMN`.
@@ -26,6 +26,23 @@ for the single-drop shape. Plans containing a drop and additional steps still
 rebuild or refuse. Run SQLite migrations with no TEMP objects on other
 connections, or use a dedicated migration connection with other connections closed.
 Refs #882.
+
+## 0.208.0 to 0.209.0: external migration preflight
+
+**No action.** Upgrade ORM and macros together. Hosts applying DDL externally
+can call `database.schema().preflight_unique_indexes(&plan).await?` before any
+migration statements. Use a connection that can read all affected rows and
+quiesce concurrent writes and schema changes through application. Repeated
+keys return `UniqueIndexDuplicates`. No data migration is needed for this API.
+
+## 0.207.0 to 0.208.0: bounded set-based deletes
+
+**No action.** Upgrade ORM and macros together. Opt in per entity to call
+`MutationContext::delete_keys_set_bounded` or `delete_where_set_bounded`
+inside a `StateMachine` transaction. Existing delete APIs keep their
+behavior. Review the
+[set-delete contract](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+before implementing `SetDeleteEntity`.
 
 ## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
 

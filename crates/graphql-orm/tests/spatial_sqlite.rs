@@ -525,6 +525,8 @@ async fn sqlite_spatial_fields_and_predicates_round_trip() -> Result<(), Box<dyn
     Ok(())
 }
 
+impl SetDeleteEntity for SqlitePlace {}
+
 #[tokio::test]
 async fn sqlite_bounded_mutations_reject_residual_filters_before_side_effects()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -577,6 +579,21 @@ async fn sqlite_bounded_mutations_reject_residual_filters_before_side_effects()
         }),
         ..Default::default()
     };
+
+    let set_filter = residual_filter.clone();
+    let refusal = database
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                tx.delete_where_set_bounded::<SqlitePlace>(set_filter, MutationLimit::new(10)?)
+                    .await
+                    .map_err(OrmPublicError::from)
+            })
+        })
+        .await;
+    assert!(matches!(
+        refusal,
+        Err(TransactionError::Rejected(error)) if error.code == OrmErrorCode::InvalidInput
+    ));
 
     for error in [
         SqlitePlace::update_where_bounded(

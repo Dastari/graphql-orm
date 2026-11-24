@@ -665,6 +665,71 @@ inserts, scoped system access, transaction extensions and ordered sorts through
 `scripts/run-owned-database-lanes.sh bulk-write-targets`; PostgreSQL and SQL Server use test-owned
 disposable containers.
 
+### Bounded set-based deletes
+
+Implement `SetDeleteEntity` on a generated mutable model to use
+`tx.delete_keys_set_bounded::<Model>(&keys, limit)` or
+`tx.delete_where_set_bounded::<Model>(filter, limit)` inside a
+`Database::transaction(TransactionMode::StateMachine, ...)` callback.
+In a build with multiple backends, specify the model's backend in the impl
+for `SetDeleteEntity<Backend>`.
+
+```rust
+impl SetDeleteEntity for WorkItem {}
+
+let limit = MutationLimit::new(100)?;
+let outcome = database
+    .transaction(TransactionMode::StateMachine, |tx| {
+        Box::pin(async move {
+            tx.delete_keys_set_bounded::<WorkItem>(&keys, limit)
+                .await
+                .map_err(OrmPublicError::from)
+        })
+    })
+    .await?;
+```
+
+- Pass unique, complete typed primary keys, or a non-empty typed scalar
+  filter such as an equality filter. A missing key or multiple keys matching
+  one row returns `CONFLICT`. Empty key sets, empty filters, relation
+  filters and predicates that require Rust evaluation are refused.
+- `LimitExceeded` leaves the transaction usable and runs no DELETE or
+  hooks. A filter that matches zero rows returns `Applied { affected: 0 }`
+  without a DELETE. Larger key sets that cannot fit in one statement are
+  refused. The filter path uses an independent one-row look-ahead and ignores
+  repository page limits. If the caller sets a limit above the statement's
+  key capacity and that look-ahead finds more matches than fit, the operation
+  returns `INVALID_INPUT` and prevents commit. For example, SQL Server allows
+  2,000 single-column keys per statement.
+- The ORM checks entity write access and calls the row write policy for
+  every selected row. Any denied row refuses the batch. The database
+  principal must be able to select the entire requested scope. Database RLS
+  can hide rows from selection, so a filter operation can only bound and
+  authorize the matches visible to that principal. On SQL Server, the
+  `UPDLOCK, HOLDLOCK` selection locks the rows read by a scan, including
+  rows hidden from the caller. The `mssql_snapshot_bulk_write_targets`
+  option does not apply.
+- Adopt this API only if the row policy can authorize the batch against the
+  pre-delete state. All Before hooks run before the DELETE and all After
+  hooks run after it, each in complete primary-key order. Hooks can write
+  other rows in the same transaction. Before hooks must leave the targets
+  and match set intact. The ORM revalidates them if a hook is configured.
+- The DELETE binds the selected primary keys and must affect exactly the
+  selected row count. Errors, vetoes and cancellation prevent commit even
+  if the caller catches an error. The ordinary generated Changed
+  notifications are queued after the After hooks and emitted at commit.
+- The runtime refuses append-only and read-only entities with `FORBIDDEN`,
+  composite keys without an entity policy with `AUTHORIZATION_MISCONFIGURED`,
+  and enabled generated search indexes with `CONFLICT`. Entities with
+  ORM-managed dependent deletes lack the generated adapter.
+  Opt in only after checking that foreign keys and triggers cannot delete,
+  rewrite or redirect other rows as a side effect of deleting targets.
+  Database cascades and other database-side effects fall outside the
+  target-row count, authorization, hooks and notifications.
+
+Run the regression on all three backends with
+`scripts/run-owned-database-lanes.sh bounded-set-delete`.
+
 ### Rust repository limits never truncate
 
 Rust repository builders return `Vec`s with no page info, so they never reduce a limit silently.

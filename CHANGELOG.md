@@ -14,13 +14,27 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.215.0
+## Unreleased - ORM/macros 0.212.0
 
 - **Fixed (#882).** An admitted owned SQLite migration with a single column
   drop can preserve unrelated indexes and incoming foreign keys using native
   `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
   drop and history updates commit together.
-  [Migration](MIGRATION.md#02070-to-02150-scoped-sqlite-column-drop)
+  [Migration](MIGRATION.md#02090-to-02120-scoped-sqlite-column-drop)
+
+## Unreleased - ORM/macros 0.209.0
+
+- `SchemaManager::preflight_unique_indexes` exposes the read-only duplicate-key
+  check to hosts using external migration tools, including SQL Server (#878).
+  [Migration](MIGRATION.md#02080-to-02090-external-migration-preflight)
+
+## Unreleased - ORM/macros 0.208.0
+
+- **Added (#852).** Typed transactions can delete a bounded key set or scalar
+  filter match with one DELETE for opted-in mutable entities. The operation
+  checks row write authorization and exact cardinality, runs per-row delete
+  hooks and queues the generated change notifications.
+  [Migration](MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
 
 ## Unreleased - ORM/macros 0.207.0
 

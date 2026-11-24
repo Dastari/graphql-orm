@@ -681,3 +681,18 @@ mod unique_constraint_upgrade {
             .expect("a new key should insert");
     }
 }
+
+#[cfg(feature = "sqlite")]
+#[path = "support/legacy_approval_upgrade.rs"]
+mod legacy_approval_upgrade;
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_upgrades_legacy_approval_lookup_index() {
+    let database = graphql_orm::prelude::Database::<graphql_orm_ai::AiOrmBackend>::connect_sqlite(
+        "sqlite::memory:",
+    )
+    .await
+    .expect("open SQLite fixture");
+    legacy_approval_upgrade::legacy_approval_upgrade(&database).await;
+}

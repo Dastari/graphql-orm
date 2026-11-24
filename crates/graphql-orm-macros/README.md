@@ -10,8 +10,14 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.215.0 aligns with the ORM's
-[scoped SQLite column drop](../../MIGRATION.md#02070-to-02150-scoped-sqlite-column-drop).
+Version 0.212.0 aligns with the ORM's
+[scoped SQLite column drop](../../MIGRATION.md#02090-to-02120-scoped-sqlite-column-drop).
+
+Version 0.209.0 aligns with the ORM runtime's
+[external migration preflight API](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
+Version 0.208.0 generates the adapter for opt-in
+[bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes).
 
 Version 0.207.0 aligns with the ORM's
 [closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).

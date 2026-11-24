@@ -89,6 +89,8 @@ impl OwnedPostgres {
                 "--env",
                 &format!("POSTGRES_DB={database}"),
                 POSTGRES_IMAGE,
+                "-c",
+                "statement_timeout=60s",
             ])
             .output()
             .map_err(|_| "failed to invoke the local Docker CLI".to_owned())?;
