@@ -14,8 +14,11 @@ supersedes: []
 
 **No action.** Upgrade ORM and macros together. With `exact_string_filters`
 enabled, SQL Server can seek on the declared BIN2 Unicode key columns for
-`eq` and nonempty `in_list` filters (#867). The binary and byte-length checks
-still determine an exact match. There is no schema or data migration.
+`eq` and nonempty `in_list` filters (#867). The generated SQL text changes
+for opted-in BIN2 key filters. Review any SQL Server plan guides or Query
+Store forced plans for these queries because they match on statement text.
+Exact comparisons also normalize a live `VARCHAR` column to Unicode when it
+differs from its declaration. There is no schema or data migration.
 
 ## 0.211.0 to 0.212.0: scoped SQLite column drop
 

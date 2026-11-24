@@ -117,20 +117,25 @@ fn render_exact_mssql_string_filter(
 ) {
     let mut equal = |value: &String, seek: bool| {
         let value_bind = backend.placeholder(values.len() + 1);
+        // Keep both the residual and the bare seek bind as SqlValue::String
+        // (NVARCHAR), even if the live column has drifted to VARCHAR.
         values.push(SqlValue::String(value.clone()));
-        // SQL Server pads operands before equality, including under BIN2.
-        // SqlValue::String binds as NVARCHAR. On the seek path calculate its
-        // UTF-16 byte length here so the new comparison takes the place of
-        // the length bind. A 1,000-operand list still uses only 2,000 binds.
-        let length = if seek {
-            (value.encode_utf16().count() * 2).to_string()
-        } else {
-            let length_bind = backend.placeholder(values.len() + 1);
-            values.push(SqlValue::String(value.clone()));
-            format!("DATALENGTH({length_bind})")
-        };
+        let unicode_column = format!("CONVERT(nvarchar(max), {column})");
+        if seek {
+            // SQL Server pads operands for equality even under BIN2. A
+            // non-space suffix makes trailing spaces significant. MAX keeps
+            // the suffix from being truncated at the 4,000-code-unit limit.
+            return format!(
+                "(({unicode_column} + N'.') COLLATE Latin1_General_100_BIN2 = CONVERT(nvarchar(max), {value_bind}) + N'.')"
+            );
+        }
+        let length_bind = backend.placeholder(values.len() + 1);
+        values.push(SqlValue::String(value.clone()));
+        // Measure both sides in the same encoding when the live type differs
+        // from the declaration. The BIN2 comparison and length still share
+        // the same three-valued logic under negation.
         format!(
-            "({column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({column}) = {length})"
+            "({unicode_column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({unicode_column}) = DATALENGTH({length_bind}))"
         )
     };
     if let Some(value) = &f.eq {
@@ -158,9 +163,9 @@ fn render_exact_mssql_string_filter(
     }
     let mut remaining = f.clone();
     // The bare Unicode column's implicit collation wins over the parameter's
-    // coercible-default collation. The explicit BIN2 and length checks still
-    // cover trailing spaces and legacy collations. With a NULL column, both
-    // the exact and the plain comparison stay UNKNOWN, including under NOT.
+    // coercible-default collation. The residual BIN2 comparison enforces
+    // exactness. With a NULL column, both comparisons stay UNKNOWN, including
+    // under NOT.
     if !seek {
         remaining.eq = None;
         remaining.in_list = None;

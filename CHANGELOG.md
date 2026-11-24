@@ -18,6 +18,8 @@ for historical context.
 
 - **Fixed (#867).** Generated exact SQL Server equality and membership filters
   include a seek predicate for Unicode key columns declared with BIN2 collation.
+  The residual comparison uses parameterized SQL and distinguishes trailing
+  spaces even when a declared Unicode column has drifted to `VARCHAR`.
   [Migration](MIGRATION.md#02120-to-02160-sql-server-exact-string-filter-seeks)
 
 ## Unreleased - ORM/macros 0.212.0
