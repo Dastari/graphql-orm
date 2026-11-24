@@ -594,6 +594,7 @@ pub trait AiApprovalService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiApprovalQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -633,6 +634,7 @@ impl AiApprovalQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiApprovalMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

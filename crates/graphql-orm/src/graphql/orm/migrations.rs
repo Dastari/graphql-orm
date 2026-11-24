@@ -81,7 +81,11 @@ impl TableIdentifierConflict {
 /// no row data.
 ///
 /// The check covers a `CREATE UNIQUE INDEX` step on a table that exists
-/// before the plan, over columns that exist before the plan. It follows the
+/// before the plan, over columns that exist before the plan. It reads keys
+/// with their pre-plan types and collations. If the plan changes a key's type
+/// or collation, duplicates introduced by that change are caught by the
+/// database at `CREATE UNIQUE INDEX`, and managed transactional apply rolls
+/// back. The preflight follows the
 /// backend's own uniqueness rule for `NULL`: PostgreSQL and SQLite treat
 /// `NULL` keys as distinct, so rows with a `NULL` key column are ignored;
 /// SQL Server treats them as equal, so they are compared. A unique index over
@@ -4339,7 +4343,7 @@ fn render_mssql_alter_column(
          THEN N' COLLATE ' + @gorm_collation ELSE N'' END + N' {nullability}'; \
          EXEC sys.sp_executesql @gorm_alter;",
         sql_string_literal(&table),
-        sql_string_literal(&mssql_unquoted_identifier(&before.name)),
+        sql_string_literal(&backend.identifier_part_name(&before.name)),
         sql_string_literal(&head),
     );
     format!("EXEC sys.sp_executesql N{}", sql_string_literal(&batch))
@@ -4357,15 +4361,6 @@ fn mssql_character_type(sql_type: &str) -> bool {
         base.as_str(),
         "CHAR" | "VARCHAR" | "NCHAR" | "NVARCHAR" | "TEXT" | "NTEXT" | "SYSNAME"
     )
-}
-
-/// The name inside one bracket-quoted SQL Server identifier, or the name as
-/// given when it is not quoted.
-fn mssql_unquoted_identifier(name: &str) -> String {
-    name.strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .map(|inner| inner.replace("]]", "]"))
-        .unwrap_or_else(|| name.to_string())
 }
 
 /// Classify without a backend or source schema.
@@ -7295,6 +7290,35 @@ mod mssql_index_predicate_tests {
         mssql_index_predicate, render_migration_step, try_render_migration_step,
     };
     use crate::graphql::orm::IndexDef;
+
+    #[test]
+    fn alter_column_looks_up_the_exact_catalogue_identifier() {
+        for (declared, raw) in [
+            ("[a]]b]", "a]b"),
+            ("[]]]", "]"),
+            ("[[]", "["),
+            ("[[x]]]", "[x]"),
+            ("[x]", "x"),
+            ("\"[x]\"", "[x]"),
+            ("[a] , [b]", "[a] , [b]"),
+        ] {
+            let before = graphql_orm_column(declared);
+            let sql = super::render_mssql_alter_column("dbo.items", &before, &before);
+            assert!(sql.contains(&format!("c.name = N''{raw}''")), "{sql}");
+        }
+
+        fn graphql_orm_column(name: &str) -> super::ColumnModel {
+            super::ColumnModel {
+                name: name.into(),
+                sql_type: "varchar(20)".into(),
+                spatial: None,
+                nullable: true,
+                default: None,
+                is_primary_key: false,
+                is_unique: false,
+            }
+        }
+    }
 
     #[test]
     fn closed_set_filters_read_back_as_predicates() {

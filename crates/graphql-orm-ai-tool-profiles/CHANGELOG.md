@@ -10,6 +10,45 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.29.0
+
+- Generated keyset-list plans now accept the page limit injected by the
+  compiler from `maximumItems` (#881). The size, continuation cursor, and
+  count flag stay out of the model's arguments. The resolver applies the
+  schema's page-limit policy and the input's default count behavior.
+  See the [migration guide](MIGRATION.md#0290-generated-keyset-page-limits).
+
+## Unreleased - 0.28.0
+
+Per-call costs of the capability broker that grew with the index, and
+admission checks for deserialized indexes (#551). No public API, schema,
+fingerprint or rendering change. See the
+[migration guide](MIGRATION.md#0280-index-set-and-signature-reuse).
+
+- **Fixed:** `AiCapabilityIndexSet::compile` now applies to every member
+  index the checks `AiCapabilityIndex::compile` applies. Its own limits must
+  be valid and hold for its entry count, each entry's size and the total
+  size, and each entry must be stored under its own ID. A deserialized index
+  is not recompiled, so before this change one that broke its own limits, or
+  stored an entry under a key other than the entry's ID, was admitted and
+  reached the broker. Such an index is now refused with a configuration
+  error. A compiled index, or one serialized and deserialized unchanged, is
+  admitted as before.
+
+- **Performance:** `AiCapabilityIndexSet::compile` measures each member
+  index once and reuses the measurement for every later set formed from the
+  same index, and a one-member set builds no capability-owner map. A host
+  that supplies one current index gets a one-member set on every broker
+  call, so before this change each discover, describe, `describe_type` and
+  execute re-serialized every index entry and re-indexed every capability ID.
+  Duplicate identities in a deserialized index are still refused, and the
+  set's entry and byte limits are unchanged.
+- **Performance:** `AiGraphqlQueryCapability::capability_signature` and
+  `shared_type_plan_schema` recover the capability's input-type names once
+  and keep the small name table. Before this change, every call regenerated
+  the whole compact plan schema, which for a wide entity cost more than the
+  rest of a broker describe. Signatures and renderings are unchanged.
+
 ## Unreleased - 0.27.1
 
 - Replayable subscriptions reuse compiled plan and condition validators

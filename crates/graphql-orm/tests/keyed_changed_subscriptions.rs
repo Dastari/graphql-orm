@@ -151,7 +151,7 @@ struct KeyedSlot {
     label: String,
 }
 
-/// Opted in to key-only delete signals (#666).
+/// Opted in to key-only delete signals (#666) and a started frame.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
     feature = "sqlite",
@@ -159,7 +159,8 @@ struct KeyedSlot {
         backend = "sqlite",
         table = "keyed_tickets",
         plural = "KeyedTickets",
-        key_only_deletes
+        key_only_deletes,
+        changed_started = true
     )
 )]
 #[cfg_attr(
@@ -168,7 +169,8 @@ struct KeyedSlot {
         backend = "postgres",
         table = "keyed_tickets",
         plural = "KeyedTickets",
-        key_only_deletes
+        key_only_deletes,
+        changed_started = true
     )
 )]
 #[cfg_attr(
@@ -178,7 +180,8 @@ struct KeyedSlot {
         schema_policy = "external_writable",
         table = "keyed_tickets",
         plural = "KeyedTickets",
-        key_only_deletes
+        key_only_deletes,
+        changed_started = true
     )
 )]
 struct KeyedTicket {
@@ -1067,6 +1070,26 @@ async fn key_only_deletes_reach_exact_key_subscribers_only(db: &Database) -> Tes
     parent(db, "p1", "alice").await?;
     let key = argument_name("key");
     let changed = resolver_name("keyedTicketChanged");
+    let started_arg = argument_name("started");
+    let started = field_name("started");
+    let action = field_name("action");
+    let change_kind = field_name("changeKind");
+    let id = field_name("id");
+    let source_entity = field_name("sourceEntity");
+    let source_id = field_name("sourceId");
+    let path = field_name("path");
+    let entity = field_name("keyedTicket");
+    let label = field_name("label");
+    let mut with_started = open(
+        db,
+        format!(
+            r#"subscription {{ {changed}({key}: "t1", {started_arg}: true) {{
+                {started} {action} {change_kind} {id} {source_entity} {source_id} {path}
+                {entity} {{ {label} }}
+            }} }}"#
+        ),
+        "alice",
+    );
     let mut by_keys = open(db, ticket_subscription(&keys_argument(&["t1"])), "alice");
     let mut by_key = open(
         db,
@@ -1086,9 +1109,24 @@ async fn key_only_deletes_reach_exact_key_subscribers_only(db: &Database) -> Tes
     ] {
         admitted(stream).await;
     }
+    assert_eq!(
+        next_event(&mut with_started, changed).await,
+        serde_json::json!({
+            (started): true, (action): null, (change_kind): null, (id): null,
+            (source_entity): null, (source_id): null, (path): [], (entity): null,
+        })
+    );
 
     assert!(KeyedTicket::delete_by_id(db, &"t1".to_string()).await?);
     assert!(KeyedParent::delete_by_id(db, &"p1".to_string()).await?);
+    assert_eq!(
+        next_event(&mut with_started, changed).await,
+        serde_json::json!({
+            (started): false, (action): "DELETED", (change_kind): "DIRECT", (id): "t1",
+            (source_entity): null, (source_id): null, (path): [], (entity): null,
+        })
+    );
+    quiet(&mut with_started, "keyed with a started frame").await;
 
     for (name, stream) in [("keys", &mut by_keys), ("key", &mut by_key)] {
         let event = next_event(stream, changed).await;

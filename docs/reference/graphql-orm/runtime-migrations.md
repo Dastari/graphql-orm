@@ -239,6 +239,15 @@ commit together. A recorded version is an already-applied success only after a
 fresh no-op replan; nonempty reuse is rejected. Database commit errors remain
 errors; do not blindly retry an ambiguous outcome.
 
+An owned SQLite plan whose only step drops one column uses native `DROP COLUMN`.
+Planning checks for dependencies against an empty copy of the live catalog and
+reports a detected dependency as `InvalidPhysicalContract`. Apply repeats the
+check under `BEGIN IMMEDIATE` and verifies the retained catalog after the drop.
+Unrelated indexes and incoming foreign keys can remain in place. Plans with
+additional steps retain the rebuild restrictions. Since SQLite exposes only
+the current connection's TEMP schema, run migrations with no TEMP objects on
+other connections or use a dedicated migration connection with other connections closed.
+
 Owned apply never invokes RLS reconciliation with an empty target. PostgreSQL RLS
 flags, policies, table ownership/grants, host helper functions and unrelated tables
 remain intact. Removal/type changes on existing RLS-protected definitions are

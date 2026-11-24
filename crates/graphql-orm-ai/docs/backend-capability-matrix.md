@@ -89,6 +89,52 @@ run a consumer migration, or authorize a provider/application action.
   Server implementation of the privileged, bounded checkpoint purge. Durable
   checkpoint writes and context compaction use their ordinary fenced paths.
 
+### Run candidate indexes
+
+The SQL Server plan declares an `NVARCHAR(450)` BIN2 run state and
+state-first indexes on `next_attempt_at` for claims and `lease_expires_at`
+for lease recovery. Both indexes carry the maintenance order columns used
+by their candidate reads. The generated exact comparison still checks
+trailing spaces. The missing-expiry read also supplies a plain state
+membership predicate that SQL Server can use as a seek key. The candidate
+bounds and the lease, epoch, and row-version checks remain in force.
+Existing stores apply the
+[run-state migration preflight](../MIGRATION.md#01570-to-01580) before
+the external schema plan.
+
+The owned SQL Server 2022 comparison used separate 3 GiB containers with
+zero swap and 15-second query deadlines. Each database held 4,096 runs,
+including 320 queued runs and 64 expired leases. Eight claim workers made
+36 calls each, two recovery workers made 32 calls each, and four heartbeat
+workers made 72 calls each. Each successful heartbeat moved the lease expiry
+key. The benchmark provisioned the legacy schema for the first run and the
+generated schema for the second.
+
+| Measurement | Legacy schema | Indexed schema |
+| --- | --- | --- |
+| Claim with no next-attempt timestamp | Clustered index scan | State seek on the claim index |
+| Claim with a due next-attempt timestamp | Timestamp seek with a state filter | State seek on the claim index |
+| Recovery with no lease expiry | Clustered index scan | State seek on the recovery index |
+| Recovery with an expired lease | Timestamp seek with a state filter | State seek on the recovery index |
+| SQL Server deadlock victims (1205) per 640 public calls | 0 (0%) | 0 (0%) |
+| Claim `PersistenceFailed` | 0/288 (0%) | 0/288 (0%) |
+| Recovery `PersistenceFailed` | 0/64 (0%) | 0/64 (0%) |
+| Heartbeat `PersistenceFailed` | 0/288 (0%) | 0/288 (0%) |
+
+The legacy layout leased 288 candidates. The indexed layout leased 285 and
+returned three empty claims. Both requeued all 64 expired leases and renewed
+all 288 heartbeats. The test checks all four indexed query shapes against
+SQL Server's cached plans. The deadlock count is the delta of the isolated
+server's lock counter and includes victims absorbed by retries. The workload
+did not reproduce the predicted deadlock pattern at this scale. Its effect
+on deadlock rates at higher contention remains unmeasured.
+
+```bash
+cargo test -p graphql-orm-ai --locked --no-default-features --features mssql \
+  --test durable_parity owned_sql_server_measures_concurrent_run_candidates \
+  -- --ignored --nocapture --test-threads=1
+```
+
 ## Consumer acceptance
 
 Each consumer owner must independently verify its composed GraphQL SDL,

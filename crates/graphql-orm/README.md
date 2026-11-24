@@ -10,9 +10,55 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.207.0 lets PostgreSQL choose the join for native search on
+Version 0.216.0 lets PostgreSQL choose the join for native search on
 generated `#[graphql_rls]` entities with a column-based default sort. Both
 RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
+
+Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
+column identifier parsing in ALTER COLUMN collation lookups.
+See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+Version 0.214.0 aligns the `auth-agql` bridge with published `agql-auth`
+`v0.27.0`. Hosts that pass Auth types must adopt the same Git tag.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
+Version 0.213.0 fixes races in compile UI and consumer fixture test setup
+(#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
+
+Version 0.212.0 supports a scoped SQLite column drop in owned migrations
+with unrelated indexes and incoming foreign keys. See the
+[migration note](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
+
+Version 0.211.0 uses schema-bound semantic metadata for described roots
+returning a registered generated entity (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+Version 0.210.0 adds two opt-in options for generated updates. One makes
+`ExpectedVersion` required. The other selects assurance per request from the
+typed patch and the locked row. Other entities are unchanged. See the
+[migration guide](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+
+Version 0.209.0 exposes the read-only duplicate-key preflight for hosts
+applying DDL externally. See the
+[migration guide](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
+Version 0.208.0 adds [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+to typed transactions on SQLite, PostgreSQL and writable SQL Server.
+
+Version 0.207.0 renders SQLite closure read predicates in the original form
+again (#876) and reduces SQL duplication for directly nested closure read
+predicates on PostgreSQL and SQL Server. See the [migration note](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
+Version 0.206.0 exposes full backup and restore on explicitly typed SQLite
+and PostgreSQL handles in multi-backend builds. See the
+[migration guide](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
+
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+
+Version 0.204.0 adds an opt-in for databases whose backup and restore are
+owned by another product. See the [migration guide](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
 
 Version 0.203.0 adds SQL Server prerequisites for durable AI stores. See the
 [SQL Server DDL reference](../../docs/reference/graphql-orm/mssql.md#introspection-and-rendered-ddl).

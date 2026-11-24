@@ -669,3 +669,139 @@ fn semantic_catalogue_survives_complete_router_descriptor_transport() {
         .expect("transported semantics validate");
     assert_eq!(transported.fingerprint, catalog.fingerprint);
 }
+
+#[cfg(feature = "sqlite")]
+mod described_generated_results {
+    use super::*;
+
+    type RecordResult = SemanticRecord;
+
+    #[derive(Default)]
+    struct RecordQueries;
+
+    #[graphql_orm_custom_operations(kind = "query", authorization = true)]
+    #[graphql_orm::async_graphql::Object]
+    impl RecordQueries {
+        /// Gets the reviewed record.
+        async fn reviewed_record(&self) -> Option<RecordResult> {
+            None
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordMutations;
+
+    #[graphql_orm_custom_operations(
+        kind = "mutation",
+        authorization = true,
+        ai_execution = "approval_required"
+    )]
+    #[graphql_orm::async_graphql::Object]
+    impl RecordMutations {
+        /// Revises the reviewed record.
+        async fn revise_reviewed_record(&self) -> Option<SemanticRecord> {
+            None
+        }
+    }
+
+    mod described {
+        use super::*;
+
+        schema_roots! {
+            entities: [SemanticRecord],
+            max_page_limit: 23,
+            described_query_types: [RecordQueries],
+            described_mutation_types: [RecordMutations],
+        }
+    }
+
+    mod legacy {
+        use super::*;
+
+        schema_roots! {
+            entities: [SemanticRecord],
+            max_page_limit: 23,
+            extra_query_types: [RecordQueries],
+            extra_mutation_types: [RecordMutations],
+            semantic_custom_operations: [RecordQueries, RecordMutations],
+        }
+    }
+
+    #[tokio::test]
+    async fn described_roots_use_schema_bound_generated_result_metadata() {
+        let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        let db = Database::builder(pool)
+            .build()
+            .with_pagination_config(PaginationConfig::secure().with_max_limit(Some(23)));
+        let described_schema = described::schema_builder(db.clone()).finish();
+        let legacy_schema = legacy::schema_builder(db).finish();
+        assert_eq!(described_schema.sdl(), legacy_schema.sdl());
+
+        let described_catalog =
+            described::__graphql_orm_try_semantic_catalog().expect("described catalogue");
+        let legacy_catalog =
+            legacy::__graphql_orm_try_semantic_catalog().expect("legacy catalogue");
+        described_catalog.validate().expect("canonical catalogue");
+        assert_eq!(described_catalog, legacy_catalog);
+        assert_eq!(described_catalog.entities.len(), 1);
+        let children = described_catalog.entities[0]
+            .fields
+            .iter()
+            .find(|field| field.field_name == field_name("children", "Children"))
+            .expect("generated relationship");
+        assert!(matches!(
+            children.type_ref,
+            GraphqlSemanticTypeRef::List {
+                maximum_items: Some(23),
+                ..
+            }
+        ));
+        assert_eq!(
+            described::graphql_orm_operation_catalog().router_export_fingerprint(),
+            legacy::graphql_orm_operation_catalog().router_export_fingerprint(),
+        );
+    }
+
+    mod conflict {
+        use super::*;
+
+        #[derive(SimpleObject, GraphQLSemanticObject)]
+        #[graphql(name = "SemanticRecord")]
+        struct HandwrittenRecord {
+            /// Public value.
+            value: String,
+        }
+
+        #[derive(Default)]
+        struct ConflictingQueries;
+
+        #[graphql_orm_custom_operations(kind = "query", authorization = true)]
+        #[graphql_orm::async_graphql::Object]
+        impl ConflictingQueries {
+            /// Gets a different record type.
+            async fn conflicting_record(&self) -> Option<HandwrittenRecord> {
+                None
+            }
+        }
+
+        schema_roots! {
+            entities: [SemanticRecord],
+            max_page_limit: 23,
+            described_query_types: [ConflictingQueries],
+        }
+    }
+
+    #[test]
+    fn described_result_name_conflict_names_both_rust_types() {
+        let error = conflict::__graphql_orm_try_semantic_catalog()
+            .expect_err("unrelated types with the same GraphQL name must be refused")
+            .to_string();
+        assert!(
+            error.contains(std::any::type_name::<SemanticRecord>()),
+            "{error}"
+        );
+        assert!(error.contains("conflict::HandwrittenRecord"), "{error}");
+    }
+}
