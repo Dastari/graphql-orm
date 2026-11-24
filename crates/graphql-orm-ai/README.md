@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.161.0 uses ORM 0.215.0 and has no migration action.
+See the [migration guide](MIGRATION.md#01600-to-01610).
+
 AI 0.160.0 uses published `agql-auth` `v0.27.0` and ORM 0.214.0. Hosts that
 pass Auth types must adopt the same Git tag.
 See the [migration guide](MIGRATION.md#01590-to-01600).
