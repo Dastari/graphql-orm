@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.214.0 stays aligned with ORM 0.214.0 for the Auth update.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
 Version 0.213.0 aligns with the ORM's
 [test harness fixes](../../MIGRATION.md#02120-to-02130-test-harness-coordination).
 

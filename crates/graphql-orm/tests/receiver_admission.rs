@@ -13,16 +13,16 @@ use async_trait::async_trait;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-struct NoUsers;
+struct EnabledUser(StoredUser);
 
 #[async_trait]
-impl UserStore for NoUsers {
-    async fn find_user_by_principal(&self, _principal: &str) -> AuthResult<Option<StoredUser>> {
-        Ok(None)
+impl UserStore for EnabledUser {
+    async fn find_user_by_principal(&self, principal: &str) -> AuthResult<Option<StoredUser>> {
+        Ok((self.0.principal == principal).then(|| self.0.clone()))
     }
 
-    async fn find_user_by_id(&self, _user_id: &str) -> AuthResult<Option<StoredUser>> {
-        Ok(None)
+    async fn find_user_by_id(&self, user_id: &str) -> AuthResult<Option<StoredUser>> {
+        Ok((self.0.id == user_id).then(|| self.0.clone()))
     }
 }
 
@@ -66,6 +66,16 @@ impl RefreshTokenStore for NoRefreshTokens {
         Ok(())
     }
 
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        _user_id: &str,
+        _revoked_at: OffsetDateTime,
+        _reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    }
+
     async fn touch_refresh_token(
         &self,
         _token_id: Uuid,
@@ -87,6 +97,19 @@ impl RefreshTokenStore for NoRefreshTokens {
     ) -> AuthResult<bool> {
         self.mutations.fetch_add(1, Ordering::SeqCst);
         Ok(false)
+    }
+}
+
+impl EnabledUser {
+    fn from_session(user: &AuthUser) -> Self {
+        Self(StoredUser {
+            id: user.user_id.clone(),
+            principal: user.user_id.clone(),
+            password_hash: String::new(),
+            roles: user.roles.clone(),
+            scopes: user.scopes.clone(),
+            disabled: false,
+        })
     }
 }
 
@@ -164,7 +187,7 @@ async fn exact_signed_delegation_is_admitted_before_context_and_unrelated_read_i
     });
     let auth = AuthService::new(
         AuthConfig::new("test-only-secret-that-is-at-least-thirty-two-bytes"),
-        Arc::new(NoUsers),
+        Arc::new(EnabledUser::from_session(&active.user)),
         Arc::new(NoRefreshTokens::default()),
     )
     .unwrap()
@@ -923,7 +946,7 @@ async fn issue(
     });
     let auth = AuthService::new(
         AuthConfig::new("test-only-secret-that-is-at-least-thirty-two-bytes"),
-        Arc::new(NoUsers),
+        Arc::new(EnabledUser::from_session(&active.user)),
         Arc::new(NoRefreshTokens::default()),
     )
     .unwrap()

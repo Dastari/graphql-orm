@@ -183,6 +183,8 @@ fn configuration(
             clock_skew: Duration::seconds(30),
             allowed_amr: vec!["otp".to_owned()],
             allowed_acr: vec!["urn:test:loa:2".to_owned()],
+            required_amr: Vec::new(),
+            required_context: None,
             match_mode: AssuranceMatchMode::All,
         },
         Arc::new(FixedClock::new(now)),

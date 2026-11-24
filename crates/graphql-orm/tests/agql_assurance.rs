@@ -99,6 +99,8 @@ fn enforcement(now: OffsetDateTime) -> AssuranceEnforcement {
             clock_skew: Duration::ZERO,
             allowed_amr: vec!["totp".to_string()],
             allowed_acr: vec![],
+            required_amr: Vec::new(),
+            required_context: None,
             match_mode: AssuranceMatchMode::All,
         },
     );

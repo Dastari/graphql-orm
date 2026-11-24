@@ -10,6 +10,67 @@ supersedes: []
 
 # Migration Guide
 
+## 0.213.0 to 0.214.0: agql-auth v0.27.0
+
+**Action needed** for hosts with direct `agql-auth` dependencies. Upgrade
+ORM/macros together and choose the same Auth Git tag in the same upgrade:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.27.0", version = "0.27.0" }
+```
+
+Refresh the host lockfile and run `cargo tree -i agql-auth` with the host's
+deployment features enabled. Cargo reports an ambiguous package specification
+if multiple sources resolve in that graph. The tag resolves to
+`71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+Cargo considers a different tag or a `rev` selector a different source, even
+at the same commit. This matters when passing `AuthPrincipal` to
+`auth_bundle_from_principal` or using the AI and router Auth integration types.
+
+Auth 0.27 requires `typ = "access"` and `purpose = "access_token"` by default,
+rejects legacy array scope claims by default, and requires the `Bearer` scheme
+for Authorization values. Access tokens from the default 0.26 issuer already
+carry both access markers. Hierarchical scope wildcards match whole segments.
+Rewrite raw-prefix grants such as `records*` as `records.*` when they should
+grant the whole subtree. API-token services reject a mismatched audience or
+configured resource. An audience-bound token requires a declared audience.
+Without a configured resource, the host still enforces the token's resource
+binding.
+
+**Action needed** for hosts using `with_exact_only_scope_patterns` or
+equivalent configuration. In-segment wildcards now match literally. Rewrite
+raw-prefix patterns such as `records*` as whole-segment patterns such as
+`records.*` to protect the subtree.
+
+**Action needed** for hosts building Auth guards. Every Auth user and
+principal guard now fails closed for delegated tokens or tokens carrying an
+`actor` claim unless the guard calls `.allow_delegated()`. Opt in on each
+guard that is intended to accept these tokens. The Auth `RequireAll*` guards
+and `has_all_scopes` helpers also fail closed on empty lists. Supply a
+non-empty list where scopes or roles are required.
+
+Hosts using Auth's rotating JWKS cache should explicitly set
+`stale_policy: StaleKeyPolicy::Reject` to preserve fail-closed refresh behavior.
+The new default, `UseStale`, permits cached keys after a failed refresh until
+the cache TTL plus the one-hour default `max_stale` window. A host requiring
+token confirmation must use a validator entry point that passes the verified
+confirmation material.
+
+Auth issuers must update their stores and rollout procedures. Auth 0.27 adds
+user-wide refresh-session revocation and a default 90-day absolute lifetime for
+new session families. Existing records without a family deadline end at their
+recorded expiry. Completing a password reset revokes the user's refresh
+sessions. Session-bound delegation requires a current enabled parent. Rehydrated
+delegations retain their bindings, are capped at the earlier of parent and
+delegated expiry, and intersect current grants with the original delegation's
+grant ceiling. Pre-0.27 persisted delegation references lack the ceiling and
+must be replaced through fresh authorization. Host token-status and current
+authority checks still apply to accepted requests.
+
+The ORM has no schema or data migration for this pin. For Auth-owned stores,
+validators and login flows, follow the
+[Auth 0.27 migration guide](https://github.com/Dastari/agql-auth/blob/v0.27.0/MIGRATION.md#0260-to-0270-security-hardening).
+
 ## 0.212.0 to 0.213.0: Test harness coordination
 
 **No action.** Upgrade the ORM and macros together. This release fixes

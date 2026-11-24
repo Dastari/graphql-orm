@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.160.0
+
+- **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag
+  when constructing principals, principal references and assurance policies for AI.
+  [Migration](MIGRATION.md#01590-to-01600)
+
 ## Unreleased - 0.159.0
 
 - Codex app-server registrations can opt into resolved entity-reference

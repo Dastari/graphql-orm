@@ -26,8 +26,8 @@ dependencies = [
 
 [[package]]
 name = "agql-auth"
-version = "0.26.0"
-source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.26.0#7d016f6a6bc3e697382e2e05865f596862189240"
+version = "0.27.0"
+source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.27.0#71a3acee5942bd5b6aac57dcaccbb6391b383880"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -39,7 +39,6 @@ dependencies = [
  "jsonwebtoken",
  "percent-encoding",
  "rand 0.8.7",
- "rsa",
  "serde",
  "serde_json",
  "sha1",
@@ -48,6 +47,7 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.213.0"
+version = "0.214.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.159.0"
+version = "0.160.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.213.0"
+version = "0.214.0"
 dependencies = [
  "Inflector",
  "convert_case",
@@ -1816,9 +1816,9 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "10.4.0"
+version = "11.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
+checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
 dependencies = [
  "base64",
  "ed25519-dalek",

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.214.0 aligns the `auth-agql` bridge with published `agql-auth`
+`v0.27.0`. Hosts that pass Auth types must adopt the same Git tag.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
 Version 0.213.0 fixes races in compile UI and consumer fixture test setup
 (#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
 

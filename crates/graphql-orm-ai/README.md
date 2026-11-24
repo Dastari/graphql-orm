@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.160.0 uses published `agql-auth` `v0.27.0` and ORM 0.214.0. Hosts that
+pass Auth types must adopt the same Git tag.
+See the [migration guide](MIGRATION.md#01590-to-01600).
+
 AI 0.159.0 adds opt-in resolved entity-reference delivery for Codex app-server.
 The host process must implement the consuming dispatch hook. Direct runtime
 dispatch methods always send unavailable markers. Review local process
