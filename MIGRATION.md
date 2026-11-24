@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.212.0 to 0.213.0: Test harness coordination
+
+**No action.** Upgrade the ORM and macros together. This release fixes
+parallel test execution in the workspace (#887, #888).
+
 ## 0.211.0 to 0.212.0: scoped SQLite column drop
 
 **No action.** Upgrade ORM and macros together. An owned SQLite plan whose

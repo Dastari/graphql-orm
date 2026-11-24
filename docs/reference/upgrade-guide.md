@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.212.0**; **`graphql-orm-macros` 0.212.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.159.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.213.0**; **`graphql-orm-macros` 0.213.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.159.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** — ORM/macros 0.213.0 fixes parallel compile UI and consumer fixture setup (#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
 - **No action** — AI 0.159.0 adds opt-in resolved entity-reference delivery
   for Codex app-server (#721).
   [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01580-to-01590)
