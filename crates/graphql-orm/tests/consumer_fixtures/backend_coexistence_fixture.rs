@@ -1,4 +1,4 @@
-use super::fixture_target;
+use super::fixture_build_dir;
 
 #[test]
 fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
@@ -7,10 +7,7 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
         "/tests/fixtures/backend-coexistence/Cargo.toml"
     );
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    // The fixture's services use the PascalCase naming contract (#508). A
-    // separate target directory keeps the camelCase fixtures' graphql-orm
-    // build from being rebuilt on every switch.
-    let target_dir = fixture_target::target_dir().join("pascal-case");
+    let target_dir = fixture_build_dir("backend-coexistence");
     let status = std::process::Command::new(cargo)
         .env("CARGO_TARGET_DIR", target_dir)
         .env("GRAPHQL_ORM_RESOLVER_CASE", "PascalCase")

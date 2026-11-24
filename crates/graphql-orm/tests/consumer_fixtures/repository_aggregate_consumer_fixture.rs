@@ -1,4 +1,4 @@
-use super::fixture_target;
+use super::fixture_build_dir;
 
 #[test]
 fn external_repository_aggregate_consumer_requires_no_direct_graphql_dependency() {
@@ -6,7 +6,7 @@ fn external_repository_aggregate_consumer_requires_no_direct_graphql_dependency(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/repository-aggregate-consumer/Cargo.toml"
     );
-    let target_dir = fixture_target::target_dir();
+    let target_dir = fixture_build_dir("repository-aggregate-consumer");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let lane = if cfg!(feature = "sqlite") {
         "sqlite"
