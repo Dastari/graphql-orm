@@ -1558,9 +1558,8 @@ async fn validate_owned_sqlite_rebuild_plan(
                 .bind(&name)
                 .fetch_one(&mut *connection)
                 .await?;
-                let recognized = sql.to_ascii_uppercase().find(" WHERE ").and_then(|offset| {
-                    super::migrations::parse_closed_set_index_predicate(&sql[offset + 7..])
-                });
+                let recognized = super::migrations::sqlite_unique_rebuild::index_filter(&sql)
+                    .and_then(super::migrations::parse_closed_set_index_predicate);
                 if recognized.is_none() {
                     return Err(
                         rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into(),

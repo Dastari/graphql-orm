@@ -141,6 +141,30 @@ fn tokens(sql: &str) -> Result<Vec<Token>, sqlx::Error> {
 fn punctuation(sql: &str, t: &Token, value: &str) -> bool {
     t.ident.is_none() && &sql[t.span.clone()] == value
 }
+
+#[cfg(feature = "sqlite")]
+pub(in crate::graphql::orm) fn index_filter(sql: &str) -> Option<&str> {
+    let ts = tokens(sql).ok()?;
+    let mut depth = 0usize;
+    for (offset, token) in ts.iter().enumerate() {
+        if punctuation(sql, token, "(") {
+            depth += 1;
+        } else if punctuation(sql, token, ")") {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                let suffix = ts.get(offset + 1..)?;
+                return match suffix {
+                    [keyword, first, ..] if keyword.keyword("where") => {
+                        Some(sql[first.span.start..].trim_end())
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
 fn key(sql: &str, ts: &[Token]) -> Result<Option<Vec<String>>, sqlx::Error> {
     let start = if ts.first().is_some_and(|t| t.keyword("constraint")) {
         2

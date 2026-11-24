@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.222.0 aligns with the ORM's
+[partial-index introspection fix](../../MIGRATION.md#02130-to-02220-opaque-partial-index-predicates).
+
 Version 0.213.0 aligns with the ORM's
 [test harness fixes](../../MIGRATION.md#02120-to-02130-test-harness-coordination).
 

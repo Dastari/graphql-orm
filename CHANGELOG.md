@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.222.0
+
+- **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters
+  during introspection. SQL Server distinguishes a filtered index when the
+  catalog indicates a filter and the definition is unavailable.
+  [Migration](MIGRATION.md#02130-to-02220-opaque-partial-index-predicates)
+
 ## Unreleased - ORM/macros 0.213.0
 
 - **Fixed (#887, #888).** Compile UI tests coordinate on Cargo's resolved

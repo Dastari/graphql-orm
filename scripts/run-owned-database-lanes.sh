@@ -264,6 +264,8 @@ case "${lane}" in
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
         --test conditional_indexes -- --include-ignored --test-threads=1
     done
+    cargo test -p graphql-orm --locked --no-default-features --features mssql \
+      --test mssql_restore_marker opaque_partial_index_differs_from_plain_index -- --ignored
     ;;
   dependent-deletes) run_dependent_deletes ;;
   notify-bulk)

@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.222.0 preserves opaque partial-index predicates in SQLite and
+PostgreSQL schema comparisons. [Migration](../../MIGRATION.md#02130-to-02220-opaque-partial-index-predicates)
+
 Version 0.213.0 fixes races in compile UI and consumer fixture test setup
 (#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
 

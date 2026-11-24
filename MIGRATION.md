@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.213.0 to 0.222.0: Opaque partial-index predicates
+
+**Action needed.** Review schema validation and migration plans before applying
+the upgrade to existing databases. SQLite and PostgreSQL now retain filters
+they cannot represent as portable predicates. SQL Server retains the presence
+of a filter even when its definition is unavailable. A same-name index with an
+opaque filter can now generate an index mismatch, a replacement plan, or a
+refusal under the existing ownership and apply rules. Confirm who owns the
+index and whether the declared index should replace it before approving
+destructive steps. Opaque SQLite and PostgreSQL predicates are inspection
+metadata. Use explicitly reviewed DDL to recreate one.
+
+SQL Server `INCLUDE` columns are still unrepresented in the schema model.
+The follow-up on `next/breaking` will add an included-columns field and mark
+the public index structs `#[non_exhaustive]`.
+
 ## 0.212.0 to 0.213.0: Test harness coordination
 
 **No action.** Upgrade the ORM and macros together. This release fixes

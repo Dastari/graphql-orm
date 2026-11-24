@@ -1810,10 +1810,8 @@ pub(super) fn validate_migration_step_capabilities<'a>(
             return Err(sqlx::Error::Protocol(overlong.to_string()));
         }
     }
-    if backend == DatabaseBackend::Mssql {
-        for step in &steps {
-            validate_mssql_step(step)?;
-        }
+    for step in &steps {
+        validate_step_rendering(backend, step)?;
     }
     Ok(())
 }
@@ -2843,6 +2841,7 @@ fn sqlite_constant_default(default: &str) -> bool {
 
 const INVALID_MSSQL_FILTER_SQL: &str =
     "THROW 50000, 'Invalid SQL Server filtered index predicate', 1";
+const OPAQUE_INDEX_FILTER_SQL: &str = "SELECT /* opaque index predicate cannot be recreated */";
 
 /// A SQL Server index predicate that cannot be rendered safely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2866,10 +2865,38 @@ impl std::fmt::Display for InvalidMssqlIndexPredicate {
 
 impl std::error::Error for InvalidMssqlIndexPredicate {}
 
-fn refused_mssql_step_sql(error: sqlx::Error) -> &'static str {
-    match error {
-        sqlx::Error::Protocol(_) => INVALID_MSSQL_APPEND_ONLY_SQL,
-        _ => INVALID_MSSQL_FILTER_SQL,
+fn created_indexes<'a, 'schema>(step: &'a StepRef<'schema>) -> &'a [IndexRef<'schema>] {
+    match step {
+        StepRef::CreateTable(table) => table.indexes.as_slice(),
+        StepRef::CreateIndex { index, .. } => std::slice::from_ref(index),
+        _ => &[],
+    }
+}
+
+fn validate_step_rendering(backend: DatabaseBackend, step: &StepRef<'_>) -> crate::Result<()> {
+    if backend == DatabaseBackend::Mssql {
+        return validate_mssql_step(step);
+    }
+    for index in created_indexes(step) {
+        if index
+            .predicate
+            .as_ref()
+            .is_some_and(|p| p.column.is_empty())
+        {
+            return Err(sqlx::Error::Protocol(format!(
+                "cannot recreate index {} with an opaque catalog predicate",
+                index.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn refused_step_sql(backend: DatabaseBackend, error: sqlx::Error) -> &'static str {
+    match (backend, error) {
+        (DatabaseBackend::Mssql, sqlx::Error::Protocol(_)) => INVALID_MSSQL_APPEND_ONLY_SQL,
+        (DatabaseBackend::Mssql, _) => INVALID_MSSQL_FILTER_SQL,
+        _ => OPAQUE_INDEX_FILTER_SQL,
     }
 }
 
@@ -2895,12 +2922,7 @@ fn validate_mssql_step(step: &StepRef<'_>) -> crate::Result<()> {
             "SQL Server append-only triggers require a local table and no retention purge".into(),
         ));
     }
-    let indexes = match step {
-        StepRef::CreateTable(table) => table.indexes.as_slice(),
-        StepRef::CreateIndex { index, .. } => std::slice::from_ref(index),
-        _ => &[],
-    };
-    for index in indexes {
+    for index in created_indexes(step) {
         let Some(predicate) = &index.predicate else {
             continue;
         };
@@ -3964,22 +3986,20 @@ fn render_sqlite_table_rebuild_statements(
 /// `-- sqlite requires table rebuild …` marker instead of executable DDL. Use a migration
 /// plan, which renders the controlled rebuild.
 ///
-/// Invalid SQL Server index predicates render a statement that raises
-/// an error. Use [`try_render_migration_step`] to receive the error in Rust.
+/// When a step cannot render its index predicate, the returned SQL raises an
+/// error. Use [`try_render_migration_step`] to receive the error in Rust.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     try_render_migration_step(backend, step)
-        .unwrap_or_else(|error| vec![refused_mssql_step_sql(error).to_owned()])
+        .unwrap_or_else(|error| vec![refused_step_sql(backend, error).to_owned()])
 }
 
-/// Render one step and reject invalid SQL Server index predicates.
+/// Render one step and reject index predicates the backend cannot recreate.
 pub fn try_render_migration_step(
     backend: DatabaseBackend,
     step: &MigrationStep,
 ) -> crate::Result<Vec<String>> {
     let step = StepRef::from(step);
-    if backend == DatabaseBackend::Mssql {
-        validate_mssql_step(&step)?;
-    }
+    validate_step_rendering(backend, &step)?;
     Ok(render_migration_step_view(backend, &step))
 }
 pub(super) fn render_migration_step_view(
@@ -4643,12 +4663,11 @@ pub(super) fn render_owned_plan_steps(
     target_for_backend: &SchemaRef<'_>,
     steps: &[OwnedMigrationStep],
 ) -> Vec<String> {
-    if backend == DatabaseBackend::Mssql
-        && let Some(error) = steps
-            .iter()
-            .find_map(|step| validate_mssql_step(&StepRef::from(step)).err())
+    if let Some(error) = steps
+        .iter()
+        .find_map(|step| validate_step_rendering(backend, &StepRef::from(step)).err())
     {
-        return vec![refused_mssql_step_sql(error).to_owned()];
+        return vec![refused_step_sql(backend, error).to_owned()];
     }
     match backend {
         DatabaseBackend::Sqlite => {
@@ -5009,19 +5028,26 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 continue;
             }
 
-            let index_sql: Option<String> = sqlx::query_scalar(
-                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
-            )
-            .bind(&index_name)
-            .fetch_optional(&mut *connection)
-            .await?
-            .flatten();
-            let predicate = index_sql.as_deref().and_then(|sql| {
-                let upper = sql.to_ascii_uppercase();
-                upper
-                    .find(" WHERE ")
-                    .and_then(|offset| parse_closed_set_index_predicate(&sql[offset + 7..]))
-            });
+            let predicate = if row.try_get::<i64, _>("partial")? != 0 {
+                let index_sql: Option<String> = sqlx::query_scalar(
+                    "SELECT sql FROM main.sqlite_master WHERE type = 'index' AND name = ?",
+                )
+                .bind(&index_name)
+                .fetch_optional(&mut *connection)
+                .await?
+                .flatten();
+                let expression = index_sql
+                    .as_deref()
+                    .and_then(sqlite_unique_rebuild::index_filter);
+                let parsed = expression.and_then(parse_closed_set_index_predicate);
+                Some(parsed.unwrap_or_else(|| {
+                    IndexPredicateModel::opaque(
+                        expression.or(index_sql.as_deref()).map(str::to_owned),
+                    )
+                }))
+            } else {
+                None
+            };
 
             indexes.push(IndexModel {
                 name: index_name,
@@ -5579,10 +5605,14 @@ pub(super) async fn introspect_owned_postgres_connection_including(
             let unique: bool = row.try_get("is_unique")?;
             let predicate_catalog_only: bool = row.try_get("predicate_catalog_only")?;
             let predicate_expression: Option<String> = row.try_get("predicate")?;
-            let predicate = predicate_expression
-                .as_deref()
-                .filter(|_| predicate_catalog_only)
-                .and_then(parse_closed_set_index_predicate);
+            let predicate = predicate_expression.map(|expression| {
+                if predicate_catalog_only
+                    && let Some(predicate) = parse_closed_set_index_predicate(&expression)
+                {
+                    return predicate;
+                }
+                IndexPredicateModel::opaque(Some(expression))
+            });
             let method_name: String = row.try_get("method")?;
             let method = match method_name.to_ascii_lowercase().as_str() {
                 "gist" => IndexMethod::Gist,
@@ -7041,6 +7071,7 @@ async fn introspect_mssql_indexes(
     let rows = super::MssqlBackend::fetch_rows(
         pool,
         "SELECT i.name AS index_name, CAST(i.is_unique AS bigint) AS is_unique,
+                CAST(i.has_filter AS bigint) AS has_filter,
                 i.filter_definition AS filter_definition, c.name AS column_name,
                 CAST(ic.is_descending_key AS bigint) AS is_descending
          FROM sys.indexes AS i
@@ -7065,9 +7096,13 @@ async fn introspect_mssql_indexes(
         if indexes.last().is_none_or(|(index, _)| index.name != name) {
             let mut index = super::owned_schema::IndexModel::new(name, Vec::new());
             index.is_unique = row.try_get::<i64, _>("is_unique")? != 0;
+            let has_filter = row.try_get::<i64, _>("has_filter")? != 0;
             index.predicate = row
                 .try_get::<Option<String>, _>("filter_definition")?
-                .map(|filter| mssql_index_predicate(&filter));
+                .map(mssql_index_predicate)
+                .or_else(|| {
+                    has_filter.then(|| super::owned_schema::IndexPredicateModel::opaque(None))
+                });
             indexes.push((index, false));
         }
         let (index, any_descending) = indexes.last_mut().expect("pushed above");
@@ -7102,16 +7137,14 @@ async fn introspect_mssql_indexes(
 /// a declared predicate, so a plan replaces the index rather than treating it
 /// as unfiltered. Rendering an introspected index reuses that text.
 #[cfg(feature = "mssql")]
-fn mssql_index_predicate(filter: &str) -> super::owned_schema::IndexPredicateModel {
-    parse_mssql_in_filter(filter)
+fn mssql_index_predicate(filter: impl Into<String>) -> super::owned_schema::IndexPredicateModel {
+    let filter = filter.into();
+    parse_mssql_in_filter(&filter)
         .map(|mut predicate| {
             predicate.column = DatabaseBackend::Mssql.raw_name_in_declared_form(&predicate.column);
             predicate
         })
-        .unwrap_or_else(|| super::owned_schema::IndexPredicateModel {
-            column: String::new(),
-            values: vec![filter.to_string()],
-        })
+        .unwrap_or_else(|| super::owned_schema::IndexPredicateModel::opaque(Some(filter)))
 }
 
 #[cfg(feature = "mssql")]
