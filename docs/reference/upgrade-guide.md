@@ -72,6 +72,8 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.211.0; `graphql-orm-macros` 0.211.0; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.158.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
+- **No action** for ORM/macros 0.216.0 and AI 0.161.0. Generated exact string filters can seek on declared SQL Server BIN2 Unicode key columns, including AI run state (#867). [ORM migration](../../MIGRATION.md#02150-to-02160-sql-server-exact-string-filter-seeks) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01600-to-01610)
+
 - **Action needed** for AI 0.158.0. Apply the guarded external run-state index migration on SQL Server and drain workers on all backends before epoch rotation (#848). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01570-to-01580)
 
 ### workspace-2026.11.24.2

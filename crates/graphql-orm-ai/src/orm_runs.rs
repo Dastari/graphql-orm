@@ -1381,7 +1381,7 @@ impl OrmAiRunService {
                     .transaction(TransactionMode::Default, move |tx| {
                         Box::pin(async move {
                             crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                            let filter = || AiRunRecordWhereInput {
+                            let filter = AiRunRecordWhereInput {
                                 state: Some(expired_lease_states()),
                                 lease_expires_at: Some(if missing_expiry {
                                     Int64Filter {
@@ -1396,14 +1396,9 @@ impl OrmAiRunService {
                                 }),
                                 ..Default::default()
                             };
-                            let query = tx.query::<AiRunRecord>().filter(filter());
-                            #[cfg(feature = "mssql")]
-                            let query = if missing_expiry {
-                                query.filter(ExpiredLeaseStatePrefilter)
-                            } else {
-                                query
-                            };
-                            let rows = query
+                            let rows = tx
+                                .query::<AiRunRecord>()
+                                .filter(filter)
                                 .order_by(AiRunRecordOrderByInput {
                                     recovery_examined_at: Some(OrderDirection::Asc),
                                     ..Default::default()
@@ -7249,38 +7244,6 @@ fn expired_lease_states() -> StringFilter {
                 .collect(),
         ),
         ..Default::default()
-    }
-}
-
-// Give SQL Server a state-only seek predicate. The generated exact filter
-// still checks casing and trailing spaces, including on a legacy schema.
-#[cfg(feature = "mssql")]
-struct ExpiredLeaseStatePrefilter;
-
-#[cfg(feature = "mssql")]
-impl graphql_orm::graphql::orm::DatabaseFilter for ExpiredLeaseStatePrefilter {
-    fn to_sql_conditions(&self) -> (Vec<String>, Vec<graphql_orm::graphql::orm::SqlValue>) {
-        use graphql_orm::graphql::orm::{__gom_render_string_filter, DatabaseBackend};
-
-        let backend = DatabaseBackend::Mssql;
-        let mut conditions = Vec::new();
-        let mut values = Vec::new();
-        __gom_render_string_filter(
-            &expired_lease_states(),
-            backend,
-            &backend.render_identifier("state"),
-            &mut conditions,
-            &mut values,
-        );
-        (conditions, values)
-    }
-
-    fn is_empty(&self) -> bool {
-        false
-    }
-
-    fn referenced_fields(&self) -> Vec<&'static str> {
-        vec!["state"]
     }
 }
 

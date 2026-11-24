@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.216.0 lets SQL Server seek on BIN2 Unicode key columns when using
+generated exact string filters (#867).
+[Migration](../../MIGRATION.md#02150-to-02160-sql-server-exact-string-filter-seeks)
+
 Version 0.211.0 uses schema-bound semantic metadata for described roots
 returning a registered generated entity (#883).
 [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)

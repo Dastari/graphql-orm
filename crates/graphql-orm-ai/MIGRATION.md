@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.160.0 to 0.161.0
+
+**No action.** The ORM now supplies the seek predicate for SQL Server run-state
+filters (#867). This update requires no additional schema or data migration.
+Hosts still running a pre-0.158.0 schema should follow the upgrade below to
+install the run candidate indexes.
+
 ## 0.157.0 to 0.158.0
 
 **Action needed** on SQL Server. Generate the external schema plan for

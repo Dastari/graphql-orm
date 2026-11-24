@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.216.0 selects the ORM's seek-capable exact string filter renderer for
+declared SQL Server BIN2 Unicode key columns (#867).
+[Migration](../../MIGRATION.md#02150-to-02160-sql-server-exact-string-filter-seeks)
+
 Version 0.211.0 records the Rust type of described root results for
 schema catalogue composition (#883).
 [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)

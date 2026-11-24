@@ -92,24 +92,52 @@ pub fn __gom_render_exact_mssql_string_filter(
     conditions: &mut Vec<String>,
     values: &mut Vec<SqlValue>,
 ) {
-    let mut equal = |value: &String| {
+    render_exact_mssql_string_filter(f, backend, column, conditions, values, false);
+}
+
+/// Add seek predicates to exact filters on a declared SQL Server BIN2 Unicode column.
+#[doc(hidden)]
+pub fn __gom_render_bin2_mssql_string_filter(
+    f: &StringFilter,
+    backend: DatabaseBackend,
+    column: &str,
+    conditions: &mut Vec<String>,
+    values: &mut Vec<SqlValue>,
+) {
+    render_exact_mssql_string_filter(f, backend, column, conditions, values, true);
+}
+
+fn render_exact_mssql_string_filter(
+    f: &StringFilter,
+    backend: DatabaseBackend,
+    column: &str,
+    conditions: &mut Vec<String>,
+    values: &mut Vec<SqlValue>,
+    seek: bool,
+) {
+    let mut equal = |value: &String, seek: bool| {
         let value_bind = backend.placeholder(values.len() + 1);
-        let length_bind = backend.placeholder(values.len() + 2);
-        values.extend([
-            SqlValue::String(value.clone()),
-            SqlValue::String(value.clone()),
-        ]);
+        values.push(SqlValue::String(value.clone()));
         // SQL Server pads operands before equality, including under BIN2.
-        // The separate length predicate distinguishes trailing spaces.
+        // SqlValue::String binds as NVARCHAR. On the seek path calculate its
+        // UTF-16 byte length here so the new comparison takes the place of
+        // the length bind. A 1,000-operand list still uses only 2,000 binds.
+        let length = if seek {
+            (value.encode_utf16().count() * 2).to_string()
+        } else {
+            let length_bind = backend.placeholder(values.len() + 1);
+            values.push(SqlValue::String(value.clone()));
+            format!("DATALENGTH({length_bind})")
+        };
         format!(
-            "({column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({column}) = DATALENGTH({length_bind}))"
+            "({column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({column}) = {length})"
         )
     };
     if let Some(value) = &f.eq {
-        conditions.push(equal(value));
+        conditions.push(equal(value, seek));
     }
     if let Some(value) = &f.ne {
-        conditions.push(format!("NOT {}", equal(value)));
+        conditions.push(format!("NOT {}", equal(value, false)));
     }
     for (list, negated) in [(&f.in_list, false), (&f.not_in, true)] {
         if let Some(list) = list {
@@ -118,16 +146,28 @@ pub fn __gom_render_exact_mssql_string_filter(
                     conditions.push("1 = 0".to_owned());
                 }
             } else {
-                let comparisons = list.iter().map(&mut equal).collect::<Vec<_>>().join(" OR ");
+                let comparisons = list
+                    .iter()
+                    .map(|value| equal(value, seek && !negated))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
                 let not = if negated { "NOT " } else { "" };
                 conditions.push(format!("{not}({comparisons})"));
             }
         }
     }
     let mut remaining = f.clone();
-    remaining.eq = None;
+    // The bare Unicode column's implicit collation wins over the parameter's
+    // coercible-default collation. The explicit BIN2 and length checks still
+    // cover trailing spaces and legacy collations. With a NULL column, both
+    // the exact and the plain comparison stay UNKNOWN, including under NOT.
+    if !seek {
+        remaining.eq = None;
+        remaining.in_list = None;
+    } else if remaining.in_list.as_ref().is_some_and(Vec::is_empty) {
+        remaining.in_list = None; // The exact branch already emitted 1 = 0.
+    }
     remaining.ne = None;
-    remaining.in_list = None;
     remaining.not_in = None;
     __gom_render_string_filter(&remaining, backend, column, conditions, values);
 }

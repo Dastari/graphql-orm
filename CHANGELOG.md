@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.216.0
+
+- **Fixed (#867).** Generated exact SQL Server equality and membership filters
+  include a seek predicate for Unicode key columns declared with BIN2 collation.
+  [Migration](MIGRATION.md#02150-to-02160-sql-server-exact-string-filter-seeks)
+
 ## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
 
 - **Fixed (#883).** Described roots returning a registered generated entity

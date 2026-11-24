@@ -5703,6 +5703,7 @@ fn generate_entity_tokens(
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let mut sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        let mut mssql_bin2_unicode = false;
         if backend == BackendKind::Mssql
             && sql_type == "NVARCHAR(MAX)"
             && is_plain_string_type(field_type)
@@ -5712,6 +5713,7 @@ fn generate_entity_tokens(
             sql_type = MSSQL_INDEXABLE_STRING.to_string();
             if entity_meta.exact_string_filters {
                 sql_type.push_str(" COLLATE Latin1_General_100_BIN2");
+                mssql_bin2_unicode = true;
             }
         }
         let decimal_tokens = field_meta
@@ -5996,6 +5998,7 @@ fn generate_entity_tokens(
                     filter_type,
                     &field_meta,
                     entity_meta.exact_string_filters,
+                    mssql_bin2_unicode,
                 )?;
                 where_input_fields.push(input_field);
                 // Unqualified, or `row.<column>` for the row `_gom_table`
@@ -8046,6 +8049,7 @@ fn generate_filter_field(
     filter_type: &str,
     field_meta: &FieldMetadata,
     exact_string_filters: bool,
+    mssql_bin2_unicode: bool,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
@@ -8335,7 +8339,9 @@ fn generate_filter_field(
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
             };
-            let render = if backend == BackendKind::Mssql && exact_string_filters {
+            let render = if mssql_bin2_unicode {
+                quote! { ::graphql_orm::graphql::orm::__gom_render_bin2_mssql_string_filter }
+            } else if backend == BackendKind::Mssql && exact_string_filters {
                 quote! { ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter }
             } else {
                 quote! { ::graphql_orm::graphql::orm::__gom_render_string_filter }

@@ -918,6 +918,11 @@ it, for review or for a host's own tooling.
   collation. Plans also render `COLLATE Latin1_General_100_BIN2` on the
   entity's generated Unicode key columns: primary keys, unique columns,
   relation foreign-key sources and index members.
+  - On those declared BIN2 Unicode columns, exact `eq` and nonempty
+    `in_list` add a plain equality or membership predicate so the optimizer
+    can seek. The existing binary comparison and byte-length checks still
+    enforce exact matching, including trailing spaces. The seek path uses
+    the UTF-16 byte count for the length check and keeps the same bind count.
   - SQL Server requires both sides of a string foreign key to share a
     collation, so opt in the referencing and referenced entities together.
   - On an existing table the planner emits `ALTER COLUMN … COLLATE`, which

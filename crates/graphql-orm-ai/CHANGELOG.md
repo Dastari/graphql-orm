@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.161.0
+
+- SQL Server run candidate reads use the ORM's generated exact string filters
+  to seek on the run-state indexes (#867).
+
 ## Unreleased - 0.158.0
 
 - **Action needed.** Apply the checked SQL Server schema upgrade so claim and

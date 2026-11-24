@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.215.0 to 0.216.0: SQL Server exact string filter seeks
+
+**No action.** Upgrade ORM and macros together. With `exact_string_filters`
+enabled, SQL Server can seek on the declared BIN2 Unicode key columns for
+`eq` and nonempty `in_list` filters (#867). The binary and byte-length checks
+still determine an exact match. There is no schema or data migration.
+
 ## 0.210.0 to 0.211.0: Described root result metadata
 
 **No action.** Described roots returning an entity registered in
