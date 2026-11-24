@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.209.0 exposes the read-only duplicate-key preflight for hosts
+applying DDL externally. See the
+[migration guide](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
 Version 0.208.0 adds [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
 to typed transactions on SQLite, PostgreSQL and writable SQL Server.
 

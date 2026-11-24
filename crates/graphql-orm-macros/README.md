@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.209.0 aligns with the ORM runtime's
+[external migration preflight API](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
 Version 0.208.0 generates the adapter for opt-in
 [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes).
 
