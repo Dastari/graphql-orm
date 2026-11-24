@@ -16,7 +16,8 @@ supersedes: []
 `subgraph_only` in the resolver catalogue. The resolver catalogue fingerprint
 changes for exports that previously referenced a target root for such a
 relationship. Consumers of older exports should defer authorization to the
-subgraph when `has_field_policy` is true.
+subgraph when `has_field_policy` is true. Rebind any pinned
+resolver-catalogue fingerprint.
 
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 

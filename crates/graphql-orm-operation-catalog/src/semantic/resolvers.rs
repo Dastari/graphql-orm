@@ -116,6 +116,12 @@ pub struct GraphqlRelationResolverDescriptor {
     /// semantic catalogue.
     pub arguments: Vec<String>,
     /// Whether the field has an authoritative field policy.
+    ///
+    /// The subgraph enforces that policy on every traversal, so the policy is
+    /// stricter than any root's requirement. A consumer defers to the
+    /// subgraph whenever this is `true`, including for older exports that
+    /// still report [`GraphqlResolverAuthorization::SameAsRoot`] for such a
+    /// relation.
     pub has_field_policy: bool,
     /// What a traversal is required to hold.
     pub authorization: GraphqlResolverAuthorization,
@@ -176,6 +182,10 @@ pub enum GraphqlResolverAuthorization {
     /// [`crate::GraphqlOperationCatalog`], knows this one. The subgraph
     /// applies the owning type's authentication mode and any field, row and
     /// database policy before returning data.
+    ///
+    /// A relation whose `has_field_policy` is `true` is never described by
+    /// this mode. A consumer defers to the subgraph when `has_field_policy`
+    /// is `true`, including for older exports that say `same_as_root`.
     SameAsRoot {
         /// Root operation kind; always `query`.
         kind: GraphqlOperationKind,
