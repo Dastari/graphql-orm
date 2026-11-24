@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.84.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.85.0");
     assert_eq!(catalog.entities().len(), 50);
     // The stored-response ledger keeps its identifiers in backups so a
     // restored deletion debt is not lost.
@@ -680,6 +680,29 @@ mod unique_constraint_upgrade {
             .await
             .expect("a new key should insert");
     }
+}
+
+#[cfg(feature = "mssql")]
+#[test]
+fn sql_server_run_state_has_an_ordered_candidate_index() {
+    let catalog = SchemaModuleCatalog::compose(&[&AiSchemaModule]).unwrap();
+    let schema = catalog.schema_model();
+    let runs = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "[graphql_orm_ai_runs]")
+        .unwrap();
+    for (timestamp, created_at) in [("lease_expires_at", false), ("next_attempt_at", true)] {
+        let mut columns = vec!["state", timestamp, "recovery_examined_at"];
+        if created_at {
+            columns.push("created_at");
+        }
+        columns.push("id");
+        assert!(runs.indexes.iter().any(|index| index.columns == columns));
+    }
+    assert!(runs.columns.iter().any(|column| {
+        column.name == "state" && column.sql_type == "NVARCHAR(450) COLLATE Latin1_General_100_BIN2"
+    }));
 }
 
 #[cfg(feature = "sqlite")]

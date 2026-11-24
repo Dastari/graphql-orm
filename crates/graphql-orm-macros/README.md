@@ -10,8 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.213.0 aligns with the ORM's
+[test harness fixes](../../MIGRATION.md#02120-to-02130-test-harness-coordination).
+
 Version 0.212.0 aligns with the ORM's
-[test harness fixes](../../MIGRATION.md#02110-to-02120-test-harness-coordination).
+[scoped SQLite column drop](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
 
 Version 0.211.0 records the Rust type of described root results for
 schema catalogue composition (#883).

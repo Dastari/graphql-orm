@@ -14,12 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.212.0
+## Unreleased - ORM/macros 0.213.0
 
 - **Fixed (#887, #888).** Compile UI tests coordinate on Cargo's resolved
   target directory. Consumer fixture builds initialize their own target
   directories before launching Cargo.
-  [Migration](MIGRATION.md#02110-to-02120-test-harness-coordination)
+  [Migration](MIGRATION.md#02120-to-02130-test-harness-coordination)
+
+## Unreleased - ORM/macros 0.212.0
+
+- **Fixed (#882).** An admitted owned SQLite migration with a single column
+  drop can preserve unrelated indexes and incoming foreign keys using native
+  `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
+  drop and history updates commit together.
+  [Migration](MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
 
 ## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
 

@@ -10,8 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.212.0 fixes races in compile UI and consumer fixture test setup
-(#887, #888). [Migration](../../MIGRATION.md#02110-to-02120-test-harness-coordination)
+Version 0.213.0 fixes races in compile UI and consumer fixture test setup
+(#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
+
+Version 0.212.0 supports a scoped SQLite column drop in owned migrations
+with unrelated indexes and incoming foreign keys. See the
+[migration note](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
 
 Version 0.211.0 uses schema-bound semantic metadata for described roots
 returning a registered generated entity (#883).
