@@ -89,6 +89,8 @@ impl OwnedPostgres {
                 "--env",
                 &format!("POSTGRES_DB={database}"),
                 POSTGRES_IMAGE,
+                "-c",
+                "statement_timeout=60s",
             ])
             .output()
             .map_err(|_| "failed to invoke the local Docker CLI".to_owned())?;
@@ -226,7 +228,14 @@ pub(crate) async fn owned_database() -> Option<(OwnedServer, Database<ParityBack
 
 #[cfg(feature = "mssql")]
 pub(crate) async fn owned_database() -> Option<(OwnedServer, Database<ParityBackend>)> {
-    use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
+    owned_database_with_options(graphql_orm::db::mssql::MssqlPoolOptions::default()).await
+}
+
+#[cfg(feature = "mssql")]
+pub(crate) async fn owned_database_with_options(
+    options: graphql_orm::db::mssql::MssqlPoolOptions,
+) -> Option<(OwnedServer, Database<ParityBackend>)> {
+    use graphql_orm::db::mssql::MssqlPool;
 
     let server = tokio::time::timeout(
         StdDuration::from_secs(120),
@@ -235,7 +244,7 @@ pub(crate) async fn owned_database() -> Option<(OwnedServer, Database<ParityBack
     .await
     .expect("owned SQL Server startup timed out")
     .expect("owned SQL Server should start");
-    let options = MssqlPoolOptions::default().query_timeout(Some(StdDuration::from_secs(15)));
+    let options = options.query_timeout(Some(StdDuration::from_secs(15)));
     let pool = MssqlPool::connect_ado_external_writable_with(&server.connection_string, options)
         .await
         .expect("ORM should connect only to the owned container");
@@ -259,13 +268,22 @@ pub(crate) async fn apply_parity_migration(
     #[cfg(feature = "mssql")]
     {
         for sql in &plan.statements {
-            tokio::time::timeout(
-                StdDuration::from_secs(15),
-                owned_mssql::execute_batch(&_server.connection_string, sql),
-            )
-            .await
-            .expect("external DDL must finish before its timeout")
-            .unwrap_or_else(|error| panic!("external DDL failed: {error}: {sql}"));
+            execute_sql_server_batch(_server, sql)
+                .await
+                .unwrap_or_else(|error| panic!("external DDL failed: {error}: {sql}"));
         }
     }
+}
+
+#[cfg(feature = "mssql")]
+pub(crate) async fn execute_sql_server_batch(
+    server: &OwnedServer,
+    sql: &str,
+) -> graphql_orm::Result<()> {
+    tokio::time::timeout(
+        StdDuration::from_secs(15),
+        owned_mssql::execute_batch(&server.connection_string, sql),
+    )
+    .await
+    .expect("owned SQL Server batch must finish before its timeout")
 }

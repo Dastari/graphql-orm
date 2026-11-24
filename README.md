@@ -38,6 +38,9 @@ connection and schema policy.
 Schema construction never applies migrations; applications choose and execute
 schema changes explicitly.
 
+Typed transactions support [bounded set-based deletes](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+on opted-in mutable entities.
+
 ## Install
 
 Packages are distributed through Git. Use the

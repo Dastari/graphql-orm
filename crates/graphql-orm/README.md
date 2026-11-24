@@ -10,6 +10,30 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.211.0 uses schema-bound semantic metadata for described roots
+returning a registered generated entity (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+Version 0.210.0 adds two opt-in options for generated updates. One makes
+`ExpectedVersion` required. The other selects assurance per request from the
+typed patch and the locked row. Other entities are unchanged. See the
+[migration guide](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+
+Version 0.209.0 exposes the read-only duplicate-key preflight for hosts
+applying DDL externally. See the
+[migration guide](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
+Version 0.208.0 adds [bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+to typed transactions on SQLite, PostgreSQL and writable SQL Server.
+
+Version 0.207.0 renders SQLite closure read predicates in the original form
+again (#876) and reduces SQL duplication for directly nested closure read
+predicates on PostgreSQL and SQL Server. See the [migration note](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
+Version 0.206.0 exposes full backup and restore on explicitly typed SQLite
+and PostgreSQL handles in multi-backend builds. See the
+[migration guide](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
+
 Version 0.205.0 reduces per-entity compile work for generated Changed
 subscriptions by sharing their stream implementation. See the
 [migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).

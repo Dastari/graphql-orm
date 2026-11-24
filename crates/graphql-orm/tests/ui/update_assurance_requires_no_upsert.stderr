@@ -1,0 +1,5 @@
+error: update_assurance requires mutation_shapes without upsert: an upsert rewrites an existing row without a per-row ExpectedVersion or assurance selection
+ --> tests/ui/update_assurance_requires_no_upsert.rs:8:5
+  |
+8 |     update_assurance(select = "select", levels = "write,elevated")
+  |     ^^^^^^^^^^^^^^^^

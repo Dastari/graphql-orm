@@ -1,0 +1,29 @@
+error: update_assurance requires the generated update mutation
+  --> tests/ui/update_assurance_unsupported_roots.rs:10:5
+   |
+10 |     update_assurance(select = "select_disabled", levels = "write")
+   |     ^^^^^^^^^^^^^^^^
+
+error: update_expected_version = "required" requires mutation_shapes to select update
+  --> tests/ui/update_assurance_unsupported_roots.rs:24:31
+   |
+24 |     update_expected_version = "required"
+   |                               ^^^^^^^^^^
+
+error: update_expected_version = "required" requires mutation_shapes without upsert: an upsert rewrites an existing row without a per-row ExpectedVersion or assurance selection
+  --> tests/ui/update_assurance_unsupported_roots.rs:41:31
+   |
+41 |     update_expected_version = "required"
+   |                               ^^^^^^^^^^
+
+error: update_assurance requires mutation_shapes without update_many: a bulk update writes existing rows without a per-row ExpectedVersion or assurance selection
+  --> tests/ui/update_assurance_unsupported_roots.rs:60:5
+   |
+60 |     update_assurance(select = "select_bulk", levels = "write")
+   |     ^^^^^^^^^^^^^^^^
+
+error: update_assurance is not supported with dependent_deletes
+  --> tests/ui/update_assurance_unsupported_roots.rs:75:5
+   |
+75 |     update_assurance(select = "select_dependent", levels = "write")
+   |     ^^^^^^^^^^^^^^^^

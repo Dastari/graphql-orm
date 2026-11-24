@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.158.0
+## Unreleased - 0.159.0
 
 - Codex app-server registrations can opt into resolved entity-reference
   delivery when the host process overrides `start_dispatch_turn`. The host
@@ -22,6 +22,44 @@ supersedes: []
   and empties thread previews as a best-effort defence-in-depth measure.
   Tool-free Codex turns also accept entity references. Direct runtime calls
   permanently send markers (#721).
+
+## Unreleased - 0.158.0
+
+- **Action needed.** Apply the checked SQL Server schema upgrade so claim and
+  expired-lease recovery candidate reads can seek on run state (#848).
+- **Action needed.** Drain workers on all backends before opening the successor
+  epoch under AI schema module 0.85.0.
+
+## Unreleased - 0.157.0
+
+- **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier
+  can admit replacement of the legacy approval lookup index with the unique
+  `tool_call_id` index. The live index must match the legacy definition, and
+  duplicate approval keys stop the upgrade before any DDL.
+  [Migration](MIGRATION.md#01560-to-01570)
+
+## Unreleased - 0.156.0
+
+Model-context measurement for the fixed capability broker (#551). Requires AI
+tool profiles 0.28.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change, and no AI schema module change. See the
+[migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
+
+- **Added:** the `capability_context_benchmark` example (requires the
+  `sqlite` feature) stamps a realistic generated entity family across 1, 10
+  and 100 independent targets and drives the version 2 broker as the
+  coordinator does, including the coordinator's describe steps (the exact
+  model definition and its fingerprint, the signature, and the describe byte
+  bounds). It reports first-turn definition bytes, discover,
+  describe and `describe_type` result bytes, discover latency, a restricted
+  caller's candidates, whether an unrelated target's schema change rotates a
+  retained binding, startup time and peak memory, and the bytes eager
+  delivery of the same roots would cost. Results and the measured curve are
+  in [capability discovery and execution](docs/capability-discovery-and-execution.md#model-context-benchmark).
+- **Performance:** with AI tool profiles 0.28.0, a host that supplies one
+  index through `AiCurrentCapabilityIndex` no longer pays a cost that grows
+  with the index on every broker call. Describe and `describe_type` no longer
+  regenerate a capability's compact schema on every call.
 
 ## Unreleased - 0.155.0
 
