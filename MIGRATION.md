@@ -10,6 +10,113 @@ supersedes: []
 
 # Migration Guide
 
+## 0.209.0 to 0.210.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+
+**No action.** Both features are opt-in, and no data migration is needed.
+Entities that declare neither option generate byte-identical SDL, operation
+and semantic catalogues and fingerprints. Upgrade ORM and macros together.
+
+To opt in, restrict the entity's roots with `mutation_shapes` so it generates
+neither `update_many` nor `upsert`. Then add
+`update_expected_version = "required"`, `update_assurance(select, levels)` or
+both. The update's `ExpectedVersion` becomes `Int!`, so clients that omit it
+must send it. A declared selection changes the update's operation and
+router-export fingerprints. Regenerate exported SDL and catalogues, and
+re-approve any bindings to that operation. Install `AssuranceEnforcement`
+before you enable `update_assurance`: without it, every update of the entity
+is refused with `AUTHORIZATION_MISCONFIGURED`.
+
+The derive also refuses either option on an entity with a relation declaring
+`on_delete = "set_null"`. Use `restrict` or `cascade` instead. The runtime IR
+conversion (`RuntimeSchema::from_static_entities*`) refuses the entity.
+
+Some schema configuration bypasses the checks, and the derive cannot see it,
+so avoid it:
+
+- Do not declare database-only foreign keys that set the table's keys to null.
+- Do not map a guarded table through another entity or a separate migration
+  plan. It could install its own `SET NULL` key or expose its own update.
+- Do not use runtime IR over a guarded table that you write by hand or
+  deserialize. It bypasses these protections.
+
+The caller can observe the level a selector chooses, because the update either
+succeeds or is refused for step-up. Write selectors that branch only on the
+patch and on fields the writing principal may read. A selector error or panic
+reaches the client only as `INTERNAL_ERROR`. No ORM write runs before the
+selector. Host SQL in a filter or policy predicate runs inside the same
+transaction, and any write it makes rolls back on refusal.
+See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
+and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+## 0.208.0 to 0.209.0: external migration preflight
+
+**No action.** Upgrade ORM and macros together. Hosts applying DDL externally
+can call `database.schema().preflight_unique_indexes(&plan).await?` before any
+migration statements. Use a connection that can read all affected rows and
+quiesce concurrent writes and schema changes through application. Repeated
+keys return `UniqueIndexDuplicates`. No data migration is needed for this API.
+
+## 0.207.0 to 0.208.0: bounded set-based deletes
+
+**No action.** Upgrade ORM and macros together. Opt in per entity to call
+`MutationContext::delete_keys_set_bounded` or `delete_where_set_bounded`
+inside a `StateMachine` transaction. Existing delete APIs keep their
+behavior. Review the
+[set-delete contract](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+before implementing `SetDeleteEntity`.
+
+## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
+
+**No action.** SQLite renders every closure read predicate, single-level and
+nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
+on 0.200.0 through 0.206.0 were exposed only if a SQLite closure walks a
+pointer column whose collation treats values as equal that the key column
+distinguishes, for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY`
+key. There, pointers such as `'a'` and `'A'`, or `'a'` and `'a '`, reached at
+the same depth were followed only once. An `Any` closure could then deny a
+row that the original rendering admits. A randomized search found no case
+that admitted extra rows, but over-admission is not proven impossible: SQLite
+does not guarantee which of several equal pointers it keeps.
+
+On PostgreSQL and SQL Server, a root closure whose target is itself a closure
+over built-in column tests and NULL checks can reuse the inner walk's
+three-valued result, with fewer SQL fragments and bind parameters. PostgreSQL
+and SQL Server single-level closures keep their 0.200.0 rendering. The policy
+admits the same rows as the original rendering on SQLite, PostgreSQL, and SQL
+Server, including text pointers and targets with declared collations and
+binds whose type differs from the column's. Where PostgreSQL or SQL Server
+cannot compare a pointer and key with different collations, both renderings
+fail the statement. Composition limits still apply. Applications that
+snapshot generated policy SQL may need to refresh those snapshots. Refs #785.
+
+## 0.205.0 to 0.206.0: backend-typed backup runtime
+
+**No action.** Upgrade ORM and macros together. SQLite and PostgreSQL
+`Database<B>` handles expose full backup and restore even when Cargo enables
+multiple ORM backends. Incremental backup still requires a single ORM backend
+with `change-journal`: in a multi-backend build `ensure_change_journal_table`,
+`ensure_change_journal_recorder` and `export_changes*` exist but always return
+an error. Use backup 0.30.0 from the same reviewed workspace
+revision to select a typed adapter with `orm-sqlite` or `orm-postgres`.
+
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
+
+## 0.203.0 to 0.204.0: externally managed backup and restore
+
+**No action.** The default backup and restore behavior stays the same. No
+data migration is needed. For a database whose backup and restore are owned
+by another product, opt in with
+`DatabaseBuilder::externally_managed_backup_restore(true)` on every handle.
+Backup, restore, and explicit restore-fencing operations return
+`BACKUP_RESTORE_EXTERNALLY_MANAGED`. Use the same reviewed workspace revision
+for ORM and backup 0.29.0 if you use its ORM adapter.
+See [backup ownership](docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore).
+
 ## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
 
 **Action needed** for SQL Server hosts with `append_only = true` entities.

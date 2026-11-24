@@ -48,5 +48,6 @@ mod skip_false_compat_ui;
 mod spatial_field_ui;
 mod stable_type_id_ui;
 mod transform_write_ui;
+mod update_assurance_ui;
 mod upsert_validation_ui;
 mod zero_public_write_inputs_ui;

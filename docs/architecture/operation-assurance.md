@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -221,6 +221,72 @@ operation identity.
 The manifest is advisory client-codegen input. It can prepare step-up UX, but
 it cannot authorize an operation, extend a session deadline, or replace the
 server evaluator.
+
+## Conditional Assurance On Generated Updates
+
+A registry classification is fixed per operation and is decided before the
+resolver reads anything. Some writes need a level that depends on the change.
+For example, a rename might need ordinary write assurance while a state transition
+needs elevated assurance. An entity opts in with
+`update_assurance(select = "path", levels = "write,elevated")`. The derive
+contract is in the
+[macro reference](../reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+The owning service enforces the selection:
+
+- The registry classification of the update is enforced first, as for every
+  root, before any database work.
+- Inside the write transaction, the row is first locked, authorized and
+  version-checked, then write transforms and field policies run.
+  `enforce_selected_assurance` then refuses a schema without
+  `AssuranceEnforcement` with `AUTHORIZATION_MISCONFIGURED`, before the
+  selector is called.
+- The typed selector receives the patch the write applies and the locked row,
+  and returns one declared level. A selector error becomes one fixed
+  `INTERNAL_ERROR`; its text is logged server-side only. An undeclared level is
+  refused with `AUTHORIZATION_MISCONFIGURED`. Otherwise the installed
+  evaluator enforces that policy ID for the operation's actor class.
+- A refusal returns before the `Before` mutation hook and the `UPDATE`. No
+  ORM write path runs before the selector. Host SQL in a filter or policy
+  predicate runs inside the same transaction, and any write it makes rolls back
+  on refusal. No `Changed` event is committed.
+- A selector panic is caught and becomes the same fixed `INTERNAL_ERROR`, and
+  the transaction rolls back. A row whose managed version cannot advance is
+  refused before the selector runs.
+
+The selection is a disclosure channel. The caller sees success or a step-up
+refusal, and so learns which level the selector chose. The selector receives
+the full locked row once write access is authorized, and read authorization is
+not re-checked for it. A selector must branch only on the patch and on fields
+the writing principal may read.
+
+The operation catalogue describes the contract to callers and routers.
+`GeneratedGraphqlOperationDescriptor::conditional_assurance()` (and the resolved
+descriptor's accessor) returns a `GraphqlConditionalAssurance`. It lists every
+level a request may need, sorted, and reports `is_conditional()`. The
+declaration is part of the operation fingerprint and so of the router-export
+fingerprint. Operations without one keep their fingerprints and debug output.
+
+The description is advisory, as the manifest is:
+
+- A caller can prepare step-up UX for the highest listed level. Only the owning
+  service knows which level a request needs, because the selection reads the
+  locked row.
+- A router must not refuse or admit a request from the listed levels. It
+  forwards the request, and the subgraph returns the authoritative denial, such
+  as `STEP_UP_REQUIRED` or `FORBIDDEN`.
+- The registry manifest and the semantic catalogue are unchanged. The update's
+  manifest entry shows its baseline classification only.
+
+An entity with a conditional selection must not generate `update_many` or
+`upsert`, or declare a `set_null` relation. Each would rewrite rows without a
+per-row selection, so the derive refuses the entity. The runtime IR conversion
+refuses the entity as well, however its metadata was built. Some host schema
+configuration is outside the derive's view: a foreign key that exists only in
+the database, a second mapping of the same physical table, and runtime IR the
+host writes by hand. The
+[macro reference](../reference/graphql-orm/macros-and-attributes.md#paths-the-update-options-do-not-cover)
+lists these paths.
 
 ## Rollback
 

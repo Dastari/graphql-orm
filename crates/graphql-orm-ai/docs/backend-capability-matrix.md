@@ -99,7 +99,7 @@ trailing spaces. The missing-expiry read also supplies a plain state
 membership predicate that SQL Server can use as a seek key. The candidate
 bounds and the lease, epoch, and row-version checks remain in force.
 Existing stores apply the
-[run-state migration preflight](../MIGRATION.md#01560-to-01570) before
+[run-state migration preflight](../MIGRATION.md#01570-to-01580) before
 the external schema plan.
 
 The owned SQL Server 2022 comparison used separate 3 GiB containers with

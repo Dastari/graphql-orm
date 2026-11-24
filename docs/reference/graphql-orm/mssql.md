@@ -145,12 +145,48 @@ mismatched hostname. The transport fixture checks the encryption default, each
 explicit opt-in, session reset between checkouts, pool timeouts and a server
 default of `NOCOUNT ON`.
 
+## Externally managed backup and restore
+
+Use this setting for databases whose backup and restore are owned by another
+product:
+
+```rust
+let database = Database::<MssqlBackend>::builder(pool)
+    .schema_policy(SchemaPolicy::ExternalWritable)
+    .externally_managed_backup_restore(true)
+    .build();
+```
+
+Set this on every ORM handle for the database, since a default handle can
+still back it up, restore it, or fence it where supported, and opted-in
+writers can keep writing during that restore. On PostgreSQL and SQLite,
+`Database::new(db.pool().clone())` drops the setting.
+
+The SQL Server database handle and its pool handle run ordinary statements
+without checking or requiring
+`dbo.__graphql_orm_restore_marker` and without acquiring a restore-fencing
+application lock. The other product is responsible for coordinating access
+during its restore. The setting leaves the schema policy and the pool's
+physical access mode in effect.
+
+Before opting in for an existing database, use a default handle to check
+`restore_in_progress()` and resolve any interrupted restore, or drop the
+marker table after independently confirming the database is fully restored.
+An opted-in handle skips that check and can serve partially restored data.
+
+Calling `restore_in_progress`, `ensure_no_restore_in_progress`,
+`begin_restore`, `resume_restore` or `database.pool().install_restore_marker()`
+returns `BACKUP_RESTORE_EXTERNALLY_MANAGED` before accessing SQL Server.
+Schema validation continues without querying restore state. See
+[backup ownership](backup-runtime.md#externally-managed-backup-and-restore)
+for the backend-neutral policy.
+
 ## Restore-in-progress marker
 
-The ORM does not restore SQL Server databases. A host that restores one with
+Restore fencing is enabled by default. A host that restores SQL Server with
 its own statements may commit table by table, so a failure can leave the
-database partly restored, and a service that is already running must not read
-or write the tables meanwhile. A lock and a marker provide that:
+database partly restored. The ORM uses a lock and a marker to keep readers
+and writers away from the partly restored tables:
 
 ```rust
 let mut restore = database

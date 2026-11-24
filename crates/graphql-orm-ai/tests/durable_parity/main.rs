@@ -2255,3 +2255,24 @@ async fn owned_postgres_broker_v2_entity_capability_executes_one_root_through_th
         .expect("ORM should connect only to the owned container");
     broker_entity_parity::entity_capability_round_trip(database).await;
 }
+
+#[path = "../support/legacy_approval_upgrade.rs"]
+mod legacy_approval_upgrade;
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn owned_postgres_upgrades_legacy_approval_lookup_index() {
+    let Some((_server, database)) = owned_database().await else {
+        return;
+    };
+    legacy_approval_upgrade::legacy_approval_upgrade(&database).await;
+}
+
+#[cfg(feature = "mssql")]
+#[tokio::test]
+async fn owned_mssql_upgrades_legacy_approval_lookup_index() {
+    let Some((_server, database)) = owned_database().await else {
+        return;
+    };
+    legacy_approval_upgrade::legacy_approval_upgrade(&database).await;
+}

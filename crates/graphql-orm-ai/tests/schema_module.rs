@@ -704,3 +704,18 @@ fn sql_server_run_state_has_an_ordered_candidate_index() {
         column.name == "state" && column.sql_type == "NVARCHAR(450) COLLATE Latin1_General_100_BIN2"
     }));
 }
+
+#[cfg(feature = "sqlite")]
+#[path = "support/legacy_approval_upgrade.rs"]
+mod legacy_approval_upgrade;
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_upgrades_legacy_approval_lookup_index() {
+    let database = graphql_orm::prelude::Database::<graphql_orm_ai::AiOrmBackend>::connect_sqlite(
+        "sqlite::memory:",
+    )
+    .await
+    .expect("open SQLite fixture");
+    legacy_approval_upgrade::legacy_approval_upgrade(&database).await;
+}
