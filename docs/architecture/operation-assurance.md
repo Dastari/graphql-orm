@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -161,6 +161,13 @@ returns the pre-pass refusal. Subscriptions are checked before registration. `Ru
 module roots as `runtime` origin operations and host fields as `custom`
 operations. Coordinates the builder already holds keep their registration.
 See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).
+
+Not yet covered ([#902](https://github.com/Dastari/graphql-orm/issues/902)):
+runtime `node(id:)` checks only `Query.node`, runtime child layers do not check
+the target collection's query roots, and generated Federation `_entities`
+checks only the entity's get-by-id root. Until that is fixed, require
+`Query.node` (it covers every runtime collection) or enforce step-up inside
+`RuntimeReadAuthority`, which sees each layer.
 
 ## Authoritative Server Enforcement
 

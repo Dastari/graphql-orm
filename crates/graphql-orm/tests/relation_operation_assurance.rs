@@ -232,6 +232,25 @@ fn assert_read(response: Response, operation: &str, expected: &str) {
     );
 }
 
+#[test]
+fn generated_query_root_list_names_every_enabled_root() {
+    // Relation traversal enforces exactly these coordinates. If the const is
+    // renamed or moved, the macro's empty fallback would check nothing.
+    let mut roots = AssuranceEntry::__GOM_QUERY_ROOT_FIELDS.to_vec();
+    roots.sort_unstable();
+    assert_eq!(
+        roots,
+        [
+            "assuranceEntries",
+            "assuranceEntriesAggregate",
+            "assuranceEntriesKeyset",
+            "assuranceEntriesScan",
+            "assuranceEntriesSearch",
+            "assuranceEntry",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn each_target_query_root_protects_relation_reads() {
     for root in [
