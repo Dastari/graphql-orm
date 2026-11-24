@@ -10,9 +10,15 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.159.0 uses published `agql-auth` `v0.27.0` and ORM 0.213.0. Hosts that
+AI 0.160.0 uses published `agql-auth` `v0.27.0` and ORM 0.214.0. Hosts that
 pass Auth types must adopt the same Git tag.
-See the [migration guide](MIGRATION.md#01580-to-01590).
+See the [migration guide](MIGRATION.md#01590-to-01600).
+
+AI 0.159.0 adds opt-in resolved entity-reference delivery for Codex app-server.
+The host process must implement the consuming dispatch hook. Direct runtime
+dispatch methods always send unavailable markers. Review local process
+retention before opting in. See the
+[migration guide](MIGRATION.md#01580-to-01590).
 
 AI 0.157.0 supports upgrading the pre-0.83 approval lookup index to the
 unique tool-call key with live schema verification and duplicate preflight.
@@ -33,7 +39,12 @@ AI 0.153.0 binds compaction to the session's pinned provider and model, checks
 the lease before adopting tool checkpoints, and reads restore facts in bounded
 pages. See [migration guidance](MIGRATION.md#01520-to-01530).
 
-AI 0.152.0 adds an opt-in for resolved [entity references](docs/entity-references.md#adapters-for-a-local-process) on the local-harness and Grok ACP adapters. It is off by default: a registration opts in with `with_resolved_entity_reference_delivery` and a freshness bound, and until then, and always on the Codex app-server adapter and the direct runtime dispatch methods, every reference is the unavailable marker. No signature, GraphQL SDL or schema change. See the [migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters) before opting in: a local process retains what it is sent.
+AI 0.152.0 added opt-in resolved [entity references](docs/entity-references.md#adapters-for-a-local-process)
+for the local-harness and Grok ACP adapters. Hosts opt in per registration
+with `with_resolved_entity_reference_delivery` and a freshness bound.
+Review local process retention before enabling delivery. See the
+[migration guide](MIGRATION.md#01512-to-01520-opt-in-entity-references-on-local-process-adapters).
+
 Version 0.151.2 emits fixed skill content-protection reason codes in debug
 tracing and reuses compiled proposal validators.
 See the [migration guide](MIGRATION.md#01512-skill-content-protection-diagnostics).

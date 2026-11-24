@@ -41,7 +41,7 @@ non-empty list where scopes or roles are required.
 If the host uses Auth's rotating JWKS cache, set
 `stale_policy: StaleKeyPolicy::Reject` to preserve its prior fail-closed default
 when refreshing keys fails. Review the
-[workspace migration](../../MIGRATION.md#02120-to-02130-agql-auth-v0270)
+[workspace migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270)
 before deploying validators alongside older issuers. No router data migration
 is needed.
 

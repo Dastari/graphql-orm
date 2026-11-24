@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.158.0 to 0.159.0
+## 0.159.0 to 0.160.0
 
 **Action needed.** Move direct Auth dependencies to the published `v0.27.0`
 Git tag in the same upgrade and refresh the host lockfile. AI's principal and
@@ -19,9 +19,20 @@ must now set `required_amr` and `required_context`. Auth denies accepted MFA
 with no recorded method. AI continues to refuse delegated credentials for
 durable work and rehydrates current authority at execution checkpoints.
 
-AI 0.159.0 uses ORM 0.213.0. There is no AI schema or AI data migration for this
-update. See the [workspace migration](../../MIGRATION.md#02120-to-02130-agql-auth-v0270)
+AI 0.160.0 uses ORM 0.214.0. There is no AI schema or AI data migration for this
+update. See the [workspace migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270)
 for Auth store and token changes.
+
+## 0.158.0 to 0.159.0
+
+**No action.** Resolved reference delivery to Codex app-server requires a
+registration opt-in and a process implementation that passes the dispatch to
+the protocol actor's consuming write. Existing process implementations keep
+receiving markers. The actor filters echoed `userMessage` items and sets
+existing thread `preview` values to the empty string for every host,
+regardless of opt-in. Hosts that display these previews will receive empty
+strings. No data migration is needed. See
+[per-message entity references](docs/entity-references.md#adapters-for-a-local-process).
 
 ## 0.157.0 to 0.158.0
 

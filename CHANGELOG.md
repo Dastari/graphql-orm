@@ -14,12 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.213.0
+## Unreleased - ORM/macros 0.214.0
 
 - **Changed (#857).** The `auth-agql` adapter uses published `agql-auth`
   `v0.27.0`, locked to `71a3acee5942bd5b6aac57dcaccbb6391b383880`.
   Upgrade direct Auth dependencies with the ORM.
-  [Migration](MIGRATION.md#02120-to-02130-agql-auth-v0270)
+  [Migration](MIGRATION.md#02130-to-02140-agql-auth-v0270)
 
 ## Unreleased - ORM/macros 0.212.0
 

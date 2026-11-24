@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.212.0 to 0.213.0: agql-auth v0.27.0
+## 0.213.0 to 0.214.0: agql-auth v0.27.0
 
 **Action needed** for hosts with direct `agql-auth` dependencies. Upgrade
 ORM/macros together and choose the same Auth Git tag in the same upgrade:

@@ -23,7 +23,7 @@ not enough: Cargo treats a revision, tag and path as different sources, which
 can split principal types. Refresh the host lockfile and verify one Auth source
 across ORM, AI, router and host. Git release metadata retains the full locked
 revision; `tag` is present only for an actually selected published tag. See the
-[Auth 0.27.0 migration](../../../MIGRATION.md#02120-to-02130-agql-auth-v0270).
+[Auth 0.27.0 migration](../../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
 
 Authenticate the credential before constructing a bundle. Signature/secret,
 issuer, audience and transport proof validation belong to the trusted host
