@@ -110,9 +110,15 @@ authorization](docs/architecture/authentication-and-authorization.md),
 [operation assurance](docs/architecture/operation-assurance.md), and the
 [GraphQL workflow](docs/development/graphql-workflow.md).
 
-SQL Server hosts can declare column types and opt in to per-pool parameter
-binding for eligible VARCHAR comparison filters. SQL Server checks the
-column collation and verifies that the operand converts losslessly.
+SQL Server hosts can opt in to native integer parameter widths per pool.
+String filters bind as NVARCHAR because the 0.215.0 ASCII VARCHAR conversion
+could match different rows under legacy `SQL_` collations. In the fixture,
+Windows CP1252 and UTF-8 VARCHAR indexes sought at 2 logical reads with
+NVARCHAR and 10 with conversion checks. The `SQL_` index scanned at 31 reads
+with NVARCHAR and sought at 2 with the 0.215.0 conversion. **Action needed**
+if you depended on that seek. Move to a Windows column collation or index a
+persisted computed Unicode column for the affected comparison. Single-row
+and bulk updates validate unsigned inputs before selecting targets.
 [SQL Server parameter types](docs/reference/graphql-orm/mssql.md#typed-column-parameters)
 
 ## Documentation

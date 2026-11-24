@@ -75,7 +75,6 @@ pub struct MssqlTypedValue {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum MssqlParameterType {
-    VarChar(Option<u16>),
     Int,
     SmallInt,
     TinyInt,
@@ -113,30 +112,6 @@ impl SqlValue {
             }),
             None => self,
         }
-    }
-
-    // The SQL Server driver proves eligibility once it knows the physical
-    // column's collation and can check the actual conversion.
-    pub(super) fn mssql_varchar_comparison(value: String, sql_type: &str) -> Self {
-        if let Some(length) = sql_type
-            .strip_prefix("VARCHAR(")
-            .and_then(|s| s.strip_suffix(')'))
-        {
-            let length = if length == "MAX" {
-                None
-            } else if let Ok(length) = length.parse::<u16>()
-                && (1..=8000).contains(&length)
-            {
-                Some(length)
-            } else {
-                return Self::String(value);
-            };
-            return Self::MssqlTyped(MssqlTypedValue {
-                value: Box::new(Self::String(value)),
-                parameter_type: MssqlParameterType::VarChar(length),
-            });
-        }
-        Self::String(value)
     }
 
     /// Convert an unsigned SQL Server operand without wrapping through BIGINT.

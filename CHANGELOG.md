@@ -16,15 +16,18 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.223.0
 
-- **Fixed (#860).** SQL Server's opt-in typed parameters preserve Unicode
-  results under legacy `SQL_` collations such as the common default
-  `SQL_Latin1_General_CP1_CI_AS`. In 0.215.0, ASCII VARCHAR conversion could
-  change results, especially for `ne` and `not_in`. These predicates lose the
-  0.215.0 conversion-based index seek. Review affected plans if you relied on
-  that seek. Eligible direct VARCHAR reads use a cached per-table catalog
-  lookup and an in-statement collation and code-page round-trip check.
-- **Fixed (#860).** SQL Server repository updates validate unsigned operands
-  before selecting targets, including requests that would affect zero rows.
+- **Fixed (#860).** Removed the 0.215.0 ASCII VARCHAR conversion because it
+  could match different rows under legacy `SQL_` collations. String filters
+  bind as NVARCHAR. Windows CP1252 and UTF-8 VARCHAR indexes sought at 2
+  logical reads in the fixture. With conversion proof they used 10 reads.
+  The `SQL_` fixture index scanned at 31 reads with NVARCHAR, compared with
+  the 2-read VARCHAR seek in 0.215.0. **Action needed** for hosts that relied
+  on the `SQL_` seek. Move the column to a Windows collation or index a
+  persisted computed Unicode column for the affected comparison.
+  [Migration](MIGRATION.md#02150-to-02230-sql-server-varchar-and-bulk-update-validation)
+- **Fixed (#860).** SQL Server single-row and bulk repository updates validate
+  unsigned operands before selecting targets, including requests that would
+  affect zero rows. Opt-in native integer widths and BIGINT fallback remain.
 
 ## Unreleased - ORM/macros 0.215.0
 

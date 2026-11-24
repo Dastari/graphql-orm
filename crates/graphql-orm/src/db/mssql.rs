@@ -4,7 +4,6 @@ mod notifications;
 #[path = "../../tests/support/owned_mssql.rs"]
 pub(crate) mod owned_mssql;
 mod transport;
-mod varchar;
 pub use notifications::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
     MssqlQueryNotificationMessage,
@@ -189,12 +188,9 @@ impl MssqlPoolOptions {
         self.typed_temporal_parameters
     }
 
-    /// Opt in to binding declared SQL Server types for generated scalar parameters.
+    /// Opt in to native widths for eligible declared SQL Server integer parameters.
     ///
-    /// Ordinary VARCHAR comparisons may use a parameter-side conversion when
-    /// the physical collation preserves Unicode comparison rules and the value
-    /// round-trips exactly. Pattern matching and authorization predicates use
-    /// Unicode binding. Disabled by default.
+    /// String operands use Unicode binding. Disabled by default.
     pub fn typed_parameters(mut self, enabled: bool) -> Self {
         self.typed_parameters = enabled;
         self
@@ -376,7 +372,6 @@ struct MssqlPoolInner {
     config: Config,
     access_mode: MssqlAccessMode,
     options: MssqlPoolOptions,
-    varchar_collations: varchar::CollationCache,
     idle: Mutex<Vec<IdleClient>>,
     permits: Arc<Semaphore>,
 }
@@ -549,7 +544,6 @@ impl MssqlPool {
                 access_mode,
                 permits: Arc::new(Semaphore::new(options.max_connections)),
                 options,
-                varchar_collations: varchar::CollationCache::default(),
                 idle: Mutex::new(Vec::new()),
             }),
         }
@@ -573,7 +567,9 @@ impl MssqlPool {
         if self.externally_managed_backup_restore {
             return self.fetch_rows_ungated(sql, values).await;
         }
-        let result = self.fetch_rows_autocommit(sql, values, true).await;
+        let result = self
+            .fetch_rows_ungated(&restore_gated(sql, true), values)
+            .await;
         self.typed_restore_refusal(result).await
     }
 
@@ -584,42 +580,14 @@ impl MssqlPool {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<Vec<MssqlRow>> {
-        self.fetch_rows_autocommit(sql, values, false).await
-    }
-
-    async fn fetch_rows_autocommit(
-        &self,
-        sql: &str,
-        values: &[SqlValue],
-        restore_fenced: bool,
-    ) -> crate::Result<Vec<MssqlRow>> {
         let mut lease = self.acquire().await?;
         let result = self
-            .bounded(async {
-                let converted = if self.options().typed_parameters {
-                    catch_driver_panic(
-                        varchar::render(
-                            &mut lease.client,
-                            &self.inner.varchar_collations,
-                            sql,
-                            values,
-                        ),
-                        StatementFailure::from,
-                    )
-                    .await?
-                } else {
-                    None
-                };
-                let sql = converted.as_deref().unwrap_or(sql);
-                let fenced;
-                let sql = if restore_fenced {
-                    fenced = restore_gated(sql, true);
-                    &fenced
-                } else {
-                    sql
-                };
-                fetch_rows_with_client(&mut lease.client, sql, values, self.options()).await
-            })
+            .bounded(fetch_rows_with_client(
+                &mut lease.client,
+                sql,
+                values,
+                self.options(),
+            ))
             .await;
         self.finish(lease, result).await
     }
@@ -2145,9 +2113,7 @@ impl MssqlParamValue {
                             .transpose()
                             .ok()
                             .map(ColumnData::U8),
-                        MssqlParameterType::VarChar(_) | MssqlParameterType::UnsignedOverflow => {
-                            None
-                        }
+                        MssqlParameterType::UnsignedOverflow => None,
                     };
                     if let Some(narrowed) = narrowed {
                         return Ok(Self::Native(narrowed));

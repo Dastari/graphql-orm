@@ -852,27 +852,28 @@ the value fits. Wider comparison operands use BIGINT. Generated unsigned
 operands that exceed their declared integer range are refused with
 `INVALID_INPUT`, including with the option off.
 
-Ordinary generated VARCHAR equality, inequality and membership filters can
-use a parameter-side VARCHAR conversion for a direct single-table read.
-On a cache miss, SQL Server looks up the table's physical VARCHAR collations
-in `sys.columns`. Each pool caches results for up to 128 tables for five
-minutes. The read statement checks the physical collation again under its
-schema stability lock, so a stale cached collation falls back to Unicode.
-SQL Server also checks that the entire operand round-trips byte for byte.
-This allows values such as `café` in a compatible Windows CP1252 collation
-and Unicode text in compatible UTF-8 collations. The conversion accounts for
-the encoded byte length even when it exceeds the declared column width.
+String filters, including filters on declared VARCHAR columns, bind as
+NVARCHAR. The ASCII VARCHAR conversion introduced in 0.215.0 could match
+different rows under legacy `SQL_` collations and was removed.
 
-Legacy `SQL_` collations can compare VARCHAR and NVARCHAR differently even
-for a lossless conversion. Binary collations (BIN and BIN2, including BIN2
-UTF-8) can also distinguish encoded bytes that decode to the same Unicode
-text. These collations, comparisons without proof, and membership lists
-with more than 32 operands retain Unicode binding. NVARCHAR columns,
-undeclared types, pattern operands (`contains`, `starts_with`, `ends_with`,
-`LIKE` and similarity), write values, transactional reads, key and cursor
-lookups, and authorization predicates also use Unicode parameters. Generated
-repository updates validate unsigned inputs even when they would affect zero
-rows.
+In the disposable SQL Server fixture, equality filters on Windows CP1252
+and UTF-8 VARCHAR indexes used an index seek with the NVARCHAR parameter.
+The fixture recorded these plans and logical reads.
+
+| Column collation | Unicode bind | VARCHAR conversion |
+| --- | --- | --- |
+| Windows CP1252 | Seek, 2 reads | Seek, 10 reads with conversion checks |
+| Windows UTF-8 | Seek, 2 reads | Seek, 10 reads with conversion checks |
+| `SQL_Latin1_General_CP1_CI_AS` | Scan, 31 reads | Seek, 2 reads with the 0.215.0 conversion |
+
+**Action needed** for hosts that relied on the 0.215.0 seek on a `SQL_`
+column. After reviewing comparison rules, move the column to a Windows
+collation or direct the affected comparison to an indexed persisted
+computed Unicode column.
+
+Generated single-row and bulk repository updates validate unsigned inputs
+before selecting targets, including in transactions and when zero rows
+would be updated.
 
 ### Native temporal parameters
 

@@ -10,8 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.223.0 validates SQL Server bulk update unsigned inputs before
-selecting targets, including updates that would affect zero rows.
+Version 0.223.0 validates SQL Server unsigned inputs before selecting targets
+for single-row and bulk updates, including updates that would affect zero rows.
 See the [migration guide](../../MIGRATION.md#02150-to-02230-sql-server-varchar-and-bulk-update-validation).
 
 Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer

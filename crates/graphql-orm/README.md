@@ -10,9 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.223.0 verifies the physical SQL Server collation and the operand's
-code-page round trip before using a typed VARCHAR comparison.
-See [typed SQL Server parameters](../../docs/reference/graphql-orm/mssql.md#typed-column-parameters).
+Version 0.223.0 uses Unicode string binds for SQL Server filters, including
+VARCHAR columns. The 0.215.0 ASCII VARCHAR conversion could change matches
+under legacy `SQL_` collations. Windows-collation VARCHAR indexes can seek
+with Unicode binds. See the [migration guide](../../MIGRATION.md#02150-to-02230-sql-server-varchar-and-bulk-update-validation)
+if you relied on the 0.215.0 seek. Opt-in integer widths and unsigned
+range validation remain.
 
 Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
 column identifier parsing in ALTER COLUMN collation lookups.

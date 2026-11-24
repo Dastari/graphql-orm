@@ -12,19 +12,25 @@ supersedes: []
 
 ## 0.215.0 to 0.223.0: SQL Server VARCHAR and bulk update validation
 
-**Action needed** if you rely on the 0.215.0 VARCHAR index seek under a
-legacy `SQL_` collation. Review affected query plans before upgrading. With
-`MssqlPoolOptions::typed_parameters(true)`, 0.215.0 converted ASCII operands
-to VARCHAR even under common defaults such as `SQL_Latin1_General_CP1_CI_AS`.
-VARCHAR and NVARCHAR can match different rows under those collations,
-especially for `ne` and `not_in`. This release restores Unicode comparison
-results and those columns lose the 0.215.0 conversion-based seek.
+**Action needed** for hosts that relied on the 0.215.0 VARCHAR seek on
+columns using a legacy `SQL_` collation. Move the column to a Windows
+collation after reviewing its comparison rules, or add a persisted computed
+Unicode column and index it for the affected comparison.
 
-Upgrade ORM and macros together. Eligible direct reads look up the table's
-physical VARCHAR collations on a per-pool cache miss. Compatible Windows
-linguistic collations can use a parameter-side conversion after an exact
-round-trip check. Repository updates return `INVALID_INPUT` for out-of-range
-unsigned values before selecting targets, even when no rows would be updated.
+Upgrade ORM and macros together. The 0.215.0 ASCII VARCHAR conversion could
+match different rows under `SQL_` collations, including
+`SQL_Latin1_General_CP1_CI_AS`. String filters now bind as NVARCHAR with
+either pool setting. In the SQL Server fixture, a `SQL_` index scanned at
+31 logical reads with NVARCHAR, compared with a 2-read VARCHAR seek in
+0.215.0. The Windows CP1252 and UTF-8 VARCHAR indexes already sought with
+NVARCHAR at 2 reads each. A tested VARCHAR rewrite with per-statement
+collation and conversion checks used 10 reads on each Windows index.
+
+Opt-in integer narrowing to INT, SMALLINT and TINYINT still uses BIGINT when
+a signed comparison operand exceeds the declared width. Repository updates,
+including bulk and transactional updates, return `INVALID_INPUT` for
+out-of-range unsigned inputs before selecting targets, even when no rows
+would be updated.
 See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
 
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
