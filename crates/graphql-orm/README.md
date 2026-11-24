@@ -12,7 +12,16 @@ supersedes: []
 
 Version 0.212.0 supports a scoped SQLite column drop in owned migrations
 with unrelated indexes and incoming foreign keys. See the
-[migration note](../../MIGRATION.md#02090-to-02120-scoped-sqlite-column-drop).
+[migration note](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
+
+Version 0.211.0 uses schema-bound semantic metadata for described roots
+returning a registered generated entity (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+Version 0.210.0 adds two opt-in options for generated updates. One makes
+`ExpectedVersion` required. The other selects assurance per request from the
+typed patch and the locked row. Other entities are unchanged. See the
+[migration guide](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
 
 Version 0.209.0 exposes the read-only duplicate-key preflight for hosts
 applying DDL externally. See the

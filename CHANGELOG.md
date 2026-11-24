@@ -20,7 +20,44 @@ for historical context.
   drop can preserve unrelated indexes and incoming foreign keys using native
   `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
   drop and history updates commit together.
-  [Migration](MIGRATION.md#02090-to-02120-scoped-sqlite-column-drop)
+  [Migration](MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
+
+## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
+
+- **Fixed (#883).** Described roots returning a registered generated entity
+  use its schema-bound semantic metadata, including generated list
+  relationship page limits. When distinct Rust types claim the same GraphQL
+  name, catalogue composition reports both sources.
+  [Migration](MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+## Unreleased - ORM/macros 0.210.0, operation catalogue 0.13.0
+
+- **Added (#851).** `#[graphql_entity(update_expected_version = "required")]`
+  makes the generated update's `ExpectedVersion` non-null (`Int!`) in the SDL
+  and the operation catalogue. An omitted or null value is refused by
+  validation, a stale one with `CONFLICT`, and a matching one advances the
+  managed version once. Delete keeps its optional argument.
+- **Added (#851).** `#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]`
+  selects the generated update's assurance policy per request from the typed
+  patch and the locked row. The selection runs inside the write transaction,
+  after the row is locked and before any write. A refusal rolls back the
+  transaction with its related writes and commits no `Changed` event.
+  `UpdateAssuranceInput` and `enforce_selected_assurance` are new. Enforcement
+  fails closed with `AUTHORIZATION_MISCONFIGURED` for an undeclared level, or
+  for a schema without `AssuranceEnforcement`, which is checked before the
+  selector runs. A selector error or panic reaches the client only as a fixed
+  `INTERNAL_ERROR`. A row whose managed version cannot advance is refused
+  before the selector runs. The chosen level is observable to the caller, as the
+  reference documents.
+- **Added (operation catalogue, #851).** `GraphqlConditionalAssurance` and
+  `conditional_assurance()` on generated and resolved descriptors list the
+  levels an operation may require and mark the selection as conditional. The
+  declaration is part of the operation and router-export fingerprints. Both
+  options require an entity that generates neither `update_many` nor `upsert`
+  and declares no `set_null` relation. `RuntimeSchema::from_static_entities*`
+  refuses such entities, whichever typed constructor built their metadata.
+  Entities that opt into neither keep byte-identical SDL, catalogues,
+  fingerprints and debug output.
 
 ## Unreleased - ORM/macros 0.209.0
 

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.209.0 to 0.212.0: scoped SQLite column drop
+## 0.211.0 to 0.212.0: scoped SQLite column drop
 
 **No action.** Upgrade ORM and macros together. An owned SQLite plan whose
 only change is to drop a column now renders SQLite's native `DROP COLUMN`.
@@ -26,6 +26,52 @@ for the single-drop shape. Plans containing a drop and additional steps still
 rebuild or refuse. Run SQLite migrations with no TEMP objects on other
 connections, or use a dedicated migration connection with other connections closed.
 Refs #882.
+
+## 0.210.0 to 0.211.0: Described root result metadata
+
+**No action.** Described roots returning an entity registered in
+`schema_roots!` use the same schema-bound semantic metadata as the
+generated roots (#883). Operation catalogue 0.14.0 uses local Rust type
+identity to detect conflicting declarations. Existing valid SDL and
+fingerprints retain their values.
+
+## 0.209.0 to 0.210.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+
+**No action.** Both features are opt-in, and no data migration is needed.
+Entities that declare neither option generate byte-identical SDL, operation
+and semantic catalogues and fingerprints. Upgrade ORM and macros together.
+
+To opt in, restrict the entity's roots with `mutation_shapes` so it generates
+neither `update_many` nor `upsert`. Then add
+`update_expected_version = "required"`, `update_assurance(select, levels)` or
+both. The update's `ExpectedVersion` becomes `Int!`, so clients that omit it
+must send it. A declared selection changes the update's operation and
+router-export fingerprints. Regenerate exported SDL and catalogues, and
+re-approve any bindings to that operation. Install `AssuranceEnforcement`
+before you enable `update_assurance`: without it, every update of the entity
+is refused with `AUTHORIZATION_MISCONFIGURED`.
+
+The derive also refuses either option on an entity with a relation declaring
+`on_delete = "set_null"`. Use `restrict` or `cascade` instead. The runtime IR
+conversion (`RuntimeSchema::from_static_entities*`) refuses the entity.
+
+Some schema configuration bypasses the checks, and the derive cannot see it,
+so avoid it:
+
+- Do not declare database-only foreign keys that set the table's keys to null.
+- Do not map a guarded table through another entity or a separate migration
+  plan. It could install its own `SET NULL` key or expose its own update.
+- Do not use runtime IR over a guarded table that you write by hand or
+  deserialize. It bypasses these protections.
+
+The caller can observe the level a selector chooses, because the update either
+succeeds or is refused for step-up. Write selectors that branch only on the
+patch and on fields the writing principal may read. A selector error or panic
+reaches the client only as `INTERNAL_ERROR`. No ORM write runs before the
+selector. Host SQL in a filter or policy predicate runs inside the same
+transaction, and any write it makes rolls back on refusal.
+See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
+and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
 
 ## 0.208.0 to 0.209.0: external migration preflight
 

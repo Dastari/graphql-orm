@@ -2056,6 +2056,29 @@ fn generate_graphql_operations_unfiltered(
     } else {
         (quote! {}, quote! { ::std::option::Option::None })
     };
+    // `update_expected_version = "required"` makes only the update's argument
+    // non-null; delete keeps its optional argument (#851).
+    let (update_expected_version_param, update_expected_version_binding) = if managed_version_field
+        .is_some()
+        && entity_meta.update_expected_version_required.is_some()
+    {
+        (
+            quote! {
+                #[graphql(
+                    name = #expected_version_arg_name,
+                    desc = "Required. Apply only if the record's current managed version equals this value; otherwise fail with CONFLICT and write nothing"
+                )]
+                #[__gom_catalogue_type(i64)]
+                expected_version: i64,
+            },
+            quote! { ::std::option::Option::Some(expected_version) },
+        )
+    } else {
+        (
+            expected_version_param.clone(),
+            expected_version_binding.clone(),
+        )
+    };
     let managed_version_column_option = match &managed_version_field {
         Some((_, _, column)) => quote! { ::std::option::Option::Some(#column) },
         None => quote! { ::std::option::Option::None },
@@ -4590,6 +4613,65 @@ fn generate_graphql_operations_unfiltered(
                     ),
                 ));
             }
+        }
+    }
+    // #851: a required ExpectedVersion and a conditional assurance selector
+    // govern the single-row update only. Every other root that rewrites an
+    // existing row would bypass them, so the entity must not generate one.
+    // A declared `set_null` relation lets the database (or a dependent-delete
+    // plan) rewrite the row when its parent is deleted, so it is refused too.
+    // `cascade` deletes the row instead, and deletes are not guarded.
+    let set_null_relation = fields.iter().find_map(|field| {
+        parse_field_metadata(field)
+            .ok()
+            .filter(|meta| {
+                meta.is_relation && meta.relation_on_delete.as_deref() == Some("set_null")
+            })
+            .and_then(|_| field.ident.as_ref().map(ToString::to_string))
+    });
+    for (option, span) in [
+        (
+            "update_expected_version = \"required\"",
+            entity_meta.update_expected_version_required,
+        ),
+        (
+            "update_assurance",
+            entity_meta
+                .update_assurance
+                .as_ref()
+                .map(|selector| selector.span),
+        ),
+    ] {
+        let Some(span) = span else {
+            continue;
+        };
+        let shape_selected = |shape: &str| {
+            entity_meta
+                .mutation_shapes
+                .as_ref()
+                .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+        };
+        let refusal = if mutations_disabled.is_some() || !generates_public_update {
+            Some("requires the generated update mutation".to_owned())
+        } else if !shape_selected("update") {
+            Some("requires mutation_shapes to select update".to_owned())
+        } else if shape_selected("update_many") {
+            Some("requires mutation_shapes without update_many: a bulk update writes existing rows without a per-row ExpectedVersion or assurance selection".to_owned())
+        } else if generates_public_upsert && shape_selected("upsert") {
+            Some("requires mutation_shapes without upsert: an upsert rewrites an existing row without a per-row ExpectedVersion or assurance selection".to_owned())
+        } else if entity_meta.dependent_deletes {
+            Some("is not supported with dependent_deletes".to_owned())
+        } else if let Some(relation) = set_null_relation.as_deref() {
+            Some(format!(
+                "cannot be combined with relation `{relation}` declaring on_delete = \"set_null\": deleting the related row would rewrite this row without its ExpectedVersion or assurance selection. Use restrict or cascade"
+            ))
+        } else if option.starts_with("update_expected_version") && managed_version_field.is_none() {
+            Some("requires a #[graphql_orm(version = \"managed\")] field".to_owned())
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            return Err(syn::Error::new(span, format!("{option} {refusal}")));
         }
     }
     // Every supported entity profile emits a real Changed subscription,
@@ -7519,14 +7601,23 @@ fn generate_graphql_operations_unfiltered(
             ));
         }
         if generates_public_update {
-            operation_descriptors.push(mutation_descriptor(
+            let update_descriptor = mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Update },
                 "update",
                 &update_mutation_name,
                 &update_operation_description,
                 quote! { #result_type },
                 &update_operation_authorization,
-            ));
+            );
+            // Only an entity declaring a selector records one, so every other
+            // descriptor and fingerprint is unchanged (#851).
+            operation_descriptors.push(match &entity_meta.update_assurance {
+                Some(selector) => {
+                    let levels = &selector.levels;
+                    quote! { #update_descriptor.with_conditional_assurance(&[#(#levels),*]) }
+                }
+                None => update_descriptor,
+            });
             operation_descriptors.push(mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::UpdateMany },
                 "update_many",
@@ -8027,12 +8118,13 @@ fn generate_graphql_operations_unfiltered(
             pk_type: &pk_type,
             input_arg_name: &input_arg_name,
             input_arg_description: &input_arg_description,
-            expected_version_param: &expected_version_param,
+            expected_version_param: &update_expected_version_param,
             result_type: &result_type,
-            expected_version_binding: &expected_version_binding,
+            expected_version_binding: &update_expected_version_binding,
             resolver_auth_mode: &resolver_auth_mode,
             rls_request_guard: &rls_request_guard,
             update_scope_enforcement: &update_scope_enforcement,
+            update_assurance: entity_meta.update_assurance.as_ref(),
             backend_marker: &backend_marker,
             entity_name_lit: &entity_name_lit,
             struct_name,

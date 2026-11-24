@@ -81,6 +81,31 @@ pub(crate) struct EntityMetadata {
     /// `<Entity>AggregateResultRow`, whose `SourceEntity` field's type names
     /// the entity (#372).
     pub(crate) aggregate_source: bool,
+    /// `update_expected_version = "required"`: the generated update's
+    /// `ExpectedVersion` argument is non-null (#851).
+    pub(crate) update_expected_version_required: Option<proc_macro2::Span>,
+    /// `update_assurance(select = "...", levels = "...")`: the generated
+    /// update selects its assurance level per request (#851).
+    pub(crate) update_assurance: Option<UpdateAssuranceMetadata>,
+}
+
+/// A declared conditional update-assurance selector.
+#[derive(Clone)]
+pub(crate) struct UpdateAssuranceMetadata {
+    /// Path of `fn(UpdateAssuranceInput<'_, Entity, UpdateEntityInput>) -> async_graphql::Result<&'static str>`.
+    pub(crate) select: syn::Path,
+    /// Declared assurance policy IDs, in declaration order.
+    pub(crate) levels: Vec<String>,
+    pub(crate) span: proc_macro2::Span,
+}
+
+/// Whether `value` is a valid assurance policy ID (the registry's rule).
+fn is_assurance_policy_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+        })
 }
 
 /// A declared lifetime (expiry) field.
@@ -309,6 +334,69 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.changed_started = lit.value;
+                } else if meta.path.is_ident("update_expected_version") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("update_expected_version requires a GraphQL entity"));
+                    }
+                    if metadata.update_expected_version_required.is_some() {
+                        return Err(meta.error("update_expected_version may only be declared once per entity"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    if lit.value() != "required" {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "update_expected_version accepts only \"required\"; omit it to keep ExpectedVersion optional",
+                        ));
+                    }
+                    metadata.update_expected_version_required = Some(lit.span());
+                } else if meta.path.is_ident("update_assurance") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("update_assurance requires a GraphQL entity"));
+                    }
+                    if metadata.update_assurance.is_some() {
+                        return Err(meta.error("update_assurance may only be declared once per entity"));
+                    }
+                    let span = meta.path.span();
+                    let mut select = None;
+                    let mut levels: Option<Vec<String>> = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("select") {
+                            if select.is_some() {
+                                return Err(option.error("update_assurance select may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            select = Some(lit.parse::<syn::Path>()?);
+                        } else if option.path.is_ident("levels") {
+                            if levels.is_some() {
+                                return Err(option.error("update_assurance levels may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            let mut parsed = Vec::new();
+                            for level in lit.value().split(',').map(str::trim) {
+                                if !is_assurance_policy_id(level) {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        "update_assurance levels must be comma-separated assurance policy IDs (ASCII letters, digits, - _ . : /, at most 128 bytes each)",
+                                    ));
+                                }
+                                if parsed.iter().any(|existing| existing == level) {
+                                    return Err(syn::Error::new(lit.span(), "update_assurance levels must not repeat a level"));
+                                }
+                                parsed.push(level.to_owned());
+                            }
+                            levels = Some(parsed);
+                        } else {
+                            return Err(option.error("unsupported update_assurance option; expected select or levels"));
+                        }
+                        Ok(())
+                    })?;
+                    let select = select.ok_or_else(|| {
+                        syn::Error::new(span, "update_assurance requires select = \"<path to selector fn>\"")
+                    })?;
+                    let levels = levels.ok_or_else(|| {
+                        syn::Error::new(span, "update_assurance requires levels = \"<policy id>,<policy id>\"")
+                    })?;
+                    metadata.update_assurance = Some(UpdateAssuranceMetadata { select, levels, span });
                 } else if meta.path.is_ident("lifetime") {
                     if metadata.lifetime.is_some() {
                         return Err(meta.error("lifetime may only be declared once per entity"));
@@ -3835,6 +3923,21 @@ fn generate_entity_tokens(
     let identity_only = identity_names.is_some();
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
+    // #851: a guarded entity says so through `DatabaseSchema`, and every
+    // typed metadata constructor then records its table, so conversions that
+    // would serve it without the update checks (the runtime IR) refuse it.
+    // Other entities emit nothing.
+    let guarded_update_schema_method = if entity_meta.update_expected_version_required.is_some()
+        || entity_meta.update_assurance.is_some()
+    {
+        quote::quote! {
+            fn __gom_guarded_update() -> bool {
+                true
+            }
+        }
+    } else {
+        quote::quote! {}
+    };
     let backend = resolve_backend(
         entity_meta.backend.as_deref(),
         struct_name.span(),
@@ -6653,6 +6756,7 @@ fn generate_entity_tokens(
             }
 
             impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                #guarded_update_schema_method
                 fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
                     static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
                         #(#column_defs),*
@@ -7378,6 +7482,7 @@ fn generate_entity_tokens(
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                #guarded_update_schema_method
             fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
                 static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
                     #(#column_defs),*
