@@ -2056,6 +2056,29 @@ fn generate_graphql_operations_unfiltered(
     } else {
         (quote! {}, quote! { ::std::option::Option::None })
     };
+    // `update_expected_version = "required"` makes only the update's argument
+    // non-null; delete keeps its optional argument (#851).
+    let (update_expected_version_param, update_expected_version_binding) = if managed_version_field
+        .is_some()
+        && entity_meta.update_expected_version_required.is_some()
+    {
+        (
+            quote! {
+                #[graphql(
+                    name = #expected_version_arg_name,
+                    desc = "Required. Apply only if the record's current managed version equals this value; otherwise fail with CONFLICT and write nothing"
+                )]
+                #[__gom_catalogue_type(i64)]
+                expected_version: i64,
+            },
+            quote! { ::std::option::Option::Some(expected_version) },
+        )
+    } else {
+        (
+            expected_version_param.clone(),
+            expected_version_binding.clone(),
+        )
+    };
     let managed_version_column_option = match &managed_version_field {
         Some((_, _, column)) => quote! { ::std::option::Option::Some(#column) },
         None => quote! { ::std::option::Option::None },
@@ -4592,6 +4615,65 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     }
+    // #851: a required ExpectedVersion and a conditional assurance selector
+    // govern the single-row update only. Every other root that rewrites an
+    // existing row would bypass them, so the entity must not generate one.
+    // A declared `set_null` relation lets the database (or a dependent-delete
+    // plan) rewrite the row when its parent is deleted, so it is refused too.
+    // `cascade` deletes the row instead, and deletes are not guarded.
+    let set_null_relation = fields.iter().find_map(|field| {
+        parse_field_metadata(field)
+            .ok()
+            .filter(|meta| {
+                meta.is_relation && meta.relation_on_delete.as_deref() == Some("set_null")
+            })
+            .and_then(|_| field.ident.as_ref().map(ToString::to_string))
+    });
+    for (option, span) in [
+        (
+            "update_expected_version = \"required\"",
+            entity_meta.update_expected_version_required,
+        ),
+        (
+            "update_assurance",
+            entity_meta
+                .update_assurance
+                .as_ref()
+                .map(|selector| selector.span),
+        ),
+    ] {
+        let Some(span) = span else {
+            continue;
+        };
+        let shape_selected = |shape: &str| {
+            entity_meta
+                .mutation_shapes
+                .as_ref()
+                .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+        };
+        let refusal = if mutations_disabled.is_some() || !generates_public_update {
+            Some("requires the generated update mutation".to_owned())
+        } else if !shape_selected("update") {
+            Some("requires mutation_shapes to select update".to_owned())
+        } else if shape_selected("update_many") {
+            Some("requires mutation_shapes without update_many: a bulk update writes existing rows without a per-row ExpectedVersion or assurance selection".to_owned())
+        } else if generates_public_upsert && shape_selected("upsert") {
+            Some("requires mutation_shapes without upsert: an upsert rewrites an existing row without a per-row ExpectedVersion or assurance selection".to_owned())
+        } else if entity_meta.dependent_deletes {
+            Some("is not supported with dependent_deletes".to_owned())
+        } else if let Some(relation) = set_null_relation.as_deref() {
+            Some(format!(
+                "cannot be combined with relation `{relation}` declaring on_delete = \"set_null\": deleting the related row would rewrite this row without its ExpectedVersion or assurance selection. Use restrict or cascade"
+            ))
+        } else if option.starts_with("update_expected_version") && managed_version_field.is_none() {
+            Some("requires a #[graphql_orm(version = \"managed\")] field".to_owned())
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            return Err(syn::Error::new(span, format!("{option} {refusal}")));
+        }
+    }
     // Every supported entity profile emits a real Changed subscription,
     // independently of whether it can generate standard GraphQL mutations.
     let resolver_schema_signature = generated_resolver_schema_signature(
@@ -7052,6 +7134,45 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
 
+    let set_delete_model_impl = if (generates_standard_write_surface
+        || composite_repository_mutations)
+        && !entity_meta.dependent_deletes
+    {
+        let event_id = if has_composite_primary_key {
+            quote! { Self::__gom_event_id(&Self::__gom_entity_key(entity)) }
+        } else {
+            pk_id_for_entity.clone()
+        };
+        quote! {
+            impl ::graphql_orm::graphql::orm::SetDeleteModel<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                type WhereInput = #where_input;
+
+                fn set_delete_validate_filter(filter: &Self::WhereInput) -> ::graphql_orm::Result<()> {
+                    filter.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)
+                }
+                fn set_delete_key_values(key: &Self::Key) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                    Self::__gom_key_values(key)
+                }
+                fn set_delete_row_key_values(&self) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                    Self::__gom_subscription_key_values(self)
+                }
+                fn set_delete_event_id(&self) -> ::std::string::String {
+                    let entity = self;
+                    #event_id
+                }
+                fn set_delete_queue_change<'a>(
+                    &'a self,
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
+                    ::std::boxed::Box::pin(Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Deleted, ::std::option::Option::Some(self)))
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let single_bounded_helper_methods = if !has_composite_primary_key
         && !schema_policy_read_only
         && !entity_meta.append_only
@@ -7480,14 +7601,23 @@ fn generate_graphql_operations_unfiltered(
             ));
         }
         if generates_public_update {
-            operation_descriptors.push(mutation_descriptor(
+            let update_descriptor = mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Update },
                 "update",
                 &update_mutation_name,
                 &update_operation_description,
                 quote! { #result_type },
                 &update_operation_authorization,
-            ));
+            );
+            // Only an entity declaring a selector records one, so every other
+            // descriptor and fingerprint is unchanged (#851).
+            operation_descriptors.push(match &entity_meta.update_assurance {
+                Some(selector) => {
+                    let levels = &selector.levels;
+                    quote! { #update_descriptor.with_conditional_assurance(&[#(#levels),*]) }
+                }
+                None => update_descriptor,
+            });
             operation_descriptors.push(mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::UpdateMany },
                 "update_many",
@@ -7963,6 +8093,7 @@ fn generate_graphql_operations_unfiltered(
             #append_only_surface
             #retention_surface
             #composite_mutation_surface
+            #set_delete_model_impl
             #composite_write_stubs
             #readonly_composite_changed
             #computed_field_invalidation_target
@@ -7987,12 +8118,13 @@ fn generate_graphql_operations_unfiltered(
             pk_type: &pk_type,
             input_arg_name: &input_arg_name,
             input_arg_description: &input_arg_description,
-            expected_version_param: &expected_version_param,
+            expected_version_param: &update_expected_version_param,
             result_type: &result_type,
-            expected_version_binding: &expected_version_binding,
+            expected_version_binding: &update_expected_version_binding,
             resolver_auth_mode: &resolver_auth_mode,
             rls_request_guard: &rls_request_guard,
             update_scope_enforcement: &update_scope_enforcement,
+            update_assurance: entity_meta.update_assurance.as_ref(),
             backend_marker: &backend_marker,
             entity_name_lit: &entity_name_lit,
             struct_name,
@@ -9952,6 +10084,7 @@ fn generate_graphql_operations_unfiltered(
 
         #upsert_trait_impl
         #single_bounded_trait_impls
+        #set_delete_model_impl
         #retention_surface
         #cas_trait_impl
         #keyset_trait_impl

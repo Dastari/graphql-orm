@@ -555,6 +555,7 @@ mod secret_generated_results {
     impl_fixture_batch_loader!(SecretSettings);
     impl_fixture_batch_loader!(HiddenSettings);
     schema_roots! {
+        max_page_limit: 2,
         query_custom_ops: [],
         entities: [PublicInventory, SecretSettings, HiddenSettings],
         generated_mutations: "none",
@@ -695,6 +696,94 @@ mod secret_generated_results {
         assert!(inventory.compile(json!({"arguments":{"Id":"inventory-one"},"fields":{"Id":true},"relationships":{"Settings":{"arguments":{},"fields":{"Id":true},"relationships":{}}}})).is_err(), "provider cannot manually request a hidden relation");
         assert!(inventory.compile_compact(json!({"arguments":{"Id":"inventory-one"},"selections":["Settings.Id"],"relationshipArguments":{},"relationshipMaximumItems":{}})).is_err(), "compact plans cannot forge a private relation path");
     }
+    #[tokio::test]
+    async fn generated_lists_execute_with_server_owned_page_limits() {
+        use graphql_orm::async_graphql::{Request, Variables};
+        use graphql_orm::graphql::orm::PaginationConfig;
+
+        let db = Database::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap()
+            .with_pagination_config(PaginationConfig::secure().with_max_limit(Some(2)));
+        let migration = db
+            .schema()
+            .plan_migration_to_entities(
+                "page-capability-test",
+                "Create inventory records",
+                &[PublicInventory::metadata()],
+            )
+            .await
+            .unwrap();
+        db.schema()
+            .apply_migration(&migration, ApplyOptions::default())
+            .await
+            .unwrap();
+        graphql_orm::sqlx::query(
+            "INSERT INTO PublicInventory (id, label, provider_token) VALUES \
+             ('one', 'One', 'fixture'), ('two', 'Two', 'fixture'), ('three', 'Three', 'fixture')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let schema = schema_builder(db).finish();
+        let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+            "paging",
+            GraphqlExecutionTargetId::parse("paging").unwrap(),
+            &schema.sdl(),
+            graphql_orm_semantic_catalog(),
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .unwrap();
+
+        for (root, limit_field) in [
+            ("PublicInventoryRows", "Limit"),
+            ("PublicInventoryRowsKeyset", "limit"),
+        ] {
+            let capability = capabilities
+                .capabilities()
+                .find(|capability| capability.field_name() == root)
+                .expect(root);
+            for (maximum, expected_rows) in [(1, 1), (3, 2)] {
+                let plan = json!({
+                    "arguments": {},
+                    "relationshipArguments": {},
+                    "relationshipMaximumItems": {},
+                    "selections": ["Id"],
+                    "maximumItems": maximum,
+                });
+                let compiled = capability.compile_compact(plan.clone()).expect(root);
+                assert_eq!(
+                    compiled.variables(),
+                    &json!({"v0": {(limit_field): maximum}})
+                );
+                let response = schema
+                    .execute(
+                        Request::new(&compiled.descriptor().document)
+                            .variables(Variables::from_json(compiled.variables().clone()))
+                            .data(AuthSubject::new("reader")),
+                    )
+                    .await;
+                assert!(response.errors.is_empty(), "{root}: {:?}", response.errors);
+                assert_eq!(
+                    response.data.into_json().unwrap()[root]["Edges"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    expected_rows,
+                );
+                for forbidden in [
+                    json!({"limit": 9}),
+                    json!({"after": "cursor"}),
+                    json!({"includeTotalCount": true}),
+                ] {
+                    let mut supplied = plan.clone();
+                    supplied["arguments"]["Page"] = forbidden;
+                    assert!(capability.compile_compact(supplied).is_err());
+                }
+            }
+        }
+    }
+
     #[test]
     fn generated_descriptor_composition_tightens_disclosure_without_repairing_stale_input() {
         let semantic = graphql_orm_semantic_catalog();

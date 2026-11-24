@@ -37,6 +37,13 @@ pub trait DatabaseSchema {
     fn check_constraints() -> &'static [super::core::CheckConstraintDef] {
         &[]
     }
+    /// Whether the entity's generated update requires `ExpectedVersion` or
+    /// selects assurance per request (#851). Derive output overrides it;
+    /// metadata built through a typed constructor then records the table.
+    #[doc(hidden)]
+    fn __gom_guarded_update() -> bool {
+        false
+    }
 }
 
 pub trait EntityRelations {
@@ -6520,6 +6527,26 @@ where
     {
         self.fetch_bounded_sentinel_in_transaction(context, limit, true)
             .await
+    }
+
+    /// Read a bounded set-delete selection at the transaction's state-machine
+    /// isolation. PostgreSQL serializability detects concurrent changes to
+    /// deleted rows without requiring the caller to pass an UPDATE RLS policy.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_set_delete_sentinel_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        limit: MutationLimit,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
+        self.fetch_bounded_sentinel_in_transaction(
+            context,
+            limit,
+            B::DIALECT == DatabaseBackend::Mssql,
+        )
+        .await
     }
 
     /// The bounded selection of a retention purge.

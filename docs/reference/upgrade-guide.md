@@ -70,9 +70,31 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.207.0, `graphql-orm-macros` 0.207.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.211.0**; **`graphql-orm-macros` 0.211.0**; **`graphql-orm-operation-catalog` 0.14.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; `graphql-orm-ai` 0.157.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
 
-- **No action** — ORM/macros 0.216.0 and operation catalogue 0.13.0 use schema-bound metadata when described roots return a registered generated entity (#883). [Migration](../../MIGRATION.md#02070-to-02160-described-root-result-metadata)
+- **No action** — ORM/macros 0.211.0 and operation catalogue 0.14.0 use schema-bound metadata when described roots return a registered generated entity (#883). [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+- **No action** — ORM/macros 0.210.0 and operation catalogue 0.13.0: opt-in `update_expected_version = "required"` and `update_assurance(select, levels)` on generated updates. The catalogue lists conditional assurance levels. Other entities are unchanged (#851). [Migration](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130)
+
+### workspace-2026.11.24.1
+
+Commit `10fa8e866e55` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.24.1)
+
+Packages (changed in bold): **`graphql-orm` 0.209.0**; **`graphql-orm-macros` 0.209.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.29.0**; **`graphql-orm-ai` 0.157.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **No action** — AI tool profiles 0.29.0 accepts the server-injected page limit in generated keyset-list plans (#881). Capability fingerprints stay stable. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0290-generated-keyset-page-limits)
+- **Action needed** for stores upgrading from a pre-0.83 AI schema with
+  the legacy approval lookup index. AI 0.157.0 checks the live index and
+  refuses duplicate tool-call keys before DDL. ORM/macros 0.209.0 expose
+  the read-only preflight for external migrations (#878).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01560-to-01570) · [ORM migration](../../MIGRATION.md#02080-to-02090-external-migration-preflight)
+
+### workspace-2026.11.23.3
+
+Commit `69e83e1b874a` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.23.3)
+
+Packages (changed in bold): **`graphql-orm` 0.208.0**; **`graphql-orm-macros` 0.208.0**; `graphql-orm-operation-catalog` 0.12.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.28.0**; **`graphql-orm-ai` 0.156.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
+- **No action** — ORM/macros 0.208.0 add opt-in bounded set deletes to typed transactions (#852). [Migration](../../MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
 - **No action** — AI 0.156.0 and AI tool profiles 0.28.0: a model-context benchmark for the fixed capability broker, and broker calls whose cost no longer grows with the index for a host that supplies one index; describe and `describe_type` no longer regenerate compact schemas, and index-set admission refuses a deserialized index that breaks its own limits or stores an entry under another ID; compiled indexes are unaffected (#551). No binding, fingerprint or schema change. [AI](../../crates/graphql-orm-ai/MIGRATION.md#01550-to-01560-capability-model-context-benchmark) · [tool profiles](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0280-index-set-and-signature-reuse)
 - **No action** — ORM/macros 0.207.0: security fix (#876). SQLite renders every closure read predicate in the original form again; from 0.200.0 through 0.206.0, a closure whose pointer column's collation treats values as equal that the key column distinguishes (for example a `NOCASE` or `RTRIM` pointer with a `BINARY` key) could reach a different verdict, so an `Any` closure could deny rows the original admits. On PostgreSQL and SQL Server, directly nested closures over built-in column tests can use fewer target SQL copies and bind parameters (#785). [Migration](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates)
 

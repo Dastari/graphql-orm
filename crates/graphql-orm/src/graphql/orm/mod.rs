@@ -1,8 +1,12 @@
 mod delete_effect_guard;
 pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
+mod guarded_updates;
 #[doc(hidden)]
 pub use generated_filter::*;
+#[doc(hidden)]
+pub use guarded_updates::__register_guarded_update_table;
+pub(crate) use guarded_updates::is_guarded_update_table;
 mod authorized_page;
 pub use authorized_page::*;
 mod authorized_pagination;
@@ -69,6 +73,10 @@ mod scalar_policy;
 mod schema_manager;
 mod schema_module;
 mod search;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod set_delete;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub use set_delete::{SetDeleteEntity, SetDeleteModel};
 #[cfg(feature = "sqlite")]
 pub mod spatial;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

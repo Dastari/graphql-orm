@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.29.0
+
+- Generated keyset-list plans now accept the page limit injected by the
+  compiler from `maximumItems` (#881). The size, continuation cursor, and
+  count flag stay out of the model's arguments. The resolver applies the
+  schema's page-limit policy and the input's default count behavior.
+  See the [migration guide](MIGRATION.md#0290-generated-keyset-page-limits).
+
 ## Unreleased - 0.28.0
 
 Per-call costs of the capability broker that grew with the index, and

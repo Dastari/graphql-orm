@@ -844,3 +844,62 @@ async fn externally_managed_backup_restore_allows_writes_without_a_marker()
     server.cleanup()?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn unique_index_preflight_obeys_restore_gate() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{IndexDef, SchemaModel};
+
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "CREATE TABLE dbo.GraphqlOrmRestoredRecords (id NVARCHAR(32) PRIMARY KEY, value BIGINT NOT NULL)",
+    )
+    .await?;
+    let db = writable(&server.connection_string).await?;
+    let current = SchemaModel::from_entities(&[RestoredRecord::metadata()]);
+    let mut target = current.clone();
+    target.tables[0]
+        .indexes
+        .push(IndexDef::new("idx_restored_value", &["value"]).unique());
+    let plan = db
+        .schema()
+        .plan_migration("unique", "restored value key", &current, &target)?;
+    db.schema().preflight_unique_indexes(&plan).await?;
+
+    let restore = db
+        .begin_restore("preflight", Duration::from_secs(10))
+        .await?;
+    let error = db
+        .schema()
+        .preflight_unique_indexes(&plan)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        RestoreInProgress::from_error(&error).map(|marker| marker.restore_id.as_str()),
+        Some("preflight")
+    );
+    restore.finish().await?;
+    execute_batch(
+        &server.connection_string,
+        "DROP TABLE dbo.__graphql_orm_restore_marker",
+    )
+    .await?;
+    let error = db
+        .schema()
+        .preflight_unique_indexes(&plan)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        RestoreStateUnavailable::from_error(&error).map(|error| error.reason),
+        Some(RestoreStateUnavailableReason::MarkerNotInstalled)
+    );
+
+    let external = Db::builder(db.pool().clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .externally_managed_backup_restore(true)
+        .build();
+    external.schema().preflight_unique_indexes(&plan).await?;
+    server.cleanup()?;
+    Ok(())
+}
