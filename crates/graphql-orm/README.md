@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
+column identifier parsing in ALTER COLUMN collation lookups.
+See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
 Version 0.214.0 aligns the `auth-agql` bridge with published `agql-auth`
 `v0.27.0`. Hosts that pass Auth types must adopt the same Git tag.
 See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).

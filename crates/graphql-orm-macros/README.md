@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
+column types with the `mssql_type` field attribute.
+See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
 Version 0.214.0 stays aligned with ORM 0.214.0 for the Auth update.
 See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
 

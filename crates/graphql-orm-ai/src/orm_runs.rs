@@ -7269,6 +7269,7 @@ impl graphql_orm::graphql::orm::DatabaseFilter for ExpiredLeaseStatePrefilter {
             &expired_lease_states(),
             backend,
             &backend.render_identifier("state"),
+            "",
             &mut conditions,
             &mut values,
         );

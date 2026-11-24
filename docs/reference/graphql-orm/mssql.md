@@ -376,6 +376,7 @@ certificate settings checked.
 | `max_lifetime` | 30 min | Connections older than this are closed when next released or acquired. |
 | `health_check_after_idle` | 30 s | A connection idle this long is reset and checked before reuse. |
 | `transport` | `verified()` | See above. |
+| `typed_parameters` | `false` | Enable [typed column parameters](#typed-column-parameters). |
 | `typed_temporal_parameters` | `false` | Enable [native parameters for temporal text](#native-temporal-parameters). |
 
 A statement timeout has two caveats. First, the outcome of a timed-out
@@ -836,6 +837,31 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
 SQL Server-specific types such as `xml`, `hierarchyid`,
 `geography`, `geometry`, `sql_variant`, `rowversion`, and table-valued columns are not first-class
 ORM scalar types in this phase.
+
+### Typed column parameters
+
+Declare a persisted column's physical type with
+`#[graphql_orm(mssql_type = "VARCHAR(32)")]` or
+`#[graphql_orm(mssql_type = "SMALLINT")]`. This overrides the type in schema
+metadata and generated DDL even when `typed_parameters` is off. The declaration
+describes the existing SQL Server column and does not apply DDL to the database.
+
+Set `MssqlPoolOptions::new().typed_parameters(true)` when creating the pool
+for that database. Declared INT, SMALLINT and TINYINT use native widths when
+the value fits. Wider comparison operands use BIGINT. Generated unsigned
+operands that exceed their declared integer range are refused with
+`INVALID_INPUT`, including with the option off.
+
+Printable ASCII values in ordinary generated VARCHAR equality, inequality
+and membership filters can use a parameter-side VARCHAR conversion. The
+conversion allows enough bytes for the full operand even when it exceeds
+the column's declared length. All other text uses Unicode parameters,
+including non-ASCII text, NVARCHAR columns, undeclared types, pattern
+operands (`contains`, `starts_with`, `ends_with`, `LIKE` and similarity),
+write values, transactional reads, key and cursor lookups, and
+authorization predicates.
+That keeps the database's existing Unicode comparison and pattern rules
+on those paths and avoids lossy code-page conversion.
 
 ### Native temporal parameters
 

@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.215.0
+
+- **Added (#522).** SQL Server pools can opt in to binding the SQL types
+  declared on generated fields. Eligible ASCII VARCHAR comparisons convert
+  the parameter. Policies, patterns and non-ASCII text retain Unicode binding.
+  INT, SMALLINT and TINYINT can use their native widths. Generated unsigned
+  values outside the declared SQL Server range return `INVALID_INPUT`.
+- **Fixed (#849).** SQL Server character column ALTER statements use the parsed
+  column name when looking up collation, including literal brackets.
+
 ## Unreleased - ORM/macros 0.214.0
 
 - **Changed (#857).** The `auth-agql` adapter uses published `agql-auth`

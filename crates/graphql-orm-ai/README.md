@@ -10,9 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.161.0 uses tool profiles 0.30.0 to speed up catalogue compilation for
+AI 0.162.0 uses tool profiles 0.30.0 to speed up catalogue compilation for
 targets with many capability roots. See the
 [benchmark measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark).
+
+AI 0.161.0 uses ORM 0.215.0 and has no migration action.
+See the [migration guide](MIGRATION.md#01600-to-01610).
 
 AI 0.160.0 uses published `agql-auth` `v0.27.0` and ORM 0.214.0. Hosts that
 pass Auth types must adopt the same Git tag.

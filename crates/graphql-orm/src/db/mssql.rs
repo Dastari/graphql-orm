@@ -10,7 +10,10 @@ pub use notifications::{
 };
 pub use transport::MssqlTransportPolicy;
 
-use crate::graphql::orm::{BackupRestoreExternallyManaged, SqlValue, TemporalKind, TemporalValue};
+use crate::graphql::orm::{
+    BackupRestoreExternallyManaged, DatabaseBackend, MssqlParameterType, SqlTokenKind, SqlValue,
+    TemporalKind, TemporalValue, scan_sql,
+};
 use chrono::{Datelike, Timelike};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -89,6 +92,7 @@ pub struct MssqlPoolOptions {
     health_check_after_idle: Option<Duration>,
     transport: MssqlTransportPolicy,
     typed_temporal_parameters: bool,
+    typed_parameters: bool,
 }
 
 impl Default for MssqlPoolOptions {
@@ -103,6 +107,7 @@ impl Default for MssqlPoolOptions {
             health_check_after_idle: Some(Duration::from_secs(30)),
             transport: MssqlTransportPolicy::verified(),
             typed_temporal_parameters: false,
+            typed_parameters: false,
         }
     }
 }
@@ -182,6 +187,21 @@ impl MssqlPoolOptions {
     /// Whether temporal text values use native SQL Server parameters.
     pub fn get_typed_temporal_parameters(&self) -> bool {
         self.typed_temporal_parameters
+    }
+
+    /// Opt in to binding declared SQL Server types for generated scalar parameters.
+    ///
+    /// Printable ASCII operands in ordinary VARCHAR comparisons may use a
+    /// parameter-side conversion. Pattern matching, non-ASCII text, and
+    /// authorization predicates retain Unicode binding. Disabled by default.
+    pub fn typed_parameters(mut self, enabled: bool) -> Self {
+        self.typed_parameters = enabled;
+        self
+    }
+
+    /// Whether generated scalar parameters use their declared SQL Server types.
+    pub fn get_typed_parameters(&self) -> bool {
+        self.typed_parameters
     }
 
     /// Configured maximum open connections.
@@ -399,7 +419,7 @@ enum MssqlParamValue {
     Float(f64),
     Bool(bool),
     Decimal(rust_decimal::Decimal),
-    Temporal(ColumnData<'static>),
+    Native(ColumnData<'static>),
     NullString,
     NullBytes,
     NullUuid,
@@ -569,7 +589,8 @@ impl MssqlPool {
                 &mut lease.client,
                 sql,
                 values,
-                self.options().typed_temporal_parameters,
+                self.options(),
+                true,
             ))
             .await;
         self.finish(lease, result).await
@@ -595,7 +616,7 @@ impl MssqlPool {
                 &mut lease.client,
                 &statement,
                 values,
-                self.options().typed_temporal_parameters,
+                self.options(),
             ))
             .await;
         if !self.externally_managed_backup_restore
@@ -678,7 +699,7 @@ impl MssqlPool {
                 &mut lease.client,
                 CREATE_RESTORE_MARKER,
                 &[],
-                self.options().typed_temporal_parameters,
+                self.options(),
             ))
             .await;
         self.finish(lease, result).await.map(|_| ())
@@ -741,7 +762,7 @@ impl MssqlPool {
                     &mut lease.client,
                     INSERT_RESTORE_MARKER,
                     &id,
-                    self.options().typed_temporal_parameters,
+                    self.options(),
                 )
                 .await?;
             }
@@ -749,7 +770,8 @@ impl MssqlPool {
                 &mut lease.client,
                 READ_RESTORE_MARKER,
                 &[],
-                self.options().typed_temporal_parameters,
+                self.options(),
+                false,
             )
             .await
         };
@@ -799,7 +821,8 @@ impl MssqlPool {
                 "SELECT CAST(snapshot_isolation_state AS INT) AS snapshot_state \
                  FROM sys.databases WHERE database_id = DB_ID()",
                 &[],
-                self.options().typed_temporal_parameters,
+                self.options(),
+                false,
             ))
             .await
             .map_err(|failure| classify(failure.error))?;
@@ -1311,7 +1334,7 @@ impl MssqlRestore {
                 &mut lease.client,
                 sql,
                 values,
-                pool.options().typed_temporal_parameters,
+                pool.options(),
             ))
             .await;
         self.keep_if_reusable(result)
@@ -1331,7 +1354,8 @@ impl MssqlRestore {
                 &mut lease.client,
                 sql,
                 values,
-                pool.options().typed_temporal_parameters,
+                pool.options(),
+                false,
             ))
             .await;
         self.keep_if_reusable(result)
@@ -1354,7 +1378,7 @@ impl MssqlRestore {
                 "IF @@TRANCOUNT > 0 BEGIN RAISERROR(N'the restore connection has an open transaction; commit or roll it back before finishing the restore', 16, 1); RETURN; END; \
                  DELETE FROM [dbo].[__graphql_orm_restore_marker] WHERE restore_id = @P1",
                 &id,
-                pool.options().typed_temporal_parameters,
+                pool.options(),
             ))
             .await;
         self.keep_if_reusable(cleared)?;
@@ -1384,7 +1408,9 @@ impl MssqlTransaction {
                 &mut lease.client,
                 sql,
                 values,
-                self.pool.options().typed_temporal_parameters,
+                self.pool.options(),
+                // Pinned reads can drive authorization and write decisions.
+                false,
             ))
             .await;
         result.map_err(|failure| self.poison(failure))
@@ -1406,7 +1432,7 @@ impl MssqlTransaction {
                 &mut lease.client,
                 sql,
                 values,
-                self.pool.options().typed_temporal_parameters,
+                self.pool.options(),
             ))
             .await;
         result.map_err(|failure| self.poison(failure))
@@ -1897,7 +1923,7 @@ impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
                 ColumnData::Numeric(value) => ColumnData::Numeric(value),
                 _ => unreachable!("rust_decimal always maps to TDS numeric"),
             },
-            Self::Temporal(value) => value,
+            Self::Native(value) => value,
             Self::NullString => ColumnData::String(None),
             Self::NullBytes => ColumnData::Binary(None),
             Self::NullUuid => ColumnData::Guid(None),
@@ -1943,19 +1969,89 @@ pub(super) async fn catch_driver_panic<T, E>(
     }
 }
 
+/// Tiberius transports strings as NVARCHAR. Convert the parameter expression
+/// on the server so SQL Server can compare a VARCHAR index key as VARCHAR.
+fn render_varchar_parameters(sql: &str, values: &[SqlValue]) -> Option<String> {
+    let varchar_length = |value: &SqlValue| {
+        let SqlValue::MssqlTyped(typed) = value else {
+            return None;
+        };
+        let MssqlParameterType::VarChar(length) = typed.parameter_type() else {
+            return None;
+        };
+        let SqlValue::String(value) = typed.value() else {
+            return None;
+        };
+        // A comparison can have an operand longer than the column. Use a
+        // wide enough conversion to keep it from truncating into a match.
+        let bytes = value.len();
+        Some(
+            length
+                .map(|length| {
+                    if bytes <= usize::from(length) {
+                        length
+                    } else {
+                        8000
+                    }
+                })
+                .filter(|_| bytes <= 8000),
+        )
+    };
+    let mut lengths = values.iter().map(varchar_length);
+    let first = lengths.position(|length| length.is_some())?;
+    let mut converted = String::with_capacity(sql.len());
+    let mut copied = 0;
+    scan_sql(DatabaseBackend::Mssql, sql, |token| {
+        if token.kind != SqlTokenKind::Placeholder {
+            return;
+        }
+        let placeholder = &sql[token.start..token.end];
+        let Some(index) = placeholder
+            .strip_prefix("@P")
+            .or_else(|| placeholder.strip_prefix("@p"))
+            .and_then(|part| part.parse::<usize>().ok())
+            .and_then(|index| index.checked_sub(1))
+            .filter(|index| *index >= first)
+        else {
+            return;
+        };
+        if let Some(Some(length)) = values.get(index).map(varchar_length) {
+            use std::fmt::Write as _;
+            converted.push_str(&sql[copied..token.start]);
+            converted.push_str("CONVERT(varchar(");
+            match length {
+                Some(length) => write!(converted, "{length}").expect("writing to a string"),
+                None => converted.push_str("max"),
+            }
+            converted.push_str("), ");
+            converted.push_str(placeholder);
+            converted.push(')');
+            copied = token.end;
+        }
+    })
+    .ok()?;
+    if copied == 0 {
+        return None;
+    }
+    converted.push_str(&sql[copied..]);
+    Some(converted)
+}
+
 fn bind_query(
     sql: &str,
     values: &[SqlValue],
-    typed_temporal_parameters: bool,
+    options: &MssqlPoolOptions,
+    allow_varchar_comparisons: bool,
 ) -> Result<Query<'static>, StatementFailure> {
-    let mut query = Query::new(sql.to_owned());
+    let varchar_sql = (options.typed_parameters && allow_varchar_comparisons)
+        .then(|| render_varchar_parameters(sql, values))
+        .flatten();
+    let mut query = Query::new(varchar_sql.unwrap_or_else(|| sql.to_owned()));
     for value in values {
         query.bind(
-            MssqlParamValue::from_value(value, typed_temporal_parameters).map_err(|error| {
-                StatementFailure {
-                    error,
-                    reusable: true,
-                }
+            MssqlParamValue::from_value(value, options).map_err(|error| StatementFailure {
+                error,
+                reusable: true,
             })?,
         );
     }
@@ -1966,11 +2062,12 @@ async fn fetch_rows_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
-    typed_temporal_parameters: bool,
+    options: &MssqlPoolOptions,
+    allow_varchar_comparisons: bool,
 ) -> Result<Vec<MssqlRow>, StatementFailure> {
     catch_driver_panic(
         async {
-            let query = bind_query(sql, values, typed_temporal_parameters)?;
+            let query = bind_query(sql, values, options, allow_varchar_comparisons)?;
             let stream = query.query(client).await.map_err(statement_failure)?;
             let rows = stream
                 .into_first_result()
@@ -1987,11 +2084,11 @@ async fn execute_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
-    typed_temporal_parameters: bool,
+    options: &MssqlPoolOptions,
 ) -> Result<MssqlWriteResult, StatementFailure> {
     catch_driver_panic(
         async {
-            let query = bind_query(sql, values, typed_temporal_parameters)?;
+            let query = bind_query(sql, values, options, false)?;
             let result = query.execute(client).await.map_err(statement_failure)?;
             Ok(MssqlWriteResult {
                 rows_affected: statement_rows_affected(result.rows_affected()),
@@ -2049,11 +2146,11 @@ fn statement_failure(error: tiberius::error::Error) -> StatementFailure {
 }
 
 impl MssqlParamValue {
-    fn from_value(value: &SqlValue, typed_temporal_parameters: bool) -> crate::Result<Self> {
+    fn from_value(value: &SqlValue, options: &MssqlPoolOptions) -> crate::Result<Self> {
         Ok(match value {
             SqlValue::String(value) => Self::String(value.clone()),
-            SqlValue::Temporal(value) if typed_temporal_parameters || value.is_chrono() => {
-                Self::Temporal(encode_temporal(value)?)
+            SqlValue::Temporal(value) if options.typed_temporal_parameters || value.is_chrono() => {
+                Self::Native(encode_temporal(value)?)
             }
             SqlValue::Temporal(value) => Self::String(value.as_text().to_owned()),
             SqlValue::StringNull => Self::NullString,
@@ -2074,6 +2171,51 @@ impl MssqlParamValue {
             SqlValue::Bool(value) => Self::Bool(*value),
             SqlValue::BoolNull => Self::NullBool,
             SqlValue::Null => Self::NullString,
+            SqlValue::MssqlTyped(typed) => {
+                if typed.parameter_type() == MssqlParameterType::UnsignedOverflow {
+                    use crate::graphql::errors::{
+                        OrmErrorCode, OrmPublicError, sqlx_error_from_public,
+                    };
+                    return Err(sqlx_error_from_public(OrmPublicError::with_message(
+                        OrmErrorCode::InvalidInput,
+                        "integer exceeds the declared SQL Server range",
+                    )));
+                }
+                let value = typed.value();
+                if options.typed_parameters {
+                    let integer = match value {
+                        SqlValue::Int(value) => Some(*value),
+                        _ => None,
+                    };
+                    // Use the legacy wide bind when a comparison operand
+                    // is out of range for the column. It can still be a
+                    // legitimate bound in a range predicate.
+                    let narrowed = match typed.parameter_type() {
+                        MssqlParameterType::Int => integer
+                            .map(i32::try_from)
+                            .transpose()
+                            .ok()
+                            .map(ColumnData::I32),
+                        MssqlParameterType::SmallInt => integer
+                            .map(i16::try_from)
+                            .transpose()
+                            .ok()
+                            .map(ColumnData::I16),
+                        MssqlParameterType::TinyInt => integer
+                            .map(u8::try_from)
+                            .transpose()
+                            .ok()
+                            .map(ColumnData::U8),
+                        MssqlParameterType::VarChar(_) | MssqlParameterType::UnsignedOverflow => {
+                            None
+                        }
+                    };
+                    if let Some(narrowed) = narrowed {
+                        return Ok(Self::Native(narrowed));
+                    }
+                }
+                return Self::from_value(value, options);
+            }
         })
     }
 }

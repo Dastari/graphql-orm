@@ -10,12 +10,19 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.161.0
+## Unreleased - 0.162.0
 
 - Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
   The release benchmark can measure startup separately and export a byte
   snapshot of the catalogue and model-facing output.
   [Measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark)
+
+## Unreleased - 0.161.0
+
+- **Changed (#522).** The SQL Server expired-lease prefilter passes an empty
+  declared type to ORM 0.215.0's string-filter renderer. Behaviour is
+  unchanged.
+  [Migration](MIGRATION.md#01600-to-01610)
 
 ## Unreleased - 0.160.0
 
