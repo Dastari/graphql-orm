@@ -1,4 +1,4 @@
-error: server_only_key target `partition` must have no GraphQL surface; declare it #[graphql_orm(private)] without filter, order, subscribe, input or primary-key exposure
+error: server_only_key target `partition` must have no GraphQL surface; every field mapping the column must be #[graphql_orm(private)] and #[graphql(skip)] without filter, order, subscribe, input or primary-key exposure
   --> tests/ui/server_only_keys/self_target_readable.rs:11:5
    |
 11 | /     #[relation(

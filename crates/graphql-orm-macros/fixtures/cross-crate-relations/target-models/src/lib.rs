@@ -46,6 +46,47 @@ pub struct Endpoint {
     pub name: String,
 }
 
+/// A relation target whose partition column is server-only (#898). The
+/// negative feature adds a public alias of the same physical column, which
+/// withdraws the column's server-only certification.
+#[derive(GraphQLEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "cross_partitioned_endpoints",
+        plural = "PartitionedEndpoints"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "cross_partitioned_endpoints",
+        plural = "PartitionedEndpoints"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "cross_partitioned_endpoints",
+        plural = "PartitionedEndpoints"
+    )
+)]
+pub struct PartitionedEndpoint {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    pub id: String,
+    #[graphql_orm(private)]
+    pub partition_id: String,
+    #[cfg(feature = "server-only-public-alias")]
+    #[graphql_orm(db_column = "partition_id")]
+    pub partition_alias: String,
+    pub label: String,
+}
+
 impl<B: OrmBackend> graphql_orm::graphql::loaders::BatchLoadEntity<B> for Endpoint
 where
     Endpoint: FromSqlRow<B>,

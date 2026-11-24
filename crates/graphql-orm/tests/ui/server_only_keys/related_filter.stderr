@@ -1,5 +1,5 @@
 error: server_only_key relations cannot declare `filter`: related-row filters would evaluate the server-only join from the parent's WhereInput
-  --> tests/ui/server_only_keys/related_filter.rs:26:9
+  --> tests/ui/server_only_keys/related_filter.rs:27:9
    |
-26 |         server_only_key(from = "partition", to = "partition"),
+27 |         server_only_key(from = "partition", to = "partition"),
    |         ^^^^^^^^^^^^^^^

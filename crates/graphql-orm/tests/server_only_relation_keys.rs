@@ -38,7 +38,7 @@ mod owned_mssql;
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(
     GraphQLEntity,
@@ -165,6 +165,7 @@ pub struct PartitionedForward {
     #[filterable(type = "string")]
     pub device_id: Option<String>,
     #[filterable(type = "string")]
+    #[sortable]
     pub label: String,
     #[graphql(skip)]
     #[serde(default)]
@@ -216,7 +217,7 @@ const ORGANISATION: &str = "org-shared";
 /// both tenants but denied the device entity.
 fn admitted_tenants(subject: &str) -> &'static [&'static str] {
     match subject {
-        "both" | "no-devices" => &[TENANT_A, TENANT_B],
+        "both" | "no-devices" | "no-labels" => &[TENANT_A, TENANT_B],
         "only-a" => &[TENANT_A],
         _ => &[],
     }
@@ -330,6 +331,39 @@ impl EntityPolicy<Backend> for Entities {
     }
 }
 
+/// Every field is readable, except a device's label for `no-labels`.
+struct Fields;
+
+impl FieldPolicy<Backend> for Fields {
+    fn can_read_field<'a>(
+        &'a self,
+        ctx: &'a async_graphql::Context<'_>,
+        _: &'a Database<Backend>,
+        entity: &'static str,
+        field: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        let allowed = !(entity == "PartitionedDevice"
+            && field.eq_ignore_ascii_case("label")
+            && subject(Some(ctx)) == "no-labels");
+        Box::pin(async move { Ok(allowed) })
+    }
+
+    fn can_write_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
 /// `(id, organisation_id, tenant_id, label, blocked)`.
 const DEVICES: [(&str, &str, &str, &str, bool); 3] = [
     ("dev-a", ORGANISATION, TENANT_A, "device in a", false),
@@ -344,7 +378,7 @@ const DEVICES: [(&str, &str, &str, &str, bool); 3] = [
 ];
 
 /// `(id, organisation_id, tenant_id, device_id, label)`.
-const FORWARDS: [(&str, &str, &str, Option<&str>, &str); 5] = [
+const FORWARDS: [(&str, &str, &str, Option<&str>, &str); 7] = [
     // Positive control: the same tenant and organisation.
     (
         "fwd-same",
@@ -371,6 +405,22 @@ const FORWARDS: [(&str, &str, &str, Option<&str>, &str); 5] = [
     ),
     // A nullable key member: no relation.
     ("fwd-unlinked", ORGANISATION, TENANT_A, None, "no device"),
+    // A populated key whose target does not exist.
+    (
+        "fwd-missing",
+        ORGANISATION,
+        TENANT_A,
+        Some("dev-ghost"),
+        "missing target",
+    ),
+    // A second same-partition forward, so windows can exclude a match.
+    (
+        "fwd-same-2",
+        ORGANISATION,
+        TENANT_A,
+        Some("dev-a"),
+        "same partition two",
+    ),
     ("fwd-b", ORGANISATION, TENANT_B, Some("dev-b"), "tenant b"),
 ];
 
@@ -495,34 +545,68 @@ fn configured(db: &Database<Backend>, mode: AuthorizationMode) -> Database<Backe
     let mut db = db.clone().with_authorization_mode(mode);
     db.set_entity_policy(Entities);
     db.set_row_policy(TenantRows);
+    db.set_field_policy(Fields);
     db
 }
 
-async fn execute(db: &Database<Backend>, user: &str, query: &str) -> async_graphql::Response {
-    schema_builder(db.clone())
-        .finish()
-        .execute(async_graphql::Request::new(query).data(AuthSubject::new(user)))
-        .await
+/// A database and the resolver path its requests take: the generated schema
+/// with its relation `DataLoader`s, or a hand-built schema without them,
+/// where every relation resolves with its own direct query.
+struct Api {
+    db: Database<Backend>,
+    direct: bool,
 }
 
-async fn data(db: &Database<Backend>, user: &str, query: String) -> Result<Value, String> {
-    let response = execute(db, user, &query).await;
+impl Api {
+    fn label(&self) -> &'static str {
+        if self.direct { "direct" } else { "loader" }
+    }
+}
+
+async fn execute(api: &Api, user: &str, query: &str) -> async_graphql::Response {
+    let request = async_graphql::Request::new(query).data(AuthSubject::new(user));
+    if api.direct {
+        AppSchema::build(QueryRoot::default(), Default::default(), Default::default())
+            .data(api.db.clone())
+            .data(graphql_orm::graphql::orm::DeclaredPageMaximum(
+                GRAPHQL_ORM_MAX_PAGE_LIMIT,
+            ))
+            .extension(graphql_orm::graphql::orm::PageMaximumValidation)
+            .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
+            .finish()
+            .execute(request)
+            .await
+    } else {
+        schema_builder(api.db.clone())
+            .finish()
+            .execute(request)
+            .await
+    }
+}
+
+async fn data(api: &Api, user: &str, query: String) -> Result<Value, String> {
+    let response = execute(api, user, &query).await;
     if !response.errors.is_empty() {
-        return Err(format!("{query}: {:?}", response.errors));
+        return Err(format!("{}: {query}: {:?}", api.label(), response.errors));
     }
     response.data.into_json().map_err(|error| error.to_string())
 }
 
+fn forward_query(forward: &str, device_fields: &str) -> String {
+    format!(
+        "{{ {}({}: {forward:?}) {{ {} {{ {device_fields} }} }} }}",
+        r("partitionedForward"),
+        a("id"),
+        f("device"),
+    )
+}
+
 /// The forward `id` and its related device id (or null), through the root
 /// single read.
-async fn forward_device(
-    db: &Database<Backend>,
-    user: &str,
-    forward: &str,
-) -> Result<Value, String> {
+async fn forward_device(api: &Api, user: &str, forward: &str) -> Result<Value, String> {
     let root = r("partitionedForward");
     let value = data(
-        db,
+        api,
         user,
         format!(
             "{{ {root}({}: {forward:?}) {{ {} {} {{ {} {} }} }} }}",
@@ -537,10 +621,10 @@ async fn forward_device(
     Ok(value[root].clone())
 }
 
-async fn device_by_id(db: &Database<Backend>, user: &str, device: &str) -> Result<Value, String> {
+async fn device_by_id(api: &Api, user: &str, device: &str) -> Result<Value, String> {
     let root = r("partitionedDevice");
     let value = data(
-        db,
+        api,
         user,
         format!("{{ {root}({}: {device:?}) {{ {} }} }}", a("id"), f("id")),
     )
@@ -555,25 +639,25 @@ fn device_of(forward: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// The related forward ids of one device, by connection and in one batched
-/// list read, with and without a page window.
+/// The related forward ids of one device and the connection's total, with
+/// optional relation arguments (`where`, `orderBy`, `page`).
 async fn device_forwards(
-    db: &Database<Backend>,
+    api: &Api,
     user: &str,
     device: &str,
-    paged: bool,
+    arguments: &str,
 ) -> Result<(Vec<String>, i64), String> {
     let root = r("partitionedDevice");
-    let page = if paged {
-        format!("({}: {{ limit: 10, offset: 0 }})", a("page"))
-    } else {
+    let arguments = if arguments.is_empty() {
         String::new()
+    } else {
+        format!("({arguments})")
     };
     let value = data(
-        db,
+        api,
         user,
         format!(
-            "{{ {root}({}: {device:?}) {{ {}{page} {{ edges {{ node {{ {} }} }} pageInfo {{ totalCount }} }} }} }}",
+            "{{ {root}({}: {device:?}) {{ {}{arguments} {{ edges {{ node {{ {} }} }} pageInfo {{ totalCount }} }} }} }}",
             a("id"),
             f("forwards"),
             f("id"),
@@ -596,6 +680,19 @@ async fn device_forwards(
     Ok((ids, total))
 }
 
+fn ids(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+/// The complete response, `data` and `errors`, as one comparable value.
+async fn whole_response(api: &Api, user: &str, query: &str) -> TestResult<Value> {
+    let response = execute(api, user, query).await;
+    Ok(json!({
+        "data": response.data.into_json()?,
+        "errors": serde_json::to_value(&response.errors)?,
+    }))
+}
+
 const MODES: [AuthorizationMode; 3] = [
     AuthorizationMode::LegacyPermissive,
     AuthorizationMode::DeclaredPoliciesRequired,
@@ -604,146 +701,246 @@ const MODES: [AuthorizationMode; 3] = [
 
 async fn complete_tuple_joins_in_every_mode(base: &Database<Backend>) -> TestResult {
     for mode in MODES {
-        let db = configured(base, mode);
-        let context = |what: &str| format!("{mode:?}: {what}");
-
-        // Independent read admission to both rows of the regression pair.
-        assert_eq!(
-            forward_device(&db, "both", "fwd-cross").await?[f("id")],
-            json!("fwd-cross"),
-            "{}",
-            context("forward readable")
-        );
-        assert_eq!(
-            device_by_id(&db, "both", "dev-b").await?,
-            json!("dev-b"),
-            "{}",
-            context("device readable")
-        );
-        // Same organisation, device ID stored on the forward, other tenant: null.
-        assert_eq!(
-            device_of(&forward_device(&db, "both", "fwd-cross").await?),
-            Value::Null,
-            "{}",
-            context("cross-partition relation")
-        );
-        // Positive control.
-        let same = forward_device(&db, "both", "fwd-same").await?;
-        assert_eq!(
-            device_of(&same),
-            json!("dev-a"),
-            "{}",
-            context("same partition")
-        );
-        assert_eq!(same[f("device")][f("label")], json!("device in a"));
-        // An existing same-partition target denied by row visibility.
-        assert_eq!(
-            device_of(&forward_device(&db, "both", "fwd-denied").await?),
-            Value::Null,
-            "{}",
-            context("denied target")
-        );
-        // A null key member.
-        assert_eq!(
-            device_of(&forward_device(&db, "both", "fwd-unlinked").await?),
-            Value::Null,
-            "{}",
-            context("nullable key")
-        );
-        // A caller admitted only to tenant A cannot see the B device at all.
-        assert_eq!(device_by_id(&db, "only-a", "dev-b").await?, Value::Null);
-        assert_eq!(
-            device_of(&forward_device(&db, "only-a", "fwd-cross").await?),
-            Value::Null
-        );
-        assert_eq!(
-            device_of(&forward_device(&db, "only-a", "fwd-same").await?),
-            json!("dev-a")
-        );
-
-        // One batched list read resolves every forward's relation.
-        let root = r("partitionedForwards");
-        let listed = data(
-            &db,
-            "both",
-            format!(
-                "{{ {root} {{ edges {{ node {{ {} {} {{ {} }} }} }} }} }}",
-                f("id"),
-                f("device"),
-                f("id"),
-            ),
-        )
-        .await?;
-        let related = listed[root]["edges"]
-            .as_array()
-            .ok_or("no forwards")?
-            .iter()
-            .map(|edge| {
-                (
-                    edge["node"][f("id")]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    device_of(&edge["node"]),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            related,
-            vec![
-                ("fwd-b".to_owned(), json!("dev-b")),
-                ("fwd-cross".to_owned(), Value::Null),
-                ("fwd-denied".to_owned(), Value::Null),
-                ("fwd-same".to_owned(), json!("dev-a")),
-                ("fwd-unlinked".to_owned(), Value::Null),
-            ],
-            "{}",
-            context("batched to-one")
-        );
-
-        // To-many in both loader shapes: the cross-tenant forward stores
-        // dev-b's ID but belongs to neither device's partition.
-        for paged in [false, true] {
-            assert_eq!(
-                device_forwards(&db, "both", "dev-a", paged).await?,
-                (vec!["fwd-same".to_owned()], 1),
-                "{}",
-                context("to-many dev-a")
-            );
-            assert_eq!(
-                device_forwards(&db, "both", "dev-b", paged).await?,
-                (vec!["fwd-b".to_owned()], 1),
-                "{}",
-                context("to-many dev-b")
-            );
+        for direct in [false, true] {
+            let api = Api {
+                db: configured(base, mode),
+                direct,
+            };
+            complete_tuple_joins(&api, mode).await?;
         }
-
-        // An entity-level target denial is the documented FORBIDDEN refusal on
-        // the relation path; the parent stays and nothing names the tenant.
-        let response = execute(
-            &db,
-            "no-devices",
-            &format!(
-                "{{ {}({}: \"fwd-same\") {{ {} {} {{ {} }} }} }}",
-                r("partitionedForward"),
-                a("id"),
-                f("id"),
-                f("device"),
-                f("id"),
-            ),
-        )
-        .await;
-        let errors = format!("{:?}", response.errors).to_ascii_lowercase();
-        assert!(
-            errors.contains("forbidden"),
-            "{}: {errors}",
-            context("entity denial")
-        );
-        assert!(!errors.contains("tenant"), "{errors}");
-        let value = response.data.into_json()?;
-        assert_eq!(value[r("partitionedForward")][f("id")], json!("fwd-same"));
-        assert_eq!(device_of(&value[r("partitionedForward")]), Value::Null);
     }
+    Ok(())
+}
+
+async fn complete_tuple_joins(api: &Api, mode: AuthorizationMode) -> TestResult {
+    let context = |what: &str| format!("{mode:?}/{}: {what}", api.label());
+
+    // Independent read admission to both rows of the regression pair.
+    assert_eq!(
+        forward_device(api, "both", "fwd-cross").await?[f("id")],
+        json!("fwd-cross"),
+        "{}",
+        context("forward readable")
+    );
+    assert_eq!(
+        device_by_id(api, "both", "dev-b").await?,
+        json!("dev-b"),
+        "{}",
+        context("device readable")
+    );
+    // Same organisation, device ID stored on the forward, other tenant: null.
+    assert_eq!(
+        device_of(&forward_device(api, "both", "fwd-cross").await?),
+        Value::Null,
+        "{}",
+        context("cross-partition relation")
+    );
+    // Positive control.
+    let same = forward_device(api, "both", "fwd-same").await?;
+    assert_eq!(
+        device_of(&same),
+        json!("dev-a"),
+        "{}",
+        context("same partition")
+    );
+    assert_eq!(same[f("device")][f("label")], json!("device in a"));
+    // A null key member.
+    assert_eq!(
+        device_of(&forward_device(api, "both", "fwd-unlinked").await?),
+        Value::Null,
+        "{}",
+        context("nullable key")
+    );
+    // A mismatched partition, a row-denied same-partition target and a
+    // genuinely missing target with a populated key are one response, data
+    // and errors alike.
+    let device_fields = format!("{} {}", f("id"), f("label"));
+    let missing =
+        whole_response(api, "both", &forward_query("fwd-missing", &device_fields)).await?;
+    assert_eq!(
+        missing,
+        json!({ "data": { r("partitionedForward"): { f("device"): null } }, "errors": [] }),
+        "{}",
+        context("missing target")
+    );
+    for forward in ["fwd-cross", "fwd-denied"] {
+        assert_eq!(
+            whole_response(api, "both", &forward_query(forward, &device_fields)).await?,
+            missing,
+            "{}",
+            context(forward)
+        );
+    }
+    // A caller admitted only to tenant A cannot see the B device at all.
+    assert_eq!(device_by_id(api, "only-a", "dev-b").await?, Value::Null);
+    assert_eq!(
+        device_of(&forward_device(api, "only-a", "fwd-cross").await?),
+        Value::Null
+    );
+    assert_eq!(
+        device_of(&forward_device(api, "only-a", "fwd-same").await?),
+        json!("dev-a")
+    );
+
+    // One list read resolves every forward's relation.
+    let root = r("partitionedForwards");
+    let listed = data(
+        api,
+        "both",
+        format!(
+            "{{ {root} {{ edges {{ node {{ {} {} {{ {} }} }} }} }} }}",
+            f("id"),
+            f("device"),
+            f("id"),
+        ),
+    )
+    .await?;
+    let related = listed[root]["edges"]
+        .as_array()
+        .ok_or("no forwards")?
+        .iter()
+        .map(|edge| {
+            (
+                edge["node"][f("id")]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                device_of(&edge["node"]),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        related,
+        vec![
+            ("fwd-b".to_owned(), json!("dev-b")),
+            ("fwd-cross".to_owned(), Value::Null),
+            ("fwd-denied".to_owned(), Value::Null),
+            ("fwd-missing".to_owned(), Value::Null),
+            ("fwd-same".to_owned(), json!("dev-a")),
+            ("fwd-same-2".to_owned(), json!("dev-a")),
+            ("fwd-unlinked".to_owned(), Value::Null),
+        ],
+        "{}",
+        context("list to-one")
+    );
+
+    // To-many: fwd-cross stores dev-b's ID but is in tenant A, so it belongs
+    // to neither device's partition, with or without relation arguments.
+    let label = f("label");
+    let page = a("page");
+    let filter = a("where");
+    let order = a("orderBy");
+    let windows: [(&str, &str, Vec<String>, i64); 9] = [
+        ("dev-a", "", ids(&["fwd-same", "fwd-same-2"]), 2),
+        ("dev-b", "", ids(&["fwd-b"]), 1),
+        (
+            "dev-a",
+            &format!("{page}: {{ limit: 10, offset: 0 }}"),
+            ids(&["fwd-same", "fwd-same-2"]),
+            2,
+        ),
+        // A page window that excludes a matching row.
+        (
+            "dev-a",
+            &format!("{page}: {{ limit: 1, offset: 1 }}"),
+            ids(&["fwd-same-2"]),
+            2,
+        ),
+        // A filter that excludes a matching row.
+        (
+            "dev-a",
+            &format!("{filter}: {{ {label}: {{ ne: \"same partition\" }} }}"),
+            ids(&["fwd-same-2"]),
+            1,
+        ),
+        // An explicit order, then a window over it.
+        (
+            "dev-a",
+            &format!("{order}: {{ {label}: DESC }}"),
+            ids(&["fwd-same-2", "fwd-same"]),
+            2,
+        ),
+        (
+            "dev-a",
+            &format!("{order}: {{ {label}: DESC }}, {page}: {{ limit: 1, offset: 0 }}"),
+            ids(&["fwd-same-2"]),
+            2,
+        ),
+        // The public members alone would match fwd-cross here.
+        (
+            "dev-b",
+            &format!("{filter}: {{ {label}: {{ eq: \"cross partition\" }} }}"),
+            Vec::new(),
+            0,
+        ),
+        (
+            "dev-b",
+            &format!("{order}: {{ {label}: ASC }}, {page}: {{ limit: 5, offset: 0 }}"),
+            ids(&["fwd-b"]),
+            1,
+        ),
+    ];
+    for (device, arguments, expected, total) in windows {
+        assert_eq!(
+            device_forwards(api, "both", device, arguments).await?,
+            (expected, total),
+            "{}",
+            context(&format!("to-many {device}({arguments})"))
+        );
+    }
+
+    // An entity-level target denial is the documented FORBIDDEN refusal on
+    // the relation path; the parent stays and nothing names the tenant.
+    let response = execute(
+        api,
+        "no-devices",
+        &format!(
+            "{{ {}({}: \"fwd-same\") {{ {} {} {{ {} }} }} }}",
+            r("partitionedForward"),
+            a("id"),
+            f("id"),
+            f("device"),
+            f("id"),
+        ),
+    )
+    .await;
+    let errors = format!("{:?}", response.errors).to_ascii_lowercase();
+    assert!(
+        errors.contains("forbidden"),
+        "{}: {errors}",
+        context("entity denial")
+    );
+    assert!(!errors.contains("tenant"), "{errors}");
+    let value = response.data.into_json()?;
+    assert_eq!(value[r("partitionedForward")][f("id")], json!("fwd-same"));
+    assert_eq!(device_of(&value[r("partitionedForward")]), Value::Null);
+
+    // The relation reveals a match on a target row the caller may read, by
+    // definition: selecting only `__typename` tells a same-partition target
+    // from a mismatch without any field check. A selected-field denial is
+    // therefore the ordinary relation refusal, never turned into null, and
+    // row visibility is what hides a target.
+    let typename = |forward: &str| forward_query(forward, "__typename");
+    assert_eq!(
+        whole_response(api, "no-labels", &typename("fwd-same")).await?["data"],
+        json!({ r("partitionedForward"): { f("device"): { "__typename": "PartitionedDevice" } } }),
+        "{}",
+        context("typename match")
+    );
+    assert_eq!(
+        whole_response(api, "no-labels", &typename("fwd-cross")).await?,
+        json!({ "data": { r("partitionedForward"): { f("device"): null } }, "errors": [] }),
+        "{}",
+        context("typename mismatch")
+    );
+    let denied = execute(api, "no-labels", &forward_query("fwd-same", &device_fields)).await;
+    let errors = format!("{:?}", denied.errors).to_ascii_lowercase();
+    assert!(
+        errors.contains("forbidden"),
+        "{}: {errors}",
+        context("field denial")
+    );
+    assert!(!errors.contains("tenant"), "{errors}");
     Ok(())
 }
 
@@ -783,7 +980,15 @@ async fn private_key_has_no_public_surface(base: &Database<Backend>) -> TestResu
             f("id"),
         ),
     ] {
-        let response = execute(&db, "both", &query).await;
+        let response = execute(
+            &Api {
+                db: db.clone(),
+                direct: false,
+            },
+            "both",
+            &query,
+        )
+        .await;
         assert!(!response.errors.is_empty(), "{query} was accepted");
         assert_eq!(response.data.into_json()?, Value::Null, "{query}");
     }

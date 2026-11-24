@@ -1,5 +1,5 @@
 error: server_only_key requires from = "source_field" and to = "target_column"
-  --> tests/ui/server_only_keys/missing_to.rs:26:9
+  --> tests/ui/server_only_keys/missing_to.rs:27:9
    |
-26 |         server_only_key(from = "partition"),
+27 |         server_only_key(from = "partition"),
    |         ^^^^^^^^^^^^^^^

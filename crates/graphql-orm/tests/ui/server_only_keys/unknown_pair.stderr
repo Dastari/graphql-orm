@@ -1,5 +1,5 @@
 error: server_only_key(from = "partition", to = "id") must name one declared from/to key pair of this relation, in the same position
-  --> tests/ui/server_only_keys/unknown_pair.rs:26:9
+  --> tests/ui/server_only_keys/unknown_pair.rs:27:9
    |
-26 |         server_only_key(from = "partition", to = "id"),
+27 |         server_only_key(from = "partition", to = "id"),
    |         ^^^^^^^^^^^^^^^

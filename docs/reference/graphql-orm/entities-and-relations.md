@@ -757,44 +757,77 @@ pub struct Record {
 ```
 
 Each `server_only_key` names one `from`/`to` pair of the relation, in the same
-position. Its source member is exempt from the readability rule, and its target
-column must be server-only on the target: declared `#[graphql_orm(private)]` and
-not reopened for reads, filters, ordering, subscriptions or inputs, and not a
-primary-key member. The target's generated `GeneratedRelationReadability`
-metadata proves this at compile time, across crates too; a hand-written target
-that does not list the column in `SERVER_ONLY_COLUMNS` is refused. Every other
-pair keeps the ordinary readability checks, and at least one pair must stay
-public.
+position. Every other pair keeps the ordinary readability checks, and at least
+one pair must stay public. The macro also requires:
+
+- **An exact key.** Every member of such a relation is an integer, string,
+  UUID or boolean. Floating-point members are refused because the batched
+  loader regroups rows by each member's text, which is not a lossless identity
+  for floats. Equality is the database's own comparison, so on SQL Server a
+  case-insensitive collation treats `A` and `a` as one partition; use
+  identifiers that compare exactly, or a binary collation.
+- **The stored source value.** The pair's source member is exempt from the
+  readability rule, but it must be a persisted scalar field without `skip_db`
+  or `#[transform(read = ...)]`, so the join binds the value the row stores.
+- **A server-only target column.** Eligibility belongs to the physical column,
+  not to one Rust field. Every field that maps the column, including a
+  `db_column` alias, must be declared `#[graphql_orm(private)]` and must not be
+  reopened for reads, filters, ordering, subscriptions or inputs. The column
+  cannot be a member of the effective primary key, including an implicit `id`.
+  Where the target derive does not generate the GraphQL object itself
+  (`GraphQLSchemaEntity`, `schema_only`, or a `SimpleObject` with
+  `#[graphql(complex)]`), each mapping also needs `#[graphql(skip)]`. The
+  target's generated `GeneratedRelationReadability::SERVER_ONLY_COLUMNS` proves
+  this at compile time, across crates too. A hand-written target that does not
+  list the column is refused.
 
 Generated traversal always binds the complete tuple on the server: to-one,
 nullable and to-many fields, relation `where`/`orderBy`/`page` arguments, page
-windows and counts, and the batched `RelationLoader` path. A target in another
-partition is absent, so a to-one field is `null` and a to-many field is empty,
-with no error, the same as a missing or row-denied target. Source and target
-entity access, auth modes, operation scopes and assurance, row visibility and
-field policies apply exactly as for any other relation; an entity-level target
-denial is still the `FORBIDDEN` refusal described under
+windows and counts, both the batched `RelationLoader` path and the direct
+query used without a registered loader. A target in another partition is
+absent. A to-one field is `null` and a to-many field is empty, with no error.
+That response, `data` and `errors` alike, is identical to a missing target
+and to a target hidden by row visibility. Source and target entity access,
+auth modes, operation scopes and assurance, row visibility and field policies
+apply exactly as for any other relation. An entity-level target denial is
+still the `FORBIDDEN` refusal described under
 [denied and absent relation targets](#denied-and-absent-relation-targets), and
 no message names the key.
 
-The private column appears in no SDL type, `WhereInput`, `OrderByInput`,
-create or update input, `Changed` payload or filter, semantic or resolver
-catalogue entry, or client metadata; the relation's client key mapping is
-`no_exposed_key`. Neither the source nor the target gains a filter, ordering
-or subscription capability. The macro refuses the declaration together with
-`filter` (related-row filters), `order_aggregate`, `search_relation` and
-`propagate_change = "up"`, because each would evaluate the join outside the
-relation field or needs public subscribable keys. Converting such an entity
-into a runtime GraphQL schema reports the private column as unsupported, as
-for any statically unreadable column.
+The relation reveals what any join reveals: a target the caller may read is
+returned only when its partition equals the source's. Selecting only
+`__typename` already tells a same-partition target from a mismatch, so a field
+policy cannot hide that match. A selected-field denial on a matched target is
+the ordinary `FORBIDDEN` relation refusal, and row visibility is what hides a
+target. Declare a server-only pair only where that equality, for rows the
+caller may already read, is acceptable.
 
-The relation does reveal what any join reveals: a related row is returned only
-when its partition equals the source's. Declare a server-only pair only where
-that equality, for rows the caller may already read, is acceptable.
+The private column appears in no generated SDL type, `WhereInput`,
+`OrderByInput`, create or update input, `Changed` payload or filter, semantic
+or resolver catalogue entry, or client metadata. The relation's client key
+mapping is `no_exposed_key`. Neither the source nor the target gains a filter,
+ordering or subscription capability. The macro refuses:
+
+- the declaration together with `filter` (related-row filters),
+  `order_aggregate`, `search_relation` or `propagate_change = "up"`, because
+  each would evaluate the join outside the relation field or needs public
+  subscribable keys;
+- any relation's `search_relation(fields = [...])` that names a `private` field
+  of its target, because a search document would publish it.
+
+Converting such an entity into a runtime GraphQL schema reports the private
+column as unsupported, as for any statically unreadable column. The ORM cannot
+see surfaces the host writes itself. Handwritten resolvers and object fields,
+custom roots, trusted `order_expression` SQL, repository helpers and
+host-owned `SimpleObject` getters on metadata-only entities can still read or
+order by the column, and keeping them private is the host's responsibility.
+
 `tests/server_only_relation_keys.rs` runs the matrix on SQLite and test-owned
-PostgreSQL and SQL Server in every `AuthorizationMode`, including a caller
-admitted to both rows of a cross-partition pair, and
-`tests/ui/server_only_keys/` holds the compile-time refusals.
+PostgreSQL and SQL Server in every `AuthorizationMode`, over the loader and
+the direct path. The matrix includes a caller admitted to both rows of a
+cross-partition pair. `tests/ui/server_only_keys/` holds the compile-time
+refusals. The cross-crate fixture proves that a public alias in the target
+crate withdraws the column's certification.
 
 ## Conditional Polymorphic Relations
 

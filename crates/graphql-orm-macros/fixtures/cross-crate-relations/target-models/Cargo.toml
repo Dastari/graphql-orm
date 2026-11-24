@@ -6,6 +6,7 @@ publish = false
 
 [features]
 unreadable-target-key = []
+server-only-public-alias = []
 default = ["sqlite"]
 sqlite = ["graphql-orm/sqlite", "cross-crate-ancestor-models/sqlite"]
 postgres = ["graphql-orm/postgres", "cross-crate-ancestor-models/postgres"]

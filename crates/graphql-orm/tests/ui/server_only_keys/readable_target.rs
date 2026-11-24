@@ -16,6 +16,7 @@ struct Source {
     #[sortable]
     id: i32,
     target_id: i32,
+    #[graphql(skip)]
     #[graphql_orm(private)]
     partition: i32,
     #[relation(

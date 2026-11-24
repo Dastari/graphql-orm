@@ -6,6 +6,7 @@ struct Target {
     #[primary_key]
     #[sortable]
     id: i32,
+    #[graphql(skip)]
     #[graphql_orm(private)]
     partition: i32,
 }

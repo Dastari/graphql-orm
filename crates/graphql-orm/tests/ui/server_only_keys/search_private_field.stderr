@@ -1,0 +1,31 @@
+error[E0080]: evaluation panicked: search_relation field `partition` is private on `Target`; a search document would publish it
+  --> tests/ui/server_only_keys/search_private_field.rs:24:5
+   |
+24 |     target: Option<Target>,
+   |     ^^^^^^ evaluation of `_` failed here
+
+error[E0277]: the trait bound `Target: graphql_orm::prelude::RelationTraversalAuthorization` is not satisfied
+  --> tests/ui/server_only_keys/search_private_field.rs:22:5
+   |
+22 |     #[relation(target = "Target", from = "target_id", to = "id", emit_fk = false)]
+   |     ^ unsatisfied trait bound
+   |
+help: the trait `graphql_orm::prelude::RelationTraversalAuthorization` is not implemented for `Target`
+  --> tests/ui/server_only_keys/search_private_field.rs:5:1
+   |
+ 5 | struct Target {
+   | ^^^^^^^^^^^^^
+help: the trait `graphql_orm::prelude::RelationTraversalAuthorization` is implemented for `Searcher`
+  --> tests/ui/server_only_keys/search_private_field.rs:14:10
+   |
+14 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^
+note: required by a bound in `graphql_orm::prelude::authorize_relation_target`
+  --> src/graphql/orm/read_authorization.rs
+   |
+   | pub fn authorize_relation_target<T>(
+   |        ------------------------- required by a bound in this function
+...
+   |     T: RelationTraversalAuthorization,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `authorize_relation_target`
+   = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -7,8 +7,10 @@ struct Target {
     #[sortable]
     id: i32,
     source_id: i32,
+    #[graphql(skip)]
     #[graphql_orm(private)]
     partition: i32,
+    #[graphql(skip)]
     #[graphql_orm(db_column = "Region", private)]
     region: i32,
 }

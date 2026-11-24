@@ -1,5 +1,5 @@
 error: server_only_key relations cannot declare graphql_orm(search_relation(...)): search documents are maintained outside request authorization
-  --> tests/ui/server_only_keys/search_relation.rs:29:9
+  --> tests/ui/server_only_keys/search_relation.rs:30:9
    |
-29 |         server_only_key(from = "partition", to = "partition"),
+30 |         server_only_key(from = "partition", to = "partition"),
    |         ^^^^^^^^^^^^^^^

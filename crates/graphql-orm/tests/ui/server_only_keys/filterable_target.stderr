@@ -1,5 +1,5 @@
-error[E0080]: evaluation panicked: relation `Source.target` declares server_only_key target `Target.partition`, which is not a server-only column; the target must declare it #[graphql_orm(private)] with no filter, order, subscribe, input or primary-key exposure, and its metadata must declare the physical column
-  --> tests/ui/server_only_keys/filterable_target.rs:15:10
+error[E0080]: evaluation panicked: relation `Source.target` declares server_only_key target `Target.partition`, which is not a server-only column; every target field mapping it must be #[graphql_orm(private)] with no filter, order, subscribe or input exposure, and #[graphql(skip)] when the target derive does not generate its object; it cannot be a primary-key column, and the target metadata must declare it
+  --> tests/ui/server_only_keys/filterable_target.rs:16:10
    |
-15 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+16 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
    |          ^^^^^^^^^^^^^ evaluation of `_` failed here
