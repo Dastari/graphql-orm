@@ -10,6 +10,23 @@ supersedes: []
 
 # Migration Guide
 
+## 0.211.0 to 0.212.0: scoped SQLite column drop
+
+**No action.** Upgrade ORM and macros together. An owned SQLite plan whose
+only change is to drop a column now renders SQLite's native `DROP COLUMN`.
+The plan is destructive and still requires `ApplyOptions::allow_destructive`.
+Planning and application check the live foreign-key catalog and test SQLite's
+native alterations against an empty copy of the schema. Planning reports
+detected dependencies as `InvalidPhysicalContract`. A trial rename identifies
+retained references that SQLite could silently rebind or ignore, including
+`UPDATE OF` trigger events. The live drop proceeds only when the checks
+verify that it preserves the retained physical schema.
+This narrows the [0.111.0 column-removal restrictions](#01110-sqlite-columncheckfk-rebuild-preservation)
+for the single-drop shape. Plans containing a drop and additional steps still
+rebuild or refuse. Run SQLite migrations with no TEMP objects on other
+connections, or use a dedicated migration connection with other connections closed.
+Refs #882.
+
 ## 0.210.0 to 0.211.0: Described root result metadata
 
 **No action.** Described roots returning an entity registered in
