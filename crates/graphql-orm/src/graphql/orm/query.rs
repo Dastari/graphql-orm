@@ -1008,6 +1008,33 @@ pub(crate) fn sort_clause_orders_by_column(clause: &str, column: &str) -> bool {
         .any(|term| sort_term_column(term).is_some_and(|name| name == expected))
 }
 
+/// Whether a default sort can be evaluated against a projection of these
+/// physical columns. Keep arbitrary SQL on the original table scope.
+pub(crate) fn postgres_sort_uses_projected_columns(clause: &str, columns: &[&str]) -> bool {
+    use super::dialect::{SqlTokenKind, postgres_resolved_identifier, scan_sql};
+
+    clause.trim().is_empty()
+        || split_sort_terms(clause).into_iter().all(|term| {
+            let mut first = None;
+            let mut qualified = false;
+            let scanned = scan_sql(DatabaseBackend::Postgres, term, |token| {
+                if token.kind != SqlTokenKind::Comment {
+                    first.get_or_insert(&term[token.start..token.end]);
+                    qualified |= &term[token.start..token.end] == ".";
+                }
+            });
+            scanned.is_ok()
+                && !qualified
+                && sort_term_column(term).is_some()
+                && first.is_some_and(|first| {
+                    let name = postgres_resolved_identifier(first);
+                    columns
+                        .iter()
+                        .any(|col| postgres_resolved_identifier(col) == name)
+                })
+        })
+}
+
 /// The terms of `clause` that do not order directly by a column one of
 /// `ordered` already orders by, or `None` when no term is left.
 ///
@@ -8016,6 +8043,34 @@ mod grouped_aggregate_tests {
 #[cfg(test)]
 mod visible_row_scan_tests {
     use super::*;
+
+    #[test]
+    fn postgres_sort_projection_admits_only_unqualified_physical_columns() {
+        let columns = ["id", r#""Mixed.Case""#, r#""odd""name""#];
+        for clause in [
+            "id DESC NULLS LAST",
+            r#""Mixed.Case" ASC NULLS LAST, "odd""name" DESC"#,
+        ] {
+            assert!(
+                postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+        for clause in [
+            "records.id ASC",
+            "public.records.id",
+            "lower(id)",
+            "id /* comment */ DESC",
+            "id DESC -- comment",
+            r#""mixed.case" ASC"#,
+            "missing NULLS LAST",
+        ] {
+            assert!(
+                !postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+    }
 
     #[test]
     fn key_tiebreak_needs_a_direct_key_term() {
