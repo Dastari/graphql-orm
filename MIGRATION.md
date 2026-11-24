@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.215.0 to 0.225.0: Shared generated read execution
+
+**No action.** Upgrade ORM and macros together. Generated list and aggregate
+resolvers use shared execution helpers. Their schema, catalogue and
+authorization contracts are unchanged.
+
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 
 **No action.** Upgrade ORM and macros together. SQL Server keeps the

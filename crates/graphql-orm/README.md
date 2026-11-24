@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.225.0 shares the offset list and aggregate execution paths to reduce
+compile work in crates deriving GraphQL operations.
+See the [migration guide](../../MIGRATION.md#02150-to-02250-shared-generated-read-execution).
+
 Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
 column identifier parsing in ALTER COLUMN collation lookups.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).

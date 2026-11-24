@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.225.0 splits query emission by operation family and delegates offset
+list and aggregate execution to the ORM runtime.
+See the [migration guide](../../MIGRATION.md#02150-to-02250-shared-generated-read-execution).
+
 Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
 column types with the `mssql_type` field attribute.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).

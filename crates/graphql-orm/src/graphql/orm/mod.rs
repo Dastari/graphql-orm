@@ -1,9 +1,12 @@
 mod delete_effect_guard;
 pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
+mod generated_read;
 mod guarded_updates;
 #[doc(hidden)]
 pub use generated_filter::*;
+#[doc(hidden)]
+pub use generated_read::*;
 #[doc(hidden)]
 pub use guarded_updates::__register_guarded_update_table;
 pub(crate) use guarded_updates::is_guarded_update_table;

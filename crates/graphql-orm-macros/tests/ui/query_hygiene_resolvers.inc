@@ -122,47 +122,18 @@ impl RecordQueries {
             )
             .await?;
         }
-        let mut query = Record::aggregate(db).with_auth(auth_context.as_ref());
-        if let ::std::option::Option::Some(filter) = where_input {
-            query = query.filter(filter);
-        }
-        for field in group_by {
-            query = query
-                .group_by(field)
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-        }
-        for metric in metrics {
-            use ::graphql_orm::graphql::orm::GraphqlAggregateInputOperator as Operator;
-            query = match (metric.operator, metric.field) {
-                (Operator::Count, ::std::option::Option::Some(field)) => query.count(field),
-                (Operator::Count, ::std::option::Option::None) => query.count_rows(),
-                (Operator::Min, ::std::option::Option::Some(field)) => query.min(field),
-                (Operator::Max, ::std::option::Option::Some(field)) => query.max(field),
-                (Operator::Sum, ::std::option::Option::Some(field)) => query.sum(field),
-                (_, ::std::option::Option::None) => {
-                    ::std::result::Result::Err(::graphql_orm::sqlx::Error::Protocol(
-                        "aggregate metric field is required for this operator".to_owned(),
-                    ))
-                }
-            }
-            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-        }
-        query = query
-            .group_limit(i64::from(group_limit))
-            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-        let rows = query
-            .fetch_with_graphql_context(ctx)
-            .await
-            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-        ::std::result::Result::Ok(
-            rows.into_iter()
-                .map(|row| {
-                    RecordAggregateResultRow::from(
-                        ::graphql_orm::graphql::orm::GraphqlAggregateResultRow::from(row),
-                    )
-                })
-                .collect(),
-        )
+        ::graphql_orm::graphql::orm::__gom_fetch_aggregate(
+            ctx,
+            Record::aggregate(db).with_auth(auth_context.as_ref()),
+            where_input,
+            group_by,
+            metrics
+                .into_iter()
+                .map(|metric| (metric.operator, metric.field)),
+            group_limit,
+            RecordAggregateResultRow::from,
+        )?
+        .await
     }
     #[doc = "List Record records"]
     async fn list(
@@ -173,7 +144,6 @@ impl RecordQueries {
         page: ::std::option::Option<::graphql_orm::graphql::orm::PageInput>,
     ) -> ::graphql_orm::async_graphql::Result<RecordConnection> {
         ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
-        use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
         let _auth_subject =
             ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, ::std::option::Option::None)?;
         ::graphql_orm::graphql::orm::ensure_rls_request_context::<
@@ -245,64 +215,21 @@ impl RecordQueries {
             )
             .await?;
         }
-        let mut query = EntityQuery::<Record, ::graphql_orm::SqliteBackend>::new();
-        if let ::std::option::Option::Some(ref filter) = where_input {
-            query = query.filter_with_entity_matching(filter);
-        }
-        if let ::std::option::Option::Some(ref orders) = order_by {
-            for order in orders {
-                query = query.order_by_with_context(order, ctx)?;
-            }
-        }
-        if query.order_clauses.is_empty() {
-            query = query.default_order();
-        }
-        let visibility = db
-            .read_visibility::<Record>(
-                ::std::option::Option::Some(ctx),
-                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-            )
-            .await
-            .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-        if visibility.requires_residual_checks() {
-            let resolved_page = db
-                .client_pagination_config()
-                .resolve_client_page(page.as_ref(), true)
-                .map_err(|error| error.into_graphql_error())?;
-            let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
-                db,
-                ctx,
-                query,
-                auth_context.as_ref(),
-                &visibility,
-                resolved_page,
-                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-            )
-            .await?;
-            return ::std::result::Result::Ok(RecordConnection::from_generic(
-                authorized_page.into_offset_connection(),
-            ));
-        }
-        query = query.with_read_visibility(&visibility)?;
-        if page.is_some() {
-            let resolved_page = db
-                .client_pagination_config()
-                .resolve_client_page(page.as_ref(), true)
-                .map_err(|error| error.into_graphql_error())?;
-            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
-                limit: resolved_page.limit,
-                offset: ::std::option::Option::Some(resolved_page.offset),
-            });
-        }
-        let generic_conn = query
-            .fetch_connection_selected_with_auth(
-                db,
-                auth_context.as_ref(),
-                ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
-            )
-            .await
-            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-        ::std::result::Result::Ok(RecordConnection::from_generic(generic_conn))
+        let connection = ::graphql_orm::graphql::orm::__gom_fetch_list::<
+            Record,
+            ::graphql_orm::SqliteBackend,
+            _,
+            _,
+        >(
+            db,
+            ctx,
+            auth_context.as_ref(),
+            where_input.as_ref(),
+            order_by.as_deref().unwrap_or_default(),
+            page.as_ref(),
+        )
+        .await?;
+        ::std::result::Result::Ok(RecordConnection::from_generic(connection))
     }
     #[doc = "Search Record records"]
     async fn search(

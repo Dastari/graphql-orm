@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.225.0
+
+- **Improved (#677, #723, #358).** Generated offset list and aggregate
+  queries share boxed execution helpers to reduce downstream compile cost.
+  Generated schema and operation catalogues are unchanged.
+
 ## Unreleased - ORM/macros 0.215.0
 
 - **Added (#522).** SQL Server pools can opt in to binding the SQL types
