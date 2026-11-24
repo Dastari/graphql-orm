@@ -212,12 +212,13 @@ A partial index counts as a closed-set predicate only when all of the following 
 - every operator, function, type and collation that `pg_catalog.pg_depend` records for the index
   belongs to `pg_catalog` (PostgreSQL does not record its own pinned built-in objects, so a
   catalog-only index usually has no such rows);
-- its predicate renders in the closed-set form.
+- its predicate renders in the closed-set form, including PostgreSQL's canonical
+  single-value equality against a `text` literal.
 
-Introspection reports any other partial index without a predicate, and runtime migrations refuse
-it. A session whose `search_path` lists another schema ahead of `pg_catalog` with an operator of the
-same signature, or with a type named `text`, sees the catalog's operator or type rendered
-schema-qualified, so such an index is reported without a predicate in that session too.
+Introspection retains any other partial-index predicate as opaque, and runtime migrations refuse
+to recreate it. A session whose `search_path` lists another schema ahead of `pg_catalog` with an
+operator of the same signature, or with a type named `text`, sees the catalog's operator or type
+rendered schema-qualified, so such a predicate is opaque in that session too.
 
 The plan's own `DO` blocks name catalog objects and operators with their schema too. These are the
 change journal's RLS statement, privilege revocation, the trigger installers, stray-trigger

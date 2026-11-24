@@ -18,8 +18,10 @@ use super::core::{SearchFieldModel, SearchJsonPathModel, SearchRelationFieldMode
 use super::core::{SpatialColumnDef, SpatialGeometryType};
 pub(super) use super::default_equivalence::DefaultEquivalence;
 use super::dialect::{DatabaseBackend, SqlDialect};
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+use super::owned_schema::IndexPredicateModel;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-use super::owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
+use super::owned_schema::{IndexModel, OwnedSchemaModel, OwnedTableModel};
 use super::owned_schema::{
     IndexRef, OwnedMigrationPlan, OwnedMigrationStep, SchemaRef, StepRef, TableRef,
 };
@@ -2841,7 +2843,6 @@ fn sqlite_constant_default(default: &str) -> bool {
 
 const INVALID_MSSQL_FILTER_SQL: &str =
     "THROW 50000, 'Invalid SQL Server filtered index predicate', 1";
-const OPAQUE_INDEX_FILTER_SQL: &str = "SELECT /* opaque index predicate cannot be recreated */";
 
 /// A SQL Server index predicate that cannot be rendered safely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2896,7 +2897,12 @@ fn refused_step_sql(backend: DatabaseBackend, error: sqlx::Error) -> &'static st
     match (backend, error) {
         (DatabaseBackend::Mssql, sqlx::Error::Protocol(_)) => INVALID_MSSQL_APPEND_ONLY_SQL,
         (DatabaseBackend::Mssql, _) => INVALID_MSSQL_FILTER_SQL,
-        _ => OPAQUE_INDEX_FILTER_SQL,
+        (DatabaseBackend::Postgres, _) => {
+            "DO $$ BEGIN RAISE EXCEPTION 'opaque index predicate cannot be recreated'; END; $$"
+        }
+        (DatabaseBackend::Sqlite | DatabaseBackend::Mysql, _) => {
+            "SELECT /* opaque index predicate cannot be recreated */ FROM"
+        }
     }
 }
 
@@ -3333,7 +3339,10 @@ fn parse_structural_string_value(
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<IndexPredicateModel> {
+pub(super) fn parse_closed_set_index_predicate(
+    backend: DatabaseBackend,
+    expression: &str,
+) -> Option<IndexPredicateModel> {
     let tokens = tokenize_structural_sql(expression)?;
     let tokens = strip_redundant_outer_parentheses(&tokens);
     let StructuralSqlToken::Ident(column) = tokens.first()? else {
@@ -3350,6 +3359,22 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
         return Some(IndexPredicateModel {
             column: column.clone(),
             values: Vec::new(),
+        });
+    }
+    // PostgreSQL folds a one-element IN list to equality in the catalog.
+    if backend == DatabaseBackend::Postgres
+        && let [
+            _,
+            StructuralSqlToken::Equals,
+            StructuralSqlToken::String(value),
+            StructuralSqlToken::DoubleColon,
+            cast,
+        ] = tokens
+        && structural_ident(Some(cast), "text")
+    {
+        return Some(IndexPredicateModel {
+            column: column.clone(),
+            values: vec![value.clone()],
         });
     }
     let mut offset = 1;
@@ -3415,12 +3440,19 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
 #[test]
 fn parses_non_null_index_predicate_without_accepting_other_conditions() {
     for expression in [r#""ref" IS NOT NULL"#, "(ref IS NOT NULL)"] {
-        let predicate = parse_closed_set_index_predicate(expression).unwrap();
+        let predicate =
+            parse_closed_set_index_predicate(DatabaseBackend::Sqlite, expression).unwrap();
         assert_eq!(predicate.column, "ref");
         assert!(predicate.values.is_empty());
     }
-    assert!(parse_closed_set_index_predicate("ref IS NULL").is_none());
-    assert!(parse_closed_set_index_predicate("ref IS NOT NULL OR id IS NOT NULL").is_none());
+    assert!(parse_closed_set_index_predicate(DatabaseBackend::Sqlite, "ref IS NULL").is_none());
+    assert!(
+        parse_closed_set_index_predicate(
+            DatabaseBackend::Sqlite,
+            "ref IS NOT NULL OR id IS NOT NULL"
+        )
+        .is_none()
+    );
 }
 
 #[cfg(feature = "sqlite")]
@@ -3986,8 +4018,8 @@ fn render_sqlite_table_rebuild_statements(
 /// `-- sqlite requires table rebuild …` marker instead of executable DDL. Use a migration
 /// plan, which renders the controlled rebuild.
 ///
-/// When a step cannot render its index predicate, the returned SQL raises an
-/// error. Use [`try_render_migration_step`] to receive the error in Rust.
+/// If the backend cannot recreate the step's index predicate, the returned SQL
+/// fails when executed. Use [`try_render_migration_step`] to receive the error in Rust.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     try_render_migration_step(backend, step)
         .unwrap_or_else(|error| vec![refused_step_sql(backend, error).to_owned()])
@@ -4608,8 +4640,8 @@ pub fn classify_migration_steps(steps: &[MigrationStep]) -> Vec<PlannedMigration
     steps.iter().map(classify_migration_step).collect()
 }
 
-/// Build a migration plan. A plan containing an invalid SQL Server index
-/// predicate renders only a statement that raises an error.
+/// Build a migration plan. If any step would recreate an index predicate the
+/// backend cannot render, the plan renders only a statement that fails when executed.
 pub fn build_migration_plan(
     backend: DatabaseBackend,
     current: &SchemaModel,
@@ -5039,7 +5071,9 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 let expression = index_sql
                     .as_deref()
                     .and_then(sqlite_unique_rebuild::index_filter);
-                let parsed = expression.and_then(parse_closed_set_index_predicate);
+                let parsed = expression.and_then(|expression| {
+                    parse_closed_set_index_predicate(DatabaseBackend::Sqlite, expression)
+                });
                 Some(parsed.unwrap_or_else(|| {
                     IndexPredicateModel::opaque(
                         expression.or(index_sql.as_deref()).map(str::to_owned),
@@ -5607,7 +5641,8 @@ pub(super) async fn introspect_owned_postgres_connection_including(
             let predicate_expression: Option<String> = row.try_get("predicate")?;
             let predicate = predicate_expression.map(|expression| {
                 if predicate_catalog_only
-                    && let Some(predicate) = parse_closed_set_index_predicate(&expression)
+                    && let Some(predicate) =
+                        parse_closed_set_index_predicate(DatabaseBackend::Postgres, &expression)
                 {
                     return predicate;
                 }
@@ -7097,12 +7132,8 @@ async fn introspect_mssql_indexes(
             let mut index = super::owned_schema::IndexModel::new(name, Vec::new());
             index.is_unique = row.try_get::<i64, _>("is_unique")? != 0;
             let has_filter = row.try_get::<i64, _>("has_filter")? != 0;
-            index.predicate = row
-                .try_get::<Option<String>, _>("filter_definition")?
-                .map(mssql_index_predicate)
-                .or_else(|| {
-                    has_filter.then(|| super::owned_schema::IndexPredicateModel::opaque(None))
-                });
+            let definition = row.try_get::<Option<String>, _>("filter_definition")?;
+            index.predicate = mssql_catalog_index_predicate(has_filter, definition);
             indexes.push((index, false));
         }
         let (index, any_descending) = indexes.last_mut().expect("pushed above");
@@ -7126,6 +7157,16 @@ async fn introspect_mssql_indexes(
         .collect())
 }
 
+#[cfg(feature = "mssql")]
+fn mssql_catalog_index_predicate(
+    has_filter: bool,
+    definition: Option<String>,
+) -> Option<IndexPredicateModel> {
+    definition
+        .map(mssql_index_predicate)
+        .or_else(|| has_filter.then(|| IndexPredicateModel::opaque(None)))
+}
+
 /// The closed-set predicate of a filtered index, read from the text SQL Server
 /// keeps for `WHERE [column] IN (N'a', N'b')`: `([column] IN (N'a', N'b'))`, or
 /// `([column]=N'a' OR [column]=N'b')` as older versions and hand-written
@@ -7137,14 +7178,14 @@ async fn introspect_mssql_indexes(
 /// a declared predicate, so a plan replaces the index rather than treating it
 /// as unfiltered. Rendering an introspected index reuses that text.
 #[cfg(feature = "mssql")]
-fn mssql_index_predicate(filter: impl Into<String>) -> super::owned_schema::IndexPredicateModel {
+fn mssql_index_predicate(filter: impl Into<String>) -> IndexPredicateModel {
     let filter = filter.into();
     parse_mssql_in_filter(&filter)
         .map(|mut predicate| {
             predicate.column = DatabaseBackend::Mssql.raw_name_in_declared_form(&predicate.column);
             predicate
         })
-        .unwrap_or_else(|| super::owned_schema::IndexPredicateModel::opaque(Some(filter)))
+        .unwrap_or_else(|| IndexPredicateModel::opaque(Some(filter)))
 }
 
 #[cfg(feature = "mssql")]
@@ -7329,9 +7370,19 @@ mod mssql_index_predicate_tests {
     use super::super::owned_schema::IndexModel;
     use super::{
         DatabaseBackend, INVALID_MSSQL_FILTER_SQL, InvalidMssqlIndexPredicate, MigrationStep,
-        mssql_index_predicate, render_migration_step, try_render_migration_step,
+        mssql_catalog_index_predicate, mssql_index_predicate, render_migration_step,
+        try_render_migration_step,
     };
     use crate::graphql::orm::IndexDef;
+
+    #[test]
+    fn unavailable_catalog_filter_definition_retains_the_partial_index() {
+        let predicate =
+            mssql_catalog_index_predicate(true, None).expect("catalog reports a filter");
+        assert!(predicate.column.is_empty());
+        assert!(predicate.values.is_empty());
+        assert!(mssql_catalog_index_predicate(false, None).is_none());
+    }
 
     #[test]
     fn closed_set_filters_read_back_as_predicates() {

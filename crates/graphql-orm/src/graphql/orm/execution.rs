@@ -1559,7 +1559,12 @@ async fn validate_owned_sqlite_rebuild_plan(
                 .fetch_one(&mut *connection)
                 .await?;
                 let recognized = super::migrations::sqlite_unique_rebuild::index_filter(&sql)
-                    .and_then(super::migrations::parse_closed_set_index_predicate);
+                    .and_then(|expression| {
+                        super::migrations::parse_closed_set_index_predicate(
+                            super::DatabaseBackend::Sqlite,
+                            expression,
+                        )
+                    });
                 if recognized.is_none() {
                     return Err(
                         rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into(),
@@ -1677,7 +1682,11 @@ pub(super) async fn validate_owned_postgres_plan(
                 || unsupported_storage
                 || (predicate.is_some() && !catalog_only)
                 || predicate.as_deref().is_some_and(|predicate| {
-                    super::migrations::parse_closed_set_index_predicate(predicate).is_none()
+                    super::migrations::parse_closed_set_index_predicate(
+                        super::DatabaseBackend::Postgres,
+                        predicate,
+                    )
+                    .is_none()
                 })
             {
                 return Err(

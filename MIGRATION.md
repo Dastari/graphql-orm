@@ -15,12 +15,21 @@ supersedes: []
 **Action needed.** Review schema validation and migration plans before applying
 the upgrade to existing databases. SQLite and PostgreSQL now retain filters
 they cannot represent as portable predicates. SQL Server retains the presence
-of a filter even when its definition is unavailable. A same-name index with an
-opaque filter can now generate an index mismatch, a replacement plan, or a
-refusal under the existing ownership and apply rules. Confirm who owns the
-index and whether the declared index should replace it before approving
-destructive steps. Opaque SQLite and PostgreSQL predicates are inspection
-metadata. Use explicitly reviewed DDL to recreate one.
+of a filter even when its definition is unavailable. For a same-name live
+index whose filter differs from the declaration, a replacement plan contains
+a destructive `DropIndex` followed by `CreateIndex`. Confirm who owns the index
+and whether the declared index should replace it before applying the plan
+with `allow_destructive`.
+
+Re-plan against the live database after upgrading if you prepared the plan
+before the upgrade. The owned apply path checks the source hash and refuses an
+older plan when the live hash changes because introspection now retains its
+filter.
+
+`build_migration_plan` and `render_migration_step` return a refusal statement
+that fails on execution when rendering would recreate an opaque predicate the
+backend cannot reproduce. Opaque SQLite and PostgreSQL predicates are
+inspection metadata. Use explicitly reviewed DDL to recreate one.
 
 SQL Server `INCLUDE` columns are still unrepresented in the schema model.
 The follow-up on `next/breaking` will add an included-columns field and mark

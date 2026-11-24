@@ -18,7 +18,9 @@ for historical context.
 
 - **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters
   during introspection. SQL Server distinguishes a filtered index when the
-  catalog indicates a filter and the definition is unavailable.
+  catalog indicates a filter and the definition is unavailable. SQLite and
+  PostgreSQL emit a failing statement if asked to render an opaque predicate.
+  PostgreSQL preserves declared single-value filters through introspection.
   [Migration](MIGRATION.md#02130-to-02220-opaque-partial-index-predicates)
 
 ## Unreleased - ORM/macros 0.213.0

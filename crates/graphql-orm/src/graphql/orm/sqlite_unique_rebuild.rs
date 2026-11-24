@@ -154,8 +154,8 @@ pub(in crate::graphql::orm) fn index_filter(sql: &str) -> Option<&str> {
             if depth == 0 {
                 let suffix = ts.get(offset + 1..)?;
                 return match suffix {
-                    [keyword, first, ..] if keyword.keyword("where") => {
-                        Some(sql[first.span.start..].trim_end())
+                    [keyword, _, ..] if keyword.keyword("where") => {
+                        Some(sql[keyword.span.end..].trim())
                     }
                     _ => None,
                 };
@@ -163,6 +163,36 @@ pub(in crate::graphql::orm) fn index_filter(sql: &str) -> Option<&str> {
         }
     }
     None
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+#[test]
+fn index_filter_finds_top_level_where() {
+    for (sql, expected) in [
+        (
+            "CREATE INDEX idx ON items (key /* ) WHERE fake */) -- WHERE fake\nWHERE key > 0",
+            Some("key > 0"),
+        ),
+        (
+            "CREATE INDEX idx ON items ((lower(key)))\nwhere ((key IS NOT NULL))  ",
+            Some("((key IS NOT NULL))"),
+        ),
+        (
+            r#"CREATE INDEX "WHERE)" ON items (coalesce("key)", 'WHERE (''x'))
+               WHERE "key)" IN ('WHERE (', ')')"#,
+            Some(r#""key)" IN ('WHERE (', ')')"#),
+        ),
+        (
+            "CREATE INDEX idx ON items (key) WHERE/* leading */ key IN ('x') -- trailing",
+            Some("/* leading */ key IN ('x') -- trailing"),
+        ),
+        (
+            r#"CREATE INDEX "WHERE" ON items (coalesce([WHERE(], 'WHERE )')) -- WHERE fake"#,
+            None,
+        ),
+    ] {
+        assert_eq!(index_filter(sql), expected, "{sql}");
+    }
 }
 
 fn key(sql: &str, ts: &[Token]) -> Result<Option<Vec<String>>, sqlx::Error> {
