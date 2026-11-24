@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.212.0 fixes races in compile UI and consumer fixture test setup
+(#887, #888). [Migration](../../MIGRATION.md#02110-to-02120-test-harness-coordination)
+
 Version 0.211.0 uses schema-bound semantic metadata for described roots
 returning a registered generated entity (#883).
 [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)

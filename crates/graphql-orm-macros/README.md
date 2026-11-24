@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.212.0 aligns with the ORM's
+[test harness fixes](../../MIGRATION.md#02110-to-02120-test-harness-coordination).
+
 Version 0.211.0 records the Rust type of described root results for
 schema catalogue composition (#883).
 [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)

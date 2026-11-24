@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.211.0 to 0.212.0: Test harness coordination
+
+**No action.** Upgrade the ORM and macros together. This release fixes
+parallel test execution in the workspace (#887, #888).
+
 ## 0.210.0 to 0.211.0: Described root result metadata
 
 **No action.** Described roots returning an entity registered in
