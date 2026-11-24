@@ -4,6 +4,7 @@ mod notifications;
 #[path = "../../tests/support/owned_mssql.rs"]
 pub(crate) mod owned_mssql;
 mod transport;
+mod varchar;
 pub use notifications::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
     MssqlQueryNotificationMessage,
@@ -11,8 +12,7 @@ pub use notifications::{
 pub use transport::MssqlTransportPolicy;
 
 use crate::graphql::orm::{
-    BackupRestoreExternallyManaged, DatabaseBackend, MssqlParameterType, SqlTokenKind, SqlValue,
-    TemporalKind, TemporalValue, scan_sql,
+    BackupRestoreExternallyManaged, MssqlParameterType, SqlValue, TemporalKind, TemporalValue,
 };
 use chrono::{Datelike, Timelike};
 use std::borrow::Cow;
@@ -191,9 +191,10 @@ impl MssqlPoolOptions {
 
     /// Opt in to binding declared SQL Server types for generated scalar parameters.
     ///
-    /// Printable ASCII operands in ordinary VARCHAR comparisons may use a
-    /// parameter-side conversion. Pattern matching, non-ASCII text, and
-    /// authorization predicates retain Unicode binding. Disabled by default.
+    /// Ordinary VARCHAR comparisons may use a parameter-side conversion when
+    /// the physical collation preserves Unicode comparison rules and the value
+    /// round-trips exactly. Pattern matching and authorization predicates use
+    /// Unicode binding. Disabled by default.
     pub fn typed_parameters(mut self, enabled: bool) -> Self {
         self.typed_parameters = enabled;
         self
@@ -570,9 +571,7 @@ impl MssqlPool {
         if self.externally_managed_backup_restore {
             return self.fetch_rows_ungated(sql, values).await;
         }
-        let result = self
-            .fetch_rows_ungated(&restore_gated(sql, true), values)
-            .await;
+        let result = self.fetch_rows_autocommit(sql, values, true).await;
         self.typed_restore_refusal(result).await
     }
 
@@ -583,15 +582,37 @@ impl MssqlPool {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<Vec<MssqlRow>> {
+        self.fetch_rows_autocommit(sql, values, false).await
+    }
+
+    async fn fetch_rows_autocommit(
+        &self,
+        sql: &str,
+        values: &[SqlValue],
+        restore_fenced: bool,
+    ) -> crate::Result<Vec<MssqlRow>> {
         let mut lease = self.acquire().await?;
         let result = self
-            .bounded(fetch_rows_with_client(
-                &mut lease.client,
-                sql,
-                values,
-                self.options(),
-                true,
-            ))
+            .bounded(async {
+                let converted = if self.options().typed_parameters {
+                    catch_driver_panic(
+                        varchar::render(&mut lease.client, sql, values),
+                        StatementFailure::from,
+                    )
+                    .await?
+                } else {
+                    None
+                };
+                let sql = converted.as_deref().unwrap_or(sql);
+                let fenced;
+                let sql = if restore_fenced {
+                    fenced = restore_gated(sql, true);
+                    &fenced
+                } else {
+                    sql
+                };
+                fetch_rows_with_client(&mut lease.client, sql, values, self.options()).await
+            })
             .await;
         self.finish(lease, result).await
     }
@@ -766,14 +787,8 @@ impl MssqlPool {
                 )
                 .await?;
             }
-            fetch_rows_with_client(
-                &mut lease.client,
-                READ_RESTORE_MARKER,
-                &[],
-                self.options(),
-                false,
-            )
-            .await
+            fetch_rows_with_client(&mut lease.client, READ_RESTORE_MARKER, &[], self.options())
+                .await
         };
         let rows = self
             .bounded(claimed)
@@ -822,7 +837,6 @@ impl MssqlPool {
                  FROM sys.databases WHERE database_id = DB_ID()",
                 &[],
                 self.options(),
-                false,
             ))
             .await
             .map_err(|failure| classify(failure.error))?;
@@ -1355,7 +1369,6 @@ impl MssqlRestore {
                 sql,
                 values,
                 pool.options(),
-                false,
             ))
             .await;
         self.keep_if_reusable(result)
@@ -1409,8 +1422,6 @@ impl MssqlTransaction {
                 sql,
                 values,
                 self.pool.options(),
-                // Pinned reads can drive authorization and write decisions.
-                false,
             ))
             .await;
         result.map_err(|failure| self.poison(failure))
@@ -1969,84 +1980,12 @@ pub(super) async fn catch_driver_panic<T, E>(
     }
 }
 
-/// Tiberius transports strings as NVARCHAR. Convert the parameter expression
-/// on the server so SQL Server can compare a VARCHAR index key as VARCHAR.
-fn render_varchar_parameters(sql: &str, values: &[SqlValue]) -> Option<String> {
-    let varchar_length = |value: &SqlValue| {
-        let SqlValue::MssqlTyped(typed) = value else {
-            return None;
-        };
-        let MssqlParameterType::VarChar(length) = typed.parameter_type() else {
-            return None;
-        };
-        let SqlValue::String(value) = typed.value() else {
-            return None;
-        };
-        // A comparison can have an operand longer than the column. Use a
-        // wide enough conversion to keep it from truncating into a match.
-        let bytes = value.len();
-        Some(
-            length
-                .map(|length| {
-                    if bytes <= usize::from(length) {
-                        length
-                    } else {
-                        8000
-                    }
-                })
-                .filter(|_| bytes <= 8000),
-        )
-    };
-    let mut lengths = values.iter().map(varchar_length);
-    let first = lengths.position(|length| length.is_some())?;
-    let mut converted = String::with_capacity(sql.len());
-    let mut copied = 0;
-    scan_sql(DatabaseBackend::Mssql, sql, |token| {
-        if token.kind != SqlTokenKind::Placeholder {
-            return;
-        }
-        let placeholder = &sql[token.start..token.end];
-        let Some(index) = placeholder
-            .strip_prefix("@P")
-            .or_else(|| placeholder.strip_prefix("@p"))
-            .and_then(|part| part.parse::<usize>().ok())
-            .and_then(|index| index.checked_sub(1))
-            .filter(|index| *index >= first)
-        else {
-            return;
-        };
-        if let Some(Some(length)) = values.get(index).map(varchar_length) {
-            use std::fmt::Write as _;
-            converted.push_str(&sql[copied..token.start]);
-            converted.push_str("CONVERT(varchar(");
-            match length {
-                Some(length) => write!(converted, "{length}").expect("writing to a string"),
-                None => converted.push_str("max"),
-            }
-            converted.push_str("), ");
-            converted.push_str(placeholder);
-            converted.push(')');
-            copied = token.end;
-        }
-    })
-    .ok()?;
-    if copied == 0 {
-        return None;
-    }
-    converted.push_str(&sql[copied..]);
-    Some(converted)
-}
-
 fn bind_query(
     sql: &str,
     values: &[SqlValue],
     options: &MssqlPoolOptions,
-    allow_varchar_comparisons: bool,
 ) -> Result<Query<'static>, StatementFailure> {
-    let varchar_sql = (options.typed_parameters && allow_varchar_comparisons)
-        .then(|| render_varchar_parameters(sql, values))
-        .flatten();
-    let mut query = Query::new(varchar_sql.unwrap_or_else(|| sql.to_owned()));
+    let mut query = Query::new(sql.to_owned());
     for value in values {
         query.bind(
             MssqlParamValue::from_value(value, options).map_err(|error| StatementFailure {
@@ -2063,11 +2002,10 @@ async fn fetch_rows_with_client(
     sql: &str,
     values: &[SqlValue],
     options: &MssqlPoolOptions,
-    allow_varchar_comparisons: bool,
 ) -> Result<Vec<MssqlRow>, StatementFailure> {
     catch_driver_panic(
         async {
-            let query = bind_query(sql, values, options, allow_varchar_comparisons)?;
+            let query = bind_query(sql, values, options)?;
             let stream = query.query(client).await.map_err(statement_failure)?;
             let rows = stream
                 .into_first_result()
@@ -2088,7 +2026,7 @@ async fn execute_with_client(
 ) -> Result<MssqlWriteResult, StatementFailure> {
     catch_driver_panic(
         async {
-            let query = bind_query(sql, values, options, false)?;
+            let query = bind_query(sql, values, options)?;
             let result = query.execute(client).await.map_err(statement_failure)?;
             Ok(MssqlWriteResult {
                 rows_affected: statement_rows_affected(result.rows_affected()),
@@ -2173,13 +2111,7 @@ impl MssqlParamValue {
             SqlValue::Null => Self::NullString,
             SqlValue::MssqlTyped(typed) => {
                 if typed.parameter_type() == MssqlParameterType::UnsignedOverflow {
-                    use crate::graphql::errors::{
-                        OrmErrorCode, OrmPublicError, sqlx_error_from_public,
-                    };
-                    return Err(sqlx_error_from_public(OrmPublicError::with_message(
-                        OrmErrorCode::InvalidInput,
-                        "integer exceeds the declared SQL Server range",
-                    )));
+                    return Err(SqlValue::mssql_unsigned_overflow());
                 }
                 let value = typed.value();
                 if options.typed_parameters {

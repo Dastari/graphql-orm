@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.223.0 verifies the physical SQL Server collation and the operand's
+code-page round trip before using a typed VARCHAR comparison.
+See [typed SQL Server parameters](../../docs/reference/graphql-orm/mssql.md#typed-column-parameters).
+
 Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
 column identifier parsing in ALTER COLUMN collation lookups.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).

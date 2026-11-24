@@ -115,15 +115,12 @@ impl SqlValue {
         }
     }
 
-    // Limit VARCHAR conversion to printable ASCII, which round-trips
-    // through the SQL Server VARCHAR code pages without best-fit mapping.
+    // The SQL Server driver proves eligibility once it knows the physical
+    // column's collation and can check the actual conversion.
     pub(super) fn mssql_varchar_comparison(value: String, sql_type: &str) -> Self {
-        if value
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
-            && let Some(length) = sql_type
-                .strip_prefix("VARCHAR(")
-                .and_then(|s| s.strip_suffix(')'))
+        if let Some(length) = sql_type
+            .strip_prefix("VARCHAR(")
+            .and_then(|s| s.strip_suffix(')'))
         {
             let length = if length == "MAX" {
                 None
@@ -148,19 +145,41 @@ impl SqlValue {
     /// infallible generated key builders can carry the refusal to the caller.
     #[doc(hidden)]
     pub fn mssql_unsigned(value: u64, sql_type: &str) -> Self {
-        let maximum = match sql_type {
+        if value <= Self::mssql_unsigned_max(sql_type) {
+            Self::Int(value as i64)
+        } else {
+            Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value.to_string())),
+                parameter_type: MssqlParameterType::UnsignedOverflow,
+            })
+        }
+    }
+
+    /// Validate a generated SQL Server unsigned input before selecting write targets.
+    #[doc(hidden)]
+    pub fn validate_mssql_unsigned(value: u64, sql_type: &str) -> crate::Result<()> {
+        if value <= Self::mssql_unsigned_max(sql_type) {
+            return Ok(());
+        }
+        Err(Self::mssql_unsigned_overflow())
+    }
+
+    fn mssql_unsigned_max(sql_type: &str) -> u64 {
+        match sql_type {
             "TINYINT" => u64::from(u8::MAX),
             "SMALLINT" => i16::MAX as u64,
             "INT" => i32::MAX as u64,
             _ => i64::MAX as u64,
-        };
-        match i64::try_from(value) {
-            Ok(signed) if value <= maximum => Self::Int(signed),
-            _ => Self::MssqlTyped(MssqlTypedValue {
-                value: Box::new(Self::String(value.to_string())),
-                parameter_type: MssqlParameterType::UnsignedOverflow,
-            }),
         }
+    }
+
+    pub(crate) fn mssql_unsigned_overflow() -> sqlx::Error {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+
+        sqlx_error_from_public(OrmPublicError::with_message(
+            OrmErrorCode::InvalidInput,
+            "integer exceeds the declared SQL Server range",
+        ))
     }
 
     pub(crate) fn into_policy_bind(self) -> Self {

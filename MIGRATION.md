@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.215.0 to 0.223.0: SQL Server VARCHAR and bulk update validation
+
+**No action.** Upgrade ORM and macros together. With
+`MssqlPoolOptions::typed_parameters(true)`, ordinary VARCHAR comparisons can
+use the physical column's code page when the value round-trips exactly and
+the collation preserves Unicode comparison rules. Legacy SQL collations
+retain Unicode binding. Bulk updates now return `INVALID_INPUT` for out-of-range
+unsigned values before selecting targets, even when no rows would be updated.
+See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
+
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 
 **No action.** Upgrade ORM and macros together. SQL Server keeps the

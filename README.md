@@ -110,10 +110,10 @@ authorization](docs/architecture/authentication-and-authorization.md),
 [operation assurance](docs/architecture/operation-assurance.md), and the
 [GraphQL workflow](docs/development/graphql-workflow.md).
 
-SQL Server hosts can declare column types and opt in to parameter binding
-that allows index seeks for ASCII comparison filters over indexed VARCHAR
-columns. Policy and pattern operands and non-ASCII inputs use Unicode
-binding. The opt-in is per connection pool. [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types)
+SQL Server hosts can declare column types and opt in to per-pool parameter
+binding for eligible VARCHAR comparison filters. SQL Server checks the
+column collation and verifies that the operand converts losslessly.
+[SQL Server parameter types](docs/reference/graphql-orm/mssql.md#typed-column-parameters)
 
 ## Documentation
 

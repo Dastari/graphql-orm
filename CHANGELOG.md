@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.223.0
+
+- **Fixed (#860).** Opt-in SQL Server VARCHAR comparisons use the physical
+  column collation and require an exact code-page round trip. Eligible Windows
+  collations support non-ASCII operands, including CP1252 and UTF-8.
+  Comparisons that cannot be proven equivalent retain Unicode binding.
+- **Fixed (#860).** SQL Server bulk updates validate unsigned operands before
+  selecting targets, including requests that would affect zero rows.
+
 ## Unreleased - ORM/macros 0.215.0
 
 - **Added (#522).** SQL Server pools can opt in to binding the SQL types

@@ -1,6 +1,7 @@
 use super::owned_mssql::{OwnedSqlServer, execute_batch};
 use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
-use graphql_orm::graphql::orm::{DatabaseFilter, SqlValue};
+use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::orm::{BoundedMutationOutcome, DatabaseFilter, MutationLimit, SqlValue};
 use graphql_orm::prelude::*;
 use std::time::Duration;
 
@@ -18,6 +19,12 @@ struct ParameterItem {
     #[graphql_orm(mssql_type = "VARCHAR(32)")]
     #[filterable(type = "string")]
     code: String,
+    #[graphql_orm(mssql_type = "VARCHAR(32)")]
+    #[filterable(type = "string")]
+    windows_code: Option<String>,
+    #[graphql_orm(mssql_type = "VARCHAR(32)")]
+    #[filterable(type = "string")]
+    utf8_code: Option<String>,
     #[graphql_orm(mssql_type = "NVARCHAR(40)")]
     #[filterable(type = "string")]
     label: String,
@@ -29,7 +36,7 @@ struct ParameterItem {
 
 #[tokio::test]
 #[ignore = "owns a capped disposable SQL Server container"]
-async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek() {
+async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
     let server = tokio::time::timeout(Duration::from_secs(120), OwnedSqlServer::start())
         .await
         .unwrap()
@@ -39,9 +46,13 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         Duration::from_secs(30),
         execute_batch(
             connection,
-            "CREATE TABLE dbo.ParameterItems (
+            "IF COLLATIONPROPERTY(CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Collation')), 'CodePage') <> 1252
+                THROW 50000, 'Expected a non-UTF8 database default to test a mixed-code-page column', 1;
+             CREATE TABLE dbo.ParameterItems (
                 id int NOT NULL PRIMARY KEY,
                 code varchar(32) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+                windows_code varchar(32) COLLATE Latin1_General_100_CI_AS_SC NULL,
+                utf8_code varchar(32) COLLATE Latin1_General_100_CI_AS_SC_UTF8 NULL,
                 label nvarchar(40) NOT NULL,
                 score smallint NULL,
                 attempts smallint NULL
@@ -57,18 +68,21 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
              INSERT dbo.ParameterItems (id, code, label) VALUES (10001, REPLICATE('y', 32), N'東京 😀');
              INSERT dbo.ParameterItems (id, code, label) VALUES
                 (10003, '??', N'unrepresentable'), (10004, 'abc ', N'trailing blank'),
-                (10005, 'cafe', N'unaccented');
-             CREATE UNIQUE INDEX IX_ParameterItems_code ON dbo.ParameterItems(code);",
+                (10005, 'cafe', N'unaccented'), (10007, 'missing', N'null code');
+             UPDATE dbo.ParameterItems SET windows_code = code, utf8_code = code;
+             UPDATE dbo.ParameterItems SET windows_code = NULL WHERE id = 10007;
+             UPDATE dbo.ParameterItems SET utf8_code = N'東京 😀' WHERE id = 10000;
+             UPDATE dbo.ParameterItems SET utf8_code = REPLICATE(N'é', 16) WHERE id = 10001;
+             CREATE UNIQUE INDEX IX_ParameterItems_code ON dbo.ParameterItems(code);
+             CREATE INDEX IX_ParameterItems_windows_code ON dbo.ParameterItems(windows_code);
+             CREATE INDEX IX_ParameterItems_utf8_code ON dbo.ParameterItems(utf8_code);",
         ),
     )
     .await
     .unwrap()
     .unwrap();
 
-    for (typed, access_path, identifier) in [
-        (false, "Index Scan", "legacy"),
-        (true, "Index Seek", "typed"),
-    ] {
+    for (typed, identifier) in [(false, "legacy"), (true, "typed")] {
         let options = MssqlPoolOptions::new()
             .max_connections(1)
             .query_timeout(Some(Duration::from_secs(10)))
@@ -87,15 +101,62 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 42);
         let plan = lookup_plan(&pool, &format!("%{marker}%")).await;
-        assert!(
-            plan.contains(&format!("PhysicalOp=\"{access_path}\"")),
-            "{plan}"
-        );
+        assert!(plan.contains("PhysicalOp=\"Index Scan\""), "{plan}");
         assert!(
             plan.contains("Index=\"[IX_ParameterItems_code]\""),
             "{plan}"
         );
-        eprintln!("{identifier}: {access_path} on IX_ParameterItems_code");
+
+        for (index, (condition, expected)) in [
+            (string_comparison("café", false), vec![10000]),
+            (string_comparison("東京 😀", true), vec![10000]),
+            (string_comparison("東京", false), vec![]),
+            (string_comparison(&"é".repeat(17), true), vec![]),
+            (string_comparison(&"é".repeat(4001), true), vec![]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (conditions, binds) = condition.to_sql_conditions();
+            let marker = format!("/* {identifier}_varchar_{index} */");
+            let sql = format!(
+                "SELECT id FROM dbo.ParameterItems WHERE {} {marker}",
+                conditions.join(" AND ")
+            );
+            let rows = pool.fetch_rows(&sql, &binds).await.unwrap();
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.try_get::<i32, _>("id").unwrap())
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+            let plan = lookup_plan(&pool, &format!("%{marker}%")).await;
+            assert_eq!(
+                plan.to_ascii_lowercase().contains("convert(varchar("),
+                typed,
+                "{plan}",
+            );
+            if index < 2 && typed {
+                let index_name = [
+                    "IX_ParameterItems_windows_code",
+                    "IX_ParameterItems_utf8_code",
+                ][index];
+                let operator_prefix = format!("Index=\"[{index_name}]\"");
+                let operations = plan
+                    .split("<RelOp ")
+                    .filter(|operator| operator.contains(&operator_prefix))
+                    .map(|operator| operator.split_once('>').unwrap().0)
+                    .collect::<Vec<_>>();
+                assert!(
+                    operations
+                        .iter()
+                        .any(|operator| operator.contains("PhysicalOp=\"Index Seek\"")),
+                    "{operations:?}",
+                );
+            }
+        }
+
+        assert_membership_matches(&pool).await;
 
         let db = Database::<MssqlBackend>::new(pool);
         let matches = ParameterItem::query(&db)
@@ -182,6 +243,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         CreateParameterItemInput {
             id: 10002,
             code: "crème".into(),
+            windows_code: None,
+            utf8_code: None,
             label: "雪 😀".into(),
             score: Some(-12),
             attempts: Some(3),
@@ -211,6 +274,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         CreateParameterItemInput {
             id: 10006,
             code: "overflow".into(),
+            windows_code: None,
+            utf8_code: None,
             label: "overflow".into(),
             score: None,
             attempts: Some(u64::MAX),
@@ -220,8 +285,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
     .err()
     .expect("out-of-range insert");
     assert_eq!(
-        graphql_orm::graphql::errors::OrmPublicError::from(insert_error).code,
-        graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+        OrmPublicError::from(insert_error).code,
+        OrmErrorCode::InvalidInput
     );
     let update_error = ParameterItem::update_by_id(
         &db,
@@ -235,9 +300,59 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
     .err()
     .expect("out-of-range update");
     assert_eq!(
-        graphql_orm::graphql::errors::OrmPublicError::from(update_error).code,
-        graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+        OrmPublicError::from(update_error).code,
+        OrmErrorCode::InvalidInput
     );
+    let no_target = code_filter("does-not-exist");
+    for (attempts, should_error) in [(32767, false), (32768, true), (u64::MAX, true)] {
+        let input = UpdateParameterItemInput {
+            attempts: Some(Some(attempts)),
+            ..Default::default()
+        };
+        let standalone = ParameterItem::update_where(&db, no_target.clone(), input.clone())
+            .await
+            .map_err(OrmPublicError::from);
+        let in_transaction = db
+            .transaction(TransactionMode::StateMachine, |context| {
+                let where_input = no_target.clone();
+                Box::pin(async move {
+                    context
+                        .update_where::<ParameterItem>(where_input, input)
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(|error| error.public_error().clone());
+        let bounded = ParameterItem::update_where_bounded(
+            &db,
+            no_target.clone(),
+            UpdateParameterItemInput {
+                attempts: Some(Some(attempts)),
+                ..Default::default()
+            },
+            MutationLimit::new(1).unwrap(),
+        )
+        .await;
+        if should_error {
+            assert_eq!(
+                OrmPublicError::from(bounded.unwrap_err()).code,
+                OrmErrorCode::InvalidInput
+            );
+        } else {
+            assert!(matches!(
+                bounded.unwrap(),
+                BoundedMutationOutcome::Applied { affected: 0 }
+            ));
+        }
+        for result in [standalone, in_transaction] {
+            if should_error {
+                assert_eq!(result.unwrap_err().code, OrmErrorCode::InvalidInput);
+            } else {
+                assert_eq!(result.unwrap(), 0);
+            }
+        }
+    }
     let rows = db
         .pool()
         .fetch_rows(
@@ -350,4 +465,77 @@ async fn lookup_plan(pool: &MssqlPool, marker: &str) -> String {
         .await
         .unwrap();
     rows[0].try_get("plan_xml").unwrap()
+}
+
+fn string_comparison(value: &str, utf8: bool) -> ParameterItemWhereInput {
+    let filter = StringFilter {
+        eq: Some(value.into()),
+        ..Default::default()
+    };
+    if utf8 {
+        ParameterItemWhereInput {
+            utf_8_code: Some(filter),
+            ..Default::default()
+        }
+    } else {
+        ParameterItemWhereInput {
+            windows_code: Some(filter),
+            ..Default::default()
+        }
+    }
+}
+
+async fn assert_membership_matches(pool: &MssqlPool) {
+    for (filter, expected) in [
+        (
+            StringFilter {
+                in_list: Some(vec!["café".into(), "東京".into(), "abc".into()]),
+                ..Default::default()
+            },
+            vec![10000, 10004],
+        ),
+        (
+            StringFilter {
+                not_in: Some(vec!["café".into(), "東京".into(), "abc".into()]),
+                ..Default::default()
+            },
+            vec![10001, 10003, 10005],
+        ),
+        (
+            StringFilter {
+                ne: Some("東京".into()),
+                ..Default::default()
+            },
+            vec![10000, 10001, 10003, 10004, 10005],
+        ),
+        (
+            StringFilter {
+                in_list: Some(vec!["café".into(), "abc".into()]),
+                ..Default::default()
+            },
+            vec![10000, 10004],
+        ),
+    ] {
+        let (conditions, values) = ParameterItemWhereInput {
+            windows_code: Some(filter),
+            ..Default::default()
+        }
+        .to_sql_conditions();
+        let rows = pool
+            .fetch_rows(
+                &format!(
+                    "SELECT id FROM dbo.ParameterItems WHERE id >= 10000 AND {} ORDER BY id",
+                    conditions.join(" AND "),
+                ),
+                &values,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.try_get::<i32, _>("id").unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+        );
+    }
 }
