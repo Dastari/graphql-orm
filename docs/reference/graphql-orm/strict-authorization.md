@@ -664,10 +664,20 @@ The authority belongs to the hook's transaction, and to nothing else:
   write the mutation's entity: the entity decision is asked once more, on the `GraphqlMutation`
   surface, before each hook invocation that attaches it. `MutationContext::run_mutation_hook`,
   which host code can call, runs the hook without it.
+  The generated mutation's dispatcher, `MutationContext::__run_generated_mutation_hook`, is
+  macro-internal and hosts must not call it. It is public only because generated code compiles
+  in the host's crate. Its entity write-policy check is the only admission it performs: called
+  from host code with a request and an event of the host's making, it attaches that request's
+  authority to the hook without the generated resolver's scope, assurance or target-row
+  admission. [#724](https://github.com/Dastari/graphql-orm/issues/724) moves generated write
+  admission into the runtime and seals it.
 - **It ends with the hook invocation,** including on an error or a dropped future, and every read
   of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`
   return `None` afterwards, also for a value obtained earlier. Post-commit actions, later
-  transactions and later requests start with none.
+  transactions and later requests start with none. Revocation applies to the marker and its
+  accessors. A policy callback that clones the `AuthSubject` or the accepted agql-auth identity
+  into its own state keeps identity data only: the ORM never reads authority from a copy, so it
+  cannot attach to a write, and a host must not treat it as live authority.
 - A hook invoked by a repository write or a worker's transaction has no originating request.
 - Inside `MutationContext::with_system_access`, the scope's named access replaces it.
 

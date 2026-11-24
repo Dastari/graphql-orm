@@ -1032,7 +1032,10 @@ async fn request_authority_is_issued_only_to_a_request_admitted_to_the_mutation(
     // though the same caller could write lines.
     let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
     assert!(!host_dispatch(&fixture.db, subject(&["lines.write"]), true).await);
-    // A caller admitted to the mutation is the case the opt-in is for.
+    // An entity-admitted caller does get it. This entry is macro-internal:
+    // the entity decision is its only admission, so host code must not call
+    // it (the generated resolver's scope, assurance and target checks are not
+    // repeated here). #724 moves admission into the runtime and seals it.
     assert!(host_dispatch(&fixture.db, subject(&["orders.write", "lines.write"]), true).await);
     // Without the opt-in, nothing is attached for anyone.
     let fixture = setup(Policy::PerEntity, false, Cleanup::Plain).await;

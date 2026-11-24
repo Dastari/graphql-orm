@@ -2681,13 +2681,25 @@ where
 
     /// [`Self::run_mutation_hook`] for a generated GraphQL mutation.
     ///
+    /// **Macro-internal. Host code must not call this method.** Use
+    /// [`Self::run_mutation_hook`], which attaches no request authority.
+    ///
     /// On a database that propagates request authority to hooks, the hook's
-    /// operations on this transaction present the originating request, but
-    /// only when that request is admitted to write `event`'s entity on the
-    /// `GraphqlMutation` surface: the entity decision is asked again here, so
-    /// a caller that is not admitted to the generated mutation obtains no
-    /// authority by reaching this method. A nested invocation keeps the
-    /// authority already presented. For generated code only.
+    /// operations on this transaction present the originating request when
+    /// that request is admitted to write `event`'s entity on the
+    /// `GraphqlMutation` surface: the entity decision is asked again here. A
+    /// nested invocation keeps the authority already presented.
+    ///
+    /// That entity write-policy decision is the only admission this method
+    /// performs, and it trusts the entity name and policy key of the `event`
+    /// it is given. The generated resolver's own admission (resolver auth
+    /// and scopes, declared assurance, and the checks on the mutation's
+    /// target rows) happens in generated code before the call. A host that
+    /// calls this method with its own request and event therefore attaches
+    /// that request's authority to the hook without those checks. It is
+    /// `pub` only because generated code compiles in the host's crate;
+    /// [#724](https://github.com/Dastari/graphql-orm/issues/724) moves
+    /// generated write admission into the runtime and seals this entry.
     #[doc(hidden)]
     pub async fn __run_generated_mutation_hook<'a>(
         &'a mut self,

@@ -393,6 +393,14 @@ impl<'a> AccessContext<'a> {
 /// It grants nothing by itself. A policy that does not read it decides as it
 /// did before, and a policy that honours it applies the same checks it
 /// applies to the request's own operations.
+///
+/// Revocation applies to this marker and its accessors: after the hook
+/// invocation ends they return nothing and `Debug` prints no identity. A
+/// policy callback that clones the [`AuthSubject`] or the accepted agql-auth
+/// identity into state of its own keeps identity data only. The ORM never
+/// reads authority from such a copy, so it cannot attach to a write, and a
+/// host must not treat it as live authority either: decide on what the
+/// accessors return at the time of each decision.
 pub struct HookRequestAuthority {
     subject: Option<AuthSubject>,
     #[cfg(feature = "auth-agql")]
@@ -402,10 +410,15 @@ pub struct HookRequestAuthority {
 
 impl fmt::Debug for HookRequestAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HookRequestAuthority")
-            .field("subject", &self.subject)
-            .field("live", &self.is_live())
-            .finish_non_exhaustive()
+        // The identity is printed only while the hook invocation is running.
+        let live = self.is_live();
+        let mut debug = f.debug_struct("HookRequestAuthority");
+        if live {
+            debug.field("subject", &self.subject);
+        } else {
+            debug.field("subject", &"[revoked]");
+        }
+        debug.field("live", &live).finish_non_exhaustive()
     }
 }
 
@@ -944,5 +957,52 @@ mod hook_request_authority_tests {
             both.system().map(|access| access.name.as_str()),
             Some("worker")
         );
+    }
+
+    /// `Debug` prints the subject only while the hook invocation is running.
+    #[test]
+    fn debug_prints_no_identity_after_revocation() {
+        let request = authority();
+        assert!(format!("{request:?}").contains("user-1"));
+        request.revoke();
+        let printed = format!("{request:?}");
+        assert!(!printed.contains("user-1"), "{printed}");
+        assert!(printed.contains("[revoked]"), "{printed}");
+    }
+
+    /// A previously live accepted agql-auth identity yields nothing through
+    /// the accessors once the hook invocation has ended.
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn an_accepted_agql_identity_is_not_readable_after_revocation() {
+        use crate::graphql::auth_agql::AgqlAcceptedRequest;
+        let principal = agql_auth::AuthPrincipal::User(agql_auth::AuthUser {
+            user_id: "user-1".into(),
+            session_id: uuid::Uuid::from_u128(1),
+            roles: Vec::new(),
+            scopes: vec!["shop.write".into()],
+            session: Default::default(),
+            token_claims: Default::default(),
+        });
+        let accepted = AgqlAcceptedRequest::new(principal);
+        let request = HookRequestAuthority {
+            subject: Some(accepted.subject().clone()),
+            agql_accepted: Some(accepted.clone()),
+            live: std::sync::atomic::AtomicBool::new(true),
+        };
+        let presented = PolicyAuthority::new(None, Some(&request));
+        let held = presented.hook_request().expect("live");
+        assert_eq!(held.agql_accepted_request(), Some(&accepted));
+
+        request.revoke();
+        assert!(held.agql_accepted_request().is_none());
+        assert!(held.subject().is_none());
+        assert!(
+            presented
+                .hook_request()
+                .and_then(HookRequestAuthority::agql_accepted_request)
+                .is_none()
+        );
+        assert!(!format!("{request:?}").contains("user-1"));
     }
 }

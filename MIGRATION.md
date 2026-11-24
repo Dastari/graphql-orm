@@ -32,6 +32,14 @@ the schema serves. Then:
 - Under `AgqlCurrentAuthorityPolicy`, also implement
   `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.
 
+Do not call `MutationContext::__run_generated_mutation_hook` from host code.
+It is macro-internal: it attaches the caller's request authority after only
+an entity write-policy check, without the generated resolver's scope,
+assurance or target admission. Host code that dispatches hooks itself uses
+`run_mutation_hook`, which attaches none.
+[#724](https://github.com/Dastari/graphql-orm/issues/724) will move
+admission into the runtime and seal that entry.
+
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
 ## 0.208.0 to 0.209.0: external migration preflight
 
