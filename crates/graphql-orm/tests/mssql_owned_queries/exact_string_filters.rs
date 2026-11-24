@@ -46,9 +46,9 @@ fn exact_filter_adds_seek_only_for_declared_bin2_columns() {
     assert_eq!(
         conditions,
         [
-            "((CONVERT(nvarchar(max), [code]) + N'.') COLLATE Latin1_General_100_BIN2 = CONVERT(nvarchar(max), @P1) + N'.')",
+            "((CASE WHEN [code] IS NOT NULL THEN CONVERT(nvarchar(max), [code]) + N'.' END) COLLATE Latin1_General_100_BIN2 = CONVERT(nvarchar(max), @P1) + N'.')",
             "[code] = @P2",
-            "((CONVERT(nvarchar(max), [unindexed]) COLLATE Latin1_General_100_BIN2 = @P3 AND DATALENGTH(CONVERT(nvarchar(max), [unindexed])) = DATALENGTH(@P4)) OR (CONVERT(nvarchar(max), [unindexed]) COLLATE Latin1_General_100_BIN2 = @P5 AND DATALENGTH(CONVERT(nvarchar(max), [unindexed])) = DATALENGTH(@P6)))",
+            "(([unindexed] = @P3 COLLATE Latin1_General_100_BIN2 AND DATALENGTH(CONVERT(nvarchar(max), [unindexed])) = DATALENGTH(@P4)) OR ([unindexed] = @P5 COLLATE Latin1_General_100_BIN2 AND DATALENGTH(CONVERT(nvarchar(max), [unindexed])) = DATALENGTH(@P6)))",
         ]
     );
     let different_lengths = ExactFilterRowWhereInput {
@@ -167,13 +167,20 @@ async fn exact_filters_seek_and_preserve_rows_and_read_visibility() {
         assert_eq!(old_rows, expected, "{name}: legacy");
         assert_eq!(filter_ids(&db, &new).await, old_rows, "{name}");
         if matches!(name, "eq" | "in_list") {
-            let marker = format!("/* exact_filter_seek_{name} */");
-            assert_eq!(
-                select_ids(&db, &format!("{marker} {new_sql}"), &values).await,
-                old_rows,
-                "{name}: seek"
-            );
-            assert_code_seek(db.pool(), &marker).await;
+            for setting in ["ON", "OFF"] {
+                let marker = format!("/* exact_filter_seek_{name}_{setting} */");
+                let sql = format!(
+                    "SET CONCAT_NULL_YIELDS_NULL {setting};
+                     SELECT id FROM dbo.ExactFilterRows WHERE {marker} {new_sql} ORDER BY id;
+                     SET CONCAT_NULL_YIELDS_NULL ON;"
+                );
+                assert_eq!(
+                    fetch_ids(&db, &sql, &values).await,
+                    old_rows,
+                    "{name}: seek with CONCAT_NULL_YIELDS_NULL {setting}"
+                );
+                assert_code_seek(db.pool(), &marker).await;
+            }
         }
 
         let unindexed = ExactFilterRowWhereInput {
@@ -250,6 +257,7 @@ async fn exact_filters_seek_and_preserve_rows_and_read_visibility() {
             );
         }
     }
+    assert_exact_filter_matrix(&db, false).await;
     server.cleanup().unwrap();
 }
 
@@ -276,7 +284,9 @@ async fn exact_filters_match_unicode_operands_against_live_varchar() {
              (1, N'bob'), (2, N'bob   '), (3, N'BOB'), (4, NULL),
              (5, REPLICATE(CONVERT(nvarchar(max), N'x'), 3999) + N' '),
              (6, REPLICATE(CONVERT(nvarchar(max), N'x'), 3999) + N'  '),
-             (7, N'🚀'), (8, N'🚀 ')
+             (7, N'🚀'), (8, N'🚀 '),
+             (9, REPLICATE(CONVERT(nvarchar(max), N'x'), 4000) + N'a'),
+             (10, REPLICATE(CONVERT(nvarchar(max), N'x'), 4000) + N'b')
          ) AS v(id, code);",
         &[],
     )
@@ -287,6 +297,7 @@ async fn exact_filters_match_unicode_operands_against_live_varchar() {
     assert_eq!(select_ids(&db, &legacy, &binds).await, [2]);
 
     let long = format!("{} ", "x".repeat(3999));
+    let longer = format!("{}a", "x".repeat(4000));
     let cases = [
         (eq("bob"), vec![1]),
         (in_list(&["bob", "BOB"]), vec![1, 3]),
@@ -295,16 +306,17 @@ async fn exact_filters_match_unicode_operands_against_live_varchar() {
                 ne: Some("bob".into()),
                 ..Default::default()
             },
-            vec![2, 3, 5, 6, 7, 8],
+            vec![2, 3, 5, 6, 7, 8, 9, 10],
         ),
         (
             StringFilter {
                 not_in: in_list(&["bob", "BOB"]).in_list,
                 ..Default::default()
             },
-            vec![2, 5, 6, 7, 8],
+            vec![2, 5, 6, 7, 8, 9, 10],
         ),
         (eq(&long), vec![5]),
+        (eq(&longer), vec![9]),
         (eq("🚀"), vec![7]),
     ];
     for (filter, expected) in cases {
@@ -324,7 +336,101 @@ async fn exact_filters_match_unicode_operands_against_live_varchar() {
             assert_eq!(policy_ids(&db, &policy).await, expected);
         }
     }
+    assert_exact_filter_matrix(&db, true).await;
     server.cleanup().unwrap();
+}
+
+async fn assert_exact_filter_matrix(db: &Database<MssqlBackend>, live_varchar: bool) {
+    let operands = [
+        "",
+        " ",
+        "  ",
+        "bob",
+        "bob ",
+        "bob   ",
+        "BOB",
+        "bób",
+        "e\u{301}",
+        "é",
+        "中",
+        "🚀",
+        "🚀 ",
+        "𐐷",
+        "a",
+        "a.",
+        "a .",
+        "a\0",
+        "a\0 ",
+        "\0",
+        ".",
+        "\t",
+        "bob\u{a0}",
+    ];
+    <MssqlBackend as WriteBackend>::execute_with_binds(
+        db.pool(),
+        "DELETE FROM dbo.ExactFilterRows;
+         INSERT dbo.ExactFilterRows (id, code, unindexed) VALUES (0, NULL, NULL);",
+        &[],
+    )
+    .await
+    .unwrap();
+    for (offset, operand) in operands.iter().enumerate() {
+        <MssqlBackend as WriteBackend>::execute_with_binds(
+            db.pool(),
+            "INSERT dbo.ExactFilterRows (id, code, unindexed) VALUES (@P1, @P2, @P2);",
+            &[
+                SqlValue::Int(offset as i64 + 1),
+                SqlValue::String((*operand).into()),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    for setting in ["ON", "OFF"] {
+        for operand in operands {
+            for column in ["[code]", "[unindexed]"] {
+                let mut filter = ExactFilterRowWhereInput::default();
+                if column == "[code]" {
+                    filter.code = Some(eq(operand));
+                } else {
+                    filter.unindexed = Some(eq(operand));
+                }
+                let (conditions, binds) = filter.to_sql_conditions();
+                // The legacy comparison used byte length. Normalize its input
+                // on drifted columns to compare against its Unicode semantics.
+                let baseline_column = if live_varchar {
+                    format!("CONVERT(nvarchar(max), {column})")
+                } else {
+                    column.to_owned()
+                };
+                let baseline = format!(
+                    "{baseline_column} COLLATE Latin1_General_100_BIN2 = @P1 AND DATALENGTH({baseline_column}) = DATALENGTH(@P2)"
+                );
+                let generated = conditions.join(" AND ");
+                for negation in ["", "NOT "] {
+                    let differences = db
+                        .pool()
+                        .fetch_rows(
+                            &format!(
+                                "SET CONCAT_NULL_YIELDS_NULL {setting};
+                                 SELECT id FROM dbo.ExactFilterRows
+                                 WHERE CASE WHEN {negation}({baseline}) THEN 1 ELSE 0 END
+                                    <> CASE WHEN {negation}({generated}) THEN 1 ELSE 0 END;
+                                 SET CONCAT_NULL_YIELDS_NULL ON;"
+                            ),
+                            &binds,
+                        )
+                        .await
+                        .unwrap();
+                    assert!(
+                        differences.is_empty(),
+                        "varchar={live_varchar}, setting={setting}, {column}, {negation}operand={operand:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn fixture_scope() -> ExactFilterRowWhereInput {
@@ -401,13 +507,19 @@ fn legacy_predicate(filter: &StringFilter) -> (String, Vec<SqlValue>) {
 }
 
 async fn select_ids(db: &Database<MssqlBackend>, predicate: &str, values: &[SqlValue]) -> Vec<i32> {
+    fetch_ids(
+        db,
+        &format!("SELECT id FROM dbo.ExactFilterRows WHERE {predicate} ORDER BY id"),
+        values,
+    )
+    .await
+}
+
+async fn fetch_ids(db: &Database<MssqlBackend>, sql: &str, values: &[SqlValue]) -> Vec<i32> {
     db.pool()
-        .fetch_rows(
-            &format!("SELECT id FROM dbo.ExactFilterRows WHERE {predicate} ORDER BY id"),
-            values,
-        )
+        .fetch_rows(sql, values)
         .await
-        .unwrap_or_else(|error| panic!("{predicate}: {error}"))
+        .unwrap_or_else(|error| panic!("{sql}: {error}"))
         .iter()
         .map(|row| row.try_get(0).unwrap())
         .collect()

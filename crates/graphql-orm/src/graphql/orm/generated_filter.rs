@@ -125,17 +125,19 @@ fn render_exact_mssql_string_filter(
             // SQL Server pads operands for equality even under BIN2. A
             // non-space suffix makes trailing spaces significant. MAX keeps
             // the suffix from being truncated at the 4,000-code-unit limit.
+            // CASE keeps a NULL column UNKNOWN under NOT even when the session
+            // treats NULL as an empty string in concatenation. Binds are non-NULL.
             return format!(
-                "(({unicode_column} + N'.') COLLATE Latin1_General_100_BIN2 = CONVERT(nvarchar(max), {value_bind}) + N'.')"
+                "((CASE WHEN {column} IS NOT NULL THEN {unicode_column} + N'.' END) COLLATE Latin1_General_100_BIN2 = CONVERT(nvarchar(max), {value_bind}) + N'.')"
             );
         }
         let length_bind = backend.placeholder(values.len() + 1);
         values.push(SqlValue::String(value.clone()));
-        // Measure both sides in the same encoding when the live type differs
-        // from the declaration. The BIN2 comparison and length still share
-        // the same three-valued logic under negation.
+        // The explicit collation on the Unicode bind wins the comparison.
+        // This lets SQL Server promote VARCHAR using the column's code page
+        // before comparing. DATALENGTH needs an explicit Unicode conversion.
         format!(
-            "({unicode_column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({unicode_column}) = DATALENGTH({length_bind}))"
+            "({column} = {value_bind} COLLATE Latin1_General_100_BIN2 AND DATALENGTH({unicode_column}) = DATALENGTH({length_bind}))"
         )
     };
     if let Some(value) = &f.eq {

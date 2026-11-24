@@ -12,10 +12,15 @@ supersedes: []
 
 ## 0.159.0 to 0.161.0
 
-**No action.** The ORM now supplies the seek predicate for SQL Server run-state
-filters (#867). This update requires no additional schema or data migration.
-Hosts still running a pre-0.158.0 schema should follow the upgrade below to
-install the run candidate indexes.
+The ORM now supplies the seek predicate for SQL Server run-state filters
+(#867). The SQL text changes for all opted-in exact comparisons. Review plan
+guides and Query Store forced plans for those queries. **Action needed** if a
+live column has drifted. Check the live column types, especially for
+`VARCHAR` columns declared as `NVARCHAR`, and review the affected read
+policies. See the [ORM migration](../../MIGRATION.md#02120-to-02160-sql-server-exact-string-filter-seeks).
+This update requires no additional schema or data migration. Hosts still
+running a pre-0.158.0 schema should follow the upgrade below to install the
+run candidate indexes.
 
 ## 0.158.0 to 0.159.0
 

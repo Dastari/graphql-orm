@@ -13,7 +13,9 @@ supersedes: []
 ## Unreleased - 0.161.0
 
 - SQL Server run candidate reads use the ORM's generated exact string filters
-  to seek on the run-state indexes (#867).
+  to seek on the run-state indexes (#867). SQL text changes for all opted-in
+  exact string comparisons. See the [migration guidance](MIGRATION.md#01590-to-01610)
+  for plan guides, Query Store forced plans, and live column drift.
 
 ## Unreleased - 0.159.0
 

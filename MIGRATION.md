@@ -12,13 +12,25 @@ supersedes: []
 
 ## 0.212.0 to 0.216.0: SQL Server exact string filter seeks
 
-**No action.** Upgrade ORM and macros together. With `exact_string_filters`
-enabled, SQL Server can seek on the declared BIN2 Unicode key columns for
-`eq` and nonempty `in_list` filters (#867). The generated SQL text changes
-for opted-in BIN2 key filters. Review any SQL Server plan guides or Query
-Store forced plans for these queries because they match on statement text.
-Exact comparisons also normalize a live `VARCHAR` column to Unicode when it
-differs from its declaration. There is no schema or data migration.
+Upgrade ORM and macros together. With `exact_string_filters` enabled, SQL
+Server can seek on declared BIN2 Unicode key columns for `eq` and nonempty
+`in_list` filters (#867). The SQL text changes for every opted-in exact
+comparison, including on non-BIN2 columns and for `ne` and `not_in`. This
+also applies to the AI crate's opted-in entities. Review SQL Server plan
+guides and Query Store forced plans for these queries because they match on
+statement text. The generated SQL always converts the column to Unicode
+for the exactness check, including the byte-length check on non-seek paths.
+
+**Action needed** if a live column has drifted. Compare the live column
+types with the ORM declarations for opted-in entities and review affected
+read policies. On a live `VARCHAR` column declared as `NVARCHAR`, the old
+length check compared bytes across encodings. It rejected true matches when
+the byte counts differed, including every nonempty single-byte exact match.
+It could also admit a space-padded value whose byte count happened to
+match, such as stored `'bob   '` for operand `'bob'`. Exact comparisons now
+accept the true match and reject the padded value. A read policy that
+matches an owner exactly can now return rows to the true owner that it
+previously denied. The upgrade itself requires no schema or data migration.
 
 ## 0.211.0 to 0.212.0: scoped SQLite column drop
 
