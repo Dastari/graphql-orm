@@ -19,7 +19,15 @@ for historical context.
 - **Added (#353).** Generated creates can opt into typed child lists on
   collection relations. The ORM binds the relation keys, authorizes each row,
   and commits the parent and up to 50 children in one transaction.
-  [Migration](MIGRATION.md#02110-to-02170-generated-nested-create)
+  [Migration](MIGRATION.md#02120-to-02170-generated-nested-create)
+
+## Unreleased - ORM/macros 0.212.0
+
+- **Fixed (#882).** An admitted owned SQLite migration with a single column
+  drop can preserve unrelated indexes and incoming foreign keys using native
+  `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
+  drop and history updates commit together.
+  [Migration](MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
 
 ## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
 

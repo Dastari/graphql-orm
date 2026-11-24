@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.211.0 to 0.217.0: Generated nested create
+## 0.212.0 to 0.217.0: Generated nested create
 
 **No action** unless opting in (#353). Add `nested_create` to the parent
 collection relation and declare the child's `nested_create_keys`. For an
@@ -18,6 +18,23 @@ opted-in parent, regenerate the SDL and catalogues and update clients using
 GraphQL variables to name the new `Create<Entity>WithChildrenInput` type.
 The standalone child create keeps its shape. See
 [creating a parent with child rows](docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
+
+## 0.211.0 to 0.212.0: scoped SQLite column drop
+
+**No action.** Upgrade ORM and macros together. An owned SQLite plan whose
+only change is to drop a column now renders SQLite's native `DROP COLUMN`.
+The plan is destructive and still requires `ApplyOptions::allow_destructive`.
+Planning and application check the live foreign-key catalog and test SQLite's
+native alterations against an empty copy of the schema. Planning reports
+detected dependencies as `InvalidPhysicalContract`. A trial rename identifies
+retained references that SQLite could silently rebind or ignore, including
+`UPDATE OF` trigger events. The live drop proceeds only when the checks
+verify that it preserves the retained physical schema.
+This narrows the [0.111.0 column-removal restrictions](#01110-sqlite-columncheckfk-rebuild-preservation)
+for the single-drop shape. Plans containing a drop and additional steps still
+rebuild or refuse. Run SQLite migrations with no TEMP objects on other
+connections, or use a dedicated migration connection with other connections closed.
+Refs #882.
 
 ## 0.210.0 to 0.211.0: Described root result metadata
 

@@ -227,7 +227,10 @@ impl Declaration {
             if !names.insert(relation.graphql_name.clone()) {
                 return Err(syn::Error::new(
                     relation.field.span(),
-                    format!("duplicate nested_create input field `{}`", relation.graphql_name),
+                    format!(
+                        "duplicate nested_create input field `{}`",
+                        relation.graphql_name
+                    ),
                 ));
             }
         }
