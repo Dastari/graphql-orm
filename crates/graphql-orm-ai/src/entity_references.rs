@@ -670,8 +670,17 @@ fn anonymous_unavailable_wire_envelope() -> Value {
 }
 
 /// Whether a JSON input value is an entity-reference envelope.
-fn is_envelope(value: &Value) -> bool {
+pub(crate) fn is_entity_reference_envelope(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some(AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE)
+}
+
+/// Canonical marker for a reference envelope, regardless of its current payload.
+pub(crate) fn entity_reference_unavailable_marker(value: &Value) -> Option<Value> {
+    is_entity_reference_envelope(value).then(|| {
+        stored_handle(value).map_or_else(anonymous_unavailable_wire_envelope, |reference| {
+            unavailable_wire_envelope(&reference)
+        })
+    })
 }
 
 /// Bytes an envelope reserves for resolved data, as recorded in the block.
@@ -692,7 +701,7 @@ pub(crate) fn redact_model_blocks(blocks: &mut [ModelInputBlock]) {
         let ModelInputBlock::Json { value } = block else {
             continue;
         };
-        if !is_envelope(value) {
+        if !is_entity_reference_envelope(value) {
             continue;
         }
         *block = match stored_handle(value) {
@@ -737,7 +746,7 @@ fn envelope_values<'a>(
         .flatten()
         .chain(input)
         .filter_map(|block| match block {
-            ModelInputBlock::Json { value } if is_envelope(value) => Some(value),
+            ModelInputBlock::Json { value } if is_entity_reference_envelope(value) => Some(value),
             _ => None,
         })
 }
@@ -867,7 +876,7 @@ impl ModelDispatchReferences {
     /// The returned value must be used for this one transport write. Do not
     /// clone it into anything that is stored, logged or retried.
     pub fn wire_json<'a>(&'a self, value: &'a Value) -> &'a Value {
-        if !is_envelope(value) {
+        if !is_entity_reference_envelope(value) {
             return value;
         }
         stored_handle(value)
@@ -1075,18 +1084,14 @@ impl ModelDispatchRequest {
     /// the one write that delivers the turn, where it passes each marker
     /// block through [`ModelDispatchReferences::wire_json`], which accepts a
     /// marker as well as a handle.
-    #[cfg_attr(not(feature = "provider-grok-acp"), allow(dead_code))]
     pub(crate) fn into_unavailable_parts(self) -> (ModelRequest, ModelDispatchReferences) {
         let mut request = self.request;
         let mark = |blocks: &mut [ModelInputBlock]| {
             for block in blocks {
                 if let ModelInputBlock::Json { value } = block
-                    && is_envelope(value)
+                    && let Some(marker) = entity_reference_unavailable_marker(value)
                 {
-                    *value = stored_handle(value)
-                        .map_or_else(anonymous_unavailable_wire_envelope, |reference| {
-                            unavailable_wire_envelope(&reference)
-                        });
+                    *value = marker;
                 }
             }
         };
@@ -1105,7 +1110,11 @@ impl ModelDispatchRequest {
 }
 
 /// How an attempt to write a frame that carries resolved data ended.
-#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+#[cfg(any(
+    feature = "local-harness",
+    feature = "provider-grok-acp",
+    feature = "provider-codex-app-server"
+))]
 pub(crate) enum ResolvedWrite<T> {
     /// The freshness deadline had passed before the write was first polled.
     /// Nothing was written; the caller sends the all-marker frame instead.
@@ -1118,7 +1127,14 @@ pub(crate) enum ResolvedWrite<T> {
     Abandoned,
 }
 
-#[cfg(all(test, any(feature = "local-harness", feature = "provider-grok-acp")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "local-harness",
+        feature = "provider-grok-acp",
+        feature = "provider-codex-app-server"
+    )
+))]
 thread_local! {
     /// Test seam: time that passes between the encoding of a resolved frame
     /// and the start check of its write, on the current thread.
@@ -1136,7 +1152,11 @@ thread_local! {
 /// deadline is polled before every further poll of `write` (a deadline-first,
 /// biased select), so expiry wins over more writing. A write that completes
 /// within a poll that began before expiry is allowed to finish.
-#[cfg(any(feature = "local-harness", feature = "provider-grok-acp"))]
+#[cfg(any(
+    feature = "local-harness",
+    feature = "provider-grok-acp",
+    feature = "provider-codex-app-server"
+))]
 pub(crate) async fn write_resolved_before<T>(
     deadline: std::time::Instant,
     write: impl std::future::Future<Output = T>,
