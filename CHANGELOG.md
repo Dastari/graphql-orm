@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.216.0
+
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02150-to-02160-postgresql-rls-search)
+
 ## Unreleased - ORM/macros 0.215.0
 
 - **Added (#522).** SQL Server pools can opt in to binding the SQL types

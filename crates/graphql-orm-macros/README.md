@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.216.0 lets PostgreSQL choose the join for native search on
+generated `#[graphql_rls]` entities with a column-based default sort. Both
+RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
+
 Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
 column types with the `mssql_type` field attribute.
 See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
