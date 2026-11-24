@@ -10,11 +10,11 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.157.0
+## Unreleased - 0.158.0
 
 Requires ORM 0.214.0. No public API, GraphQL SDL, persistent schema, broker
 definition or fingerprint change. See the
-[migration guide](MIGRATION.md#01560-to-01570-authority-aware-host-field-decisions).
+[migration guide](MIGRATION.md#01570-to-01580-authority-aware-host-field-decisions).
 
 - **Fixed (#291):** the crate's internal database handle forwards
   repository field decisions for fields the host owns to the host policy's
@@ -22,6 +22,14 @@ definition or fingerprint change. See the
   `can_write_repository_field_with_authority`. A host refusal written in
   those methods is no longer skipped on that handle. Decisions for the
   crate's own key-less fields are unchanged.
+
+## Unreleased - 0.157.0
+
+- **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier
+  can admit replacement of the legacy approval lookup index with the unique
+  `tool_call_id` index. The live index must match the legacy definition, and
+  duplicate approval keys stop the upgrade before any DDL.
+  [Migration](MIGRATION.md#01560-to-01570)
 
 ## Unreleased - 0.156.0
 

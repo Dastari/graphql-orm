@@ -10,9 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.157.0 forwards host-owned repository field decisions to the host
+AI 0.158.0 forwards host-owned repository field decisions to the host
 policy's authority-aware methods (ORM 0.214.0). See the
-[migration guide](MIGRATION.md#01560-to-01570-authority-aware-host-field-decisions).
+[migration guide](MIGRATION.md#01570-to-01580-authority-aware-host-field-decisions).
+
+AI 0.157.0 supports upgrading the pre-0.83 approval lookup index to the
+unique tool-call key with live schema verification and duplicate preflight.
+See the [migration guide](MIGRATION.md#01560-to-01570).
 
 AI 0.156.0 adds a model-context benchmark for the fixed capability broker and,
 with AI tool profiles 0.28.0, keeps per-call broker costs flat for a host that

@@ -681,7 +681,7 @@ What it does not cover:
   present the request. The runtime GraphQL surface does not.
 - **Policies wrapped by a companion crate** receive what that crate forwards. `graphql-orm-ai`
   forwards host-owned repository field decisions on its internal handle to the host policy's
-  `*_with_authority` methods (AI 0.157.0); its own key-less fields are answered by the crate.
+  `*_with_authority` methods (AI 0.158.0); its own key-less fields are answered by the crate.
 
 A policy that honours the originating request trusts every installed mutation hook to act for
 the caller on the entities and rows that request could itself write. Decide per entity where a

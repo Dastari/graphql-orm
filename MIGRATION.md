@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.207.0 to 0.214.0: explicit authority for hooks and workers
+## 0.209.0 to 0.214.0: explicit authority for hooks and workers
 
 **No action.** Upgrade ORM and macros together. Existing policies decide
 exactly as before: the new `*_with_authority` methods on `EntityPolicy`,
@@ -33,6 +33,23 @@ the schema serves. Then:
   `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.
 
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
+## 0.208.0 to 0.209.0: external migration preflight
+
+**No action.** Upgrade ORM and macros together. Hosts applying DDL externally
+can call `database.schema().preflight_unique_indexes(&plan).await?` before any
+migration statements. Use a connection that can read all affected rows and
+quiesce concurrent writes and schema changes through application. Repeated
+keys return `UniqueIndexDuplicates`. No data migration is needed for this API.
+
+## 0.207.0 to 0.208.0: bounded set-based deletes
+
+**No action.** Upgrade ORM and macros together. Opt in per entity to call
+`MutationContext::delete_keys_set_bounded` or `delete_where_set_bounded`
+inside a `StateMachine` transaction. Existing delete APIs keep their
+behavior. Review the
+[set-delete contract](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+before implementing `SetDeleteEntity`.
+
 ## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
 
 **No action.** SQLite renders every closure read predicate, single-level and

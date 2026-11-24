@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.214.0 and AI 0.157.0
+## Unreleased - ORM/macros 0.214.0 and AI 0.158.0
 
 - **Added (#291).** A mutation hook's nested writes can be authorized from
   the request that caused them. With
@@ -47,12 +47,25 @@ for historical context.
   same status and authority revalidation as a request, when the host's
   `AgqlBindingAuthorizer::authorize_hook_operation` allows it. The default
   denies, so `ctx = None` calls stay refused until the host implements it.
-- **Fixed (#291), AI 0.157.0.** The AI crate's internal handle forwards
+- **Fixed (#291), AI 0.158.0.** The AI crate's internal handle forwards
   host-owned repository field decisions to the host policy's
   `*_with_authority` methods; see the
-  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01560-to-01570-authority-aware-host-field-decisions).
+  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01570-to-01580-authority-aware-host-field-decisions).
   **No action.** See the
-  [migration guide](MIGRATION.md#02070-to-02140-explicit-authority-for-hooks-and-workers).
+  [migration guide](MIGRATION.md#02090-to-02140-explicit-authority-for-hooks-and-workers).
+## Unreleased - ORM/macros 0.209.0
+
+- `SchemaManager::preflight_unique_indexes` exposes the read-only duplicate-key
+  check to hosts using external migration tools, including SQL Server (#878).
+  [Migration](MIGRATION.md#02080-to-02090-external-migration-preflight)
+
+## Unreleased - ORM/macros 0.208.0
+
+- **Added (#852).** Typed transactions can delete a bounded key set or scalar
+  filter match with one DELETE for opted-in mutable entities. The operation
+  checks row write authorization and exact cardinality, runs per-row delete
+  hooks and queues the generated change notifications.
+  [Migration](MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
 
 ## Unreleased - ORM/macros 0.207.0
 

@@ -81,7 +81,11 @@ impl TableIdentifierConflict {
 /// no row data.
 ///
 /// The check covers a `CREATE UNIQUE INDEX` step on a table that exists
-/// before the plan, over columns that exist before the plan. It follows the
+/// before the plan, over columns that exist before the plan. It reads keys
+/// with their pre-plan types and collations. If the plan changes a key's type
+/// or collation, duplicates introduced by that change are caught by the
+/// database at `CREATE UNIQUE INDEX`, and managed transactional apply rolls
+/// back. The preflight follows the
 /// backend's own uniqueness rule for `NULL`: PostgreSQL and SQLite treat
 /// `NULL` keys as distinct, so rows with a `NULL` key column are ignored;
 /// SQL Server treats them as equal, so they are compared. A unique index over
