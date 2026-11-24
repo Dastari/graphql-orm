@@ -14,8 +14,10 @@ mod owned_mssql;
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 
+use graphql_orm::async_graphql::ErrorExtensions;
 use graphql_orm::futures::future::BoxFuture;
 use graphql_orm::prelude::*;
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 #[derive(
@@ -47,6 +49,7 @@ struct Order {
     #[graphql_orm(auto_generated = false)]
     id: String,
     tenant: String,
+    note: Option<String>,
     #[relation(target = "Line", from = ["id", "tenant"], to = ["order_id", "tenant"], multiple, nested_create, emit_fk = false)]
     #[graphql(skip)]
     #[serde(default)]
@@ -73,6 +76,98 @@ struct Line {
 schema_roots! { query_custom_ops: [], entities: [Order, Line] }
 #[cfg(feature = "mssql")]
 schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [Order, Line] }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refuse {
+    ParentField,
+    ChildEntity,
+    ChildAssurance,
+}
+
+struct NestedWritePolicy;
+
+impl EntityPolicy for NestedWritePolicy {
+    fn can_access_entity<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            if entity == "Line"
+                && kind == EntityAccessKind::Write
+                && surface == EntityAccessSurface::GraphqlMutation
+                && let Some(ctx) = ctx
+                && ctx.data_opt::<Refuse>() == Some(&Refuse::ChildEntity)
+            {
+                assert_eq!(ctx.field().name(), "createLine");
+                return Ok(false);
+            }
+            Ok(true)
+        })
+    }
+}
+
+impl FieldPolicy for NestedWritePolicy {
+    fn ignore_denied_field_write(&self, entity: &'static str, field: &'static str) -> bool {
+        entity == "Order" && field == "note"
+    }
+
+    fn can_read_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_field<'a>(
+        &'a self,
+        ctx: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        entity: &'static str,
+        field: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(!(entity == "Order"
+                && field == "note"
+                && ctx.data_opt::<Refuse>() == Some(&Refuse::ParentField)))
+        })
+    }
+}
+
+#[derive(Debug)]
+struct LineAssurance;
+
+impl AssuranceRequirementEvaluator for LineAssurance {
+    fn enforce(
+        &self,
+        check: &AssuranceCheck<'_>,
+        _: AssuranceActorClass,
+        policy_id: &str,
+    ) -> async_graphql::Result<()> {
+        assert_eq!(check.field_name(), "createLine");
+        assert_eq!(check.kind(), GraphqlOperationKind::Mutation);
+        assert_eq!(policy_id, "line.write");
+        if check.data_opt::<Refuse>() == Some(&Refuse::ChildAssurance) {
+            return Err(
+                async_graphql::Error::new("additional authentication is required")
+                    .extend_with(|_, extensions| extensions.set("code", "STEP_UP_REQUIRED")),
+            );
+        }
+        Ok(())
+    }
+}
 
 struct DenyOneLine;
 impl RowPolicy for DenyOneLine {
@@ -139,7 +234,7 @@ impl MutationHook for Trace {
                 let trace = self.0.clone();
                 let id = event.id.clone();
                 tx.defer(move |_| async move {
-                    trace.lock().unwrap().push(format!("committed:{id}"));
+                    trace.lock().unwrap().push(format!("committed {id}"));
                     Ok::<(), std::convert::Infallible>(())
                 });
             }
@@ -206,7 +301,7 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
         )
     };
     for sql in [
-        "CREATE TABLE nested_orders (id VARCHAR(80) PRIMARY KEY, tenant VARCHAR(80) NOT NULL)",
+        "CREATE TABLE nested_orders (id VARCHAR(80) PRIMARY KEY, tenant VARCHAR(80) NOT NULL, note VARCHAR(80) NULL)",
         "CREATE TABLE nested_lines (id VARCHAR(80) PRIMARY KEY, order_id VARCHAR(80) NOT NULL REFERENCES nested_orders(id), tenant VARCHAR(80) NOT NULL, note VARCHAR(80) NULL, version BIGINT NOT NULL DEFAULT 0)",
     ] {
         <DefaultBackend as WriteBackend>::execute_with_binds(db.pool(), sql, &[])
@@ -215,9 +310,22 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
     }
     let trace = Arc::new(Mutex::new(Vec::new()));
     db.set_mutation_hook(Trace(trace.clone()));
+    db.set_entity_policy(NestedWritePolicy);
+    db.set_field_policy(NestedWritePolicy);
     db.set_row_policy(DenyOneLine);
     db.set_write_input_transform(TransformLine);
+    let mut assurance = OperationAssuranceRegistry::builder(
+        graphql_orm_operation_catalog(),
+        AssuranceSchemaConfig::legacy(),
+    );
+    assurance
+        .require(GraphqlOperationKind::Mutation, "createLine", "line.write")
+        .unwrap();
     let schema = schema_builder(db.clone())
+        .data(AssuranceEnforcement::new(
+            Arc::new(assurance.build().unwrap()),
+            Arc::new(LineAssurance),
+        ))
         .data(
             AuthSubject::builder("operator")
                 .scopes(vec!["lines.write".to_owned()])
@@ -264,6 +372,37 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
     assert_eq!(rows(&db, "nested_orders").await, 0);
     assert!(trace.lock().unwrap().is_empty());
 
+    for (refusal, code, message) in [
+        (Refuse::ParentField, "FORBIDDEN", "note"),
+        (Refuse::ChildEntity, "FORBIDDEN", "forbidden"),
+        (
+            Refuse::ChildAssurance,
+            "STEP_UP_REQUIRED",
+            "additional authentication",
+        ),
+    ] {
+        let request = async_graphql::Request::new(
+            r#"mutation { createOrder(input: { id: "order", tenant: "west", note: "optional", lines: [{ id: "one" }, { id: "two" }] }) { success } }"#,
+        )
+        .data(refusal);
+        let response = schema.execute(request).await;
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert!(response.errors[0].message.contains(message), "{response:?}");
+        assert_eq!(
+            response.errors[0]
+                .extensions
+                .as_ref()
+                .and_then(|ext| ext.get("code")),
+            Some(&async_graphql::Value::from(code)),
+            "{response:?}",
+        );
+        assert_eq!(rows(&db, "nested_orders").await, 0);
+        assert_eq!(rows(&db, "nested_lines").await, 0);
+        assert!(trace.lock().unwrap().is_empty());
+        assert!(parents.try_recv().is_err());
+        assert!(children_events.try_recv().is_err());
+    }
+
     for (children, message) in [
         (r#"{ id: "one" }, { id: "denied" }"#.to_owned(), "forbidden"),
         (r#"{ id: "same" }, { id: "same" }"#.to_owned(), "duplicate"),
@@ -295,7 +434,7 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
         assert!(parents.try_recv().is_err());
         assert!(children_events.try_recv().is_err());
         let log = trace.lock().unwrap();
-        assert!(log.iter().all(|entry| !entry.starts_with("committed:")));
+        assert!(log.iter().all(|entry| !entry.starts_with("committed ")));
         if message != "forbidden" {
             assert!(log.is_empty(), "{log:?}");
         }
@@ -329,9 +468,9 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
             "After:one",
             "Before:two",
             "After:two",
-            "committed:order",
-            "committed:one",
-            "committed:two",
+            "committed order",
+            "committed one",
+            "committed two",
         ]
     );
     assert_eq!(parents.try_recv().unwrap().id, "order");

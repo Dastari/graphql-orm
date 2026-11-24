@@ -229,7 +229,7 @@ pub(in crate::operations) fn create(
             let entity = match __gom_write_result {
                 ::std::result::Result::Ok(entity) => entity,
                 ::std::result::Result::Err(error) => {
-                    hook_ctx.rollback().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                    ::graphql_orm::db::log_failed_rollback(hook_ctx.rollback().await);
                     return ::std::result::Result::Err(error);
                 }
             };

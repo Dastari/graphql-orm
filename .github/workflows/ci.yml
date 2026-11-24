@@ -264,6 +264,10 @@ jobs:
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
           done
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --test zero_public_write_inputs_backends
+      - name: Verify nested create on owned PostgreSQL
+        run: |
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test nested_create -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test compile_ui nested_create_ui::
       - name: Check composite subscription scope declarations on native backends
         run: |
           for backend in postgres mssql; do

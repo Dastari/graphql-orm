@@ -1,0 +1,5 @@
+error: nested_create is incompatible with upsert or an AI create policy on the parent
+ --> tests/ui/nested_create_parent_ai.rs:8:5
+  |
+8 |     id: String,
+  |     ^^

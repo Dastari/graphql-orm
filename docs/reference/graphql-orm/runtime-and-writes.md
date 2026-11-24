@@ -212,6 +212,12 @@ events in queue order, then executes deferred actions in registration order.
 Use transactional writes or `MutationContext::defer` for hook side effects.
 Input transforms run during preparation and should only prepare or validate input.
 
+The catalogue and the parent mutation's `@requiresScopes` and
+`@authenticated` directives describe the parent only, so router prechecks and
+host extensions that filter by root field can see weaker requirements than
+the ORM enforces for the children at runtime. An opted-in parent can create a
+child whose own create root is excluded from the schema.
+
 Nested create requires writable, single-primary-key GraphQL entities with
 generated create enabled. Bound fields are non-nullable writable relation
 keys. Child bindings must be ordinary public create fields other than the
@@ -220,7 +226,10 @@ field. Append-only and dependent-delete entities are rejected. Parent upsert
 and AI create policies are incompatible with the expanded input. Participants
 use transactional mutation hooks and deferred actions in place of
 `notify_with`. External SQL Server tables require the usual
-`external_writable` policy. Nesting creates one level of children.
+`external_writable` policy. The parent and child must use the same database
+backend. A mixed-backend declaration can report a Rust type mismatch on the
+generated database or mutation context argument. Nesting creates one level of
+children.
 
 A custom root remains available for other transaction shapes. It can open
 `Database::transaction` and insert rows with `tx.insert`:

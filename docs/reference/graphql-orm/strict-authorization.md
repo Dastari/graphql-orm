@@ -256,9 +256,23 @@ records itself and delegates everything else to the host policy.
 
 Deletes write no field. The ORM's own maintenance writes (managed versions and
 timestamps, dependent `set_null` updates, retention purges, search documents)
-are not caller-supplied field writes and ask no field decision. The static
-macros generate no relation-link mutation and no nested-object input: a link
-row is an entity and is written through the paths above.
+are not caller-supplied field writes and ask no field decision. Link rows are
+entities and use the write paths above.
+
+With [opt-in nested create](runtime-and-writes.md#creating-a-parent-with-child-rows),
+each child uses its own create coordinate and policy context. The generated
+create enforces the child's entity write policy, fixed scopes, assurance and
+field writes. It requires a row write provider when the child declares a
+write policy, handles its managed version, and checks the stored row against
+row policy after insert. A field-write denial on any row refuses the entire
+call, even when the field policy allows legacy omission on a standalone
+create.
+
+The catalogue and the parent mutation's `@requiresScopes` and
+`@authenticated` directives publish only the parent's requirements, so
+router prechecks and host extensions that filter by root field can see weaker
+requirements than the ORM enforces at runtime. An opted-in parent can create
+a child whose own create root is excluded from the schema.
 
 ## Policy Callback Errors
 

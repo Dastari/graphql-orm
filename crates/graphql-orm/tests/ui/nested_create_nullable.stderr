@@ -1,0 +1,5 @@
+error: nested_create bindings require non-nullable, writable relation key fields without managed values or write transforms; a child binding must be a public create field other than its primary key
+ --> tests/ui/nested_create_nullable.rs:9:5
+  |
+9 |     order_id: Option<String>,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
