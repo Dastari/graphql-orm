@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.214.0 stays aligned with ORM 0.214.0 for the Auth update.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
+Version 0.213.0 aligns with the ORM's
+[test harness fixes](../../MIGRATION.md#02120-to-02130-test-harness-coordination).
+
+Version 0.212.0 aligns with the ORM's
+[scoped SQLite column drop](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
+
 Version 0.211.0 records the Rust type of described root results for
 schema catalogue composition (#883).
 [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)

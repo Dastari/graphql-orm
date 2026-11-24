@@ -70,9 +70,23 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.211.0**; **`graphql-orm-macros` 0.211.0**; **`graphql-orm-operation-catalog` 0.14.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; `graphql-orm-ai` 0.157.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.214.0; `graphql-orm-macros` 0.214.0; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.161.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
 
-- **No action** — AI tool profiles 0.30.0 and AI 0.160.0 speed up capability catalogue compilation without changing fingerprints, provider definitions or describe output (#865). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0300-capability-catalogue-compilation)
+- **No action** — AI tool profiles 0.30.0 and AI 0.161.0 speed up capability catalogue compilation without changing fingerprints, provider definitions or describe output (#865). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0300-capability-catalogue-compilation)
+- **Action needed** — ORM/macros 0.214.0, AI 0.160.0 and router 0.18.0 use `agql-auth` `v0.27.0` (#857). Upgrade direct Auth dependencies with these packages and review the Auth store and validator changes. [ORM migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01590-to-01600) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0170-to-0180-agql-auth-v0270)
+- **No action** — ORM/macros 0.213.0 fixes parallel compile UI and consumer fixture setup (#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
+- **No action** — AI 0.159.0 adds opt-in resolved entity-reference delivery
+  for Codex app-server (#721).
+  [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01580-to-01590)
+- **No action** — ORM/macros 0.212.0 enables an admitted owned SQLite plan to drop one unused column while preserving unrelated indexes and incoming foreign keys (#882). [Migration](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
+- **Action needed** for AI 0.158.0. Apply the guarded external run-state index migration on SQL Server and drain workers on all backends before epoch rotation (#848). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01570-to-01580)
+
+### workspace-2026.11.24.2
+
+Commit `2f2b6c9d78da` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.24.2)
+
+Packages (changed in bold): **`graphql-orm` 0.211.0**; **`graphql-orm-macros` 0.211.0**; **`graphql-orm-operation-catalog` 0.14.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; `graphql-orm-ai` 0.157.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
 - **No action** — ORM/macros 0.211.0 and operation catalogue 0.14.0 use schema-bound metadata when described roots return a registered generated entity (#883). [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
 - **No action** — ORM/macros 0.210.0 and operation catalogue 0.13.0: opt-in `update_expected_version = "required"` and `update_assurance(select, levels)` on generated updates. The catalogue lists conditional assurance levels. Other entities are unchanged (#851). [Migration](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130)
 

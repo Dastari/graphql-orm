@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 #[path = "../support/durable_database.rs"]
 mod durable_database;
+#[cfg(feature = "mssql")]
+mod mssql_run_candidates;
 #[cfg(feature = "postgres")]
 use durable_database::OwnedPostgres;
 use durable_database::{apply_parity_migration, owned_database};
@@ -1239,6 +1241,8 @@ async fn owned_database_runs_generated_migration_sessions_skills_rules_and_fenci
             clock_skew: Duration::seconds(30),
             allowed_amr: vec!["otp".to_owned()],
             allowed_acr: vec!["urn:durable-parity:loa:2".to_owned()],
+            required_amr: Vec::new(),
+            required_context: None,
             match_mode: AssuranceMatchMode::All,
         },
         Arc::new(FixedClock::new(now)),
@@ -1320,6 +1324,8 @@ async fn owned_database_runs_generated_migration_sessions_skills_rules_and_fenci
             clock_skew: Duration::seconds(30),
             allowed_amr: vec!["otp".to_owned()],
             allowed_acr: vec!["urn:durable-parity:loa:2".to_owned()],
+            required_amr: Vec::new(),
+            required_context: None,
             match_mode: AssuranceMatchMode::All,
         },
         Arc::new(FixedClock::new(now)),

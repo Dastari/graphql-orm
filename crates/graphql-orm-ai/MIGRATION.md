@@ -10,11 +10,82 @@ supersedes: []
 
 # Migration Guide
 
-## 0.160.0 capability catalogue compilation
+## 0.160.0 to 0.161.0 capability catalogue compilation
 
 **No action.** Capability fingerprints, provider definitions, describe output
 and existing bindings stay unchanged. No AI schema module or data migration
 is needed.
+
+## 0.159.0 to 0.160.0
+
+**Action needed.** Move direct Auth dependencies to the published `v0.27.0`
+Git tag in the same upgrade and refresh the host lockfile. AI's principal and
+assurance APIs use types from that source. `RecentMfaPolicy` struct literals
+must now set `required_amr` and `required_context`. Auth denies accepted MFA
+with no recorded method. AI continues to refuse delegated credentials for
+durable work and rehydrates current authority at execution checkpoints.
+
+AI 0.160.0 uses ORM 0.214.0. There is no AI schema or AI data migration for this
+update. See the [workspace migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270)
+for Auth store and token changes.
+
+## 0.158.0 to 0.159.0
+
+**No action.** Resolved reference delivery to Codex app-server requires a
+registration opt-in and a process implementation that passes the dispatch to
+the protocol actor's consuming write. Existing process implementations keep
+receiving markers. The actor filters echoed `userMessage` items and sets
+existing thread `preview` values to the empty string for every host,
+regardless of opt-in. Hosts that display these previews will receive empty
+strings. No data migration is needed. See
+[per-message entity references](docs/entity-references.md#adapters-for-a-local-process).
+
+## 0.157.0 to 0.158.0
+
+**Action needed** on SQL Server. Generate the external schema plan for
+`AiSchemaModule` 0.85.0 through `Database::schema().plan_migration_to_entities`
+with `AiSchemaModule.entities()`. Review the change to
+`dbo.graphql_orm_ai_runs.state` from `NVARCHAR(MAX)` to
+`NVARCHAR(450) COLLATE Latin1_General_100_BIN2` and creation of the
+`idx_graphql_orm_ai_runs_claim_candidates` and
+`idx_graphql_orm_ai_runs_recovery_candidates` indexes.
+
+Plan a maintenance window and quiesce writers. The `ALTER COLUMN` rewrites the
+run table under an exclusive schema modification lock. User-created statistics
+on `state` block the ALTER. Drop them after the preflight and before the ALTER,
+inside the same transaction. A blocked ALTER rolls back the transaction,
+including any drops already performed.
+
+Replace the indicated comment with the reviewed plan statements. Run the whole
+batch on one connection.
+
+The check counts UTF-16 bytes, including trailing spaces and both code units
+of a supplementary character. SQL Server can silently trim trailing spaces
+when narrowing this column, even with `ANSI_WARNINGS ON`.
+
+```sql
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
+IF EXISTS (
+    SELECT 1
+    FROM [dbo].[graphql_orm_ai_runs] WITH (TABLOCKX, HOLDLOCK)
+    WHERE DATALENGTH([state]) > 900
+)
+    THROW 50000, N'Cannot narrow graphql_orm_ai_runs.state to NVARCHAR(450): a stored value exceeds 900 bytes.', 1;
+
+-- Insert the reviewed plan statements here, including any required DROP STATISTICS before ALTER COLUMN.
+COMMIT;
+```
+
+No valid run state is that long. Repair or quarantine the corrupt rows before
+retrying the upgrade. The migration keeps values within the bound exactly as
+stored.
+
+**Action needed** on SQLite, PostgreSQL, and SQL Server. Drain active workers
+before opening the new schema-module epoch. Leases granted under the previous
+epoch no longer authorize work after the successor epoch opens. SQLite and
+PostgreSQL require no schema or data migration.
 
 ## 0.156.0 to 0.157.0
 
