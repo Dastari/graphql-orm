@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.160.0
+
+- Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
+  The release benchmark can measure startup separately and export a byte
+  snapshot of the catalogue and model-facing output.
+  [Measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark)
+
 ## Unreleased - 0.157.0
 
 - **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier

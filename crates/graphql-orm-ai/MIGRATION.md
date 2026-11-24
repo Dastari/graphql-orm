@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.160.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, provider definitions, describe output
+and existing bindings stay unchanged. No AI schema module or data migration
+is needed.
+
 ## 0.156.0 to 0.157.0
 
 **Action needed** when upgrading a store that still has the pre-0.83

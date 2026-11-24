@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.160.0 uses tool profiles 0.30.0 to speed up catalogue compilation for
+targets with many capability roots. See the
+[benchmark measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark).
+
 AI 0.157.0 supports upgrading the pre-0.83 approval lookup index to the
 unique tool-call key with live schema verification and duplicate preflight.
 See the [migration guide](MIGRATION.md#01560-to-01570).
