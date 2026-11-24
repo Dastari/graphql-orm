@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** The resolver catalogue marks generated relationships with
+  a declared field policy as `subgraph_only`. The operation and semantic
+  catalogue fingerprints are unchanged.
+
 ## Unreleased - ORM/macros 0.215.0
 
 - **Added (#522).** SQL Server pools can opt in to binding the SQL types
