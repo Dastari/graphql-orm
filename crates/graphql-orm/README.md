@@ -11,7 +11,7 @@ supersedes: []
 # `graphql-orm`
 
 Version 0.228.0 lets a composite relation join on a server-only partition key
-that stays off every GraphQL surface.
+that stays off every generated GraphQL surface.
 See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
 
 Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects

@@ -1777,18 +1777,26 @@ pub(crate) fn relation_server_only_key_mask(
         }
     }
     // The bound value must be the stored partition value: a skipped field is
-    // defaulted on hydration and a read transform rewrites it.
+    // defaulted on hydration, a read transform rewrites it, and JSON, date,
+    // boolean-field, decimal and spatial mappings decode it into another
+    // representation before it is bound again.
     for key in declarations {
         match source_field(&key.from) {
             Some(parsed)
                 if !parsed.meta.is_relation
                     && !parsed.meta.skip_db
-                    && parsed.meta.transform_read.is_none() => {}
+                    && parsed.meta.transform_read.is_none()
+                    && !parsed.meta.is_json_field
+                    && !parsed.meta.is_date_field
+                    && !parsed.meta.is_boolean_field
+                    && parsed.meta.decimal.is_none()
+                    && !parsed.meta.mssql_money
+                    && parsed.meta.spatial.is_none() => {}
             _ => {
                 return Err(syn::Error::new(
                     key.span,
                     format!(
-                        "server_only_key source `{}` must be a persisted scalar field without skip_db or transform_read, so the join binds the stored value",
+                        "server_only_key source `{}` must be a persisted scalar field read as stored, so the join binds the stored value: no skip_db, read transform, json, date, boolean-field, decimal or spatial mapping",
                         key.from
                     ),
                 ));
@@ -1845,12 +1853,15 @@ pub(crate) fn relation_server_only_columns(
             .iter()
             .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)
     };
+    // Resolve every mapping as the generated SQL does: table qualifiers
+    // dropped, quoting removed and bare PostgreSQL names case-folded, so an
+    // alias that reaches the same column through other spelling is found.
     let physical = |parsed: &ParsedField| {
         let rust_name = parsed.field.ident.as_ref().unwrap().to_string();
         relation_column_identity(
             backend,
             parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
-            false,
+            true,
         )
     };
     let same = |left: &str, right: &str| {
@@ -1868,7 +1879,7 @@ pub(crate) fn relation_server_only_columns(
         primary_keys.push(relation_column_identity(
             backend,
             &implicit_id_db_column(fields).unwrap_or_else(|| "id".to_string()),
-            false,
+            true,
         ));
     }
     let mut columns: Vec<String> = Vec::new();
@@ -2006,7 +2017,7 @@ pub(crate) fn validate_graphql_relation_keys(
                         same(&relation_column_identity(
                             backend,
                             parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
-                            false,
+                            true,
                         ))
                     })
             });

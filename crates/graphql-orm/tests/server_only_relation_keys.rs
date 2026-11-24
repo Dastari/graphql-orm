@@ -179,18 +179,283 @@ pub struct PartitionedForward {
     pub device: Option<PartitionedDevice>,
 }
 
+// Key members whose database equality differs from their text: collation and
+// padding (every backend), SQLite numeric affinity, and a non-canonically
+// stored SQLite UUID. The loader and the direct path must agree on each.
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "keyed_targets",
+        plural = "KeyedTargets",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "keyed_targets",
+        plural = "KeyedTargets",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "keyed_targets",
+        plural = "KeyedTargets",
+        default_sort = "id ASC"
+    )
+)]
+pub struct KeyedTarget {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub part: String,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(
+        target = "KeyedSource",
+        from = ["id", "part"],
+        to = ["target_id", "part"],
+        server_only_key(from = "part", to = "part"),
+        multiple,
+        emit_fk = false
+    )]
+    pub sources: Vec<KeyedSource>,
+}
+
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "keyed_sources",
+        plural = "KeyedSources",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "keyed_sources",
+        plural = "KeyedSources",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "keyed_sources",
+        plural = "KeyedSources",
+        default_sort = "id ASC"
+    )
+)]
+pub struct KeyedSource {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[filterable(type = "string")]
+    pub target_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub part: String,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(
+        target = "KeyedTarget",
+        from = ["target_id", "part"],
+        to = ["id", "part"],
+        server_only_key(from = "part", to = "part"),
+        emit_fk = false
+    )]
+    pub target: Option<KeyedTarget>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "real_targets",
+        plural = "RealTargets",
+        default_sort = "id ASC"
+    )
+)]
+pub struct RealTarget {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[graphql_orm(private)]
+    pub part: f64,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "real_sources",
+        plural = "RealSources",
+        default_sort = "id ASC"
+    )
+)]
+pub struct RealSource {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[filterable(type = "string")]
+    pub target_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub part: String,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(
+        target = "RealTarget",
+        from = ["target_id", "part"],
+        to = ["id", "part"],
+        server_only_key(from = "part", to = "part"),
+        emit_fk = false
+    )]
+    pub target: Option<RealTarget>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "uuid_keyed_targets",
+        plural = "UuidTargets",
+        default_sort = "id ASC"
+    )
+)]
+pub struct UuidTarget {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[graphql_orm(private)]
+    pub part: graphql_orm::uuid::Uuid,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "uuid_keyed_sources",
+        plural = "UuidSources",
+        default_sort = "id ASC"
+    )
+)]
+pub struct UuidSource {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[filterable(type = "string")]
+    pub target_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub part: graphql_orm::uuid::Uuid,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(
+        target = "UuidTarget",
+        from = ["target_id", "part"],
+        to = ["id", "part"],
+        server_only_key(from = "part", to = "part"),
+        emit_fk = false
+    )]
+    pub target: Option<UuidTarget>,
+}
+
 #[cfg(feature = "sqlite")]
 schema_roots! {
     backend: "sqlite",
     query_custom_ops: [],
-    entities: [PartitionedDevice, PartitionedForward],
+    entities: [
+        PartitionedDevice,
+        PartitionedForward,
+        KeyedTarget,
+        KeyedSource,
+        RealTarget,
+        RealSource,
+        UuidTarget,
+        UuidSource,
+    ],
     client_metadata: true,
 }
 #[cfg(feature = "postgres")]
 schema_roots! {
     backend: "postgres",
     query_custom_ops: [],
-    entities: [PartitionedDevice, PartitionedForward],
+    entities: [PartitionedDevice, PartitionedForward, KeyedTarget, KeyedSource],
     client_metadata: true,
 }
 #[cfg(feature = "mssql")]
@@ -198,7 +463,7 @@ schema_roots! {
     backend: "mssql",
     schema_policy: "external_writable",
     query_custom_ops: [],
-    entities: [PartitionedDevice, PartitionedForward],
+    entities: [PartitionedDevice, PartitionedForward, KeyedTarget, KeyedSource],
     client_metadata: true,
 }
 
@@ -474,6 +739,16 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
                 &[
                     PartitionedDevice::metadata(),
                     PartitionedForward::metadata(),
+                    KeyedTarget::metadata(),
+                    KeyedSource::metadata(),
+                    #[cfg(feature = "sqlite")]
+                    RealTarget::metadata(),
+                    #[cfg(feature = "sqlite")]
+                    RealSource::metadata(),
+                    #[cfg(feature = "sqlite")]
+                    UuidTarget::metadata(),
+                    #[cfg(feature = "sqlite")]
+                    UuidSource::metadata(),
                 ],
             )
             .await?;
@@ -491,7 +766,11 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
              label NVARCHAR(64) NOT NULL, blocked BIT NOT NULL); \
              CREATE TABLE partitioned_forwards (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
              organisation_id NVARCHAR(64) NOT NULL, tenant_id NVARCHAR(64) NOT NULL, \
-             device_id NVARCHAR(64) NULL, label NVARCHAR(64) NOT NULL);",
+             device_id NVARCHAR(64) NULL, label NVARCHAR(64) NOT NULL); \
+             CREATE TABLE keyed_targets (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
+             part NVARCHAR(64) NOT NULL); \
+             CREATE TABLE keyed_sources (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
+             target_id NVARCHAR(64) NOT NULL, part NVARCHAR(64) NOT NULL);",
         )
         .await?;
         let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
@@ -526,13 +805,40 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    // One target; sources whose partition equals it exactly, by case only,
+    // by trailing spaces only, and not at all.
+    let keyed = "INSERT INTO keyed_targets (id, part) VALUES ('t', 'Tenant')".to_owned();
+    let keyed_sources = "INSERT INTO keyed_sources (id, target_id, part) VALUES \
+        ('s-exact', 't', 'Tenant'), ('s-case', 't', 'TENANT'), \
+        ('s-pad', 't', 'Tenant  '), ('s-other', 't', 'Other')"
+        .to_owned();
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    for statement in [devices, forwards] {
+    for statement in [devices, forwards, keyed, keyed_sources] {
         sqlx::query(&statement).execute(db.pool()).await?;
     }
+    // A REAL target partition that SQLite matches to TEXT by numeric
+    // affinity, and that renders as text with fewer digits than it holds.
+    // A UUID partition stored in upper case is not canonical.
+    #[cfg(feature = "sqlite")]
+    for statement in [
+        "INSERT INTO real_targets (id, part) VALUES ('t', 0.1000000000000001)",
+        "INSERT INTO real_sources (id, target_id, part) VALUES \
+         ('s-exact', 't', '0.1000000000000001'), ('s-rounded', 't', '0.1')",
+        "INSERT INTO uuid_keyed_targets (id, part) VALUES \
+         ('t-upper', 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE'), \
+         ('t-lower', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')",
+        "INSERT INTO uuid_keyed_sources (id, target_id, part) VALUES \
+         ('s-upper', 't-upper', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'), \
+         ('s-lower', 't-lower', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')",
+    ] {
+        sqlx::query(statement).execute(db.pool()).await?;
+    }
     #[cfg(feature = "mssql")]
-    owned_mssql::execute_batch(&owner.connection_string, &format!("{devices}; {forwards};"))
-        .await?;
+    owned_mssql::execute_batch(
+        &owner.connection_string,
+        &format!("{devices}; {forwards}; {keyed}; {keyed_sources};"),
+    )
+    .await?;
     Ok(Fixture {
         db,
         #[cfg(feature = "mssql")]
@@ -944,6 +1250,147 @@ async fn complete_tuple_joins(api: &Api, mode: AuthorizationMode) -> TestResult 
     Ok(())
 }
 
+/// Each source's related target id (or null), from one list read.
+async fn related_targets(api: &Api, root: &str) -> TestResult<Vec<(String, Value)>> {
+    let root = r(root);
+    let value = data(
+        api,
+        "both",
+        format!(
+            "{{ {root} {{ edges {{ node {{ {} {} {{ {} }} }} }} }} }}",
+            f("id"),
+            f("target"),
+            f("id"),
+        ),
+    )
+    .await?;
+    Ok(value[root]["edges"]
+        .as_array()
+        .ok_or("no sources")?
+        .iter()
+        .map(|edge| {
+            (
+                edge["node"][f("id")]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                edge["node"][f("target")]
+                    .get(f("id"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+        })
+        .collect())
+}
+
+fn pairs(expected: &[(&str, Option<&str>)]) -> Vec<(String, Value)> {
+    expected
+        .iter()
+        .map(|(source, target)| {
+            (
+                (*source).to_owned(),
+                target.map_or(Value::Null, |id| json!(id)),
+            )
+        })
+        .collect()
+}
+
+/// The batched loader associates rows by the database's own match of the
+/// complete tuple, so it agrees with the direct relation query wherever
+/// database equality differs from the key's text.
+async fn loader_agrees_with_database_equality(base: &Database<Backend>) -> TestResult {
+    let api = |direct| Api {
+        db: base.clone(),
+        direct,
+    };
+    // SQL Server's default collation ignores case and trailing spaces; the
+    // other backends compare exactly.
+    let collated = cfg!(feature = "mssql");
+    let keyed = if collated {
+        pairs(&[
+            ("s-case", Some("t")),
+            ("s-exact", Some("t")),
+            ("s-other", None),
+            ("s-pad", Some("t")),
+        ])
+    } else {
+        pairs(&[
+            ("s-case", None),
+            ("s-exact", Some("t")),
+            ("s-other", None),
+            ("s-pad", None),
+        ])
+    };
+    for direct in [false, true] {
+        assert_eq!(
+            related_targets(&api(direct), "keyedSources").await?,
+            keyed,
+            "direct={direct}"
+        );
+    }
+    let keyed_many = if collated {
+        (ids(&["s-case", "s-exact", "s-pad"]), 3)
+    } else {
+        (ids(&["s-exact"]), 1)
+    };
+    for direct in [false, true] {
+        for arguments in ["", "page: { limit: 10, offset: 0 }"] {
+            let arguments = arguments.replace("page", a("page"));
+            let root = r("keyedTarget");
+            let value = data(
+                &api(direct),
+                "both",
+                format!(
+                    "{{ {root}({}: \"t\") {{ {}{} {{ edges {{ node {{ {} }} }} pageInfo {{ totalCount }} }} }} }}",
+                    a("id"),
+                    f("sources"),
+                    if arguments.is_empty() { String::new() } else { format!("({arguments})") },
+                    f("id"),
+                ),
+            )
+            .await?;
+            let connection = &value[root][f("sources")];
+            let found = connection["edges"]
+                .as_array()
+                .ok_or("no edges")?
+                .iter()
+                .map(|edge| {
+                    edge["node"][f("id")]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                (
+                    found,
+                    connection["pageInfo"]["totalCount"].as_i64().unwrap_or(-1)
+                ),
+                keyed_many.clone(),
+                "direct={direct} {arguments}"
+            );
+        }
+    }
+    #[cfg(feature = "sqlite")]
+    for direct in [false, true] {
+        // The REAL partition matches only its exact numeric text; the
+        // rounded spelling is another value and is never given the row.
+        assert_eq!(
+            related_targets(&api(direct), "realSources").await?,
+            pairs(&[("s-exact", Some("t")), ("s-rounded", None)]),
+            "direct={direct}"
+        );
+        // A non-canonically stored UUID partition matches nothing: the
+        // source's UUID is bound in canonical form.
+        assert_eq!(
+            related_targets(&api(direct), "uuidSources").await?,
+            pairs(&[("s-lower", Some("t-lower")), ("s-upper", None)]),
+            "direct={direct}"
+        );
+    }
+    Ok(())
+}
+
 async fn private_key_has_no_public_surface(base: &Database<Backend>) -> TestResult {
     let db = configured(base, AuthorizationMode::default());
     let sdl = schema_builder(db.clone())
@@ -1058,6 +1505,7 @@ async fn private_key_has_no_public_surface(base: &Database<Backend>) -> TestResu
 async fn server_only_partition_keys_on_sqlite() -> TestResult {
     let fixture = fixture().await?;
     complete_tuple_joins_in_every_mode(&fixture.db).await?;
+    loader_agrees_with_database_equality(&fixture.db).await?;
     private_key_has_no_public_surface(&fixture.db).await?;
     fixture.finish()
 }
@@ -1068,6 +1516,7 @@ async fn server_only_partition_keys_on_sqlite() -> TestResult {
 async fn server_only_partition_keys_on_an_owned_database() -> TestResult {
     let fixture = fixture().await?;
     complete_tuple_joins_in_every_mode(&fixture.db).await?;
+    loader_agrees_with_database_equality(&fixture.db).await?;
     private_key_has_no_public_surface(&fixture.db).await?;
     fixture.finish()
 }

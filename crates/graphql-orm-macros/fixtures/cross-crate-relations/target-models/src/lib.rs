@@ -46,9 +46,9 @@ pub struct Endpoint {
     pub name: String,
 }
 
-/// A relation target whose partition column is server-only (#898). The
-/// negative feature adds a public alias of the same physical column, which
-/// withdraws the column's server-only certification.
+/// A relation target whose partition column is server-only (#898). Each
+/// negative feature adds a public alias of the same physical column, spelled
+/// differently, which withdraws the column's server-only certification.
 #[derive(GraphQLEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[cfg_attr(
     feature = "sqlite",
@@ -84,6 +84,15 @@ pub struct PartitionedEndpoint {
     #[cfg(feature = "server-only-public-alias")]
     #[graphql_orm(db_column = "partition_id")]
     pub partition_alias: String,
+    // The same column through its own-table qualifier.
+    #[cfg(feature = "server-only-qualified-alias")]
+    #[graphql_orm(db_column = "cross_partitioned_endpoints.partition_id")]
+    pub qualified_alias: String,
+    // The same column through a bare name that PostgreSQL case-folds and the
+    // other backends compare without case.
+    #[cfg(feature = "server-only-folded-alias")]
+    #[graphql_orm(db_column = "PARTITION_ID")]
+    pub folded_alias: String,
     pub label: String,
 }
 

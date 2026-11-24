@@ -12,6 +12,7 @@ fn server_only_relation_keys_are_narrow_and_explicit() {
     cases.compile_fail("tests/ui/server_only_keys/float_key.rs");
     cases.compile_fail("tests/ui/server_only_keys/hand_written_target.rs");
     cases.compile_fail("tests/ui/server_only_keys/implicit_id.rs");
+    cases.compile_fail("tests/ui/server_only_keys/json_source.rs");
     cases.compile_fail("tests/ui/server_only_keys/missing_to.rs");
     cases.compile_fail("tests/ui/server_only_keys/order_aggregate.rs");
     cases.compile_fail("tests/ui/server_only_keys/propagate_change.rs");

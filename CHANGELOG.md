@@ -23,9 +23,13 @@ for historical context.
   in another partition resolves to `null` or an empty list. The column stays
   out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
   with `filter`, `order_aggregate`, `search_relation` or upward propagation is
-  refused at compile time, as are floating-point key members, a source member
-  with `skip_db` or a read transform, and a target column that any field
-  exposes or that belongs to the primary key.
+  refused at compile time. So are floating-point key members, and a source
+  member that is skipped, read-transformed or decoded (JSON, date, boolean
+  field, decimal, spatial). A target column is refused when any field mapping
+  exposes it, however its name is spelled, or when it belongs to the primary
+  key. Batched loads of such a relation associate rows with their parent by
+  the database's match of the complete tuple, so they agree with the direct
+  query for every type and collation.
   [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
 
 ## Unreleased - ORM/macros 0.215.0

@@ -761,18 +761,26 @@ position. Every other pair keeps the ordinary readability checks, and at least
 one pair must stay public. The macro also requires:
 
 - **An exact key.** Every member of such a relation is an integer, string,
-  UUID or boolean. Floating-point members are refused because the batched
-  loader regroups rows by each member's text, which is not a lossless identity
-  for floats. Equality is the database's own comparison, so on SQL Server a
-  case-insensitive collation treats `A` and `a` as one partition; use
-  identifiers that compare exactly, or a binary collation.
+  UUID or boolean; floating-point members are refused. Equality is the
+  database's own comparison of the complete tuple. SQLite applies column
+  affinity, and SQL Server's default collation ignores case and trailing
+  spaces, so `Tenant`, `TENANT` and `Tenant  ` are one partition there. Use
+  identifiers that compare exactly, or a binary collation, where that matters.
 - **The stored source value.** The pair's source member is exempt from the
-  readability rule, but it must be a persisted scalar field without `skip_db`
-  or `#[transform(read = ...)]`, so the join binds the value the row stores.
+  readability rule. It must be a persisted scalar field read as stored, with
+  no `skip_db`, `#[transform(read = ...)]`, `json`, `date_field`,
+  `boolean_field`, decimal or spatial mapping, so the join binds the value the
+  row stores. Members are bound in their canonical form. A UUID is bound as
+  lower-case hyphenated text on SQLite, and a boolean as `1` or `0`. A key
+  stored in any other spelling matches no row, so its relation is `null`,
+  never another row. Store server-only key members in canonical form.
 - **A server-only target column.** Eligibility belongs to the physical column,
-  not to one Rust field. Every field that maps the column, including a
-  `db_column` alias, must be declared `#[graphql_orm(private)]` and must not be
-  reopened for reads, filters, ordering, subscriptions or inputs. The column
+  not to one Rust field. Names resolve as the generated SQL resolves them:
+  own-table qualifiers are dropped, quoting is honoured, and bare PostgreSQL
+  names are case-folded. Every field that maps the column, including a
+  `db_column` alias spelled any of those ways, must be declared
+  `#[graphql_orm(private)]` and must not be reopened for reads, filters,
+  ordering, subscriptions or inputs. The column
   cannot be a member of the effective primary key, including an implicit `id`.
   Where the target derive does not generate the GraphQL object itself
   (`GraphQLSchemaEntity`, `schema_only`, or a `SimpleObject` with
@@ -784,8 +792,13 @@ one pair must stay public. The macro also requires:
 Generated traversal always binds the complete tuple on the server: to-one,
 nullable and to-many fields, relation `where`/`orderBy`/`page` arguments, page
 windows and counts, both the batched `RelationLoader` path and the direct
-query used without a registered loader. A target in another partition is
-absent. A to-one field is `null` and a to-many field is empty, with no error.
+query used without a registered loader. For such a relation the loader
+associates rows by database match identity. Each batched statement joins its
+parent tuples as a derived table with one ordinal per parent, and rows,
+counts and page windows are grouped by that ordinal. Key text is never
+compared again in Rust, so the loader returns what the direct query returns
+for every type, affinity and collation. A row that matches several parents is
+returned to each of them. A target in another partition is absent. A to-one field is `null` and a to-many field is empty, with no error.
 That response, `data` and `errors` alike, is identical to a missing target
 and to a target hidden by row visibility. Source and target entity access,
 auth modes, operation scopes and assurance, row visibility and field policies

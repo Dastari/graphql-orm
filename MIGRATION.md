@@ -16,7 +16,9 @@ supersedes: []
 opt-in relation option; existing relations, their checks and their SQL are
 unchanged. Hand-written `GeneratedRelationReadability` implementations keep
 compiling: the new `SERVER_ONLY_COLUMNS` constant defaults to empty, so they
-cannot be a server-only target until they list the column.
+cannot be a server-only target until they list the column. Store server-only
+key members in canonical form (for example lower-case UUID text on SQLite): a
+non-canonical value matches no row.
 See [server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
 
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers

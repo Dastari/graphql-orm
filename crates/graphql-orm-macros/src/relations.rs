@@ -29,6 +29,8 @@ struct RelationDef {
     propagate_change: proc_macro2::TokenStream,
     source_condition: Option<ResolvedSourceCondition>,
     target_condition: Option<RelationConditionMetadata>,
+    /// A server-only key: batched rows associate by database match identity.
+    associate_by_match: bool,
 }
 
 struct ResolvedSourceCondition {
@@ -478,6 +480,7 @@ pub(crate) fn generate_graphql_relations(
             propagate_change,
             source_condition,
             target_condition: meta.relation_target_condition.clone(),
+            associate_by_match: server_only_keys.iter().any(|server_only| *server_only),
         });
     }
 
@@ -737,6 +740,13 @@ pub(crate) fn generate_graphql_relations(
             }
         };
 
+        // Relations with a server-only key associate batched rows by the
+        // database's match of the complete tuple, never by key text.
+        let association = if r.associate_by_match {
+            quote! { .__associate_by_database_match() }
+        } else {
+            quote! {}
+        };
         let relation_query_key = quote! {{
             let __gom_relation_page =
                 db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
@@ -781,6 +791,7 @@ pub(crate) fn generate_graphql_relations(
                 __gom_relation_pagination,
                 auth_context.clone(),
             )
+            #association
         }};
 
         let single_relation_query_key = quote! {
@@ -798,6 +809,7 @@ pub(crate) fn generate_graphql_relations(
                 None,
                 auth_context.clone(),
             )
+            #association
         };
         let fallback_predicate_parts = fk_columns_sql
             .iter()
