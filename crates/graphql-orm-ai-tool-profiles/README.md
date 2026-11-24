@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+Version 0.30.0 speeds up capability catalogue compilation for targets with
+many roots by sharing verified input metadata across capabilities. See the
+[migration guide](MIGRATION.md#0300-capability-catalogue-compilation).
+
 Version 0.28.0 stops two broker per-call costs from growing with the index:
 an index set formed again from the same index reuses that index's
 measurements, and a capability recovers its signature type names once. See
