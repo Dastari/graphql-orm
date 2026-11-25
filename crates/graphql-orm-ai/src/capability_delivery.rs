@@ -29,16 +29,49 @@ pub const AI_CAPABILITY_EXECUTE_TOOL_ID: &str = "graphql.capabilities.execute";
 /// Frozen broker tool identifier for expanding one named type of a loaded
 /// capability's signature (broker version 2).
 pub const AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID: &str = "graphql.capabilities.describe_type";
+/// Frozen broker tool identifier for browsing the current capabilities by
+/// hierarchy: namespace, capability, operation (broker version 3).
+pub const AI_CAPABILITY_BROWSE_TOOL_ID: &str = "graphql.capabilities.browse";
 
 /// Current broker protocol version.
 ///
 /// Version 2 adds the `describe_type` operation, returns compact typed
 /// signatures from `describe` instead of the plan schema, discovers one
 /// entity capability per entity, and takes the entity's `operation` at
-/// `describe_type` and `execute`. The version is hashed into the fixed broker
-/// definitions and every fixed-broker session binding, so a session bound
-/// under version 1 rebinds once.
-pub const AI_CAPABILITY_BROKER_VERSION: u16 = 2;
+/// `describe_type` and `execute`. Version 3 adds the `browse` operation and
+/// continuation handles on `execute`. The version is hashed into the fixed
+/// broker definitions and every fixed-broker session binding, so a session
+/// bound under an earlier version rebinds once.
+pub const AI_CAPABILITY_BROKER_VERSION: u16 = 3;
+
+/// Most continuation handles one broker session retains. The oldest handle
+/// is dropped first; a dropped handle is a stale selection.
+pub const AI_CAPABILITY_MAXIMUM_CONTINUATIONS: usize = 32;
+
+/// Most executions one continuation chain admits, including its first page.
+///
+/// The budget is shared by every handle of the chain: reusing a handle or
+/// redeeming handles concurrently draws on it too, so this bounds the total
+/// work of a chain, not only its depth. Once it is spent, no new handle is
+/// issued and every retained handle of the chain is a stale selection.
+pub const AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES: u16 = 256;
+
+/// Response version of client-deferred discovery, whose contract broker
+/// version 3 leaves unchanged.
+pub const AI_CAPABILITY_CLIENT_DEFERRED_DISCOVERY_VERSION: u16 = 2;
+
+/// Largest page of one `browse` call, and its default.
+pub const AI_CAPABILITY_BROWSE_PAGE_MAXIMUM: u16 = 32;
+
+/// Most policy decisions one browse sends to
+/// [`AiCapabilityAuthorityPolicy::authorize_discovery`] in a single batch.
+/// A host's [`AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations`]
+/// lowers it. An entity with more grouped roots is decided alone.
+pub const AI_CAPABILITY_BROWSE_POLICY_BATCH: usize = 256;
+
+/// Largest `browse` offset: the most entries an index set can hold, so every
+/// `nextOffset` a browse returns is an accepted offset.
+pub const AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET: u32 = 1_048_576;
 
 /// Maximum reviewed static tools one run may reach through the fixed broker.
 ///
@@ -439,6 +472,30 @@ fn fixed_discovery_definition() -> ModelToolDefinition {
 fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
     let index_fingerprint = None;
     let discover = fixed_discovery_definition();
+    let browse = broker_definition(
+        AI_CAPABILITY_BROWSE_TOOL_ID,
+        "graphql_capabilities_browse",
+        "Browse the current reviewed read capabilities by hierarchy when a search is ambiguous. level namespaces lists the logical namespaces; capabilities lists the capabilities of one namespace, optionally of one entity; operations lists the operations of one entity capability. Every listed capability can be described with its capabilityId and candidateReference. Page with offset and nextOffset.",
+        index_fingerprint,
+        json!({
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "enum": ["namespaces", "capabilities", "operations"]},
+                "namespace": {
+                    "type": ["string", "null"], "maxLength": 256,
+                    "description": "Namespace from level namespaces. Required for capabilities and operations."
+                },
+                "entity": {
+                    "type": ["string", "null"], "maxLength": 256,
+                    "description": "Entity name. Optional for capabilities; required for operations."
+                },
+                "offset": {"type": ["integer", "null"], "minimum": 0, "maximum": AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET},
+                "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": AI_CAPABILITY_BROWSE_PAGE_MAXIMUM}
+            },
+            "required": ["level"],
+            "additionalProperties": false
+        }),
+    );
     let describe = broker_definition(
         AI_CAPABILITY_DESCRIBE_TOOL_ID,
         "graphql_capabilities_describe",
@@ -448,9 +505,16 @@ fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
             "type": "object",
             "properties": {
                 "capabilityId": {"type": "string", "maxLength": 200},
-                "candidateFingerprint": {"type": "string", "minLength": 64, "maxLength": 64}
+                "candidateFingerprint": {
+                    "type": ["string", "null"], "minLength": 64, "maxLength": 64,
+                    "description": "candidateFingerprint of a discover candidate."
+                },
+                "candidateReference": {
+                    "type": ["string", "null"], "minLength": 64, "maxLength": 64,
+                    "description": "candidateReference of a browse candidate. Send exactly one of candidateFingerprint and candidateReference."
+                }
             },
-            "required": ["capabilityId", "candidateFingerprint"],
+            "required": ["capabilityId"],
             "additionalProperties": false
         }),
     );
@@ -481,7 +545,7 @@ fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
     let execute = broker_definition(
         AI_CAPABILITY_EXECUTE_TOOL_ID,
         "graphql_capabilities_execute",
-        "Execute one operation of a previously loaded exact capability. Use only argument and selection paths its signature and expanded types admit: flatten argument leaves into name/value entries with dotted paths, and omit optional fields you do not need.",
+        "Execute one operation of a previously loaded exact capability. Use only argument and selection paths its signature and expanded types admit: flatten argument leaves into name/value entries with dotted paths, and omit optional fields you do not need. When a result carries a continuation handle, fetch the next page with loadedReference, operation and continuation only.",
         index_fingerprint,
         json!({
             "type": "object",
@@ -515,7 +579,7 @@ fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
                 },
                 "selections": {
                     "type": "array", "maxItems": 256, "uniqueItems": true,
-                    "description": "One or more exact dotted scalar paths from the select type and its select.<path> expansions.",
+                    "description": "One or more exact dotted scalar paths from the select type and its select.<path> expansions. Required except with continuation, and empty for a capability with a fixed result.",
                     "items": {"type": "string", "maxLength": 512}
                 },
                 "relationshipArguments": {
@@ -558,13 +622,17 @@ fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
                 "maximumItems": {
                     "type": ["integer", "null"], "minimum": 1, "maximum": 10000,
                     "description": "Root result bound. Supply a positive value when the operation lists maximumItems; otherwise omit it."
+                },
+                "continuation": {
+                    "type": ["string", "null"], "minLength": 64, "maxLength": 64,
+                    "description": "Continuation handle from the previous page of this loadedReference and operation. With it, send no arguments, selections, relationship options or maximumItems: the server repeats the same query for the next page."
                 }
             },
-            "required": ["loadedReference", "selections"],
+            "required": ["loadedReference"],
             "additionalProperties": false
         }),
     );
-    vec![discover, describe, describe_type, execute]
+    vec![discover, browse, describe, describe_type, execute]
 }
 
 fn broker_definition(
@@ -1316,13 +1384,50 @@ impl AiCapabilityDiscoveryBroker {
             indexes.ranked_matches(query)?
         };
         ranked.retain(|candidate| admit(candidate.entry()));
+        let kept = Box::pin(self.admit_matches(&principal, run, &ranked, per_root, true)).await?;
+        // Rank again on each entity's own metadata and its admitted roots,
+        // so a denied root's text decides neither whether nor where its
+        // entity appears. Per-root ranks depend on the root alone already.
+        let order = if per_root {
+            (0..kept.len()).collect::<Vec<_>>()
+        } else {
+            indexes.rank_admitted(query, &kept)?
+        };
+        let candidates = order
+            .into_iter()
+            .take(usize::from(query.maximum_results))
+            .map(|position| {
+                let (candidate, admitted) = &kept[position];
+                candidate.admitted_candidate(admitted)
+            })
+            .collect();
+        Ok(AiCapabilityIndexSetSearchResult {
+            index_set_fingerprint: indexes.fingerprint().to_owned(),
+            candidates,
+        })
+    }
+
+    /// Applies one host policy batch to every match, with the entries each
+    /// depends on, and keeps the admitted matches in order, each with the
+    /// grouped roots policy admitted.
+    ///
+    /// The batch size depends only on the matches, never on a decision, and
+    /// is bounded by [`Self::with_maximum_discovery_authorizations`].
+    async fn admit_matches<'a>(
+        &self,
+        principal: &ResolvedPrincipal,
+        run: &AiCapabilityRunBinding,
+        ranked: &[AiCapabilityRankedMatch<'a>],
+        per_root: bool,
+        bounded: bool,
+    ) -> Result<Vec<(AiCapabilityRankedMatch<'a>, BTreeSet<AiToolId>)>, AiError> {
         // One policy batch decides every match together with the entries it
         // depends on: an entity entry's grouped roots follow it, and in
         // per-root ranking a root's entity entry precedes its first root.
         let mut batch = Vec::new();
         let mut slots = Vec::with_capacity(ranked.len());
         let mut entity_slots = BTreeMap::<AiToolId, usize>::new();
-        for candidate in &ranked {
+        for candidate in ranked {
             let entity_at = if per_root {
                 candidate.entity().map(|entity| {
                     *entity_slots
@@ -1346,9 +1451,10 @@ impl AiCapabilityDiscoveryBroker {
             }
             slots.push((at, roots, entity_at));
         }
-        if self
-            .maximum_discovery_authorizations
-            .is_some_and(|maximum| batch.len() > maximum)
+        if bounded
+            && self
+                .maximum_discovery_authorizations
+                .is_some_and(|maximum| batch.len() > maximum)
         {
             return Err(AiError::InvalidInput(
                 AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
@@ -1356,7 +1462,7 @@ impl AiCapabilityDiscoveryBroker {
         }
         let decisions = self
             .authority
-            .authorize_discovery(&principal, &batch, run)
+            .authorize_discovery(principal, &batch, run)
             .await?;
         if decisions.len() != batch.len()
             || batch
@@ -1384,26 +1490,7 @@ impl AiCapabilityDiscoveryBroker {
             }
             kept.push((batch[at], admitted));
         }
-        // Rank again on each entity's own metadata and its admitted roots,
-        // so a denied root's text decides neither whether nor where its
-        // entity appears. Per-root ranks depend on the root alone already.
-        let order = if per_root {
-            (0..kept.len()).collect::<Vec<_>>()
-        } else {
-            indexes.rank_admitted(query, &kept)?
-        };
-        let candidates = order
-            .into_iter()
-            .take(usize::from(query.maximum_results))
-            .map(|position| {
-                let (candidate, admitted) = &kept[position];
-                candidate.admitted_candidate(admitted)
-            })
-            .collect();
-        Ok(AiCapabilityIndexSetSearchResult {
-            index_set_fingerprint: indexes.fingerprint().to_owned(),
-            candidates,
-        })
+        Ok(kept)
     }
 
     /// Loads one exact candidate after fresh principal, current-index, target,
@@ -1731,7 +1818,7 @@ fn hash_json(value: &serde_json::Value) -> String {
 
 /// One frozen capability-broker meta-operation.
 ///
-/// The four operations are the complete crate-owned broker surface. Resolving
+/// The five operations are the complete crate-owned broker surface. Resolving
 /// an operation from a tool identifier is discovery, not authorization: every
 /// dispatch still rehydrates the principal, reapplies current host policy and,
 /// for [`Self::Execute`] only, passes through ordinary resolver authorization.
@@ -1740,6 +1827,8 @@ fn hash_json(value: &serde_json::Value) -> String {
 pub enum AiCapabilityBrokerOperation {
     /// Bounded authority-neutral search over the current compact index.
     Discover,
+    /// Bounded hierarchical listing of the current compact index.
+    Browse,
     /// Load one exact current capability and return its planning contract.
     Describe,
     /// Expand one named type of a loaded capability's signature.
@@ -1755,6 +1844,7 @@ impl AiCapabilityBrokerOperation {
     pub fn from_tool_id(tool_id: &AiToolId) -> Option<Self> {
         match tool_id.as_str() {
             AI_CAPABILITY_DISCOVER_TOOL_ID => Some(Self::Discover),
+            AI_CAPABILITY_BROWSE_TOOL_ID => Some(Self::Browse),
             AI_CAPABILITY_DESCRIBE_TOOL_ID => Some(Self::Describe),
             AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID => Some(Self::DescribeType),
             AI_CAPABILITY_EXECUTE_TOOL_ID => Some(Self::Execute),
@@ -1766,6 +1856,7 @@ impl AiCapabilityBrokerOperation {
     pub const fn tool_id(self) -> &'static str {
         match self {
             Self::Discover => AI_CAPABILITY_DISCOVER_TOOL_ID,
+            Self::Browse => AI_CAPABILITY_BROWSE_TOOL_ID,
             Self::Describe => AI_CAPABILITY_DESCRIBE_TOOL_ID,
             Self::DescribeType => AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID,
             Self::Execute => AI_CAPABILITY_EXECUTE_TOOL_ID,
@@ -1774,16 +1865,16 @@ impl AiCapabilityBrokerOperation {
 
     /// Whether this operation can reach an application resolver.
     ///
-    /// Only [`Self::Execute`] can. Discovery, describe and describe-type
-    /// return bounded authority-neutral metadata and grant no execution
-    /// authority.
+    /// Only [`Self::Execute`] can. Discovery, browse, describe and
+    /// describe-type return bounded authority-neutral metadata and grant no
+    /// execution authority.
     pub const fn reaches_resolver(self) -> bool {
         matches!(self, Self::Execute)
     }
 }
 
-/// Returns the four frozen fixed-broker definitions: discover, describe,
-/// describe-type and execute.
+/// Returns the five frozen fixed-broker definitions: discover, browse,
+/// describe, describe-type and execute.
 ///
 /// The definitions are crate-authored and deterministic: a host installs them
 /// verbatim and cannot widen, rename, or re-fingerprint the broker surface.
@@ -1883,6 +1974,9 @@ pub fn capability_provider_alias(tool_id: &AiToolId) -> String {
 pub struct AiCapabilityBrokerAmplification {
     /// Accepted discovery calls.
     pub discover_calls: u32,
+    /// Accepted browse calls.
+    #[serde(default)]
+    pub browse_calls: u32,
     /// Accepted describe calls.
     pub describe_calls: u32,
     /// Accepted describe-type calls.
@@ -1896,6 +1990,7 @@ impl AiCapabilityBrokerAmplification {
     /// Total accepted broker calls.
     pub const fn total_calls(self) -> u32 {
         self.discover_calls
+            .saturating_add(self.browse_calls)
             .saturating_add(self.describe_calls)
             .saturating_add(self.describe_type_calls)
             .saturating_add(self.execute_calls)
@@ -1906,6 +2001,10 @@ impl AiCapabilityBrokerAmplification {
 struct BrokerSessionState {
     searches: VecDeque<AiCapabilityIndexSetSearchResult>,
     loaded: VecDeque<(String, AiLoadedCapabilityBinding)>,
+    continuations: VecDeque<(String, BrokerContinuation)>,
+    /// Opaque browse references: reference, capability, entry fingerprint
+    /// and the fence of the principal and run that received it.
+    browse_references: VecDeque<(String, AiToolId, String, String)>,
     deferred_installation_pending: bool,
     amplification: AiCapabilityBrokerAmplification,
 }
@@ -2128,6 +2227,67 @@ impl AiCapabilityBrokerSession {
             .map(|(_, binding)| binding.clone())
     }
 
+    fn record_browse(
+        &self,
+        result: Option<AiCapabilityIndexSetSearchResult>,
+        references: Vec<(String, AiToolId, String, String)>,
+    ) {
+        let mut state = self.state();
+        state.amplification.browse_calls = state.amplification.browse_calls.saturating_add(1);
+        if let Some(result) = result {
+            state.searches.push_back(result);
+            while state.searches.len() > usize::from(self.limits.maximum_retained_searches) {
+                state.searches.pop_front();
+            }
+        }
+        state.browse_references.extend(references);
+        let maximum = usize::from(self.limits.maximum_retained_searches)
+            .saturating_mul(usize::from(AI_CAPABILITY_BROWSE_PAGE_MAXIMUM));
+        while state.browse_references.len() > maximum {
+            state.browse_references.pop_front();
+        }
+    }
+
+    /// Entry fingerprint behind one opaque browse reference that this
+    /// session issued for `capability_id` under exactly `fence`.
+    fn browse_reference(
+        &self,
+        capability_id: &AiToolId,
+        reference: &str,
+        fence: &str,
+    ) -> Option<String> {
+        self.state()
+            .browse_references
+            .iter()
+            .rev()
+            .find(|(candidate, id, _, issued)| {
+                candidate == reference && id == capability_id && issued == fence
+            })
+            .map(|(_, _, fingerprint, _)| fingerprint.clone())
+    }
+
+    fn record_continuation(&self, handle: String, continuation: BrokerContinuation) {
+        let mut state = self.state();
+        state.continuations.push_back((handle, continuation));
+        while state.continuations.len() > AI_CAPABILITY_MAXIMUM_CONTINUATIONS {
+            state.continuations.pop_front();
+        }
+    }
+
+    fn continuation(&self, handle: &str) -> Option<BrokerContinuation> {
+        self.state()
+            .continuations
+            .iter()
+            .find(|(existing, _)| existing == handle)
+            .map(|(_, continuation)| continuation.clone())
+    }
+
+    /// Continuation handles still retained for this run, at most
+    /// [`AI_CAPABILITY_MAXIMUM_CONTINUATIONS`].
+    pub fn continuation_count(&self) -> usize {
+        self.state().continuations.len()
+    }
+
     fn record_execute(&self) {
         let mut state = self.state();
         state.amplification.execute_calls = state.amplification.execute_calls.saturating_add(1);
@@ -2157,7 +2317,10 @@ struct BrokerDiscoverArguments {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrokerDescribeArguments {
     capability_id: String,
-    candidate_fingerprint: String,
+    #[serde(default)]
+    candidate_fingerprint: Option<String>,
+    #[serde(default)]
+    candidate_reference: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2206,6 +2369,7 @@ struct BrokerExecuteArguments {
     operation: Option<String>,
     #[serde(default)]
     arguments: Vec<BrokerExecuteArgument>,
+    #[serde(default)]
     selections: Vec<String>,
     #[serde(default)]
     relationship_arguments: Vec<BrokerRelationshipArguments>,
@@ -2213,6 +2377,181 @@ struct BrokerExecuteArguments {
     relationship_maximum_items: Vec<BrokerRelationshipMaximumItems>,
     #[serde(default)]
     maximum_items: Option<u32>,
+    #[serde(default)]
+    continuation: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum BrowseLevel {
+    Namespaces,
+    Capabilities,
+    Operations,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrokerBrowseArguments {
+    level: BrowseLevel,
+    #[serde(default)]
+    namespace: Option<String>,
+    #[serde(default)]
+    entity: Option<String>,
+    #[serde(default)]
+    offset: Option<u32>,
+    #[serde(default)]
+    limit: Option<u16>,
+}
+
+/// The page of a browse that lists nothing: identical for an unknown
+/// filter, a filter policy denies and a browse over the work bound.
+fn empty_browse_page(level: BrowseLevel) -> serde_json::Value {
+    match level {
+        BrowseLevel::Namespaces => json!({
+            "version": AI_CAPABILITY_BROKER_VERSION,
+            "level": "namespaces",
+            "nextOffset": null,
+            "namespaces": [],
+        }),
+        BrowseLevel::Capabilities => json!({
+            "version": AI_CAPABILITY_BROKER_VERSION,
+            "level": "capabilities",
+            "nextOffset": null,
+            "capabilities": [],
+        }),
+        BrowseLevel::Operations => json!({
+            "version": AI_CAPABILITY_BROKER_VERSION,
+            "level": "operations",
+            "nextOffset": null,
+            "capability": null,
+            "operations": [],
+        }),
+    }
+}
+
+/// Model-facing browse candidate: discover's candidate shape with an opaque
+/// `candidateReference` in place of the entry fingerprint, and the entity's
+/// operation list only where `with_operations` asks for it.
+fn browse_candidate_value(
+    candidate: &crate::AiCapabilitySearchCandidate,
+    reference: String,
+    with_operations: bool,
+) -> serde_json::Value {
+    let mut value = candidate_value(candidate);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("candidateFingerprint");
+        object.insert("candidateReference".to_owned(), json!(reference));
+        if !with_operations {
+            object.remove("operations");
+        }
+    }
+    value
+}
+
+/// Fence of one browse reference: the principal reference and the run,
+/// attempt and provider session it was issued to. A reference presented
+/// under any other binding, through a reused or cloned session, resolves
+/// nothing.
+fn browse_reference_fence(
+    principal_reference: &PrincipalReference,
+    run: &AiCapabilityRunBinding,
+) -> String {
+    hash_json(&json!({
+        "version": 1,
+        "principal": principal_reference_fingerprint(principal_reference),
+        "session": run.session_id,
+        "run": run.run_id,
+        "attempt": run.attempt_id,
+        "provider": run.provider_kind,
+        "providerSession": run.provider_session_fingerprint,
+    }))
+}
+
+fn valid_browse_name(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+/// Server-held state of one continued page: the exact query of its first
+/// page and the resolver cursor of the next one. Never model-visible, and
+/// its `Debug` output redacts the cursor.
+#[derive(Clone)]
+struct BrokerContinuation {
+    loaded_reference: String,
+    capability_id: AiToolId,
+    capability_fingerprint: String,
+    operation_name: String,
+    plan: serde_json::Value,
+    cursor: String,
+    page: u16,
+    expires_at: OffsetDateTime,
+    chain: ContinuationChain,
+}
+
+impl std::fmt::Debug for BrokerContinuation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerContinuation")
+            .field("loaded_reference", &self.loaded_reference)
+            .field("capability_id", &self.capability_id)
+            .field("operation_name", &self.operation_name)
+            .field("cursor", &REDACTED_CURSOR)
+            .field("page", &self.page)
+            .field("expires_at", &self.expires_at)
+            .field("chain", &self.chain)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Placeholder `Debug` output for a resolver keyset cursor.
+const REDACTED_CURSOR: &str = "<redacted cursor>";
+
+/// Executions one continuation chain has used, shared by every handle of the
+/// chain so reused or concurrent handles draw on one budget of
+/// [`AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES`] executions.
+#[derive(Clone, Debug)]
+struct ContinuationChain(Arc<std::sync::atomic::AtomicU16>);
+
+impl ContinuationChain {
+    fn first_page() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU16::new(1)))
+    }
+
+    fn exhausted(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+            >= AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES
+    }
+
+    /// Reserves one execution, or refuses once the chain's budget is spent.
+    fn reserve(&self) -> bool {
+        self.0
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |used| (used < AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES).then_some(used + 1),
+            )
+            .is_ok()
+    }
+
+    /// Returns one reserved execution that never reached the executor.
+    fn release(&self) {
+        let _ = self.0.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |used| used.checked_sub(1),
+        );
+    }
+}
+
+/// Server-held state of one continued page an execution carries: the
+/// cursor, its page number, the handle and its expiry, and whether the
+/// execution's reserved budget was returned on refusal.
+#[derive(Clone)]
+struct ContinuedPage {
+    cursor: String,
+    page: u16,
+    handle: String,
+    expires_at: OffsetDateTime,
+    released: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn valid_graphql_name(value: &str) -> bool {
@@ -2600,13 +2939,79 @@ impl AiCapabilityDescription {
 /// this run/attempt/lease/provider session, still matches the current index,
 /// and still passes current host policy. Ordinary resolver authorization is
 /// still applied by [`crate::AiRuntime::execute_query_capability`].
-#[derive(Clone, Debug)]
+///
+/// Its `Debug` output redacts the server-held cursor of a continued page.
+#[derive(Clone)]
 pub struct AiCapabilityExecution {
     capability_id: AiToolId,
     capability_kind: AiCapabilityKind,
     capability_fingerprint: String,
     audit_reference: String,
     plan: serde_json::Value,
+    operation_name: String,
+    loaded_expires_at: OffsetDateTime,
+    /// Budget of the continuation chain this execution belongs to, created
+    /// with the first page; `None` for a reviewed static tool.
+    chain: Option<ContinuationChain>,
+    /// Server-held state of a continued page.
+    continued: Option<ContinuedPage>,
+}
+
+impl std::fmt::Debug for AiCapabilityExecution {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiCapabilityExecution")
+            .field("capability_id", &self.capability_id)
+            .field("capability_kind", &self.capability_kind)
+            .field("capability_fingerprint", &self.capability_fingerprint)
+            .field("audit_reference", &self.audit_reference)
+            .field("plan", &self.plan)
+            .field("operation_name", &self.operation_name)
+            .field("loaded_expires_at", &self.loaded_expires_at)
+            .field(
+                "continued",
+                &self
+                    .continued
+                    .as_ref()
+                    .map(|continued| (REDACTED_CURSOR, continued.page)),
+            )
+            .finish()
+    }
+}
+
+/// One model-facing continuation handle of a continued result.
+///
+/// The handle is an opaque random reference to server-held state in one
+/// [`AiCapabilityBrokerSession`]: the exact query of the first page and the
+/// resolver cursor of the next one. It carries no cursor, plan or identity
+/// and grants nothing by itself. Each continued page rehydrates the
+/// principal, re-proves the loaded binding against the current index and
+/// host policy, and runs through ordinary resolver authorization and row
+/// policy, exactly as a first page does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiCapabilityContinuation {
+    handle: String,
+    expires_in_seconds: i64,
+}
+
+impl AiCapabilityContinuation {
+    /// Opaque handle the model passes back as `continuation`.
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
+
+    /// Seconds until the handle and its loaded binding expire.
+    pub const fn expires_in_seconds(&self) -> i64 {
+        self.expires_in_seconds
+    }
+
+    /// Model-facing value of this continuation.
+    pub fn to_model_value(&self) -> serde_json::Value {
+        json!({
+            "handle": self.handle,
+            "expiresInSeconds": self.expires_in_seconds,
+        })
+    }
 }
 
 impl AiCapabilityExecution {
@@ -2644,6 +3049,39 @@ impl AiCapabilityExecution {
     pub fn into_plan(self) -> serde_json::Value {
         self.plan
     }
+
+    /// Public name of the executed root.
+    pub fn operation_name(&self) -> &str {
+        &self.operation_name
+    }
+
+    /// Server-held keyset cursor of the page this execution continues, or
+    /// `None` for a first page.
+    ///
+    /// The cursor is resolver state and must never reach the model. Pass it
+    /// to [`crate::AiRuntime::execute_query_capability_page`].
+    pub fn continuation_cursor(&self) -> Option<&str> {
+        self.continued
+            .as_ref()
+            .map(|continued| continued.cursor.as_str())
+    }
+
+    /// Whether [`AiCapabilityDiscoveryBroker::continuation_admission`]
+    /// refused this continued page before it reached the executor.
+    pub fn continuation_refused(&self) -> bool {
+        self.continued.as_ref().is_some_and(|continued| {
+            continued
+                .released
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    /// One-based page number of this execution in its continuation chain.
+    pub fn page_number(&self) -> u16 {
+        self.continued
+            .as_ref()
+            .map_or(1, |continued| continued.page)
+    }
 }
 
 fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json::Value {
@@ -2676,8 +3114,8 @@ fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json
     value
 }
 
-/// Model-facing usage note of every broker version 2 description.
-const DESCRIBE_USAGE: &str = "Each operation has a typed signature. Expand a named type from inputTypes, select or select.<path> with graphql_capabilities_describe_type (loadedReference, operation, type). Execute with loadedReference, operation, arguments as dotted leaf paths (for example where.status.eq) and selections as dotted scalar paths.";
+/// Model-facing usage note of every broker version 3 description.
+const DESCRIBE_USAGE: &str = "Each operation has a typed signature. Expand a named type from inputTypes, select or select.<path> with graphql_capabilities_describe_type (loadedReference, operation, type). Execute with loadedReference, operation, arguments as dotted leaf paths (for example where.status.eq) and selections as dotted scalar paths. An operation marked continuation returns a continuation handle while more rows exist; execute again with loadedReference, operation and continuation only to read the next page.";
 
 fn planning_contract(
     entry: &AiCapabilityIndexEntry,
@@ -2927,6 +3365,243 @@ impl AiCapabilityDiscoveryBroker {
         Ok(value)
     }
 
+    /// Dispatches one frozen `graphql.capabilities.browse` call.
+    ///
+    /// Browsing lists the current top-level capabilities by hierarchy:
+    /// `namespaces` lists the logical namespaces, `capabilities` the
+    /// capabilities of one namespace (optionally of one entity), and
+    /// `operations` the operations of one entity capability. It covers the
+    /// capabilities discovery covers: generated reads and the reviewed static
+    /// tools this run brokers.
+    ///
+    /// Host policy decides every listed entry, with each entity's grouped
+    /// roots, in one batch before anything is counted or paged, exactly as
+    /// for discovery: a namespace, capability or operation appears only when
+    /// current policy admits it, and an entity only with its admitted roots.
+    /// The amount of policy work depends on the level and filters, never on
+    /// a decision, and is bounded by
+    /// [`Self::with_maximum_discovery_authorizations`]. Listed capabilities
+    /// are retained like discovery candidates, so describe accepts them;
+    /// browsing grants no load or execution authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for malformed arguments or
+    /// [`AI_CAPABILITY_DISCOVERY_TOO_BROAD`], and fails closed on
+    /// rehydration, index, or policy failure.
+    pub async fn dispatch_browse(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value, AiError> {
+        let parsed: BrokerBrowseArguments =
+            serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
+        let (namespace, entity) = match parsed.level {
+            BrowseLevel::Namespaces if parsed.namespace.is_none() && parsed.entity.is_none() => {
+                (None, None)
+            }
+            BrowseLevel::Capabilities if parsed.namespace.is_some() => {
+                (parsed.namespace.as_deref(), parsed.entity.as_deref())
+            }
+            BrowseLevel::Operations if parsed.namespace.is_some() && parsed.entity.is_some() => {
+                (parsed.namespace.as_deref(), parsed.entity.as_deref())
+            }
+            _ => return Err(malformed_broker_arguments()),
+        };
+        let offset = parsed.offset.unwrap_or(0);
+        let limit = parsed.limit.unwrap_or(AI_CAPABILITY_BROWSE_PAGE_MAXIMUM);
+        if [namespace, entity]
+            .into_iter()
+            .flatten()
+            .any(|name| !valid_browse_name(name))
+            || offset > AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET
+            || !(1..=AI_CAPABILITY_BROWSE_PAGE_MAXIMUM).contains(&limit)
+        {
+            return Err(malformed_broker_arguments());
+        }
+        let principal = self.rehydrate(principal_reference).await?;
+        let indexes = self.current_indexes.current_index_set(run)?;
+        let mut listed = indexes.browse_matches(namespace, entity)?;
+        listed.retain(|candidate| {
+            let entry = candidate.entry();
+            match parsed.level {
+                // Operations belong to an entity capability alone.
+                BrowseLevel::Operations => entry.kind == AiCapabilityKind::GeneratedEntity,
+                _ => {
+                    matches!(
+                        entry.kind,
+                        AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
+                    ) || session.brokers_static_entry(entry)
+                }
+            }
+        });
+        // Policy decides the listed entries in order, in batches of at most
+        // `batch_size` decisions, and stops once the requested page is
+        // decided: the first `offset + limit + 1` admitted results. What is
+        // returned is therefore exactly the admitted prefix, whatever hidden
+        // entries the listing holds. Hidden entries change only how much
+        // policy work is done, never the response.
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let wanted = start.saturating_add(usize::from(limit)).saturating_add(1);
+        let batch_size = self
+            .maximum_discovery_authorizations
+            .unwrap_or(AI_CAPABILITY_BROWSE_POLICY_BATCH)
+            .clamp(1, AI_CAPABILITY_BROWSE_POLICY_BATCH);
+        let mut kept = Vec::new();
+        let mut found_namespaces = BTreeSet::<&str>::new();
+        let mut position = 0;
+        loop {
+            let decided = match parsed.level {
+                BrowseLevel::Namespaces => found_namespaces.len() >= wanted,
+                BrowseLevel::Capabilities => kept.len() >= wanted,
+                // Two admitted entities of one name are ambiguous.
+                BrowseLevel::Operations => kept.len() >= 2,
+            };
+            if decided || position >= listed.len() {
+                break;
+            }
+            let mut chunk = Vec::new();
+            let mut decisions = 0_usize;
+            while let Some(candidate) = listed.get(position) {
+                // A namespace already listed needs no further decisions.
+                if parsed.level == BrowseLevel::Namespaces
+                    && found_namespaces.contains(candidate.entry().namespace.as_str())
+                {
+                    position += 1;
+                    continue;
+                }
+                let size = 1 + candidate.entry().operations.len();
+                if !chunk.is_empty() && decisions + size > batch_size {
+                    break;
+                }
+                chunk.push(*candidate);
+                decisions += size;
+                position += 1;
+            }
+            if chunk.is_empty() {
+                break;
+            }
+            for admitted in
+                Box::pin(self.admit_matches(&principal, run, &chunk, false, false)).await?
+            {
+                if parsed.level == BrowseLevel::Namespaces {
+                    found_namespaces.insert(admitted.0.entry().namespace.as_str());
+                }
+                kept.push(admitted);
+            }
+        }
+        let page = |total: usize| {
+            let end = start.saturating_add(usize::from(limit)).min(total);
+            let next = (end < total).then_some(end);
+            (start.min(total)..end, next)
+        };
+        let mut value = empty_browse_page(parsed.level);
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| AiError::InvalidConfiguration("browse result is invalid".to_owned()))?;
+        // Listed capabilities carry an opaque per-run reference in place of
+        // their entry fingerprint; describe resolves it server-side, only
+        // for the same principal and run.
+        let fence = browse_reference_fence(principal_reference, run);
+        let mut references = Vec::new();
+        let mut reference_for = |candidate: &crate::AiCapabilitySearchCandidate| {
+            let reference = hash_json(&json!({
+                "version": 1,
+                "nonce": Uuid::new_v4(),
+                "capability": candidate.id,
+            }));
+            references.push((
+                reference.clone(),
+                candidate.id.clone(),
+                candidate.entry_fingerprint.clone(),
+                fence.clone(),
+            ));
+            reference
+        };
+        let mut retained = Vec::new();
+        match parsed.level {
+            BrowseLevel::Namespaces => {
+                // Listed in namespace order: each namespace with at least one
+                // admitted capability, without a count, which would need
+                // every entry decided.
+                let namespaces = found_namespaces.into_iter().collect::<Vec<_>>();
+                let (range, next) = page(namespaces.len());
+                object.insert("nextOffset".to_owned(), json!(next));
+                object.insert(
+                    "namespaces".to_owned(),
+                    namespaces[range]
+                        .iter()
+                        .map(|namespace| json!({"namespace": namespace}))
+                        .collect(),
+                );
+            }
+            BrowseLevel::Capabilities => {
+                let (range, next) = page(kept.len());
+                let mut items = Vec::new();
+                for (candidate, admitted) in &kept[range] {
+                    let summary = candidate.admitted_candidate(admitted);
+                    items.push(browse_candidate_value(
+                        &summary,
+                        reference_for(&summary),
+                        true,
+                    ));
+                    retained.push(summary);
+                }
+                object.insert("nextOffset".to_owned(), json!(next));
+                object.insert("capabilities".to_owned(), items.into());
+            }
+            BrowseLevel::Operations => {
+                let (candidate, admitted) = match kept.as_slice() {
+                    // An unknown entity and one policy denies look the same.
+                    [] => {
+                        session.record_browse(None, Vec::new());
+                        return Ok(value);
+                    }
+                    [only] => only,
+                    _ => return Err(malformed_broker_arguments()),
+                };
+                let operations = candidate
+                    .entry()
+                    .operations
+                    .iter()
+                    .filter(|member| admitted.contains(&member.capability_id))
+                    .collect::<Vec<_>>();
+                let (range, next) = page(operations.len());
+                let summary = candidate.admitted_candidate(admitted);
+                // The header carries no operation list: the page below is
+                // the only one, and it honours the requested limit.
+                object.insert(
+                    "capability".to_owned(),
+                    browse_candidate_value(&summary, reference_for(&summary), false),
+                );
+                object.insert("nextOffset".to_owned(), json!(next));
+                object.insert(
+                    "operations".to_owned(),
+                    operations[range]
+                        .iter()
+                        .map(|member| {
+                            json!({
+                                "operation": member.operation_name,
+                                "shape": member.operation_shape,
+                                "description": member.description,
+                                "resultDescription": member.result_description,
+                            })
+                        })
+                        .collect(),
+                );
+                retained.push(summary);
+            }
+        }
+        let retained = (!retained.is_empty()).then(|| AiCapabilityIndexSetSearchResult {
+            index_set_fingerprint: indexes.fingerprint().to_owned(),
+            candidates: retained,
+        });
+        session.record_browse(retained, references);
+        Ok(value)
+    }
+
     /// Dispatches client-deferred discovery and atomically loads exactly the
     /// generated-query candidates returned for the next continuation.
     ///
@@ -2975,8 +3650,11 @@ impl AiCapabilityDiscoveryBroker {
                 .await?;
             loaded.push((binding.audit_reference(), binding));
         }
+        // Client-deferred delivery keeps its version 2 response: its
+        // definition, session binding and disclosure contract are unchanged
+        // by broker version 3.
         let value = json!({
-            "version": AI_CAPABILITY_BROKER_VERSION,
+            "version": AI_CAPABILITY_CLIENT_DEFERRED_DISCOVERY_VERSION,
             "indexFingerprint": result.index_set_fingerprint,
             "candidates": result
                 .candidates
@@ -3015,18 +3693,29 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<AiCapabilityDescription, AiError> {
         let parsed: BrokerDescribeArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
-        if !crate::valid_sha256(&parsed.candidate_fingerprint) {
-            return Err(malformed_broker_arguments());
-        }
         let capability_id = AiToolId::parse(parsed.capability_id).map_err(|_| stale_selection())?;
+        // A discovered candidate names its fingerprint; a browsed one names
+        // an opaque reference that only this run resolves to it.
+        let candidate_fingerprint = match (parsed.candidate_fingerprint, parsed.candidate_reference)
+        {
+            (Some(fingerprint), None) if crate::valid_sha256(&fingerprint) => fingerprint,
+            (None, Some(reference)) if crate::valid_sha256(&reference) => session
+                .browse_reference(
+                    &capability_id,
+                    &reference,
+                    &browse_reference_fence(principal_reference, run),
+                )
+                .ok_or_else(stale_selection)?,
+            _ => return Err(malformed_broker_arguments()),
+        };
         let search = session
-            .candidate_search(&capability_id, &parsed.candidate_fingerprint)
+            .candidate_search(&capability_id, &candidate_fingerprint)
             .or_else(|| {
                 self.cached_discovery(
                     principal_reference,
                     run,
                     &capability_id,
-                    &parsed.candidate_fingerprint,
+                    &candidate_fingerprint,
                 )
             })
             .ok_or_else(stale_selection)?;
@@ -3176,6 +3865,71 @@ impl AiCapabilityDiscoveryBroker {
         })
     }
 
+    /// Retains the next page of one executed continuable page and returns its
+    /// model-facing handle.
+    ///
+    /// Call this after the page has executed through
+    /// [`crate::AiRuntime::execute_query_capability_page`], with the page info
+    /// it returned. Returns `None`, and retains nothing, when there is no
+    /// further page, the end cursor is absent or oversized, the chain has
+    /// reached [`AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES`], the loaded binding
+    /// has expired, or the execution is not a generated query root.
+    ///
+    /// The retained state is bound to this session, to the loaded reference
+    /// the execution used (and so to its principal, run, attempt, provider
+    /// session and every fingerprint proven at load), and to the exact root
+    /// and plan of the first page. It expires with the loaded binding. At
+    /// most [`AI_CAPABILITY_MAXIMUM_CONTINUATIONS`] handles are retained.
+    pub fn record_continuation(
+        &self,
+        session: &AiCapabilityBrokerSession,
+        execution: &AiCapabilityExecution,
+        page_info: &crate::AiGraphqlQueryPageInfo,
+    ) -> Option<AiCapabilityContinuation> {
+        if execution.capability_kind != AiCapabilityKind::GeneratedQuery {
+            return None;
+        }
+        let cursor = page_info.next_cursor()?;
+        if cursor.len() > crate::AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES {
+            return None;
+        }
+        let page = execution.page_number().checked_add(1)?;
+        let now = self.clock.now();
+        // Every handle issued from one first-page execution, however often
+        // it is recorded, shares that execution's chain.
+        let chain = execution.chain.clone()?;
+        if page > AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES
+            || chain.exhausted()
+            || now >= execution.loaded_expires_at
+        {
+            return None;
+        }
+        let handle = hash_json(&json!({
+            "version": 1,
+            "nonce": Uuid::new_v4(),
+            "loaded": execution.audit_reference,
+            "page": page,
+        }));
+        session.record_continuation(
+            handle.clone(),
+            BrokerContinuation {
+                loaded_reference: execution.audit_reference.clone(),
+                capability_id: execution.capability_id.clone(),
+                capability_fingerprint: execution.capability_fingerprint.clone(),
+                operation_name: execution.operation_name.clone(),
+                plan: execution.plan.clone(),
+                cursor: cursor.to_owned(),
+                page,
+                expires_at: execution.loaded_expires_at,
+                chain,
+            },
+        );
+        Some(AiCapabilityContinuation {
+            handle,
+            expires_in_seconds: (execution.loaded_expires_at - now).whole_seconds().max(0),
+        })
+    }
+
     /// Dispatches one frozen `graphql.capabilities.execute` call up to, but
     /// not including, the resolver.
     ///
@@ -3184,6 +3938,14 @@ impl AiCapabilityDiscoveryBroker {
     /// their own exact delivery and approval contracts and fail closed here.
     /// The returned closed plan contains public names and finite typed values
     /// only and is compiled by the authoritative schema-derived compiler.
+    ///
+    /// With `continuation`, the call names a handle
+    /// [`Self::record_continuation`] returned for this loaded reference and
+    /// must carry no other plan field. The retained plan of the first page is
+    /// returned with the server-held cursor
+    /// ([`AiCapabilityExecution::continuation_cursor`]), after the same
+    /// loaded-binding, index and host-policy checks as a first page. An
+    /// unknown, expired or foreign handle is a stale selection.
     ///
     /// # Errors
     ///
@@ -3202,7 +3964,12 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<AiCapabilityExecution, AiError> {
         let parsed: BrokerExecuteArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
-        if !crate::valid_sha256(&parsed.loaded_reference) {
+        if !crate::valid_sha256(&parsed.loaded_reference)
+            || parsed
+                .continuation
+                .as_ref()
+                .is_some_and(|handle| !crate::valid_sha256(handle))
+        {
             return Err(malformed_broker_arguments());
         }
         let loaded = session
@@ -3210,6 +3977,17 @@ impl AiCapabilityDiscoveryBroker {
             .ok_or_else(stale_selection)?;
         if self.clock.now() > loaded.expires_at {
             return Err(stale_selection());
+        }
+        if let Some(handle) = parsed.continuation.clone() {
+            return Box::pin(self.authorize_continuation(
+                principal_reference,
+                run,
+                session,
+                &loaded,
+                parsed,
+                &handle,
+            ))
+            .await;
         }
         let static_tool = match loaded.capability_kind {
             AiCapabilityKind::GeneratedQuery | AiCapabilityKind::GeneratedEntity => false,
@@ -3318,6 +4096,10 @@ impl AiCapabilityDiscoveryBroker {
                 capability_fingerprint: target.capability_fingerprint,
                 audit_reference: loaded.audit_reference(),
                 plan: plan_arguments,
+                operation_name: target.operation_name,
+                loaded_expires_at: loaded.expires_at,
+                chain: None,
+                continued: None,
             });
         }
         let mut plan = serde_json::Map::from_iter([
@@ -3342,7 +4124,153 @@ impl AiCapabilityDiscoveryBroker {
             capability_fingerprint: target.capability_fingerprint,
             audit_reference: loaded.audit_reference(),
             plan: serde_json::Value::Object(plan),
+            operation_name: target.operation_name,
+            loaded_expires_at: loaded.expires_at,
+            chain: Some(ContinuationChain::first_page()),
+            continued: None,
         })
+    }
+
+    /// Resolves one continued page: the retained plan and cursor of a handle
+    /// this session holds for this exact loaded reference, after the same
+    /// checks as a first page.
+    async fn authorize_continuation(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        loaded: &AiLoadedCapabilityBinding,
+        parsed: BrokerExecuteArguments,
+        handle: &str,
+    ) -> Result<AiCapabilityExecution, AiError> {
+        // The retained query is the whole plan: nothing else may vary.
+        if !parsed.arguments.is_empty()
+            || !parsed.selections.is_empty()
+            || !parsed.relationship_arguments.is_empty()
+            || !parsed.relationship_maximum_items.is_empty()
+            || parsed.maximum_items.is_some()
+            || parsed
+                .operation
+                .as_ref()
+                .is_some_and(|operation| !valid_graphql_name(operation))
+        {
+            return Err(malformed_broker_arguments());
+        }
+        if !matches!(
+            loaded.capability_kind,
+            AiCapabilityKind::GeneratedQuery | AiCapabilityKind::GeneratedEntity
+        ) {
+            return Err(AiError::Forbidden);
+        }
+        // A handle of another loaded reference or session is the same stale
+        // selection as an unknown one.
+        let loaded_reference = loaded.audit_reference();
+        let continuation = session
+            .continuation(handle)
+            .filter(|continuation| continuation.loaded_reference == loaded_reference)
+            .ok_or_else(stale_selection)?;
+        if self.clock.now() >= continuation.expires_at {
+            return Err(stale_selection());
+        }
+        if parsed
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation != &continuation.operation_name)
+        {
+            return Err(invalid_operation());
+        }
+        // Reserve the execution first, so concurrent redemptions of one
+        // chain cannot overspend it, and return it on any refusal below.
+        // Every handle of a chain draws on one budget.
+        if !continuation.chain.reserve() {
+            return Err(stale_selection());
+        }
+        let checked = async {
+            let operation = (loaded.capability_kind == AiCapabilityKind::GeneratedEntity)
+                .then_some(continuation.operation_name.as_str());
+            let target = self
+                .authorize_loaded_operation(principal_reference, run, loaded, operation)
+                .await?;
+            if target.capability_id != continuation.capability_id
+                || target.capability_fingerprint != continuation.capability_fingerprint
+                || target.capability_kind != AiCapabilityKind::GeneratedQuery
+            {
+                return Err(stale_capability());
+            }
+            // The policy checks awaited: the handle must still be retained
+            // and unexpired now.
+            if !self.continuation_retained(session, handle, continuation.expires_at) {
+                return Err(stale_selection());
+            }
+            Ok(target)
+        }
+        .await;
+        let target = match checked {
+            Ok(target) => target,
+            Err(error) => {
+                continuation.chain.release();
+                return Err(error);
+            }
+        };
+        session.record_execute();
+        Ok(AiCapabilityExecution {
+            capability_id: target.capability_id,
+            capability_kind: target.capability_kind,
+            capability_fingerprint: target.capability_fingerprint,
+            audit_reference: loaded_reference,
+            plan: continuation.plan,
+            operation_name: target.operation_name,
+            loaded_expires_at: loaded.expires_at,
+            chain: Some(continuation.chain),
+            continued: Some(ContinuedPage {
+                cursor: continuation.cursor,
+                page: continuation.page,
+                handle: handle.to_owned(),
+                expires_at: continuation.expires_at,
+                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        })
+    }
+
+    fn continuation_retained(
+        &self,
+        session: &AiCapabilityBrokerSession,
+        handle: &str,
+        expires_at: OffsetDateTime,
+    ) -> bool {
+        session.continuation(handle).is_some() && self.clock.now() < expires_at
+    }
+
+    /// Final admission of one execution, for the executor to call after
+    /// host tool policy and the request context are built, immediately
+    /// before the resolver runs.
+    ///
+    /// A first page is always admitted. A continued page is admitted only
+    /// while its handle is still retained by `session` and unexpired; on
+    /// refusal its reserved chain execution is returned and
+    /// [`AiCapabilityExecution::continuation_refused`] reports it, so the
+    /// caller answers with [`AI_CAPABILITY_SELECTION_STALE`].
+    pub fn continuation_admission<'a>(
+        &'a self,
+        session: &'a AiCapabilityBrokerSession,
+        execution: &'a AiCapabilityExecution,
+    ) -> impl Fn() -> bool + Send + Sync + 'a {
+        move || {
+            let Some(continued) = &execution.continued else {
+                return true;
+            };
+            if self.continuation_retained(session, &continued.handle, continued.expires_at) {
+                return true;
+            }
+            if !continued
+                .released
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                && let Some(chain) = &execution.chain
+            {
+                chain.release();
+            }
+            false
+        }
     }
 }
 
@@ -4323,7 +5251,7 @@ mod tests {
             definitions,
         )
         .expect("fixed broker should project");
-        assert_eq!(fixed.tools().len(), 4);
+        assert_eq!(fixed.tools().len(), 5);
         assert!(
             serde_json::to_vec(fixed.tools())
                 .expect("fixed surface")
@@ -4386,7 +5314,7 @@ mod tests {
         .expect("fixed delivery");
         let surface = delivery.current_surface();
         assert_eq!(surface.mode(), AiCapabilityDeliveryMode::FixedBroker);
-        assert_eq!(surface.tools().len(), 5);
+        assert_eq!(surface.tools().len(), 6);
         assert!(surface.tools().contains(&static_tool));
         #[cfg(feature = "provider-grok-acp")]
         {
@@ -4488,7 +5416,7 @@ mod tests {
         clone
             .set_static_bootstrap_offering(&BTreeSet::new())
             .unwrap();
-        assert_eq!(delivery.current_tools().len(), 4);
+        assert_eq!(delivery.current_tools().len(), 5);
         assert!(delivery.shares_run_state(&clone));
         assert!(matches!(surface.freeze_offering(), Err(AiError::Conflict)));
         delivery
@@ -5494,11 +6422,26 @@ mod tests {
         assert!(parsed.relationship_arguments.is_empty());
         assert!(parsed.relationship_maximum_items.is_empty());
         assert_eq!(parsed.maximum_items, None);
-
+        assert_eq!(parsed.continuation, None);
+        // A continued page names only its loaded reference and handle.
+        let continued = json!({
+            "loadedReference": "b".repeat(64),
+            "continuation": "c".repeat(64),
+        });
+        assert!(validator.is_valid(&continued));
+        let parsed: BrokerExecuteArguments =
+            serde_json::from_value(continued).expect("continued execute wrapper should decode");
+        assert!(parsed.selections.is_empty());
         assert_eq!(
-            execute.parameters["required"],
-            json!(["loadedReference", "selections"])
+            parsed.continuation.as_deref(),
+            Some("c".repeat(64).as_str())
         );
+        assert!(!validator.is_valid(&json!({
+            "loadedReference": "b".repeat(64),
+            "continuation": "short",
+        })));
+
+        assert_eq!(execute.parameters["required"], json!(["loadedReference"]));
         assert!(
             execute
                 .description
@@ -6485,7 +7428,7 @@ mod tests {
         )
         .expect("fixed broker with a brokered static tool");
         // The brokered tool adds no provider definition.
-        assert_eq!(delivery.current_tools().len(), 5);
+        assert_eq!(delivery.current_tools().len(), 6);
         assert_eq!(
             delivery.session().brokered_static_tool_fingerprints(),
             &BTreeSet::from([static_entry.capability_fingerprint.clone()])
@@ -6640,6 +7583,7 @@ mod tests {
 
     struct EntityBrokerFixture {
         broker: AiCapabilityDiscoveryBroker,
+        clock: FixedClock,
         principal: PrincipalReference,
         run: AiCapabilityRunBinding,
         authority: Arc<RootAuthority>,
@@ -6658,16 +7602,18 @@ mod tests {
             let index = Arc::new(CurrentIndex(RwLock::new(two_root_entity_index(
                 "target-policy-v1",
             ))));
+            let clock = FixedClock::new(OffsetDateTime::UNIX_EPOCH);
             let broker = AiCapabilityDiscoveryBroker::new(
                 Arc::new(Resolver(principal)),
                 index.clone(),
                 authority.clone(),
-                Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+                Arc::new(clock.clone()),
                 Duration::seconds(30),
             )
             .expect("broker");
             Self {
                 broker,
+                clock,
                 principal: reference,
                 run: run_binding(),
                 authority,
@@ -6739,7 +7685,7 @@ mod tests {
     async fn one_entity_capability_covers_its_roots_with_per_root_authority() {
         let fixture = EntityBrokerFixture::new();
         let discovered = fixture.discover().await;
-        assert_eq!(discovered["version"], 2);
+        assert_eq!(discovered["version"], 3);
         let candidates = discovered["candidates"].as_array().expect("candidates");
         assert_eq!(
             candidates.len(),
@@ -6786,7 +7732,7 @@ mod tests {
             ]
         );
         let contract = described.contract();
-        assert_eq!(contract["version"], 2);
+        assert_eq!(contract["version"], 3);
         assert!(contract.get("planSchema").is_none());
         assert_eq!(contract["operations"][1]["operation"], "RecordBySubject");
         let loaded_reference = described.loaded_reference().to_owned();
@@ -7022,19 +7968,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 AI_CAPABILITY_DISCOVER_TOOL_ID,
+                AI_CAPABILITY_BROWSE_TOOL_ID,
                 AI_CAPABILITY_DESCRIBE_TOOL_ID,
                 AI_CAPABILITY_DESCRIBE_TYPE_TOOL_ID,
                 AI_CAPABILITY_EXECUTE_TOOL_ID,
             ]
         );
         for definition in &definitions {
-            let v1_fingerprint = hash_json(&json!({
-                "version": 2,
-                "tool_id": definition.tool_id,
-                "broker_version": 1,
-                "parameters": definition.parameters,
-            }));
-            assert_ne!(definition.fingerprint, v1_fingerprint);
+            for earlier in [1, 2] {
+                let earlier_fingerprint = hash_json(&json!({
+                    "version": 2,
+                    "tool_id": definition.tool_id,
+                    "broker_version": earlier,
+                    "parameters": definition.parameters,
+                }));
+                assert_ne!(definition.fingerprint, earlier_fingerprint);
+            }
         }
         let capabilities = ProviderCapabilities {
             custom_tools: true,
@@ -7352,5 +8301,923 @@ mod tests {
             narrowed["candidates"][0]["capabilityId"],
             fixture.root_id("GeneratedRecord").as_str()
         );
+    }
+
+    impl EntityBrokerFixture {
+        async fn browse(&self, arguments: serde_json::Value) -> Result<serde_json::Value, AiError> {
+            self.broker
+                .dispatch_browse(&self.principal, &self.run, &self.session, &arguments)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_lists_the_hierarchy_after_host_policy_and_feeds_describe() {
+        let fixture = EntityBrokerFixture::new();
+        let namespaces = fixture
+            .browse(json!({"level": "namespaces"}))
+            .await
+            .expect("namespaces");
+        assert_eq!(namespaces["version"], AI_CAPABILITY_BROKER_VERSION);
+        // Browse keeps canonical fingerprints server-side.
+        assert!(namespaces.get("indexFingerprint").is_none(), "{namespaces}");
+        let listed = namespaces["namespaces"].as_array().expect("namespaces");
+        assert_eq!(listed.len(), 1, "{namespaces}");
+        // A namespace is listed without a count, which would need every
+        // entry decided.
+        assert_eq!(listed[0].as_object().map(|object| object.len()), Some(1));
+        let namespace = listed[0]["namespace"]
+            .as_str()
+            .expect("namespace")
+            .to_owned();
+
+        let capabilities = fixture
+            .browse(json!({"level": "capabilities", "namespace": namespace}))
+            .await
+            .expect("capabilities");
+        let candidate = capabilities["capabilities"][0].clone();
+        assert_eq!(candidate["kind"], "generated_entity", "{capabilities}");
+        assert_eq!(candidate["entity"], "Record");
+        assert_eq!(capabilities["nextOffset"], serde_json::Value::Null);
+        assert!(capabilities.get("indexFingerprint").is_none());
+        // An opaque reference replaces the entry fingerprint.
+        let entity_fingerprint = fixture
+            .index
+            .0
+            .read()
+            .expect("index")
+            .entries()
+            .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+            .expect("entity")
+            .fingerprint
+            .clone();
+        assert!(
+            candidate.get("candidateFingerprint").is_none(),
+            "{candidate}"
+        );
+        assert!(!capabilities.to_string().contains(&entity_fingerprint));
+        assert!(crate::valid_sha256(
+            candidate["candidateReference"].as_str().expect("reference")
+        ));
+
+        let operations = fixture
+            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+            .await
+            .expect("operations");
+        assert_eq!(
+            operations["capability"]["capabilityId"],
+            candidate["capabilityId"]
+        );
+        // The header lists no operations: the page below is the only list.
+        assert!(
+            operations["capability"].get("operations").is_none(),
+            "{operations}"
+        );
+        assert!(!operations.to_string().contains(&entity_fingerprint));
+        let names = operations["operations"]
+            .as_array()
+            .expect("operations")
+            .iter()
+            .map(|operation| operation["operation"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [json!("GeneratedRecord"), json!("RecordBySubject")]);
+        assert!(operations.to_string().contains("subject heading"));
+
+        // A browsed candidate is describable without discovery, by its
+        // reference, which only this run resolves.
+        let describe = |arguments: serde_json::Value, session: AiCapabilityBrokerSession| {
+            let fixture = &fixture;
+            async move {
+                fixture
+                    .broker
+                    .dispatch_describe(&fixture.principal, &fixture.run, &session, &arguments)
+                    .await
+            }
+        };
+        let reference = candidate["candidateReference"].clone();
+        let mut altered = reference.as_str().expect("reference").to_owned();
+        let last = altered.pop().expect("reference");
+        altered.push(if last == '0' { '1' } else { '0' });
+        for (arguments, session) in [
+            (
+                json!({"capabilityId": candidate["capabilityId"], "candidateReference": altered}),
+                fixture.session.clone(),
+            ),
+            (
+                json!({"capabilityId": candidate["capabilityId"], "candidateReference": reference}),
+                DiscoveryCacheFixture::session(),
+            ),
+        ] {
+            let error = describe(arguments, session)
+                .await
+                .expect_err("unheld reference");
+            assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        }
+        let error = describe(
+            json!({
+                "capabilityId": candidate["capabilityId"],
+                "candidateReference": reference,
+                "candidateFingerprint": entity_fingerprint,
+            }),
+            fixture.session.clone(),
+        )
+        .await
+        .expect_err("both selectors");
+        assert!(matches!(error, AiError::InvalidInput(_)), "{error:?}");
+        let described = describe(
+            json!({"capabilityId": candidate["capabilityId"], "candidateReference": reference}),
+            fixture.session.clone(),
+        )
+        .await
+        .expect("browsed candidate describes");
+        assert_eq!(described.operations().len(), 2);
+        assert_eq!(fixture.session.amplification().browse_calls, 3);
+        assert_eq!(fixture.session.amplification().discover_calls, 0);
+
+        // Paging is over admitted entries only.
+        let paged = fixture
+            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record", "limit": 1}))
+            .await
+            .expect("first operation page");
+        assert_eq!(paged["operations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(paged["nextOffset"], 1);
+        fixture.deny("RecordBySubject");
+        let paged = fixture
+            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record", "limit": 1}))
+            .await
+            .expect("first operation page");
+        assert_eq!(paged["nextOffset"], serde_json::Value::Null, "{paged}");
+        let denied_root = fixture
+            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+            .await
+            .expect("operations");
+        assert!(
+            !denied_root.to_string().contains("RecordBySubject"),
+            "{denied_root}"
+        );
+        assert!(
+            !denied_root.to_string().contains("subject heading"),
+            "{denied_root}"
+        );
+
+        // With every root denied nothing of the entity is listed at any
+        // level, and the response matches one for an unknown entity.
+        fixture.deny("GeneratedRecord");
+        let empty = fixture
+            .browse(json!({"level": "namespaces"}))
+            .await
+            .expect("namespaces");
+        assert_eq!(empty["namespaces"], json!([]), "{empty}");
+        let none = fixture
+            .browse(json!({"level": "capabilities", "namespace": namespace}))
+            .await
+            .expect("capabilities");
+        assert_eq!(none["capabilities"], json!([]), "{none}");
+        let denied = fixture
+            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+            .await
+            .expect("operations");
+        let unknown = fixture
+            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Unknown"}))
+            .await
+            .expect("operations");
+        assert_eq!(denied, unknown);
+        assert_eq!(denied["capability"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn browse_refuses_malformed_levels_and_bounds() {
+        let fixture = EntityBrokerFixture::new();
+        for arguments in [
+            json!({"level": "namespaces", "namespace": "generated-read"}),
+            json!({"level": "namespaces", "entity": "Record"}),
+            json!({"level": "capabilities"}),
+            json!({"level": "operations", "namespace": "generated-read"}),
+            json!({"level": "capabilities", "namespace": "generated-read", "limit": 0}),
+            json!({"level": "capabilities", "namespace": "generated-read", "limit": 33}),
+            json!({
+                "level": "capabilities",
+                "namespace": "generated-read",
+                "offset": AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET + 1,
+            }),
+            json!({"level": "capabilities", "namespace": " "}),
+            json!({"level": "targets"}),
+            json!({"level": "namespaces", "text": "record"}),
+        ] {
+            let error = fixture
+                .browse(arguments.clone())
+                .await
+                .expect_err("malformed");
+            assert!(
+                matches!(error, AiError::InvalidInput(_)),
+                "{arguments}: {error:?}"
+            );
+        }
+        assert_eq!(fixture.session.amplification().browse_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn browse_over_a_small_policy_batch_still_answers_and_denied_matches_unknown() {
+        let mut fixture = EntityBrokerFixture::new();
+        let namespace = fixture
+            .browse(json!({"level": "namespaces"}))
+            .await
+            .expect("namespaces")["namespaces"][0]["namespace"]
+            .clone();
+        // A deep offset that the largest index set can reach is accepted.
+        let deep = fixture
+            .browse(json!({
+                "level": "capabilities",
+                "namespace": namespace,
+                "offset": AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET,
+            }))
+            .await
+            .expect("deep offset");
+        assert_eq!(deep["capabilities"], json!([]));
+        let without_references = |mut page: serde_json::Value| {
+            for path in ["/capability", "/capabilities/0"] {
+                if let Some(object) = page.pointer_mut(path).and_then(|v| v.as_object_mut()) {
+                    object.remove("candidateReference");
+                }
+            }
+            page
+        };
+        let unbounded = without_references(
+            fixture
+                .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+                .await
+                .expect("unbounded"),
+        );
+        // The entity and its two roots are three decisions: a smaller
+        // policy batch decides them alone, with the same response.
+        fixture.broker = fixture
+            .broker
+            .clone()
+            .with_maximum_discovery_authorizations(2)
+            .expect("bound");
+        let bounded = without_references(
+            fixture
+                .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+                .await
+                .expect("bounded"),
+        );
+        assert_eq!(bounded, unbounded);
+        // A denied entity answers exactly as an unknown one.
+        fixture.deny("GeneratedRecord");
+        fixture.deny("RecordBySubject");
+        for level in ["capabilities", "operations"] {
+            let denied = fixture
+                .browse(json!({"level": level, "namespace": namespace, "entity": "Record"}))
+                .await
+                .expect("denied");
+            let unknown = fixture
+                .browse(json!({"level": level, "namespace": namespace, "entity": "Unknown"}))
+                .await
+                .expect("unknown");
+            assert_eq!(denied, unknown, "{level}");
+        }
+    }
+
+    /// Browses a 40-tool catalogue in which only every seventh tool is
+    /// permitted, under one policy batch bound.
+    async fn browse_mixed_catalogue(
+        bound: Option<u32>,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let index = large_static_index(40);
+        let fingerprints = index
+            .entries()
+            .map(|entry| entry.capability_fingerprint.clone())
+            .collect::<Vec<_>>();
+        let permitted = index
+            .entries()
+            .enumerate()
+            .filter(|(position, _)| position % 7 == 6)
+            .map(|(_, entry)| entry.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let principal = principal();
+        let reference = principal.reference();
+        let mut broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            Arc::new(CurrentIndex(RwLock::new(index))),
+            Arc::new(PermittedSet::new(permitted.iter().map(String::as_str))),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        if let Some(bound) = bound {
+            broker = broker
+                .with_maximum_discovery_authorizations(bound)
+                .expect("bound");
+        }
+        let mut page = broker
+            .dispatch_browse(
+                &reference,
+                &run_binding(),
+                &brokering(&fingerprints),
+                &arguments,
+            )
+            .await
+            .expect("browse");
+        for candidate in page["capabilities"].as_array_mut().into_iter().flatten() {
+            candidate
+                .as_object_mut()
+                .expect("candidate")
+                .remove("candidateReference");
+        }
+        page
+    }
+
+    #[tokio::test]
+    async fn hidden_matches_never_change_what_browse_returns() {
+        let namespaces = browse_mixed_catalogue(None, json!({"level": "namespaces"})).await;
+        let namespace = namespaces["namespaces"][0]["namespace"].clone();
+        let mut pages = Vec::new();
+        for offset in [0, 2, 4] {
+            let arguments = json!({
+                "level": "capabilities",
+                "namespace": namespace,
+                "offset": offset,
+                "limit": 2,
+            });
+            let unbounded = browse_mixed_catalogue(None, arguments.clone()).await;
+            // However many hidden tools a policy batch can hold, the page
+            // is the same admitted prefix with the same nextOffset.
+            for bound in [1, 3, 64] {
+                assert_eq!(
+                    browse_mixed_catalogue(Some(bound), arguments.clone()).await,
+                    unbounded,
+                    "offset {offset}, bound {bound}"
+                );
+            }
+            pages.push(unbounded);
+        }
+        let ids = pages
+            .iter()
+            .flat_map(|page| page["capabilities"].as_array().cloned().unwrap_or_default())
+            .map(|candidate| candidate["capabilityId"].as_str().expect("id").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [6, 13, 20, 27, 34]
+                .map(|position| format!("catalogue.record_{position:04}"))
+                .to_vec()
+        );
+        assert_eq!(pages[0]["nextOffset"], 2);
+        assert_eq!(pages[1]["nextOffset"], 4);
+        assert_eq!(pages[2]["nextOffset"], serde_json::Value::Null);
+        for bound in [1, 3] {
+            assert_eq!(
+                browse_mixed_catalogue(Some(bound), json!({"level": "namespaces"})).await,
+                namespaces
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_references_resolve_only_for_the_issuing_run() {
+        let fixture = EntityBrokerFixture::new();
+        let namespace = fixture
+            .browse(json!({"level": "namespaces"}))
+            .await
+            .expect("namespaces")["namespaces"][0]["namespace"]
+            .clone();
+        let candidate = fixture
+            .browse(json!({"level": "capabilities", "namespace": namespace}))
+            .await
+            .expect("capabilities")["capabilities"][0]
+            .clone();
+        let arguments = json!({
+            "capabilityId": candidate["capabilityId"],
+            "candidateReference": candidate["candidateReference"],
+        });
+        // The same (cloned) session under another run or attempt resolves
+        // nothing.
+        let mut other_run = fixture.run.clone();
+        other_run.run_id = AiRunId::new();
+        let mut other_attempt = fixture.run.clone();
+        other_attempt.attempt_id = Uuid::new_v4();
+        for run in [other_run, other_attempt] {
+            let error = fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &run,
+                    &fixture.session.clone(),
+                    &arguments,
+                )
+                .await
+                .expect_err("another run");
+            assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        }
+        fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &arguments,
+            )
+            .await
+            .expect("issuing run");
+    }
+
+    /// Describes the entity and authorizes one first page of `operation`.
+    async fn first_page(
+        fixture: &EntityBrokerFixture,
+        operation: &str,
+    ) -> (AiCapabilityDescription, AiCapabilityExecution) {
+        let described = fixture.describe().await.expect("describe");
+        let execution = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "operation": operation,
+                "arguments": [{"name": "recordId", "value": "record-1"}],
+                "selections": ["subject"],
+            }))
+            .await
+            .expect("first page");
+        (described, execution)
+    }
+
+    fn more(cursor: &str) -> crate::AiGraphqlQueryPageInfo {
+        crate::AiGraphqlQueryPageInfo {
+            has_next_page: true,
+            end_cursor: Some(cursor.to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn continuation_replays_the_exact_query_with_a_server_held_cursor() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        assert_eq!(first.continuation_cursor(), None);
+        assert_eq!(first.page_number(), 1);
+        // No further page, or no cursor, retains nothing.
+        for page_info in [
+            crate::AiGraphqlQueryPageInfo {
+                has_next_page: false,
+                end_cursor: Some("cursor-1".to_owned()),
+            },
+            crate::AiGraphqlQueryPageInfo {
+                has_next_page: true,
+                end_cursor: None,
+            },
+        ] {
+            assert!(
+                fixture
+                    .broker
+                    .record_continuation(&fixture.session, &first, &page_info)
+                    .is_none()
+            );
+        }
+        assert_eq!(fixture.session.continuation_count(), 0);
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        assert!(crate::valid_sha256(continuation.handle()));
+        assert_eq!(continuation.expires_in_seconds(), 30);
+        let model = continuation.to_model_value();
+        assert!(!model.to_string().contains("cursor-1"), "{model}");
+
+        let second = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "operation": "GeneratedRecord",
+                "continuation": continuation.handle(),
+            }))
+            .await
+            .expect("continued page");
+        assert_eq!(second.continuation_cursor(), Some("cursor-1"));
+        assert_eq!(second.page_number(), 2);
+        assert_eq!(second.plan(), first.plan());
+        assert_eq!(second.capability_id(), first.capability_id());
+        assert_eq!(
+            second.capability_fingerprint(),
+            first.capability_fingerprint()
+        );
+        // The operation may be omitted: the handle names it.
+        let omitted = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "continuation": continuation.handle(),
+            }))
+            .await
+            .expect("continued page without operation");
+        assert_eq!(omitted.plan(), first.plan());
+        let third = fixture
+            .broker
+            .record_continuation(&fixture.session, &second, &more("cursor-2"))
+            .expect("chained continuation");
+        let third = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "continuation": third.handle(),
+            }))
+            .await
+            .expect("third page");
+        assert_eq!(third.page_number(), 3);
+        assert_eq!(third.continuation_cursor(), Some("cursor-2"));
+        assert_eq!(fixture.session.amplification().execute_calls, 4);
+    }
+
+    #[tokio::test]
+    async fn continuation_handles_are_bound_tamper_evident_and_closed() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        let loaded = described.loaded_reference().to_owned();
+        let continue_with = |arguments: serde_json::Value| fixture.execute(arguments);
+
+        // An unknown or altered handle is a stale selection.
+        let mut altered = continuation.handle().to_owned();
+        let last = altered.pop().expect("handle");
+        altered.push(if last == '0' { '1' } else { '0' });
+        let error = continue_with(json!({"loadedReference": loaded, "continuation": altered}))
+            .await
+            .expect_err("altered handle");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        let error =
+            continue_with(json!({"loadedReference": loaded, "continuation": "not-a-handle"}))
+                .await
+                .expect_err("malformed handle");
+        assert!(matches!(error, AiError::InvalidInput(_)), "{error:?}");
+
+        // The retained query cannot be varied.
+        for extra in [
+            json!({"arguments": [{"name": "recordId", "value": "record-2"}]}),
+            json!({"selections": ["recordId"]}),
+            json!({"maximumItems": 5}),
+            json!({"relationshipArguments": [{"path": "subject", "arguments": []}]}),
+            json!({"relationshipMaximumItems": [{"path": "subject", "maximumItems": 1}]}),
+        ] {
+            let mut arguments =
+                json!({"loadedReference": loaded, "continuation": continuation.handle()});
+            for (key, value) in extra.as_object().expect("extra") {
+                arguments[key] = value.clone();
+            }
+            let error = continue_with(arguments.clone())
+                .await
+                .expect_err("varied query");
+            assert!(
+                matches!(&error, AiError::InvalidInput(message) if message != AI_CAPABILITY_SELECTION_STALE),
+                "{arguments}: {error:?}"
+            );
+        }
+        let error = continue_with(json!({
+            "loadedReference": loaded,
+            "operation": "RecordBySubject",
+            "continuation": continuation.handle(),
+        }))
+        .await
+        .expect_err("other operation");
+        assert_input_error(&error, AI_CAPABILITY_OPERATION_INVALID);
+
+        // A handle belongs to the loaded reference that produced it: a new
+        // description of the same capability cannot use it.
+        let again = fixture.describe().await.expect("describe again");
+        assert_ne!(again.loaded_reference(), loaded);
+        let error = continue_with(json!({
+            "loadedReference": again.loaded_reference(),
+            "continuation": continuation.handle(),
+        }))
+        .await
+        .expect_err("foreign loaded reference");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+
+        // Another session of the same principal and run holds nothing.
+        let other_session = DiscoveryCacheFixture::session();
+        let error = fixture
+            .broker
+            .authorize_broker_execution(
+                &fixture.principal,
+                &fixture.run,
+                &other_session,
+                &json!({"loadedReference": loaded, "continuation": continuation.handle()}),
+            )
+            .await
+            .expect_err("other session");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+
+        // Another run attempt is refused by the loaded binding itself.
+        let mut other_run = fixture.run.clone();
+        other_run.attempt_id = Uuid::new_v4();
+        let error = fixture
+            .broker
+            .authorize_broker_execution(
+                &fixture.principal,
+                &other_run,
+                &fixture.session,
+                &json!({"loadedReference": loaded, "continuation": continuation.handle()}),
+            )
+            .await
+            .expect_err("other attempt");
+        assert!(matches!(error, AiError::Forbidden), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn continued_pages_reapply_current_policy_and_expire_with_the_binding() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        let arguments = json!({
+            "loadedReference": described.loaded_reference(),
+            "continuation": continuation.handle(),
+        });
+
+        // Revoking the root after the first page refuses the next one.
+        fixture.deny("GeneratedRecord");
+        let error = fixture
+            .execute(arguments.clone())
+            .await
+            .expect_err("revoked");
+        assert!(matches!(error, AiError::Forbidden), "{error:?}");
+        fixture.authority.denied.write().expect("policy").clear();
+        fixture
+            .execute(arguments.clone())
+            .await
+            .expect("readmitted");
+
+        // A changed policy fingerprint is drift.
+        *fixture
+            .authority
+            .policy_fingerprint
+            .write()
+            .expect("policy") = "current-policy-v2".to_owned();
+        let error = fixture.execute(arguments.clone()).await.expect_err("drift");
+        assert_input_error(&error, AI_CAPABILITY_STALE);
+        *fixture
+            .authority
+            .policy_fingerprint
+            .write()
+            .expect("policy") = "current-policy-v1".to_owned();
+
+        // A schema change is drift too.
+        *fixture.index.0.write().expect("index") = generated_index_with_schema(
+            "generated-read-application",
+            "generated-read",
+            "target-policy-v1",
+            Some("addedField"),
+            true,
+        );
+        let error = fixture
+            .execute(arguments.clone())
+            .await
+            .expect_err("schema drift");
+        assert_input_error(&error, AI_CAPABILITY_STALE);
+        *fixture.index.0.write().expect("index") = two_root_entity_index("target-policy-v1");
+        fixture
+            .execute(arguments.clone())
+            .await
+            .expect("index restored");
+
+        // The handle lives no longer than its loaded binding, and an
+        // expired binding records no new handle.
+        // The exact expiry instant is already expired, as at issuance.
+        fixture.clock.advance_seconds(30);
+        let error = fixture.execute(arguments).await.expect_err("expired");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        assert!(
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &first, &more("cursor-9"))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_state_is_bounded_in_count_pages_and_size() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let oldest = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-0"))
+            .expect("continuation");
+        for page in 1..=AI_CAPABILITY_MAXIMUM_CONTINUATIONS {
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &first, &more(&format!("cursor-{page}")))
+                .expect("continuation");
+        }
+        assert_eq!(
+            fixture.session.continuation_count(),
+            AI_CAPABILITY_MAXIMUM_CONTINUATIONS
+        );
+        let error = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "continuation": oldest.handle(),
+            }))
+            .await
+            .expect_err("evicted");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+
+        // An oversized cursor ends the chain.
+        let oversized = "c".repeat(crate::AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES + 1);
+        assert!(
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &first, &more(&oversized))
+                .is_none()
+        );
+
+        // The chain stops at its page bound.
+        let mut execution = first;
+        while let Some(next) =
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &execution, &more("cursor"))
+        {
+            execution = fixture
+                .execute(json!({
+                    "loadedReference": described.loaded_reference(),
+                    "continuation": next.handle(),
+                }))
+                .await
+                .expect("continued page");
+        }
+        assert_eq!(
+            execution.page_number(),
+            AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES
+        );
+    }
+
+    #[tokio::test]
+    async fn every_handle_of_a_chain_draws_on_one_execution_budget() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        let arguments = json!({
+            "loadedReference": described.loaded_reference(),
+            "continuation": continuation.handle(),
+        });
+        // Reusing one handle spends the chain's budget, which counts the
+        // first page too.
+        let mut redeemed = 0;
+        let mut last = None;
+        while let Ok(execution) = fixture.execute(arguments.clone()).await {
+            redeemed += 1;
+            last = Some(execution);
+        }
+        assert_eq!(redeemed, AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES - 1);
+        let error = fixture.execute(arguments).await.expect_err("spent");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        // A spent chain issues no new handle, from any of its pages.
+        assert!(
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &last.expect("page"), &more("cursor-2"))
+                .is_none()
+        );
+        // A new first page starts a new chain.
+        let (_, fresh) = first_page(&fixture, "GeneratedRecord").await;
+        assert!(
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &fresh, &more("cursor-3"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_output_never_carries_a_server_held_cursor() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let cursor = "server-held-cursor-7f3a";
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more(cursor))
+            .expect("continuation");
+        let continued = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "continuation": continuation.handle(),
+            }))
+            .await
+            .expect("continued page");
+        assert_eq!(continued.continuation_cursor(), Some(cursor));
+        for debug in [
+            format!("{:?}", fixture.session),
+            format!("{continued:?}"),
+            format!("{:?}", more(cursor)),
+        ] {
+            assert!(!debug.contains(cursor), "{debug}");
+        }
+        assert!(format!("{continued:?}").contains("redacted"));
+    }
+
+    #[tokio::test]
+    async fn executor_admission_refuses_an_evicted_or_expired_page_and_returns_its_budget() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        // A first page is always admitted.
+        assert!(fixture
+            .broker
+            .continuation_admission(&fixture.session, &first)(
+        ));
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        let arguments = json!({
+            "loadedReference": described.loaded_reference(),
+            "continuation": continuation.handle(),
+        });
+        let admitted = fixture
+            .execute(arguments.clone())
+            .await
+            .expect("authorized");
+        assert!(fixture
+            .broker
+            .continuation_admission(&fixture.session, &admitted)(
+        ));
+        assert!(!admitted.continuation_refused());
+
+        // Evicted after authorization: refused at admission, once.
+        let evicting = fixture
+            .execute(arguments.clone())
+            .await
+            .expect("authorized");
+        let chain_used = |execution: &AiCapabilityExecution| {
+            execution
+                .chain
+                .as_ref()
+                .expect("chain")
+                .0
+                .load(Ordering::SeqCst)
+        };
+        let before = chain_used(&evicting);
+        for page in 0..AI_CAPABILITY_MAXIMUM_CONTINUATIONS {
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &first, &more(&format!("evict-{page}")))
+                .expect("continuation");
+        }
+        let admission = fixture
+            .broker
+            .continuation_admission(&fixture.session, &evicting);
+        assert!(!admission());
+        assert!(!admission());
+        assert!(evicting.continuation_refused());
+        // The refused execution's reservation was returned, exactly once.
+        assert_eq!(chain_used(&evicting), before - 1);
+
+        // Expired after authorization: refused at admission too.
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-2"))
+            .expect("continuation");
+        let expiring = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "continuation": continuation.handle(),
+            }))
+            .await
+            .expect("authorized");
+        fixture.clock.advance_seconds(30);
+        assert!(!fixture
+            .broker
+            .continuation_admission(&fixture.session, &expiring)(
+        ));
+        assert!(expiring.continuation_refused());
+    }
+
+    #[tokio::test]
+    async fn recording_one_first_page_twice_shares_one_chain_budget() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let handles = (0..2)
+            .map(|page| {
+                fixture
+                    .broker
+                    .record_continuation(&fixture.session, &first, &more(&format!("cursor-{page}")))
+                    .expect("continuation")
+            })
+            .collect::<Vec<_>>();
+        let mut redeemed = 0;
+        'redeem: loop {
+            for handle in &handles {
+                let execute = json!({
+                    "loadedReference": described.loaded_reference(),
+                    "continuation": handle.handle(),
+                });
+                if fixture.execute(execute).await.is_err() {
+                    break 'redeem;
+                }
+                redeemed += 1;
+            }
+        }
+        assert_eq!(redeemed, AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES - 1);
     }
 }

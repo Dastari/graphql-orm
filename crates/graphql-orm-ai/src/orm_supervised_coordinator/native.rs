@@ -94,24 +94,26 @@ impl AiProviderDynamicToolExecution for NativeExecution {
                 .capability_delivery
                 .as_ref()
                 .ok_or(AiError::Forbidden)?;
+            // Boxed like the other tool paths: in debug builds an inline
+            // broker future enlarges this callback's stack frame.
             AiProviderDynamicToolOutcome::Application(Box::new(
-                self.services
-                    .applications
-                    .execute_capability_broker_call(
-                        lease,
-                        result,
-                        context,
-                        self.route.clone(),
-                        delivery,
-                    )
-                    .await?,
+                Box::pin(self.services.applications.execute_capability_broker_call(
+                    lease,
+                    result,
+                    context,
+                    self.route.clone(),
+                    delivery,
+                ))
+                .await?,
             ))
         } else {
-            let classification = self
-                .services
-                .applications
-                .classify_native_tool_call(lease, result, &context, self.route.clone())
-                .await?;
+            let classification = Box::pin(self.services.applications.classify_native_tool_call(
+                lease,
+                result,
+                &context,
+                self.route.clone(),
+            ))
+            .await?;
             let disposition = match classification {
                 crate::orm_tools::NativeToolClassification::Admitted(disposition) => disposition,
                 crate::orm_tools::NativeToolClassification::Rejected(persisted) => {

@@ -29,6 +29,7 @@ pub mod surface {
         table = "broker_parity_records",
         plural = "BrokerParityRecords",
         default_sort = "id ASC",
+        keyset = "id asc",
         description = "A reviewed record reached through the capability broker"
     )]
     pub struct BrokerParityRecord {
@@ -256,7 +257,7 @@ pub async fn entity_capability_round_trip(database: Database) {
         .with_operation_signatures(summaries, 64 * 1_024)
         .expect("signatures fit")
         .into_model_result();
-    assert_eq!(contract["version"], 2);
+    assert_eq!(contract["version"], 3);
     let encoded = serde_json::to_vec(&contract).expect("contract");
     assert!(
         encoded.len() < 16 * 1_024,
@@ -371,4 +372,274 @@ pub async fn entity_capability_round_trip(database: Database) {
     assert!(data.contains("beta"), "{data}");
     assert!(!data.contains("alpha"), "{data}");
     assert_eq!(session.amplification().describe_type_calls, 3);
+}
+
+/// Browses to the entity capability, then reads every row of its keyset
+/// root two at a time through broker continuation handles, executing each
+/// page through the generated schema against `database`, which must be
+/// empty.
+pub async fn keyset_continuation_round_trip(database: Database) {
+    use surface::{BrokerParityRecord, CreateBrokerParityRecordInput};
+
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "broker-parity-v1",
+            "capability broker parity records",
+            &[BrokerParityRecord::metadata()],
+        )
+        .await
+        .expect("parity table should plan");
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("parity table should apply");
+    let ids = (1..=5)
+        .map(|row| format!("record-{row}"))
+        .collect::<Vec<_>>();
+    for id in &ids {
+        BrokerParityRecord::insert(
+            &database,
+            CreateBrokerParityRecordInput {
+                id: id.clone(),
+                subject: format!("subject of {id}"),
+            },
+        )
+        .await
+        .expect("parity row should insert");
+    }
+    let schema = surface::schema_builder(database.clone())
+        .data(AuthSubject::new("broker-parity-user"))
+        .finish();
+    let semantics = surface::graphql_orm_semantic_catalog();
+    let target = GraphqlExecutionTargetId::parse("broker-parity").expect("target");
+    let queries = AiGraphqlQueryCapabilityCatalog::compile(
+        "brokerparity",
+        target.clone(),
+        &schema.sdl(),
+        semantics,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .expect("generated query capabilities should compile");
+    let index = Arc::new(
+        AiCapabilityIndex::compile(
+            target,
+            queries.finished_schema_fingerprint(),
+            semantics,
+            Some(&queries),
+            None,
+            None,
+            [],
+            "broker-parity-target-policy-v1",
+            AiCapabilityIndexLimits::default(),
+        )
+        .expect("capability index should compile"),
+    );
+    let principal = principal();
+    let reference = principal.reference();
+    let broker = AiCapabilityDiscoveryBroker::new(
+        Arc::new(Resolver(principal)),
+        Arc::new(CurrentIndex(index.clone())),
+        Arc::new(AllowReads),
+        Arc::new(SystemClock),
+        Duration::seconds(60),
+    )
+    .expect("broker");
+    let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+        .expect("broker session");
+    let run = AiCapabilityRunBinding {
+        session_id: AiSessionId::new(),
+        run_id: AiRunId::new(),
+        attempt_id: Uuid::new_v4(),
+        lease_generation: 1,
+        provider_kind: ProviderKind::OpenAi,
+        provider_session_fingerprint: "broker-parity-session-v3".to_owned(),
+    };
+
+    // Browse the hierarchy instead of searching.
+    let namespaces = broker
+        .dispatch_browse(&reference, &run, &session, &json!({"level": "namespaces"}))
+        .await
+        .expect("browse namespaces");
+    let namespace = namespaces["namespaces"][0]["namespace"]
+        .as_str()
+        .expect("namespace")
+        .to_owned();
+    let capabilities = broker
+        .dispatch_browse(
+            &reference,
+            &run,
+            &session,
+            &json!({"level": "capabilities", "namespace": namespace, "entity": "BrokerParityRecord"}),
+        )
+        .await
+        .expect("browse capabilities");
+    let candidate = capabilities["capabilities"][0].clone();
+    assert_eq!(candidate["kind"], "generated_entity", "{capabilities}");
+    let operations = broker
+        .dispatch_browse(
+            &reference,
+            &run,
+            &session,
+            &json!({"level": "operations", "namespace": namespace, "entity": "BrokerParityRecord"}),
+        )
+        .await
+        .expect("browse operations");
+    let keyset = operations["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .filter(|operation| operation["shape"] == "keyset_list")
+        .filter_map(|operation| operation["operation"].as_str())
+        .find_map(|name| {
+            queries
+                .capabilities()
+                .find(|capability| capability.field_name() == name)
+                .filter(|capability| capability.supports_continuation())
+        })
+        .unwrap_or_else(|| panic!("a continuable keyset root: {operations}"));
+    // Plain list roots are not continuable: they take a model-owned offset.
+    assert!(
+        queries
+            .capabilities()
+            .filter(|capability| capability.generated_entity_name() == Some("BrokerParityRecord"))
+            .any(|capability| !capability.supports_continuation())
+    );
+    let described = broker
+        .dispatch_describe(
+            &reference,
+            &run,
+            &session,
+            &json!({
+                "capabilityId": candidate["capabilityId"],
+                "candidateReference": candidate["candidateReference"],
+            }),
+        )
+        .await
+        .expect("describe the browsed candidate");
+
+    let first = json!({
+        "loadedReference": described.loaded_reference(),
+        "operation": keyset.field_name(),
+        "selections": ["id", "subject"],
+        "maximumItems": 2,
+    });
+    let mut execution = broker
+        .authorize_broker_execution(&reference, &run, &session, &first)
+        .await
+        .expect("first page authorizes");
+    assert_eq!(execution.capability_id(), keyset.id());
+    let unpaged = keyset
+        .compile_compact(execution.plan().clone())
+        .expect("unpaged compile");
+    assert!(!unpaged.descriptor().document.contains("pageInfo"));
+    let mut seen = Vec::new();
+    let mut pages = 0;
+    loop {
+        let compiled = keyset
+            .compile_compact_page(execution.plan().clone(), execution.continuation_cursor())
+            .expect("page compiles");
+        assert!(compiled.descriptor().document.contains("pageInfo"));
+        assert_ne!(compiled.plan_fingerprint(), unpaged.plan_fingerprint());
+        // The cursor a continued page carries never appears in Debug output:
+        // not of the execution, the compiled page, or the host request.
+        if let Some(cursor) = execution.continuation_cursor() {
+            let contract = compiled
+                .descriptor()
+                .graphql_contract
+                .clone()
+                .expect("page contract");
+            let request = ToolGraphqlRequest {
+                document: compiled.descriptor().document.clone(),
+                operation_name: contract.operation_name.clone(),
+                contract,
+                variables: compiled.variables().clone(),
+                invocation: GraphqlInvocationContext {
+                    run_id: run.run_id,
+                    tool_call_id: AiToolCallId::new(),
+                    scope: AiScope::new("tenant", "broker-parity"),
+                    correlation_id: "broker-parity".to_owned(),
+                    causation_id: "broker-parity".to_owned(),
+                    delegation_reference: None,
+                    idempotency_key: None,
+                },
+            };
+            assert!(request.variables.to_string().contains(cursor));
+            for debug in [
+                format!("{execution:?}"),
+                format!("{compiled:?}"),
+                format!("{request:?}"),
+            ] {
+                assert!(!debug.contains(cursor), "{debug}");
+            }
+        }
+        let response = schema
+            .execute(
+                graphql_orm::async_graphql::Request::new(compiled.descriptor().document.clone())
+                    .variables(graphql_orm::async_graphql::Variables::from_json(
+                        compiled.variables().clone(),
+                    )),
+            )
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let mut data = response.data.into_json().expect("data");
+        let raw_response = ToolGraphqlResponse {
+            data: data.clone(),
+            error_codes: Vec::new(),
+            application_audit_ref: None,
+        };
+        let page_info = compiled
+            .take_page_info(&mut data)
+            .expect("page info")
+            .expect("a page reports its page info");
+        if let Some(cursor) = page_info.end_cursor.as_deref() {
+            assert!(raw_response.data.to_string().contains(cursor));
+            assert!(!format!("{page_info:?}").contains(cursor));
+            assert!(!format!("{raw_response:?}").contains(cursor));
+        }
+        // What remains is exactly the disclosed shape: no cursor.
+        assert!(!data.to_string().contains("pageInfo"), "{data}");
+        compiled
+            .disclosure_schema()
+            .evaluate_graphql_with_record_limit(&data, 1_000)
+            .expect("the stripped page matches its disclosure schema");
+        let text = data.to_string();
+        let rows = ids
+            .iter()
+            .filter(|id| text.contains(&format!("\"{id}\"")))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty() && rows.len() <= 2, "{text}");
+        seen.extend(rows);
+        pages += 1;
+        let Some(continuation) = broker.record_continuation(&session, &execution, &page_info)
+        else {
+            assert!(!page_info.has_next_page, "{page_info:?}");
+            break;
+        };
+        assert!(
+            !continuation
+                .to_model_value()
+                .to_string()
+                .contains(page_info.end_cursor.as_deref().expect("cursor"))
+        );
+        execution = broker
+            .authorize_broker_execution(
+                &reference,
+                &run,
+                &session,
+                &json!({
+                    "loadedReference": described.loaded_reference(),
+                    "operation": keyset.field_name(),
+                    "continuation": continuation.handle(),
+                }),
+            )
+            .await
+            .expect("continued page authorizes");
+        assert!(pages < 10, "the chain terminates");
+    }
+    assert_eq!(seen, ids, "every row once, in keyset order");
+    assert_eq!(pages, 3);
+    assert_eq!(session.amplification().browse_calls, 3);
 }

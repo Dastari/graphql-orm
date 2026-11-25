@@ -12,6 +12,42 @@ supersedes: []
 
 ## Unreleased - next breaking graphql-orm-ai release
 
+- **Breaking (#551).** Capability broker version 3. The fixed broker adds a
+  fifth frozen definition, `graphql.capabilities.browse`, which lists the
+  current capabilities by namespace, capability and operation after host
+  policy, with the same `authorize_discovery` batch, authorization bound and
+  candidate retention as discover. Execute returns a `continuation` handle
+  for generated keyset roots while more rows exist and takes it back to read
+  the next page; the cursor stays server-side, and each page repeats the
+  loaded-binding, index and host-policy checks and runs through ordinary
+  resolver authorization. Handles are bound to their loaded reference and
+  broker session, expire with it, and are bounded in count, chain length and
+  cursor size. Every broker definition fingerprint and every fixed-broker
+  session binding changes once; capability, index and plan fingerprints of
+  existing plans are unchanged. New API: `AI_CAPABILITY_BROWSE_TOOL_ID`,
+  `AiCapabilityBrokerOperation::Browse`,
+  `AiCapabilityDiscoveryBroker::dispatch_browse` and `record_continuation`,
+  `AiCapabilityContinuation`, `AiCapabilityExecution::continuation_cursor`,
+  `page_number` and `operation_name`,
+  `AiCapabilityBrokerAmplification::browse_calls`,
+  `AiCapabilityBrokerSession::continuation_count`,
+  `AiRuntime::execute_query_capability_page`,
+  `AiToolCatalog::query_capability_supports_continuation` and
+  `compile_query_capability_page`. Browse decides policy in bounded batches
+  until the page is decided, so its response is the admitted prefix whatever
+  hidden entries match; a denied and an unknown filter give the same empty
+  page. It carries run-fenced opaque `candidateReference`s (accepted by
+  describe) instead of fingerprints, and never lists more than `limit`
+  items. All handles issued from one first page share one 256-execution
+  budget, reserved before and returned on refusal, and a continued page is
+  admitted again immediately before the executor
+  (`continuation_admission`). Cursors are redacted from the `Debug` output
+  of the broker session, executions, page info, compiled pages,
+  `ToolGraphqlRequest` (variable names only) and `ToolGraphqlResponse`. Fixed-broker discover and
+  describe results use version 3 disclosure contracts; client-deferred
+  discovery is unchanged. The model-context benchmark reports browse result
+  sizes. [Migration](MIGRATION.md#capability-broker-version-3-551)
+
 - **Action needed (#880).** SQL Server migration plans account for `INCLUDE`
   columns on the legacy approval lookup index. A covering variant requires
   explicit review and destructive authorization before replacement.

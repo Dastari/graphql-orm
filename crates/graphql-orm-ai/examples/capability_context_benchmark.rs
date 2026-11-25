@@ -5,12 +5,12 @@
 //! five related entities, each with its generated query roots) across `T`
 //! independent logical targets, compiles every target's
 //! query catalogue and capability index, registers the catalogues in an
-//! [`AiToolCatalog`], and drives the frozen version 2 broker with the
+//! [`AiToolCatalog`], and drives the frozen version 3 broker with the
 //! coordinator's own describe steps: the exact model definition and its
 //! fingerprint check, the signature, and the describe byte bounds, which
 //! also refuse an oversized `describe_type` page. For each `T` it reports what the
-//! model receives: the first-turn definition bytes, discover, describe and
-//! `describe_type` result bytes, discover latency, a restricted caller's
+//! model receives: the first-turn definition bytes, discover, browse, describe
+//! and `describe_type` result bytes, discover latency, a restricted caller's
 //! candidates, and whether an unrelated target's schema change rotates a
 //! retained session binding. The eager reference is what one exact
 //! definition per root would cost. A separate single-target point compares
@@ -585,6 +585,8 @@ fn growth(points: &[Value]) -> Value {
         "discoverResultBytesP95": ratio(&["discover", "resultBytesP95"]),
         "describeResultBytesP95": ratio(&["describe", "resultBytesP95"]),
         "describeTypePageBytesP95": ratio(&["describeType", "pageBytesP95"]),
+        "browseCapabilitiesResultBytesP95": ratio(&["browse", "capabilitiesResultBytesP95"]),
+        "browseOperationsResultBytesP95": ratio(&["browse", "operationsResultBytesP95"]),
         "discoverMicrosecondsP95": ratio(&["discover", "microsecondsP95"]),
     })
 }
@@ -1127,6 +1129,18 @@ async fn broker_round_trips(
     let mut keyset_example = Value::Null;
     let mut operations_per_describe = 0_usize;
     let mut keyset_continuation = false;
+    // Browsing by hierarchy: the namespace list once, then each sampled
+    // entity's capability page and operation page.
+    let mut browse_capability_bytes = Vec::new();
+    let mut browse_operation_bytes = Vec::new();
+    let mut browse_micros = Vec::new();
+    let started = Instant::now();
+    let namespaces = broker
+        .dispatch_browse(&reference, &run, &session, &json!({"level": "namespaces"}))
+        .await?;
+    let browse_namespace_micros = elapsed_micros(started);
+    let browse_namespace_bytes = bytes(&namespaces);
+    let browse_namespaces_listed = namespaces["namespaces"].as_array().map_or(0, Vec::len);
     for sample in 0..DESCRIBE_SAMPLES.min(families.len()) {
         let family = &families[(sample * 104_729) % families.len()];
         let discovered = broker
@@ -1145,6 +1159,26 @@ async fn broker_round_trips(
         let candidate = discovered["candidates"]
             .get(0)
             .ok_or("wide entity was not discovered")?;
+        for (level, sizes) in [
+            ("capabilities", &mut browse_capability_bytes),
+            ("operations", &mut browse_operation_bytes),
+        ] {
+            let started = Instant::now();
+            let page = broker
+                .dispatch_browse(
+                    &reference,
+                    &run,
+                    &session,
+                    &json!({
+                        "level": level,
+                        "namespace": candidate["namespace"],
+                        "entity": candidate["entity"],
+                    }),
+                )
+                .await?;
+            browse_micros.push(elapsed_micros(started));
+            sizes.push(bytes(&page));
+        }
         let describe = json!({
             "capabilityId": candidate["capabilityId"],
             "candidateFingerprint": candidate["candidateFingerprint"],
@@ -1171,15 +1205,11 @@ async fn broker_round_trips(
         operations_per_describe = operations_per_describe.max(description.operations().len());
         for operation in description.operations() {
             let signature = production_signature(catalog, operation)?;
-            let operation = operation.operation_name();
-            if signature.signature().contains("after?:")
-                && signature
-                    .type_names()
-                    .iter()
-                    .any(|name| name == "select.pageInfo")
-            {
+            // The coordinator marks exactly these operations continuable.
+            if catalog.query_capability_supports_continuation(operation.capability_id()) {
                 keyset_continuation = true;
             }
+            let operation = operation.operation_name();
             let summary = signature.summary();
             if keyset_example.is_null() && operation.ends_with("Keyset") {
                 keyset_example = json!({
@@ -1253,6 +1283,14 @@ async fn broker_round_trips(
             "repeatMicrosecondsP95": percentile(&mut warm_describe_micros, 95),
             "keysetContinuationAvailable": keyset_continuation,
             "keysetExample": keyset_example,
+        },
+        "browse": {
+            "namespacesListed": browse_namespaces_listed,
+            "namespacesResultBytes": browse_namespace_bytes,
+            "namespacesMicroseconds": browse_namespace_micros,
+            "capabilitiesResultBytesP95": percentile(&mut browse_capability_bytes, 95),
+            "operationsResultBytesP95": percentile(&mut browse_operation_bytes, 95),
+            "microsecondsP95": percentile(&mut browse_micros, 95),
         },
         "describeType": {
             "pages": type_page_bytes.len(),

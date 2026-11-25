@@ -1833,6 +1833,23 @@ impl OrmAiApplicationToolCallService {
                         .dispatch_discover(lease.principal_reference(), &run, session, arguments)
                         .await?
                 };
+                // Client-deferred discovery keeps its version 2 contract.
+                let fingerprint =
+                    if delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred {
+                        client_deferred_discovery_disclosure_fingerprint()
+                    } else {
+                        broker_disclosure_fingerprint(operation)
+                    };
+                BrokerCallOutput::metadata(output, fingerprint).map_err(Into::into)
+            }
+            crate::AiCapabilityBrokerOperation::Browse => {
+                let output = Box::pin(broker.dispatch_browse(
+                    lease.principal_reference(),
+                    &run,
+                    session,
+                    arguments,
+                ))
+                .await?;
                 BrokerCallOutput::metadata(output, broker_disclosure_fingerprint(operation))
                     .map_err(Into::into)
             }
@@ -1848,6 +1865,17 @@ impl OrmAiApplicationToolCallService {
                     let mut summary = signature.summary();
                     if let (Some(object), Some(schema)) = (summary.as_object_mut(), inline_schema) {
                         object.insert("planSchema".to_owned(), schema);
+                    }
+                    // A continuable root says so, so the model knows a
+                    // result may carry a continuation handle.
+                    if operation.capability_kind() == crate::AiCapabilityKind::GeneratedQuery
+                        && self
+                            .runtime
+                            .tool_catalog()
+                            .query_capability_supports_continuation(operation.capability_id())
+                        && let Some(object) = summary.as_object_mut()
+                    {
+                        object.insert("continuation".to_owned(), json!(true));
                     }
                     summaries.push(summary);
                 }
@@ -1877,14 +1905,13 @@ impl OrmAiApplicationToolCallService {
                     .map_err(Into::into)
             }
             crate::AiCapabilityBrokerOperation::Execute => {
-                let execution = broker
-                    .authorize_broker_execution(
-                        lease.principal_reference(),
-                        &run,
-                        session,
-                        arguments,
-                    )
-                    .await?;
+                let execution = Box::pin(broker.authorize_broker_execution(
+                    lease.principal_reference(),
+                    &run,
+                    session,
+                    arguments,
+                ))
+                .await?;
                 if execution.capability_kind() == crate::AiCapabilityKind::ReviewedStatic {
                     return self
                         .run_brokered_static_tool(
@@ -1896,77 +1923,152 @@ impl OrmAiApplicationToolCallService {
                         )
                         .await;
                 }
-                let definition = self
-                    .runtime
-                    .tool_catalog()
-                    .query_capability_model_definition(
-                        execution.capability_id(),
-                        crate::capability_provider_alias(execution.capability_id()),
-                    )?;
-                if definition.fingerprint != execution.capability_fingerprint() {
-                    return Err(AiError::Forbidden.into());
-                }
-                let compiled = self
-                    .runtime
-                    .tool_catalog()
-                    .compile_query_capability(
-                        execution.capability_id(),
-                        execution.capability_fingerprint(),
-                        execution.plan().clone(),
-                    )
-                    .map_err(|error| {
-                        BrokerCallFailure::query_plan(
-                            error,
-                            &definition.parameters,
-                            execution.plan(),
-                        )
-                    })?;
-                let (_, disclosure, _) = compiled.into_parts();
-                let disclosure_fingerprint = disclosure.fingerprint.clone();
-                let invocation = GraphqlInvocationContext {
-                    run_id: lease.run_id(),
+                Box::pin(self.run_broker_generated_query(
+                    lease,
+                    context,
                     tool_call_id,
-                    scope: context.scope.clone(),
-                    correlation_id: context.correlation_id.clone(),
-                    causation_id: context.causation_id.clone(),
-                    delegation_reference: context.delegation_reference.clone(),
-                    idempotency_key: Some(format!(
-                        "ai-tool:{}",
-                        provider_call_key(lease, provider_call.call_id())
-                    )),
-                };
-                let capability_id = execution.capability_id().clone();
-                let capability_fingerprint = execution.capability_fingerprint().to_owned();
-                let plan = execution.into_plan();
-                let result = tokio::time::timeout(
-                    self.limits.maximum_execution_time.unsigned_abs(),
-                    async {
-                        self.runtime
-                            .execute_query_capability(
-                                lease.principal_reference(),
-                                &capability_id,
-                                &capability_fingerprint,
-                                plan,
-                                invocation,
-                            )
-                            .await
-                    },
-                )
+                    provider_result,
+                    delivery,
+                    execution,
+                ))
                 .await
-                .unwrap_or(Err(AiError::ToolExecutionFailed))?;
-                Ok(BrokerCallOutput {
-                    output: result.model_output(),
-                    classification: result.disclosure().maximum_classification,
-                    source_trust: AiSourceTrust::ResolverResult,
-                    disclosure_fingerprint,
-                    policy_version: Some(result.policy_version().to_owned()),
-                    authorization_state_digest: Some(
-                        result.authorization_state_digest().to_owned(),
-                    ),
-                    application_audit_ref: result.response().application_audit_ref.clone(),
-                })
             }
         }
+    }
+
+    /// Executes one authorized generated query root reached through the
+    /// broker: a plain result, or a continuable keyset page with its
+    /// server-held continuation.
+    async fn run_broker_generated_query(
+        &self,
+        lease: &AiRunLease,
+        context: &AiApplicationToolCallContext,
+        tool_call_id: AiToolCallId,
+        provider_result: &AiProviderCallResult,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+        execution: crate::AiCapabilityExecution,
+    ) -> Result<BrokerCallOutput, BrokerCallFailure> {
+        let provider_call = provider_result
+            .tool_calls()
+            .get(context.tool_call_index)
+            .ok_or(AiError::Conflict)?;
+        let broker = delivery.broker();
+        let session = delivery.session();
+        let definition = self
+            .runtime
+            .tool_catalog()
+            .query_capability_model_definition(
+                execution.capability_id(),
+                crate::capability_provider_alias(execution.capability_id()),
+            )?;
+        if definition.fingerprint != execution.capability_fingerprint() {
+            return Err(AiError::Forbidden.into());
+        }
+        let catalog = self.runtime.tool_catalog();
+        let paged = catalog.query_capability_supports_continuation(execution.capability_id());
+        if execution.continuation_cursor().is_some() && !paged {
+            return Err(AiError::Forbidden.into());
+        }
+        let compiled = if paged {
+            catalog.compile_query_capability_page(
+                execution.capability_id(),
+                execution.capability_fingerprint(),
+                execution.plan().clone(),
+                execution.continuation_cursor(),
+            )
+        } else {
+            catalog.compile_query_capability(
+                execution.capability_id(),
+                execution.capability_fingerprint(),
+                execution.plan().clone(),
+            )
+        }
+        .map_err(|error| {
+            BrokerCallFailure::query_plan(error, &definition.parameters, execution.plan())
+        })?;
+        let (_, disclosure, _) = compiled.into_parts();
+        // A continuable result also carries the server-authored
+        // continuation member, so it has its own contract.
+        let disclosure_fingerprint = if paged {
+            continuation_disclosure_fingerprint(&disclosure.fingerprint)
+        } else {
+            disclosure.fingerprint.clone()
+        };
+        let invocation = GraphqlInvocationContext {
+            run_id: lease.run_id(),
+            tool_call_id,
+            scope: context.scope.clone(),
+            correlation_id: context.correlation_id.clone(),
+            causation_id: context.causation_id.clone(),
+            delegation_reference: context.delegation_reference.clone(),
+            idempotency_key: Some(format!(
+                "ai-tool:{}",
+                provider_call_key(lease, provider_call.call_id())
+            )),
+        };
+        let capability_id = execution.capability_id().clone();
+        let capability_fingerprint = execution.capability_fingerprint().to_owned();
+        let (result, continuation) = if paged {
+            let admission = broker.continuation_admission(session, &execution);
+            let executed = tokio::time::timeout(
+                self.limits.maximum_execution_time.unsigned_abs(),
+                Box::pin(self.runtime.execute_query_capability_page(
+                    lease.principal_reference(),
+                    &capability_id,
+                    &capability_fingerprint,
+                    execution.plan().clone(),
+                    execution.continuation_cursor(),
+                    invocation,
+                    Some(&admission),
+                )),
+            )
+            .await
+            .unwrap_or(Err(AiError::ToolExecutionFailed));
+            // A continuation that expired or was evicted while the page was
+            // being admitted never executed: it is a stale selection.
+            if execution.continuation_refused() {
+                return Err(
+                    AiError::InvalidInput(crate::AI_CAPABILITY_SELECTION_STALE.to_owned()).into(),
+                );
+            }
+            let (result, page_info) = executed?;
+            let continuation = broker
+                .record_continuation(session, &execution, &page_info)
+                .map_or(serde_json::Value::Null, |continuation| {
+                    continuation.to_model_value()
+                });
+            (result, Some(continuation))
+        } else {
+            let plan = execution.into_plan();
+            let result =
+                tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
+                    self.runtime
+                        .execute_query_capability(
+                            lease.principal_reference(),
+                            &capability_id,
+                            &capability_fingerprint,
+                            plan,
+                            invocation,
+                        )
+                        .await
+                })
+                .await
+                .unwrap_or(Err(AiError::ToolExecutionFailed))?;
+            (result, None)
+        };
+        let mut output = result.model_output();
+        if let (Some(continuation), Some(object)) = (continuation, output.as_object_mut()) {
+            object.insert("continuation".to_owned(), continuation);
+        }
+        Ok(BrokerCallOutput {
+            output,
+            classification: result.disclosure().maximum_classification,
+            source_trust: AiSourceTrust::ResolverResult,
+            disclosure_fingerprint,
+            policy_version: Some(result.policy_version().to_owned()),
+            authorization_state_digest: Some(result.authorization_state_digest().to_owned()),
+            application_audit_ref: result.response().application_audit_ref.clone(),
+        })
     }
 
     /// Compact signature of one described operation, from its exact
@@ -4972,10 +5074,13 @@ fn brokered_static_plan_schema(descriptor: &crate::AiToolDescriptor) -> serde_js
 fn broker_disclosure_fingerprint(operation: crate::AiCapabilityBrokerOperation) -> String {
     hex::encode(Sha256::digest(match operation {
         crate::AiCapabilityBrokerOperation::Discover => {
-            b"graphql-orm-ai/capability-broker-discover/v2".as_slice()
+            b"graphql-orm-ai/capability-broker-discover/v3".as_slice()
+        }
+        crate::AiCapabilityBrokerOperation::Browse => {
+            b"graphql-orm-ai/capability-broker-browse/v1".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Describe => {
-            b"graphql-orm-ai/capability-broker-describe/v2".as_slice()
+            b"graphql-orm-ai/capability-broker-describe/v3".as_slice()
         }
         crate::AiCapabilityBrokerOperation::DescribeType => {
             b"graphql-orm-ai/capability-broker-describe-type/v1".as_slice()
@@ -4984,6 +5089,22 @@ fn broker_disclosure_fingerprint(operation: crate::AiCapabilityBrokerOperation) 
             b"graphql-orm-ai/capability-broker-execute/v1".as_slice()
         }
     }))
+}
+
+/// Contract of a continuable broker result: the query's own disclosure
+/// schema plus the server-authored `continuation` member beside `data`.
+fn continuation_disclosure_fingerprint(query_disclosure_fingerprint: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphql-orm-ai/capability-broker-continuation/v1\0");
+    digest.update(query_disclosure_fingerprint.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+/// Unchanged version 2 contract of client-deferred discovery results.
+fn client_deferred_discovery_disclosure_fingerprint() -> String {
+    hex::encode(Sha256::digest(
+        b"graphql-orm-ai/capability-broker-discover/v2",
+    ))
 }
 
 fn safe_failure_disclosure_fingerprint() -> String {

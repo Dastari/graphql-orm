@@ -10,7 +10,12 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
-AI tool profiles 0.31.0 adds typed endpoint validation reasons for provider
+AI tool profiles 0.32.0 compiles continuable keyset pages with a server-held
+cursor and lists capability index entries for hierarchical browsing, for
+capability broker version 3. Existing fingerprints are unchanged. See the
+[migration guide](MIGRATION.md#0320-continuable-keyset-pages).
+
+Version 0.31.0 adds typed endpoint validation reasons for provider
 profile saves and reports, including missing or malformed stored endpoints.
 See the [migration guide](MIGRATION.md#0310-provider-endpoint-path-error).
 

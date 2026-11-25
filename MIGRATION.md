@@ -93,6 +93,18 @@ declare included columns yet: if an administrator added `INCLUDE` columns to an
 index that a derived entity also declares, either patch the `SchemaModel`
 before planning or accept the destructive replacement.
 
+### 7. Rebind once for capability broker version 3 (#551)
+
+**Action needed** for fixed-broker hosts of graphql-orm-ai. The broker gains
+`graphql.capabilities.browse` and continuation handles for generated keyset
+roots. Every broker definition fingerprint and fixed-broker session binding
+changes once, so retained fixed-broker sessions rebind once. Admit the five
+new broker definition fingerprints wherever you list them by value. Add the
+`Browse` arm to exhaustive `AiCapabilityBrokerOperation` matches. Capability,
+catalogue, index and existing plan fingerprints are unchanged, and approvals
+stay valid. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#capability-broker-version-3-551).
+No data migration is needed.
+
 ## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
 
 **No action.** The default uses the legacy journal recorder and full backup

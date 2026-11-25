@@ -820,6 +820,40 @@ impl AiToolCatalog {
         capability.compile_compact(plan)
     }
 
+    /// Whether one registered automatic query capability returns continuable
+    /// keyset pages ([`AiGraphqlQueryCapability::supports_continuation`]).
+    ///
+    /// An absent capability reports `false`.
+    pub fn query_capability_supports_continuation(&self, id: &AiToolId) -> bool {
+        self.query_capabilities
+            .get(id)
+            .is_some_and(AiGraphqlQueryCapability::supports_continuation)
+    }
+
+    /// Compiles one provider-authored compact plan as a continuable keyset
+    /// page of the exact registered capability
+    /// ([`AiGraphqlQueryCapability::compile_compact_page`]).
+    ///
+    /// Compilation does not authorize or execute the query.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent or drifted capability, a root
+    /// without continuation, or an invalid plan or cursor.
+    pub fn compile_query_capability_page(
+        &self,
+        id: &AiToolId,
+        expected_capability_fingerprint: &str,
+        plan: serde_json::Value,
+        after: Option<&str>,
+    ) -> Result<AiCompiledGraphqlQuery, AiError> {
+        let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
+        if capability.fingerprint() != expected_capability_fingerprint {
+            return Err(AiError::Forbidden);
+        }
+        capability.compile_compact_page(plan, after)
+    }
+
     /// Projects one registered classified mutation capability for a provider.
     ///
     /// The provider receives only the closed typed plan schema and model-safe

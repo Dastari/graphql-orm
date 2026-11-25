@@ -14170,7 +14170,7 @@ mod tests {
                 .expect("brokered static tools should validate"),
         );
         assert_eq!(delivery.current_tools(), unbrokered.current_tools());
-        assert_eq!(delivery.current_tools().len(), 4);
+        assert_eq!(delivery.current_tools().len(), 5);
         assert_eq!(
             delivery.session_binding().fingerprint(),
             unbrokered.session_binding().fingerprint()
@@ -14310,7 +14310,7 @@ mod tests {
         assert_eq!(description["kind"], "reviewed_static");
         assert_eq!(description["risk"], json!(descriptor.risk));
         assert_eq!(description["approval"], json!(descriptor.approval));
-        assert_eq!(description["version"], 2);
+        assert_eq!(description["version"], 3);
         let operations = description["operations"].as_array().expect("operations");
         assert_eq!(operations.len(), 1);
         let signature = operations[0]["signature"].as_str().expect("signature");
