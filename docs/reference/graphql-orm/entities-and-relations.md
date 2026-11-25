@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -730,6 +730,134 @@ The macro validates:
 
 Target columns are metadata literals used for generated SQL. Invalid target names are caught by the
 database when the generated query runs.
+
+### Server-only partition keys
+
+A readable relation normally needs every key column to be GraphQL-readable on
+both entities (see [field authority for read arguments](#field-authority-for-read-arguments)):
+the related row would otherwise reveal a hidden value. A partition key that must
+never reach GraphQL can still narrow a composite join when each such pair is
+declared explicitly:
+
+```rust,ignore
+#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone, Debug)]
+#[graphql(complex)]
+#[graphql_entity(table = "records", plural = "Records")]
+pub struct Record {
+    #[primary_key]
+    pub id: String,
+    pub subject_id: Option<String>,
+    pub group_id: String,
+    #[graphql(skip)]
+    #[graphql_orm(private)]
+    pub partition_id: String,
+
+    #[graphql(skip)]
+    #[relation(
+        target = "Subject",
+        from = ["subject_id", "partition_id", "group_id"],
+        to = ["id", "partition_id", "group_id"],
+        server_only_key(from = "partition_id", to = "partition_id"),
+        emit_fk = false
+    )]
+    pub subject: Option<Subject>,
+}
+```
+
+Each `server_only_key` names one `from`/`to` pair of the relation, in the same
+position. Every other pair keeps the ordinary readability checks, and at least
+one pair must stay public. The macro also requires:
+
+- **An exact key.** Every member of such a relation is an integer, string or
+  UUID. Floating-point and boolean members are refused. Equality is the
+  database's own comparison of the complete tuple. SQLite applies column
+  affinity. SQL Server's default collation ignores case, so `Tenant` and
+  `TENANT` are one partition there; a binary collation distinguishes case.
+  SQL Server's `=` ignores trailing spaces under every collation, binary ones
+  included, so `Tenant` and `Tenant  ` are always one partition. Use partition
+  values that differ by more than case or trailing spaces where that matters.
+- **The stored source value.** The pair's source member is exempt from the
+  readability rule. It must be a persisted scalar field read as stored, with
+  no `skip_db`, `#[transform(read = ...)]`, `json`, `date_field`,
+  `boolean_field`, decimal or spatial mapping, so the join binds the value the
+  row stores. Members are compared by their decoded value and bound in
+  canonical form: on SQLite a UUID is bound as lower-case hyphenated text.
+  A source UUID stored in another spelling therefore still matches its target
+  by value. A target UUID stored in another spelling matches no source, so the
+  relation is `null`, never another row. Store server-only key members in
+  canonical form on both sides.
+- **A server-only target column.** Eligibility belongs to the physical column,
+  not to one Rust field. Names resolve as the generated SQL resolves them:
+  own-table qualifiers are dropped, quoting is honoured, and bare PostgreSQL
+  names are case-folded; SQL Server and SQLite names compare without ASCII
+  case. A target certifies no column at all when its table name or any of
+  its column names is non-ASCII, longer than 63 bytes (PostgreSQL truncates
+  longer identifiers) or starts with the reserved `__gom_` prefix, because
+  those names cannot be told apart reliably or could meet the loader's own
+  aliases. Every field that maps the column, including a
+  `db_column` alias spelled any of those ways, must be declared
+  `#[graphql_orm(private)]` and must not be reopened for reads, filters,
+  ordering, subscriptions or inputs. The column
+  cannot be a member of the effective primary key, including an implicit `id`.
+  Where the target derive does not generate the GraphQL object itself
+  (`GraphQLSchemaEntity`, `schema_only`, or a `SimpleObject` with
+  `#[graphql(complex)]`), each mapping also needs `#[graphql(skip)]`. The
+  target's generated `GeneratedRelationReadability::SERVER_ONLY_COLUMNS` proves
+  this at compile time, across crates too. A hand-written target that does not
+  list the column is refused.
+
+Generated traversal always binds the complete tuple on the server: to-one,
+nullable and to-many fields, relation `where`/`orderBy`/`page` arguments, page
+windows and counts, both the batched `RelationLoader` path and the direct
+query used without a registered loader. For such a relation the loader
+associates rows by database match identity. Each batched statement joins its
+parent tuples as a derived table with one ordinal per parent, and rows,
+counts and page windows are grouped by that ordinal. Key text is never
+compared again in Rust, so the loader returns what the direct query returns
+for every type, affinity and collation. A row that matches several parents is
+returned to each of them. A target in another partition is absent. A to-one field is `null` and a to-many field is empty, with no error.
+That response, `data` and `errors` alike, is identical to a missing target
+and to a target hidden by row visibility. Source and target entity access,
+auth modes, operation scopes and assurance, row visibility and field policies
+apply exactly as for any other relation. An entity-level target denial is
+still the `FORBIDDEN` refusal described under
+[denied and absent relation targets](#denied-and-absent-relation-targets), and
+no message names the key.
+
+The relation reveals what any join reveals: a target the caller may read is
+returned only when its partition equals the source's. Selecting only
+`__typename` already tells a same-partition target from a mismatch, so a field
+policy cannot hide that match. A selected-field denial on a matched target is
+the ordinary `FORBIDDEN` relation refusal, and row visibility is what hides a
+target. Declare a server-only pair only where that equality, for rows the
+caller may already read, is acceptable.
+
+The private column appears in no generated SDL type, `WhereInput`,
+`OrderByInput`, create or update input, `Changed` payload or filter, semantic
+or resolver catalogue entry, or client metadata. The relation's client key
+mapping is `no_exposed_key`. Neither the source nor the target gains a filter,
+ordering or subscription capability. The macro refuses the declaration
+together with `filter` (related-row filters), `order_aggregate`,
+`search_relation` or `propagate_change = "up"`, because each would evaluate
+the join outside the relation field or needs public subscribable keys.
+
+Converting such an entity into a runtime GraphQL schema reports the private
+column as unsupported, as for any statically unreadable column. The ORM cannot
+see surfaces the host writes itself. Handwritten resolvers and object fields,
+custom roots, trusted `order_expression` SQL, repository helpers, search
+documents and host-owned `SimpleObject` getters on metadata-only entities can
+still read, order by or publish the column, and keeping them private is the
+host's responsibility. In particular, a `search_relation(fields = [...])` on
+another relation that copies a server-only key column into a search document
+defeats its privacy: searching for the value reveals which rows hold it. (A
+column declared searchable on its own entity is never certified server-only.)
+
+`tests/server_only_relation_keys.rs` runs the matrix on SQLite and test-owned
+PostgreSQL and SQL Server in every `AuthorizationMode`, over the loader and
+the direct path. The matrix includes a caller admitted to both rows of a
+cross-partition pair. `tests/ui/server_only_keys/` holds the compile-time
+refusals. The cross-crate fixture proves that a public alias in the target
+crate withdraws the column's certification.
 
 ## Conditional Polymorphic Relations
 

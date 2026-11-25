@@ -84,6 +84,54 @@ pub trait EntityRelations {
 pub trait GeneratedRelationReadability {
     /// Every persisted physical column and its static GraphQL readability.
     const COLUMNS: &'static [(&'static str, bool)];
+    /// Persisted physical columns with no generated GraphQL surface at all: not
+    /// readable, filterable, orderable, subscribable, accepted as input or part
+    /// of the primary key. Only these may be a relation's `server_only_key`
+    /// target. The default is empty, so a hand-written target fails closed.
+    const SERVER_ONLY_COLUMNS: &'static [&'static str] = &[];
+}
+
+/// Compare two unquoted physical column names, folding ASCII case unless
+/// `case_sensitive`.
+const fn generated_relation_column_name_eq(left: &str, right: &str, case_sensitive: bool) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut byte = 0;
+    while byte < left.len() {
+        let mut a = left[byte];
+        let mut b = right[byte];
+        if !case_sensitive {
+            a = a.to_ascii_lowercase();
+            b = b.to_ascii_lowercase();
+        }
+        if a != b {
+            return false;
+        }
+        byte += 1;
+    }
+    true
+}
+
+/// Check a relation's `server_only_key` target column at compile time: it must
+/// be declared server-only by the target's generated metadata. Unknown columns
+/// and every column with any GraphQL surface fail closed.
+#[doc(hidden)]
+pub const fn generated_relation_column_is_server_only(
+    columns: &[&str],
+    column: &str,
+    case_sensitive: bool,
+) -> bool {
+    let mut index = 0;
+    while index < columns.len() {
+        if generated_relation_column_name_eq(columns[index], column, case_sensitive) {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Check a generated relation's physical target column at compile time.

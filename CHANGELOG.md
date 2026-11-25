@@ -14,6 +14,25 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.218.0
+
+- **Added (#898).** A readable composite relation can declare
+  `server_only_key(from = "...", to = "...")` for a key pair whose target
+  column is server-only (`#[graphql_orm(private)]` with no other GraphQL
+  surface). Generated traversal still joins on the complete tuple, so a target
+  in another partition resolves to `null` or an empty list. The column stays
+  out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
+  with `filter`, `order_aggregate`, `search_relation` or upward propagation is
+  refused at compile time. So are floating-point and boolean key members,
+  targets with non-ASCII, over-long or `__gom_`-prefixed names, and a source
+  member that is skipped, read-transformed or decoded (JSON, date, boolean
+  field, decimal, spatial). A target column is refused when any field mapping
+  exposes it, however its name is spelled, or when it belongs to the primary
+  key. Batched loads of such a relation associate rows with their parent by
+  the database's match of the complete tuple, so they agree with the direct
+  query for every type and collation.
+  [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
+
 ## Unreleased - ORM/macros 0.217.0
 
 - **Security fix (#899).** Generated relations enforce every required assurance
