@@ -73,8 +73,8 @@ dependencies = [
 
 [[package]]
 name = "agql-auth"
-version = "0.26.0"
-source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.26.0#7d016f6a6bc3e697382e2e05865f596862189240"
+version = "0.27.0"
+source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.27.0#71a3acee5942bd5b6aac57dcaccbb6391b383880"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -83,10 +83,9 @@ dependencies = [
  "data-encoding",
  "futures-channel",
  "hmac",
- "jsonwebtoken 10.4.0",
+ "jsonwebtoken",
  "percent-encoding",
  "rand 0.8.6",
- "rsa",
  "serde",
  "serde_json",
  "sha1",
@@ -95,6 +94,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.217.0"
+version = "0.226.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2618,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.158.0"
+version = "0.167.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.29.0"
+version = "0.32.0"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.217.0"
+version = "0.226.0"
 dependencies = [
  "Inflector",
  "convert_case 0.7.1",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.14.0"
+version = "0.16.0"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.17.0"
+version = "0.19.0"
 dependencies = [
  "agql-auth",
  "arc-swap",
@@ -2703,7 +2703,7 @@ dependencies = [
  "graphql-composition",
  "graphql-orm-router-protocol",
  "hive-router",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken",
  "opentelemetry",
  "reqwest 0.13.4",
  "rustix",
@@ -3091,7 +3091,7 @@ dependencies = [
  "insta",
  "ipnet",
  "itoa",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken",
  "lasso2",
  "lazy-init",
  "lazy_static",
@@ -3903,30 +3903,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee0b351864e7ffbc5db9273daf7fa1b4d5177b0946713d667ca571b83c0b4045"
 dependencies = [
  "regex-syntax",
-]
-
-[[package]]
-name = "jsonwebtoken"
-version = "10.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
-dependencies = [
- "base64",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hmac",
- "js-sys",
- "p256",
- "p384",
- "pem",
- "rand 0.8.6",
- "rsa",
- "serde",
- "serde_json",
- "sha2",
- "signature",
- "simple_asn1",
- "zeroize",
 ]
 
 [[package]]

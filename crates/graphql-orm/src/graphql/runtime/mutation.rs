@@ -615,13 +615,14 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
     selections: &SelectionSet,
     root: &str,
     registry: &async_graphql::registry::Registry,
-    denied: super::execution::Denials,
+    mut denied: super::execution::Denials,
+    check_query_root: impl Fn(&str) -> async_graphql::Result<()> + Send + Sync,
 ) -> Result<super::execution::Results, RuntimeGraphqlError> {
     let mut prepared = BTreeMap::new();
     let mut projection_calls = 0usize;
     let response_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let relation_budget = Arc::new(super::execution::PayloadBudget::default());
-    for field in planner.selections(selections, root, 0)? {
+    'fields: for field in planner.selections(selections, root, 0)? {
         // A root refused by the assurance pre-pass gets no host read authorization.
         if denied.contains_key(field.response_key().node.as_str()) {
             continue;
@@ -638,10 +639,6 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                     if context.write_authority.is_none() || context.mutation_environment.is_none() {
                         return Err(RuntimeGraphqlError::new("authorization_missing"));
                     }
-                    // Before any host authority call or write.
-                    row_security
-                        .admit(module, context.mutation_environment.as_deref())
-                        .await?;
                     let args = planner.resolve(&field)?;
                     if context.fingerprint != module.schema.fingerprint()
                         || args.get("expectedSchema")
@@ -776,6 +773,17 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             }
                         }
                     }
+                    for child in &children {
+                        if let Err(error) = child.enforce_target_assurance(&check_query_root, true)
+                        {
+                            denied.insert(field.response_key().node.to_string(), error);
+                            continue 'fields;
+                        }
+                    }
+                    // Admission can read the database. Finish payload assurance first.
+                    row_security
+                        .admit(module, context.mutation_environment.as_deref())
+                        .await?;
                     projection_calls = projection_calls
                         .checked_add(projected.len())
                         .ok_or_else(invalid)?;

@@ -42,8 +42,9 @@ macro_rules! sqlx_backup_runtime {
             impl GraphqlOrmBackupRuntime for Database {
                 async fn begin_consistent_snapshot(&self) -> crate::Result<BackupSnapshot> {
                     self.ensure_backup_restore_allowed()?;
-                    let tx = begin_consistent_snapshot(self.pool()).await?;
-                    Ok(BackupSnapshot(SnapshotTransaction::$variant(tx)))
+                    let mut tx = begin_consistent_snapshot(self.pool()).await?;
+                    let start = canonical_key_epoch(&mut tx).await?;
+                    Ok(BackupSnapshot(SnapshotTransaction::$variant(tx), start))
                 }
 
                 fn backup_backend_capabilities(&self) -> BackupBackendCapabilities {
@@ -69,7 +70,7 @@ macro_rules! sqlx_backup_runtime {
                 ) -> crate::Result<Vec<BackupRow>> {
                     self.ensure_backup_restore_allowed()?;
                     match &mut snapshot.0 {
-                        SnapshotTransaction::$variant(tx) => export_table_rows(tx, entity).await,
+                        SnapshotTransaction::$variant(tx) => export_table_rows(tx, entity, snapshot.1.is_some()).await,
                         #[cfg(all(feature = "sqlite", feature = "postgres"))]
                         _ => Err(sqlx::Error::Protocol("backup snapshot backend does not match the database".into())),
                     }
@@ -163,9 +164,87 @@ macro_rules! sqlx_backup_runtime {
                     }
                 }
 
+                /// Switch the PostgreSQL journal resolved by this connection to canonical keys.
+                ///
+                /// First install the recorder as the owner, and stop writers, schema
+                /// changes, and backup workers. Take a new full snapshot before resuming
+                /// writes. Use the returned sequence as that snapshot's initial checkpoint
+                /// while writers remain stopped. Legacy entries stay in the journal.
+                /// Retrying a completed cutover returns the original sequence.
+                ///
+                /// # Errors
+                ///
+                /// Fails if the change-journal feature, managed journal, owner privileges,
+                /// or a supported key column type is missing.
+                #[cfg($postgres)]
+                pub async fn enable_canonical_change_journal_keys(&self) -> crate::Result<i64> {
+                    orm::ensure_sql_write_allowed()?;
+                    require_change_journal("canonical change journal keys require the graphql-orm change-journal feature")?;
+                    orm::journal_key::enable(self.pool()).await
+                }
+
+                /// Read the canonical key cutover sequence. Returns `None` on SQLite
+                /// or when PostgreSQL still uses legacy keys.
+                ///
+                /// # Errors
+                ///
+                /// Fails if the database cannot be read or the canonical recorder is altered.
+                pub async fn canonical_change_journal_start_sequence(&self) -> crate::Result<Option<i64>> {
+                    #[cfg($postgres)]
+                    {
+                        let mut tx = begin_consistent_snapshot(self.pool()).await?;
+                        let start = canonical_key_epoch(&mut tx).await?;
+                        tx.commit().await?;
+                        Ok(start)
+                    }
+                    #[cfg($sqlite)]
+                    Ok(None)
+                }
+
+                /// Read the live primary-key storage identity for a canonical chain.
+                ///
+                /// Bind this opaque identity to the backup schema hash. Returns `None`
+                /// for a legacy journal or on SQLite.
+                ///
+                /// # Errors
+                ///
+                /// Fails if the canonical recorder or any live key cannot be validated.
+                pub async fn canonical_key_storage_identity(
+                    &self,
+                    entities: &[EntityBackupDescriptor],
+                ) -> crate::Result<Option<String>> {
+                    #[cfg($postgres)]
+                    {
+                        let mut tx = begin_consistent_snapshot(self.pool()).await?;
+                        if canonical_key_epoch(&mut tx).await?.is_none() {
+                            return Ok(None);
+                        }
+                        // Relation OIDs can differ on a matching restore target.
+                        let mut keys = Vec::new();
+                        for entity in entities.iter().filter(|entity| entity.primary_key_columns.is_empty()) {
+                            let path = quote_table_identifier(&entity.table_name);
+                            let storage = orm::journal_key::key_type(&mut tx, &path, &entity.primary_key_column).await?;
+                            keys.push((&entity.table_name, &entity.primary_key_column, storage));
+                        }
+                        keys.sort_unstable();
+                        let identity = serde_json::to_string(&keys)
+                            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                        tx.commit().await?;
+                        Ok(Some(identity))
+                    }
+                    #[cfg($sqlite)]
+                    {
+                        let _ = entities;
+                        Ok(None)
+                    }
+                }
+
                 /// Export the change journal entries in `window`, in journal order.
                 ///
                 /// Each entry carries its journal position in [`BackupChange::sequence`].
+                /// A canonical PostgreSQL journal requires an explicit cursor at or
+                /// after the cutover sequence. Start from a fresh full backup and its
+                /// checkpoint.
                 /// To export incrementally, pass the last returned entry's position as
                 /// the next window's [`ChangeWindow::after_sequence`]. Consecutive exports
                 /// then return every entry exactly once: positions are assigned by the
@@ -276,6 +355,7 @@ macro_rules! sqlx_backup_runtime {
                 // together. Any error drops the transaction, which rolls all of it back,
                 // so a failed restore leaves the target as it was.
                 let mut restore = begin_restore_transaction(database.pool()).await?;
+                let canonical_keys = canonical_key_epoch(&mut restore).await?.is_some();
                 for entity in &entities {
                     let count = table_row_count_on(&mut restore, &entity.table_name).await?;
                     if count != 0 {
@@ -287,7 +367,7 @@ macro_rules! sqlx_backup_runtime {
                 }
                 for entity in &entities {
                     let rows = rows_by_table.get(&entity.table_name).unwrap_or(&empty_rows);
-                    reports.push(import_table_rows_on(&mut restore, entity, rows).await?);
+                    reports.push(import_table_rows_on(&mut restore, entity, rows, canonical_keys).await?);
                 }
                 // The restored rows replace whatever a runtime search index was built
                 // from. Clear each restored table's readiness-tracked index and leave it
@@ -694,6 +774,17 @@ macro_rules! sqlx_backup_runtime {
                         return Err(missing_change_journal_sequence());
                     }
                 }
+                // Serialize epoch selection with cutover, without blocking journal writes.
+                sqlx::query(&format!("LOCK TABLE {journal} IN ACCESS SHARE MODE"))
+                    .execute(&mut *tx)
+                    .await?;
+                if let Some(start) = orm::journal_key::epoch(&mut tx).await?
+                    && window.after_sequence.unwrap_or(0) < start
+                {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "change journal cursor predates the canonical key cutover at sequence {start}; start from a new full backup"
+                    )));
+                }
                 let after = window.after_sequence.unwrap_or(0);
                 let high_water: Option<i64> = sqlx::query_scalar(&format!(
                     "SELECT pg_catalog.max({CHANGE_JOURNAL_SEQUENCE_COLUMN}) FROM {journal}"
@@ -753,17 +844,47 @@ macro_rules! sqlx_backup_runtime {
                 }
             }
 
+            async fn canonical_key_epoch(tx: &mut Tx<'_>) -> crate::Result<Option<i64>> {
+                #[cfg($postgres)]
+                {
+                    orm::journal_key::epoch(tx).await
+                }
+                #[cfg($sqlite)]
+                {
+                    let _ = tx;
+                    Ok(None)
+                }
+            }
+
             async fn export_table_rows(
                 snapshot: &mut Tx<'_>,
                 entity: &EntityBackupDescriptor,
+                canonical_keys: bool,
             ) -> crate::Result<Vec<BackupRow>> {
                 let export_columns = export_columns(entity);
-                let select_columns = export_columns
+                #[cfg_attr($sqlite, allow(unused_mut))]
+                let mut select_columns = export_columns
                     .iter()
                     .map(|column| quote_identifier(&column.column_name))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let key_columns = validated_key_columns(entity)?;
+                #[cfg($sqlite)]
+                let _ = canonical_keys;
+                #[cfg($postgres)]
+                let canonical = canonical_keys && key_columns.len() == 1;
+                #[cfg($postgres)]
+                if canonical {
+                    let table = quote_table_identifier(&entity.table_name);
+                    sqlx::query(&format!("LOCK TABLE {table} IN ACCESS SHARE MODE"))
+                        .execute(&mut **snapshot)
+                        .await?;
+                    orm::journal_key::key_type(snapshot, &table, key_columns[0]).await?;
+                    select_columns.push_str(", ");
+                    select_columns.push_str(&orm::journal_key::projection(&quote_identifier(
+                        key_columns[0],
+                    )));
+                }
                 let sql = format!(
                     "SELECT {} FROM {} ORDER BY {}",
                     select_columns,
@@ -790,6 +911,20 @@ macro_rules! sqlx_backup_runtime {
                         values.insert(column.column_name.clone(), value);
                     }
 
+                    #[cfg($postgres)]
+                    let primary_key = if canonical {
+                        if matches!(values.get(key_columns[0]), Some(BackupValue::Float(value)) if !value.is_finite())
+                        {
+                            return Err(sqlx::Error::Protocol(format!(
+                                "backup cannot restore a non-finite float primary key in {}",
+                                entity.table_name
+                            )));
+                        }
+                        row.try_get(export_columns.len())?
+                    } else {
+                        row_identity(entity, &key_columns, &values)?
+                    };
+                    #[cfg($sqlite)]
                     let primary_key = row_identity(entity, &key_columns, &values)?;
                     let row_hash = canonical_row_hash(&entity.table_name, &values);
                     out.push(BackupRow {
@@ -827,7 +962,8 @@ macro_rules! sqlx_backup_runtime {
 
                 validate_import_rows(entity, rows)?;
                 let mut restore = begin_restore_transaction(pool).await?;
-                let report = import_table_rows_on(&mut restore, entity, rows).await?;
+                let canonical_keys = canonical_key_epoch(&mut restore).await?.is_some();
+                let report = import_table_rows_on(&mut restore, entity, rows, canonical_keys).await?;
                 restore.commit().await?;
                 Ok(report)
             }
@@ -855,6 +991,7 @@ macro_rules! sqlx_backup_runtime {
                 restore: &mut Tx<'_>,
                 entity: &EntityBackupDescriptor,
                 rows: &[BackupRow],
+                canonical_keys: bool,
             ) -> crate::Result<ImportReport> {
                 let tx = &mut *restore;
                 let count = table_row_count_on(tx, &entity.table_name).await?;
@@ -883,7 +1020,7 @@ macro_rules! sqlx_backup_runtime {
                     placeholder_sql
                 );
 
-                let order = import_row_order(entity, rows)?;
+                let order = import_row_order(entity, rows, canonical_keys)?;
                 let stored = |row: &BackupRow, column: &orm::ColumnBackupDescriptor| {
                     backup_value_to_sql_value(
                         row.values.get(&column.column_name).ok_or_else(|| {
@@ -990,7 +1127,7 @@ macro_rules! sqlx_backup_runtime {
 
                 // Read the rows back in the same transaction, so a mismatch rolls the
                 // import back instead of leaving it committed.
-                let exported = export_table_rows(restore, entity).await?;
+                let exported = export_table_rows(restore, entity, canonical_keys).await?;
                 let expected_hashes = rows
                     .iter()
                     .map(|row| (row.primary_key.as_str(), row.row_hash.as_str()))

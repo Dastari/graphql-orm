@@ -838,6 +838,7 @@ fn render_secure_relation(regclass_literal: &str, before: &str, what: &str) -> S
 pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]) -> Vec<String> {
     let registry_literal = sql_string_literal(CHANGE_JOURNAL_REGISTRY);
     let mut statements = vec![
+        super::journal_key::ADMIN_LOCK.to_string(),
         "CREATE SCHEMA IF NOT EXISTS graphql_orm".to_string(),
         // Every journaling role reads the registry and calls the helpers here.
         // Nothing in the schema is writable or callable through this grant:
@@ -856,9 +857,7 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
         format!(
             "DELETE FROM {CHANGE_JOURNAL_REGISTRY} r WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) r.relid::pg_catalog.oid)"
         ),
-        format!(
-            "CREATE OR REPLACE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $graphql_orm${CHANGE_JOURNAL_FUNCTION_BODY}$graphql_orm$"
-        ),
+        super::journal_key::recorder_install_sql(),
         format!("REVOKE ALL ON FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() FROM PUBLIC"),
         format!(
             "DO $graphql_orm$ DECLARE recorder pg_catalog.regprocedure := pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()'); grantee_name pg_catalog.text; BEGIN \
@@ -933,16 +932,18 @@ fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
          ON CONFLICT (journal_schema, declared_table) DO UPDATE SET entity_name = EXCLUDED.entity_name, key_column = EXCLUDED.key_column, relid = EXCLUDED.relid; \
          EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {trigger_name}, target); \
          EXECUTE pg_catalog.format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L, %L, %L)', {trigger_name}, target, journal_ns, target_ns, target_rel, {entity}, {table_name}, {key}, {encoding}); \
+         {canonical_type_check} \
          EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {truncate_trigger}, target); \
          EXECUTE pg_catalog.format('CREATE TRIGGER %I BEFORE TRUNCATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_TRUNCATE_FUNCTION}()', {truncate_trigger}, target); \
          END $graphql_orm$",
+        canonical_type_check = super::journal_key::install_type_check(&key),
         trigger_name = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
         truncate_trigger = sql_string_literal(CHANGE_JOURNAL_TRUNCATE_TRIGGER),
         base_literal = sql_string_literal(&base),
     )
 }
 
-fn sql_string_literal(value: &str) -> String {
+pub(super) fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
@@ -2015,7 +2016,8 @@ pub(crate) fn validate_change_journal(
         .change_journal_function
         .as_ref()
         .is_some_and(|function| {
-            function.body == CHANGE_JOURNAL_FUNCTION_BODY
+            (function.body == CHANGE_JOURNAL_FUNCTION_BODY
+                || function.body == super::journal_key::recorder_body())
                 && function.config == [CHANGE_JOURNAL_FUNCTION_CONFIG]
                 && function.security_definer
         });

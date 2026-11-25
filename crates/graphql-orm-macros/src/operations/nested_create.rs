@@ -603,9 +603,10 @@ impl Child<'_> {
                     );
                     let ctx = &ctx.with_field(&field);
                     #resolver_access
-                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                        #create_mutation_name,
                     )?;
                     #entity_access
                     let __gom_nested = true;

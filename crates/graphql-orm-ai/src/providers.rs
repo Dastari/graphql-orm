@@ -111,11 +111,11 @@ pub use ollama::{OllamaProvider, OllamaProviderConfig};
 #[cfg(feature = "provider-codex-app-server")]
 pub use codex_app_server::{
     AI_CODEX_APP_SERVER_PROTOCOL_V2, AiCodexAppServerBootstrapInstructions,
-    AiCodexAppServerInbound, AiCodexAppServerLaunchProfile, AiCodexAppServerLaunchedProcess,
-    AiCodexAppServerModelToolMode, AiCodexAppServerProtocolActor, AiCodexAppServerProvider,
-    AiCodexAppServerRegistration, AiCodexAppServerRunLimits, AiCodexAppServerRunPool,
-    AiCodexAppServerRunProcess, AiCodexAppServerRunProcessFactory, AiCodexAppServerTurnInput,
-    AiCodexAppServerWebSearchTurnConfig,
+    AiCodexAppServerDispatchTurn, AiCodexAppServerInbound, AiCodexAppServerLaunchProfile,
+    AiCodexAppServerLaunchedProcess, AiCodexAppServerModelToolMode, AiCodexAppServerProtocolActor,
+    AiCodexAppServerProvider, AiCodexAppServerRegistration, AiCodexAppServerRunLimits,
+    AiCodexAppServerRunPool, AiCodexAppServerRunProcess, AiCodexAppServerRunProcessFactory,
+    AiCodexAppServerTurnInput, AiCodexAppServerWebSearchTurnConfig,
 };
 
 #[cfg(feature = "provider-grok-acp")]

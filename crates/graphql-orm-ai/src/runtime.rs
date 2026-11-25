@@ -249,6 +249,7 @@ pub struct AiPreparedGraphqlMutation {
     execution_policy: AiMutationExecutionPolicy,
     capability_fingerprint: String,
     plan_fingerprint: String,
+    argument_hash: String,
     descriptor: AiToolDescriptor,
     disclosure_schema: crate::AiDisclosureSchema,
     request: ToolGraphqlRequest,
@@ -268,6 +269,17 @@ impl AiPreparedGraphqlMutation {
     /// Returns the exact closed-plan fingerprint.
     pub fn plan_fingerprint(&self) -> &str {
         &self.plan_fingerprint
+    }
+
+    /// Returns the canonical SHA-256 digest of the complete provider plan that
+    /// produced this mutation, as defined by [`crate::canonical_json_hash`].
+    ///
+    /// Use this digest as [`AiApprovalBinding::argument_hash`]. The approval
+    /// also binds the exact compiled operation contract, capability and
+    /// principal. The runtime derives the variables from the plan during
+    /// preparation and exposes the compiled request through a shared reference.
+    pub fn argument_hash(&self) -> &str {
+        &self.argument_hash
     }
 
     /// Returns the compiled execution descriptor.
@@ -753,6 +765,7 @@ impl AiRuntime {
         if !self.start_gate.is_ready() {
             return Err(AiError::RuntimeNotReady);
         }
+        let argument_hash = crate::canonical_json_hash(&plan);
         let compiled = self.tool_catalog.compile_mutation_capability(
             capability_id,
             capability_fingerprint,
@@ -789,6 +802,7 @@ impl AiRuntime {
             execution_policy,
             capability_fingerprint: compiled_capability_fingerprint,
             plan_fingerprint,
+            argument_hash,
             descriptor,
             disclosure_schema,
             request,
@@ -1263,7 +1277,8 @@ impl AiRuntime {
     }
 
     /// Calls a registered provider only after start readiness and exact egress
-    /// authorization.
+    /// authorization. Entity references permanently use unavailable markers,
+    /// as in [`Self::dispatch_provider`].
     pub async fn stream_provider(
         &self,
         provider_kind: &ProviderKind,
@@ -1283,10 +1298,9 @@ impl AiRuntime {
     /// Dispatches a provider request while preserving whether failure occurred
     /// before or after the transport uncertainty boundary.
     ///
-    /// This entry point resolves no entity reference: each one in `request`
-    /// is sent as the unavailable marker. Only
-    /// `AiProviderCallExecutor` and the background-submission
-    /// service resolve references, for the principal they rehydrate.
+    /// Entity references permanently use unavailable markers on this direct
+    /// path because it has no rehydrated run principal. Use
+    /// [`crate::AiProviderCallExecutor`] for current-principal resolution.
     pub async fn dispatch_provider(
         &self,
         provider_kind: &ProviderKind,
@@ -1428,7 +1442,8 @@ impl AiRuntime {
     ///
     /// The responder is authority only for the exact current tool request and
     /// remains outside the provider process. Ordinary providers fail closed
-    /// through their default implementation.
+    /// through their default implementation. Entity references permanently
+    /// use unavailable markers, as in [`Self::dispatch_provider`].
     ///
     /// # Errors
     ///
@@ -1451,8 +1466,9 @@ impl AiRuntime {
         }
     }
 
-    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. It resolves
-    /// no entity reference either.
+    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. Entity
+    /// references permanently use unavailable markers because the responder
+    /// grants no run principal for inference.
     pub async fn dispatch_provider_with_dynamic_tools(
         &self,
         provider_kind: &ProviderKind,
@@ -1758,8 +1774,9 @@ impl AiRuntime {
     /// Starts a registered provider background response after runtime,
     /// capability, budget, and exact egress validation.
     ///
-    /// This entry point resolves no entity reference: each one in `request`
-    /// is sent as the unavailable marker.
+    /// Entity references permanently use unavailable markers because this
+    /// API has no rehydrated run principal. The ORM background-submission
+    /// service resolves references after rehydrating and authorizing the run.
     ///
     /// # Errors
     ///
@@ -1849,7 +1866,8 @@ fn approved_prepared_mutation_matches(
     approval: &ConsumedAiApproval,
     binding: &AiApprovalBinding,
 ) -> bool {
-    approved_static_request_matches(principal_reference, &prepared.request, binding)
+    approved_request_binding_matches(principal_reference, &prepared.request, binding)
+        && prepared.argument_hash() == binding.argument_hash
         && prepared.execution_policy == AiMutationExecutionPolicy::ApprovalRequired
         && approval.binding_hash() == binding.stable_hash()
         && !approval.approval_id().0.is_nil()
@@ -1873,13 +1891,21 @@ fn approved_static_request_matches(
     request: &ToolGraphqlRequest,
     binding: &AiApprovalBinding,
 ) -> bool {
+    approved_request_binding_matches(principal_reference, request, binding)
+        && crate::tools::canonical_json_digest(&request.variables) == binding.argument_hash
+}
+
+fn approved_request_binding_matches(
+    principal_reference: &PrincipalReference,
+    request: &ToolGraphqlRequest,
+    binding: &AiApprovalBinding,
+) -> bool {
     request.invocation.tool_call_id == binding.tool_call_id
         && request.invocation.scope == binding.scope
         && request.invocation.delegation_reference == binding.delegation_reference
         && principal_reference.actor_subject == binding.delegated_actor_subject
         && AiApprovalBinding::principal_fingerprint(principal_reference)
             == binding.principal_reference_fingerprint
-        && crate::tools::canonical_json_digest(&request.variables) == binding.argument_hash
 }
 
 pub(crate) fn is_automatic_application_mutation(descriptor: &AiToolDescriptor) -> bool {
@@ -1978,6 +2004,7 @@ mod mutation_binding_tests {
             capability_fingerprint: CAPABILITY_FINGERPRINT.to_owned(),
             plan_fingerprint: "3333333333333333333333333333333333333333333333333333333333333333"
                 .to_owned(),
+            argument_hash: crate::canonical_json_hash(&json!({"plan": "test"})),
             descriptor,
             disclosure_schema: AiDisclosureSchema::new(
                 "test-v1",
@@ -2064,7 +2091,7 @@ mod mutation_binding_tests {
     }
 
     #[test]
-    fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
+    fn dynamic_approval_binds_exact_plan_capability_operation_and_principal() {
         let compiled_operation = operation("UpdateInventory");
         let prepared = prepared(compiled_operation.clone());
         let reference: PrincipalReference = serde_json::from_value(json!({
@@ -2073,7 +2100,7 @@ mod mutation_binding_tests {
         .unwrap();
         let mut binding = binding(compiled_operation);
         binding.tool_call_id = prepared.request.invocation.tool_call_id;
-        binding.argument_hash = crate::tools::canonical_json_digest(&prepared.request.variables);
+        binding.argument_hash = prepared.argument_hash().to_owned();
         binding.principal_reference_fingerprint =
             AiApprovalBinding::principal_fingerprint(&reference);
         let approval = consumed(&binding);
@@ -2086,7 +2113,9 @@ mod mutation_binding_tests {
             changed.request = prepared.request.clone();
             let mut principal = reference.clone();
             match change {
-                0 => changed.request.variables = json!({"impact": "different"}),
+                0 => {
+                    changed.argument_hash = crate::canonical_json_hash(&json!({"plan": "changed"}))
+                }
                 1 => changed.request.invocation.tool_call_id = AiToolCallId::new(),
                 2 => changed.request.invocation.scope = AiScope::new("tenant", "other"),
                 3 => principal.subject = "other".to_owned(),

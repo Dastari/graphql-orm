@@ -225,13 +225,18 @@ impl ChatCompletionsProvider {
     /// Returns [`ProviderError::InvalidConfiguration`] for an unsafe or denied
     /// endpoint, invalid profile, retention, capability or timeout data, or an
     /// HTTP client construction failure.
+    /// Returns [`ProviderError::InvalidEndpointPath`] when the path
+    /// does not meet this adapter's requirement.
     pub fn new(
         config: ChatCompletionsProviderConfig,
         endpoint_policy: Arc<dyn AiProviderEndpointPolicy>,
         secrets: Arc<dyn AiSecretStore>,
     ) -> Result<Self, ProviderError> {
         validate_config(&config)?;
-        let endpoint = super::endpoint::normalized_provider_endpoint(&config.endpoint)?;
+        let endpoint = super::endpoint::normalized_provider_endpoint(
+            &config.endpoint,
+            AiProviderKindInput::ChatCompletions,
+        )?;
         let endpoint_guard = super::endpoint::ProviderEndpointGuard::authorize(
             endpoint_policy,
             AiProviderKindInput::ChatCompletions,

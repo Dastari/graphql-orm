@@ -160,7 +160,7 @@ pub(in crate::operations) fn create(
     };
     let write_row = |check_binding: TokenStream| {
         quote! {
-                    hook_ctx.run_mutation_hook(
+                    hook_ctx.__run_generated_mutation_hook(
                         ::std::option::Option::Some(ctx),
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
@@ -191,7 +191,7 @@ pub(in crate::operations) fn create(
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     );
 
-                    hook_ctx.run_mutation_hook(
+                    hook_ctx.__run_generated_mutation_hook(
                         ::std::option::Option::Some(ctx),
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::After,

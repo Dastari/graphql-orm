@@ -73,6 +73,36 @@ pub(super) struct Plan {
     pub filter_binding: Option<Vec<u8>>,
 }
 impl Plan {
+    /// Check the query roots for collections this plan reaches indirectly.
+    /// Runtime collections currently expose one query root, their list.
+    pub(super) fn enforce_target_assurance(
+        &self,
+        check_query_root: &impl Fn(&str) -> async_graphql::Result<()>,
+        include_collection: bool,
+    ) -> async_graphql::Result<()> {
+        let check_collection = |collection: &RuntimeCollectionHandle| {
+            let metadata = self
+                .module
+                .schema
+                .schema()
+                .collections
+                .iter()
+                .find(|c| &c.id == collection.id())
+                .ok_or_else(|| super::execution::coded_error("invalid_graphql_input"))?;
+            check_query_root(&self.module.root_name(metadata))
+        };
+        if include_collection {
+            check_collection(&self.collection)?;
+        }
+        for site in &self.relation_sites {
+            check_collection(&site.collection)?;
+        }
+        for child in &self.children {
+            child.enforce_target_assurance(check_query_root, true)?;
+        }
+        Ok(())
+    }
+
     pub fn relations(&self) -> Vec<RuntimeRelationHandle> {
         let mut result = Vec::new();
         for child in &self.children {

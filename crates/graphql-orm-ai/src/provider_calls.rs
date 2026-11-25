@@ -6387,6 +6387,7 @@ mod tests {
             let record_id = request
                 .variables
                 .get("recordId")
+                .or_else(|| request.variables.pointer("/v0/subject"))
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| AiError::InvalidInput("record ID is missing".to_owned()))?;
             Ok(AiCanonicalActionPreview {
@@ -6859,8 +6860,9 @@ mod tests {
         type Record { recordId: ID!, subject: String! }
     "#;
 
-    fn automatic_mutation_catalog() -> (GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog)
-    {
+    fn generated_mutation_catalog(
+        execution_policy: AiMutationExecutionPolicy,
+    ) -> (GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog) {
         let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
             field_name: field_name.to_owned(),
             description: format!("Reviewed public {field_name}."),
@@ -6907,8 +6909,8 @@ mod tests {
             true,
         )
         .expect("test mutation semantics should validate")
-        .with_ai_mutation_execution(AiMutationExecutionPolicy::Automatic)
-        .expect("automatic classification should validate");
+        .with_ai_mutation_execution(execution_policy)
+        .expect("mutation classification should validate");
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [entity],
             &GraphqlOperationCatalog::compose(std::iter::empty()),
@@ -7200,7 +7202,7 @@ mod tests {
         fixture_with_optional_provider_and_automatic_static_with_start(
             mock,
             access_policy,
-            include_static_tools,
+            (!include_static_tools).then_some(AiMutationExecutionPolicy::Automatic),
             provider,
             automatic_static,
             true,
@@ -7211,11 +7213,12 @@ mod tests {
     async fn fixture_with_optional_provider_and_automatic_static_with_start(
         mock: MockProvider,
         access_policy: Arc<dyn AiAccessPolicy>,
-        include_static_tools: bool,
+        generated_mutation_policy: Option<AiMutationExecutionPolicy>,
         provider: Option<Arc<dyn crate::AiProvider>>,
         automatic_static: bool,
         start: bool,
     ) -> Fixture {
+        let include_static_tools = generated_mutation_policy.is_none();
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -7547,8 +7550,9 @@ mod tests {
         let mut automatic_mutation_id = None;
         let mut automatic_mutation_fingerprint = None;
         let mut automatic_schema_fingerprint = None;
-        if !include_static_tools {
-            let (mutation_semantics, mutation_catalog) = automatic_mutation_catalog();
+        if let Some(execution_policy) = generated_mutation_policy {
+            let (mutation_semantics, mutation_catalog) =
+                generated_mutation_catalog(execution_policy);
             let automatic_mutation = mutation_catalog
                 .capabilities()
                 .next()
@@ -7557,16 +7561,19 @@ mod tests {
             automatic_mutation_fingerprint = Some(automatic_mutation.fingerprint().to_owned());
             automatic_schema_fingerprint =
                 Some(mutation_catalog.finished_schema_fingerprint().to_owned());
+            let binding = AiGeneratedGraphqlTargetPolicyBinding::new(
+                automatic_mutation.target_id().clone(),
+                mutation_catalog.finished_schema_fingerprint(),
+                mutation_semantics.fingerprint.clone(),
+            )
+            .expect("generated target binding should validate");
             generated_target_policy
-                .bind(
-                    AiGeneratedGraphqlTargetPolicyBinding::new(
-                        automatic_mutation.target_id().clone(),
-                        mutation_catalog.finished_schema_fingerprint(),
-                        mutation_semantics.fingerprint.clone(),
-                    )
-                    .expect("generated target binding should validate")
-                    .allow_automatic_mutations(),
-                )
+                .bind(match execution_policy {
+                    AiMutationExecutionPolicy::ApprovalRequired => {
+                        binding.allow_approval_required_mutations()
+                    }
+                    _ => binding.allow_automatic_mutations(),
+                })
                 .expect("generated target should bind once");
             tool_catalog
                 .register_mutation_capability_catalog(&mutation_catalog)
@@ -8047,6 +8054,76 @@ mod tests {
                     requested.approval_id(),
                     requested.tool_call_id(),
                     automatic_mutation_route()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_approval_required_generated_mutation_executes_once_after_approval() {
+        let fixture = fixture_with_optional_provider_and_automatic_static_with_start(
+            MockProvider::new(Vec::new()),
+            Arc::new(AllowAccess),
+            Some(AiMutationExecutionPolicy::ApprovalRequired),
+            None,
+            false,
+            true,
+        )
+        .await;
+        let result =
+            commit_broker_provider_budget(&fixture, automatic_mutation_result(&fixture)).await;
+        let (service, approvals) = consequential_test_service(&fixture);
+        let requested = service
+            .request_approval(
+                &fixture.lease,
+                &result,
+                automatic_mutation_context(&fixture),
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .expect("direct approval request");
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        approvals
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: approval.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: approval.row_version,
+                },
+            )
+            .await
+            .expect("approve");
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        let outcome = service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                automatic_mutation_route(),
+            )
+            .await
+            .expect("approved execution");
+        assert!(
+            outcome
+                .persisted()
+                .is_some_and(|call| call.state() == AiApplicationToolCallState::Completed),
+            "approved generated mutation did not complete: {outcome:?}"
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        assert!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    automatic_mutation_route(),
                 )
                 .await
                 .is_err()
@@ -11848,6 +11925,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: Vec::new(),
                 allowed_acr: Vec::new(),
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: agql_auth::AssuranceMatchMode::All,
             },
             Arc::new(ProtectionPolicy),
@@ -17656,6 +17735,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: Vec::new(),
                 allowed_acr: Vec::new(),
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: agql_auth::AssuranceMatchMode::All,
             },
             Arc::new(ProtectionPolicy),
@@ -17994,6 +18075,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: Vec::new(),
                 allowed_acr: Vec::new(),
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: agql_auth::AssuranceMatchMode::All,
             },
             Arc::new(ProtectionPolicy),

@@ -212,12 +212,13 @@ A partial index counts as a closed-set predicate only when all of the following 
 - every operator, function, type and collation that `pg_catalog.pg_depend` records for the index
   belongs to `pg_catalog` (PostgreSQL does not record its own pinned built-in objects, so a
   catalog-only index usually has no such rows);
-- its predicate renders in the closed-set form.
+- its predicate renders in the closed-set form, including PostgreSQL's canonical
+  single-value equality against a `text` literal.
 
-Introspection reports any other partial index without a predicate, and runtime migrations refuse
-it. A session whose `search_path` lists another schema ahead of `pg_catalog` with an operator of the
-same signature, or with a type named `text`, sees the catalog's operator or type rendered
-schema-qualified, so such an index is reported without a predicate in that session too.
+Introspection retains any other partial-index predicate as opaque, and runtime migrations refuse
+to recreate it. A session whose `search_path` lists another schema ahead of `pg_catalog` with an
+operator of the same signature, or with a type named `text`, sees the catalog's operator or type
+rendered schema-qualified, so such a predicate is opaque in that session too.
 
 The plan's own `DO` blocks name catalog objects and operators with their schema too. These are the
 change journal's RLS statement, privilege revocation, the trigger installers, stray-trigger
@@ -435,14 +436,46 @@ doubling the cost of parsing floats. Store values that must be exact beyond
 
 ### Search performance
 
-PostgreSQL evaluates row-security quals before non-leakproof operators, and the full-text match
-operator `@@` is not leakproof. With the search document policy in place PostgreSQL can no longer
-use the GIN index for a search on an RLS entity: each search scans the search document table and
-probes the base primary key per document. In a disposable-container measurement with 200,000
-documents across ten tenants, a selective search went from about 8 ms to about 470 ms, and a broad
-one from about 85 ms to about 430 ms. Searches on entities without `#[graphql_rls]` are unchanged.
-Plan capacity accordingly for large RLS search tables. An index-preserving design is tracked in
-[#555](https://github.com/Dastari/graphql-orm/issues/555).
+For generated `#[graphql_rls]` entities with an unqualified, column-based
+default sort, native search projects the document key from visible base rows
+after applying caller filters. PostgreSQL can use the resulting text equality
+to probe the document primary-key B-tree or join the documents in bulk. The
+planner can still choose per-row probes at broad partial visibility, even
+when a bulk join would execute faster. Both plans enforce the base and
+document RLS policies. Default sort expressions that need the original table scope
+keep the direct join.
+
+The document-vector GIN index does not serve RLS searches. PostgreSQL keeps
+the non-leakproof full-text operator `@@` behind the document policy. With
+broad visibility, searches can still scan the document table even when the
+term matches few rows. Tables without document RLS can still use GIN.
+
+In an owned PostgreSQL 17 benchmark with 200,000 documents across ten
+tenants, both RLS policies were active. These are median execution times for
+four runs per query, with a 20-row page and a separate total-count query.
+
+| Visibility | Term | Page, legacy → new | Count, legacy → new |
+| --- | --- | ---: | ---: |
+| 10% | Selective | 318.0 → 86.5 ms | 276.1 → 79.4 ms |
+| 10% | Common | 394.9 → 228.6 ms | 195.5 → 79.9 ms |
+| Full | Selective | 232.9 → 256.2 ms | 205.6 → 222.9 ms |
+| Full | Common | 370.0 → 352.7 ms | 251.8 → 238.0 ms |
+
+The selective tenant query used a document primary-key index condition.
+The full-visibility queries in this benchmark used a hash join and scanned
+documents.
+
+A separate 200,000-row benchmark measured broad partial visibility. The
+table reports the best of three runs per query. In that benchmark PostgreSQL
+favored per-row probes until about 90–95% estimated visibility, while a hash
+join was faster from about 50%. The cutoff depends on the planner's estimates.
+
+| Visibility | Term | Page, legacy → new | Count, legacy → new |
+| --- | --- | ---: | ---: |
+| 50% | Selective | 291 → 387 ms | 281 → 333 ms |
+| 50% | Common | 280 → 418 ms | 253 → 374 ms |
+| 90% | Selective | 366 → 580 ms | 342 → 536 ms |
+| 90% | Common | 422 → 628 ms | 300 → 546 ms |
 
 Use a separate runtime database role without superuser, `BYPASSRLS`, or inherited
 table-owner privileges. The schema owner applies the plan; the runtime role needs

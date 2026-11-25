@@ -323,7 +323,7 @@ impl RowBoundFilter {
             sql: RowBoundSql {
                 pieces: vec![RowPiece::Rendered(renderer)],
             },
-            values,
+            values: values.into_iter().map(SqlValue::into_policy_bind).collect(),
         })
     }
 }
@@ -1039,7 +1039,11 @@ fn handwritten_policy(
             *bound &= clause_bound;
             Policy::Sql {
                 sql,
-                values: values.clone(),
+                values: values
+                    .iter()
+                    .cloned()
+                    .map(SqlValue::into_policy_bind)
+                    .collect(),
             }
         }
         FilterExpression::And(children) => Policy::And(
@@ -2333,7 +2337,10 @@ impl ReadPredicate {
             entity,
             backend,
             table,
-            policy: Policy::Sql { sql, values },
+            policy: Policy::Sql {
+                sql,
+                values: values.into_iter().map(SqlValue::into_policy_bind).collect(),
+            },
             unbound: false,
             column_tests_only: false,
             cost,
@@ -4100,11 +4107,25 @@ where
         before: bool,
         inclusive: bool,
     ) -> async_graphql::Result<Self> {
-        let (mut clause, mut binds) = if before {
-            render_keyset_before(B::DIALECT, order, values, self.values.len() + 1)
+        let parameter_type = |column: &str| {
+            if B::DIALECT == DatabaseBackend::Mssql {
+                mssql_parameter_type::<T>(column)
+            } else {
+                None
+            }
+        };
+        let render = if before {
+            super::query::render_keyset_before_with_types
         } else {
-            render_keyset_after(B::DIALECT, order, values, self.values.len() + 1)
-        }
+            super::query::render_keyset_after_with_types
+        };
+        let (mut clause, mut binds) = render(
+            B::DIALECT,
+            order,
+            values,
+            self.values.len() + 1,
+            parameter_type,
+        )
         .map_err(|e| e.into_graphql_error())?;
         if inclusive {
             let mut equal = Vec::new();
@@ -4117,7 +4138,11 @@ where
                         column.column,
                         B::DIALECT.placeholder(self.values.len() + binds.len() + 1)
                     ));
-                    binds.push(super::keyset_sql_value(value).ok_or_else(input_error)?);
+                    binds.push(
+                        super::keyset_sql_value(value)
+                            .ok_or_else(input_error)?
+                            .with_mssql_type(parameter_type(column.column).unwrap_or("")),
+                    );
                 }
             }
             clause = format!("({clause}) OR ({})", equal.join(" AND "));
@@ -4607,6 +4632,28 @@ mod predicate_tests {
             }
             FilterExpression::Or(children) => Policy::Or(children.iter().map(raw_policy).collect()),
         }
+    }
+
+    #[test]
+    fn generated_policy_drops_comparison_type_hints() {
+        let policy = RowBoundFilter::new(|row| {
+            (
+                vec![
+                    format!("{row}.[code] = @P1"),
+                    format!("{row}.[ordinal] = @P2"),
+                ],
+                vec![
+                    SqlValue::mssql_varchar_comparison("item-42".into(), "VARCHAR(32)"),
+                    SqlValue::Int(42).with_mssql_type("SMALLINT"),
+                ],
+            )
+        })
+        .policy(DatabaseBackend::Mssql)
+        .unwrap();
+        assert_eq!(
+            policy.flatten().1,
+            vec![SqlValue::String("item-42".into()), SqlValue::Int(42)]
+        );
     }
 
     const BACKENDS: [DatabaseBackend; 3] = [

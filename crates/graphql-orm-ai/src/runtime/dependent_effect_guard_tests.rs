@@ -681,7 +681,7 @@ impl Fixture {
             session_id: AiSessionId(Uuid::new_v4()),
             scope: prepared.request.invocation.scope.clone(),
             tool_fingerprint: prepared.capability_fingerprint.clone(),
-            argument_hash: crate::tools::canonical_json_digest(&prepared.request.variables),
+            argument_hash: prepared.argument_hash().to_owned(),
             operation: prepared
                 .descriptor
                 .graphql_contract

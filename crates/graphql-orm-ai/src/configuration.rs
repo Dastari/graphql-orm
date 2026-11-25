@@ -110,8 +110,8 @@ pub(crate) enum ProviderEndpointError {
 }
 
 /// Parses the endpoint shape shared by every configurable provider: `http`
-/// or `https`, a host, and no user information, query or fragment. Path rules
-/// stay with each caller.
+/// or `https`, a host, and no user information, query or fragment. The
+/// adapter path contract is checked separately.
 pub(crate) fn parse_provider_endpoint(value: &str) -> Result<url::Url, ProviderEndpointError> {
     let mut url = url::Url::parse(value).map_err(|_| ProviderEndpointError::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
@@ -186,7 +186,39 @@ pub enum AiProviderKindInput {
     ChatCompletions,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderEndpointPathContract {
+    Origin,
+    Exact,
+}
+
+impl ProviderEndpointPathContract {
+    pub(crate) fn validate(self, url: &url::Url) -> Result<(), crate::AiProviderEndpointPathError> {
+        use crate::AiProviderEndpointPathError;
+
+        let path = url.path();
+        let root = matches!(path, "" | "/");
+        match self {
+            Self::Origin if !root => Err(AiProviderEndpointPathError::OriginRequired),
+            Self::Exact if root || path.len() > 2_048 => {
+                Err(AiProviderEndpointPathError::ExactEndpointRequired)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 impl AiProviderKindInput {
+    pub(crate) const fn endpoint_path_contract(self) -> Option<ProviderEndpointPathContract> {
+        match self {
+            Self::Ollama => Some(ProviderEndpointPathContract::Origin),
+            Self::Anthropic | Self::OpenAiCompatible | Self::ChatCompletions => {
+                Some(ProviderEndpointPathContract::Exact)
+            }
+            Self::OpenAi | Self::Xai | Self::LocalHarness => None,
+        }
+    }
+
     /// Stable persistence/configuration value.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -526,7 +558,9 @@ pub struct UpsertAiProviderProfileInput {
     pub provider_kind: AiProviderKindInput,
     /// Administrative display name.
     pub display_name: String,
-    /// Endpoint for explicitly configurable providers.
+    /// Endpoint for explicitly configurable providers. Ollama requires an
+    /// origin with a root path. OpenAI-compatible and Chat Completions
+    /// require a non-root path of at most 2048 bytes.
     pub base_url: Option<String>,
     /// Required reviewed contract only for `OpenAiCompatible` profiles.
     pub openai_compatible: Option<AiOpenAiCompatibleProfileInput>,

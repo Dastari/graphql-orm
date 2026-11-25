@@ -3,12 +3,62 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.225.0 aligns with the ORM's
+[partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
+
+Version 0.224.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
+Version 0.223.0 selects the ORM's seek-capable exact string filter renderer for
+declared SQL Server BIN2 Unicode key columns (#867).
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
+Version 0.222.0 adds the `upsert_bound_key`, `transient_input` and
+`upsert_acknowledge` entity options.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+Version 0.221.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
+Version 0.220.0 stays aligned with the ORM's opt-in canonical PostgreSQL
+journal keys. Existing macro call sites require no changes. See the
+[migration guide](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
+Version 0.219.0 enforces assurance on every enabled entity query root in
+generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).
+
+Version 0.218.0 adds the `server_only_key(from, to)` relation option.
+See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+Version 0.217.0 enforces required query assurance when traversing generated
+relations into the protected entity.
+See the [migration guide](../../MIGRATION.md#02160-to-02170-relation-target-assurance).
+
+Version 0.216.0 lets PostgreSQL choose the join for native search on
+generated `#[graphql_rls]` entities with a column-based default sort. Both
+RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
+
+Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
+column types with the `mssql_type` field attribute.
+See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+Version 0.214.0 stays aligned with ORM 0.214.0 for the Auth update.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
+Version 0.213.0 aligns with the ORM's
+[test harness fixes](../../MIGRATION.md#02120-to-02130-test-harness-coordination).
 
 Version 0.212.0 aligns with the ORM's
 [scoped SQLite column drop](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).

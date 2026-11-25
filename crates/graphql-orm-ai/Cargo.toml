@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-ai"
-version = "0.158.0"
+version = "0.167.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -46,7 +46,7 @@ provider-tls-ring = [
 ]
 provider-tls-native = ["reqwest?/native-tls"]
 local-harness = []
-provider-codex-app-server = ["dep:base64"]
+provider-codex-app-server = ["dep:base64", "tokio/io-util"]
 provider-grok-acp = []
 
 [dependencies]

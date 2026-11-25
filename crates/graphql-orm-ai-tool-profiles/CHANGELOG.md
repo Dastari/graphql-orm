@@ -10,6 +10,43 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.32.0
+
+- **No action (graphql-orm #908).** An argument declared `@transientInput` in
+  the finished schema is request-only data, and tool arguments are retained
+  with the run. Every AI path that sees the finished SDL now refuses to carry
+  one. `AiGraphqlToolManifest::register_into` and `from_extension_payload` do
+  not see the SDL, so a manifest this process did not compile must be
+  validated first (see the migration note). The marker covers field arguments
+  only, not arguments of executable directives.
+  - The GraphQL tool-profile compiler refuses an argument plan that maps it.
+    A mutation whose transient argument is required therefore has no profile;
+    an optional one is never sent.
+  - `AiGraphqlToolManifest::validate_against_finished_schema`, and so
+    `AiGraphqlToolManifestSet::aggregate`, check every entry's document
+    against the owning SDL and refuse one that passes such an argument, for
+    example a manifest written by an older compiler. An entry whose document
+    does not execute on the entry's root type is refused. The new
+    `register_into_with_finished_schema` validates and then registers.
+  - The typed query, mutation and subscription capability catalogues fail to
+    compile when an operation admitted for AI execution takes one. For
+    mutations this is checked on every `Automatic` or `ApprovalRequired`
+    mutation, including one whose result is not exportable.
+
+  [Migration](MIGRATION.md#0320-transient-mutation-arguments)
+
+## Unreleased - 0.31.0
+
+- **No action (#817).** Add content-free endpoint validation reasons to the
+  shared AI error contract for provider profile saves and reports. [Migration](MIGRATION.md#0310-provider-endpoint-path-error)
+
+## Unreleased - 0.30.0
+
+- Validate filter roles and index generated-input ownership once per target
+  when compiling capability catalogues (#865). Capability fingerprints,
+  plan schemas and model-facing output stay byte-identical.
+  [Migration](MIGRATION.md#0300-capability-catalogue-compilation)
+
 ## Unreleased - 0.29.0
 
 - Generated keyset-list plans now accept the page limit injected by the

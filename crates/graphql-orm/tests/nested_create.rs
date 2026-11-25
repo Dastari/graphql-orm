@@ -16,6 +16,7 @@ mod owned_postgres;
 
 use graphql_orm::async_graphql::ErrorExtensions;
 use graphql_orm::futures::future::BoxFuture;
+use graphql_orm::graphql::subscriptions::SubscriptionEvent;
 use graphql_orm::prelude::*;
 use std::any::Any;
 use std::sync::{Arc, Mutex};
@@ -57,8 +58,8 @@ struct Order {
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
-#[cfg_attr(not(feature = "mssql"), graphql_entity(table = "nested_lines", plural = "Lines", nested_create_keys = ["order_id", "tenant"]))]
-#[cfg_attr(feature = "mssql", graphql_entity(table = "nested_lines", plural = "Lines", nested_create_keys = ["order_id", "tenant"], schema_policy = "external_writable"))]
+#[cfg_attr(not(feature = "mssql"), graphql_entity(table = "nested_lines", plural = "Lines", nested_create_keys = ["order_id", "tenant"], changed_started = true, changed_replay = true))]
+#[cfg_attr(feature = "mssql", graphql_entity(table = "nested_lines", plural = "Lines", nested_create_keys = ["order_id", "tenant"], changed_started = true, changed_replay = true, schema_policy = "external_writable"))]
 #[graphql_orm(operation_authorization(categories = ["create"], all_scopes = ["lines.write"]))]
 struct Line {
     #[primary_key]
@@ -108,6 +109,29 @@ impl EntityPolicy for NestedWritePolicy {
             }
             Ok(true)
         })
+    }
+
+    fn can_access_entity_with_authority<'a>(
+        &'a self,
+        authority: PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a Database,
+        entity: &'static str,
+        key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        if ctx.is_none() && entity == "Line" && surface == EntityAccessSurface::Repository {
+            return Box::pin(async move {
+                Ok(authority
+                    .hook_request()
+                    .and_then(|request| request.subject())
+                    .is_some_and(|subject| {
+                        subject.id == "operator" && subject.has_scope("lines.write")
+                    }))
+            });
+        }
+        self.can_access_entity(ctx, db, entity, key, kind, surface)
     }
 }
 
@@ -225,6 +249,17 @@ impl MutationHook for Trace {
         event: &'a MutationEvent,
     ) -> BoxFuture<'a, async_graphql::Result<()>> {
         Box::pin(async move {
+            if event.entity_name == "Line" {
+                tx.__policy()
+                    .ensure_entity_access(
+                        None,
+                        event.entity_name,
+                        event.metadata.write_policy,
+                        EntityAccessKind::Write,
+                        EntityAccessSurface::Repository,
+                    )
+                    .await?;
+            }
             tx.emit_queued_events();
             self.0
                 .lock()
@@ -308,6 +343,7 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
             .await
             .unwrap();
     }
+    db = db.with_request_authority_propagated_to_hooks(true);
     let trace = Arc::new(Mutex::new(Vec::new()));
     db.set_mutation_hook(Trace(trace.clone()));
     db.set_entity_policy(NestedWritePolicy);
@@ -334,6 +370,9 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
         .finish();
     let mut parents = db.ensure_event_sender::<OrderChangedEvent>().subscribe();
     let mut children_events = db.ensure_event_sender::<LineChangedEvent>().subscribe();
+    let mut child_replay = db
+        .ensure_event_sender::<SubscriptionEvent<LineChangedEvent>>()
+        .subscribe();
     let sdl = schema.sdl();
     assert!(sdl.contains("input CreateOrderWithChildrenInput"));
     assert!(sdl.contains("lines: [NestedCreateLineInput!]"));
@@ -401,6 +440,7 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
         assert!(trace.lock().unwrap().is_empty());
         assert!(parents.try_recv().is_err());
         assert!(children_events.try_recv().is_err());
+        assert!(child_replay.try_recv().is_err());
     }
 
     for (children, message) in [
@@ -433,6 +473,7 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
         assert_eq!(rows(&db, "nested_lines").await, 0);
         assert!(parents.try_recv().is_err());
         assert!(children_events.try_recv().is_err());
+        assert!(child_replay.try_recv().is_err());
         let log = trace.lock().unwrap();
         assert!(log.iter().all(|entry| !entry.starts_with("committed ")));
         if message != "forbidden" {
@@ -476,6 +517,9 @@ async fn nested_create_is_bounded_authorized_and_atomic() {
     assert_eq!(parents.try_recv().unwrap().id, "order");
     assert_eq!(children_events.try_recv().unwrap().id, "one");
     assert_eq!(children_events.try_recv().unwrap().id, "two");
+    assert_eq!(child_replay.try_recv().unwrap().event.id, "one");
+    assert_eq!(child_replay.try_recv().unwrap().event.id, "two");
+    assert!(child_replay.try_recv().is_err());
     assert!(parents.try_recv().is_err());
     assert!(children_events.try_recv().is_err());
     #[cfg(feature = "mssql")]

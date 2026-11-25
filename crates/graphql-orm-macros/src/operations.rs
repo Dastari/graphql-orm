@@ -285,7 +285,8 @@ const TRAVERSAL_READ_CATEGORIES: &[&str] = &[
 /// `single_read` for to-one traversal. When that category is not declared but
 /// another read category is, every declared read category's requirement
 /// applies. Scope templates bind root arguments that a traversal does not
-/// have, so they refuse it. `GraphQLEntity` and
+/// have, so they refuse it. After scopes, traversal checks assurance on
+/// every generated query root of the target. `GraphQLEntity` and
 /// `RepositoryEntity` emit this so every relation target carries it. A
 /// malformed declaration, which `GraphQLOperations` reports, refuses every
 /// traversal rather than adding a second diagnostic here.
@@ -322,6 +323,24 @@ pub(crate) fn relation_traversal_authorization_tokens(
         };
         let list_scope = scope("list");
         let single_scope = scope("single_read");
+        let assurance = (!crate::entity::has_repository_entity_attribute(&input.attrs)).then(|| {
+            quote! {
+                // GraphQLOperations provides the names of its enabled query
+                // roots. A target without that derive has no generated roots.
+                #[allow(dead_code)]
+                trait QueryRootsFallback {
+                    const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] = &[];
+                }
+                impl<T> QueryRootsFallback for T {}
+                for &field_name in Self::__GOM_QUERY_ROOT_FIELDS {
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                        field_name,
+                    )?;
+                }
+            }
+        });
         Ok(quote! {
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
             if multiple {
@@ -329,6 +348,7 @@ pub(crate) fn relation_traversal_authorization_tokens(
             } else {
                 #single_scope
             }
+            #assurance
             ::std::result::Result::Ok(())
         })
     })()
@@ -1054,6 +1074,244 @@ fn resolve_upsert_config(
     }
 }
 
+/// Where an entity takes part in a generated nested create (#893): its own
+/// `nested_create_keys`, or a relation declaring `nested_create`. Read from
+/// the raw attribute tokens, so the combination with a principal-bound key is
+/// refused whichever derive learns the options first.
+fn nested_create_participation(input: &DeriveInput) -> Option<proc_macro2::Span> {
+    fn names(tokens: proc_macro2::TokenStream, wanted: &str) -> Option<proc_macro2::Span> {
+        tokens.into_iter().find_map(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) if ident == wanted => Some(ident.span()),
+            proc_macro2::TokenTree::Group(group) => names(group.stream(), wanted),
+            _ => None,
+        })
+    }
+    let list = |attr: &syn::Attribute, attribute: &str| match &attr.meta {
+        // `cfg_attr` is expanded before derives run.
+        syn::Meta::List(list) if list.path.is_ident(attribute) => Some(list.tokens.clone()),
+        _ => None,
+    };
+    input
+        .attrs
+        .iter()
+        .find_map(|attr| names(list(attr, "graphql_entity")?, "nested_create_keys"))
+        .or_else(|| {
+            let syn::Data::Struct(data) = &input.data else {
+                return None;
+            };
+            data.fields.iter().find_map(|field| {
+                field
+                    .attrs
+                    .iter()
+                    .find_map(|attr| names(list(attr, "relation")?, "nested_create"))
+            })
+        })
+}
+
+#[cfg(test)]
+mod nested_create_participation_tests {
+    use super::nested_create_participation;
+
+    fn participates(tokens: proc_macro2::TokenStream) -> bool {
+        nested_create_participation(&syn::parse2(tokens).expect("derive input")).is_some()
+    }
+
+    #[test]
+    fn finds_both_declarations_of_a_nested_create() {
+        // The child's own declaration.
+        assert!(participates(quote::quote! {
+            #[graphql_entity(table = "lines", nested_create_keys = ["order_id"])]
+            struct Line { id: String, order_id: String }
+        }));
+        // A parent relation that creates children.
+        assert!(participates(quote::quote! {
+            #[graphql_entity(table = "orders")]
+            struct Order {
+                id: String,
+                #[relation(target = "Line", from = "id", to = "order_id", multiple, nested_create)]
+                lines: Vec<Line>,
+            }
+        }));
+        // Neither: other options and other attributes that share a word.
+        assert!(!participates(quote::quote! {
+            #[graphql_entity(table = "orders", upsert = "nested_create_keys")]
+            #[doc = "nested_create"]
+            struct Order {
+                id: String,
+                #[relation(target = "Line", from = "id", to = "order_id", multiple)]
+                lines: Vec<Line>,
+                #[graphql_orm(private)]
+                nested_create: String,
+            }
+        }));
+    }
+}
+
+/// A principal-bound conflict-key member of the generated GraphQL upsert.
+struct ResolvedUpsertBoundKey {
+    field_name: syn::Ident,
+    binding: syn::Type,
+    db_column: String,
+}
+
+/// Resolve `upsert_bound_key` declarations against the upsert conflict key.
+///
+/// Each bound member must be a non-nullable, repository-writable column with
+/// no GraphQL surface. The per-column proof (aliases included) is the const
+/// assertion over the entity's `SERVER_ONLY_COLUMNS`; the checks here give
+/// the declaration its own diagnostics.
+fn resolve_upsert_bound_keys(
+    input: &DeriveInput,
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    entity_meta: &crate::entity::EntityMetadata,
+    upsert_config: Option<&ResolvedUpsertConfig>,
+    backend: BackendKind,
+) -> syn::Result<Vec<ResolvedUpsertBoundKey>> {
+    // A nested create writes a row from client input without the binding,
+    // exactly as a generated create would (#893).
+    if let (Some(declared), Some(span)) = (
+        entity_meta.upsert_bound_keys.first(),
+        nested_create_participation(input),
+    ) {
+        let mut error = syn::Error::new(
+            declared.span,
+            "upsert_bound_key cannot be combined with nested creates: a nested create has no principal binding and would store the key type's default value",
+        );
+        error.combine(syn::Error::new(span, "nested create declared here"));
+        return Err(error);
+    }
+    let physical = |column: &str| crate::entity::relation_column_identity(backend, column, true);
+    let same_column = |left: &str, right: &str| {
+        if backend == BackendKind::Postgres {
+            left == right
+        } else {
+            left.eq_ignore_ascii_case(right)
+        }
+    };
+    let mut resolved: Vec<ResolvedUpsertBoundKey> = Vec::new();
+    for declared in &entity_meta.upsert_bound_keys {
+        let refuse = |reason: &str| {
+            syn::Error::new(
+                declared.span,
+                format!("upsert_bound_key field `{}` {reason}", declared.field),
+            )
+        };
+        let Some(config) = upsert_config else {
+            return Err(syn::Error::new(
+                declared.span,
+                "upsert_bound_key requires graphql_entity upsert = \"...\" naming the bound field",
+            ));
+        };
+        let field = config
+            .fields
+            .iter()
+            .find(|field| field.rust_name == declared.field)
+            .or_else(|| {
+                config
+                    .fields
+                    .iter()
+                    .find(|field| field.db_column == declared.field)
+            })
+            .ok_or_else(|| {
+                refuse("must name a member of the upsert conflict key: only the key the conflict lookup uses can be bound")
+            })?;
+        if resolved
+            .iter()
+            .any(|key| key.field_name == field.field_name)
+        {
+            return Err(refuse("is bound more than once"));
+        }
+        if !field.meta.is_private || !field.meta.graphql_server_only() {
+            return Err(refuse(
+                "must be #[graphql_orm(private)] with no filter, order, subscribe, search, input or primary-key exposure: a principal-bound key has no GraphQL surface",
+            ));
+        }
+        if is_option_type(&field.field_type) {
+            return Err(refuse(
+                "must not be nullable: a NULL key never conflicts, so every upsert would insert another row",
+            ));
+        }
+        if !field.meta.write
+            || field.meta.managed_version
+            || field
+                .meta
+                .timestamp_behavior(&field.rust_name)
+                .exclude_input
+        {
+            return Err(refuse(
+                "must be a repository-writable column: the resolver stores the bound value through the create input",
+            ));
+        }
+        if field.meta.transform_read.is_some()
+            || field.meta.is_json_field
+            || field.meta.spatial.is_some()
+        {
+            return Err(refuse(
+                "must be stored and read as bound: no read transform, json or spatial mapping",
+            ));
+        }
+        // No other generated writer may share the physical column: the
+        // implicit timestamp writers, a version column, or a second field.
+        let column = physical(&field.db_column);
+        if ["created_at", "updated_at"]
+            .iter()
+            .any(|implicit| same_column(&column, implicit))
+            || field.meta.is_version
+            || field
+                .meta
+                .timestamp_behavior(&field.rust_name)
+                .update_updated_at
+        {
+            return Err(refuse(
+                "maps a column that generated writes maintain themselves (created_at, updated_at or a version column): the implicit writer would overwrite the bound key",
+            ));
+        }
+        for other in fields {
+            let Some(other_name) = other.ident.as_ref() else {
+                continue;
+            };
+            let other_meta = parse_field_metadata(other)?;
+            if *other_name == field.field_name || other_meta.is_relation || other_meta.skip_db {
+                continue;
+            }
+            let other_rust = other_name.to_string();
+            let other_column = physical(other_meta.db_column.as_deref().unwrap_or(&other_rust));
+            if same_column(&column, &other_column) {
+                return Err(refuse(&format!(
+                    "shares its column with field `{other_rust}`: no second field may write a principal-bound column"
+                )));
+            }
+        }
+        resolved.push(ResolvedUpsertBoundKey {
+            field_name: field.field_name.clone(),
+            binding: declared.binding.clone(),
+            db_column: field.db_column.clone(),
+        });
+    }
+    Ok(resolved)
+}
+
+fn integer_bind_tokens(
+    backend: BackendKind,
+    field_type: &syn::Type,
+    meta: &FieldMetadata,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let scalar_type = option_inner_type(field_type).unwrap_or(field_type);
+    let unsigned = type_path_last_ident(scalar_type).is_some_and(|ident| {
+        matches!(
+            ident.to_string().as_str(),
+            "u8" | "u16" | "u32" | "u64" | "usize"
+        )
+    });
+    if backend == BackendKind::Mssql && unsigned {
+        let sql_type = meta.mssql_type.as_deref().unwrap_or("");
+        quote! { ::graphql_orm::graphql::orm::SqlValue::mssql_unsigned((#value) as u64, #sql_type) }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Int((#value) as i64) }
+    }
+}
+
 fn push_create_input_sql_value_tokens(
     backend: BackendKind,
     struct_name: &syn::Ident,
@@ -1062,7 +1320,7 @@ fn push_create_input_sql_value_tokens(
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if meta.decimal.is_some() {
+    let push = if meta.decimal.is_some() {
         let definition = decimal_definition_tokens(meta);
         if is_option_type(field_type) {
             quote! {
@@ -1172,9 +1430,10 @@ fn push_create_input_sql_value_tokens(
             )
         })
     {
+        let integer_bind = integer_bind_tokens(backend, field_type, meta, quote! { value });
         quote! {
             match #field_access {
-                ::std::option::Option::Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(value as i64)),
+                ::std::option::Option::Some(value) => bind_values.push(#integer_bind),
                 ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
             }
         }
@@ -1194,8 +1453,9 @@ fn push_create_input_sql_value_tokens(
             "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
         )
     }) {
+        let integer_bind = integer_bind_tokens(backend, field_type, meta, quote! { #field_access });
         quote! {
-            bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int((#field_access) as i64));
+            bind_values.push(#integer_bind);
         }
     } else if type_path_last_ident(field_type)
         .is_some_and(|ident| matches!(ident.to_string().as_str(), "f32" | "f64"))
@@ -1231,6 +1491,14 @@ fn push_create_input_sql_value_tokens(
         quote! {
             bind_values.push(#value_expr);
         }
+    };
+    match &meta.mssql_type {
+        Some(sql_type) => quote! {{
+            #push
+            let value = bind_values.pop().expect("one generated field bind");
+            bind_values.push(value.with_mssql_type(#sql_type));
+        }},
+        None => push,
     }
 }
 
@@ -1351,6 +1619,25 @@ fn generated_resolver_schema_signature(
     }
     if let Some(shapes) = &entity_meta.mutation_shapes {
         signature.push_str(&format!("mutation_shapes={shapes:?}\n"));
+    }
+    // Only an entity declaring these records them, so every other
+    // fingerprint is unchanged (#908).
+    for key in &entity_meta.upsert_bound_keys {
+        signature.push_str(&format!("upsert_bound_key={:?}\n", key.field));
+    }
+    if let Some(transient) = &entity_meta.transient_input {
+        let ty = &transient.ty;
+        signature.push_str(&format!(
+            "transient_input={:?} name={:?} required={} max_bytes={} max_nodes={}\n",
+            quote!(#ty).to_string(),
+            transient.name,
+            transient.required,
+            transient.max_bytes,
+            transient.max_nodes
+        ));
+    }
+    if entity_meta.upsert_acknowledge.is_some() {
+        signature.push_str("upsert_acknowledge=true\n");
     }
     if entity_meta
         .mutations
@@ -1579,6 +1866,17 @@ fn generate_graphql_operations_unfiltered(
             "subscriptions = false conflicts with changed_started or subscription operation authorization",
         ));
     }
+
+    if let Some(span) = entity_meta.changed_replay
+        && (!entity_meta.changed_started
+            || crate::entity::has_repository_entity_attribute(&input.attrs))
+    {
+        return Err(syn::Error::new(
+            span,
+            "changed_replay requires a GraphQL entity with changed_started = true",
+        ));
+    }
+    let changed_replay = entity_meta.changed_replay.is_some();
 
     let query_shape_enabled = |shape: &str| {
         entity_meta
@@ -2316,11 +2614,15 @@ fn generate_graphql_operations_unfiltered(
         backend,
         auto_generated_pk,
     )?;
+    let upsert_bound_keys =
+        resolve_upsert_bound_keys(input, fields, &entity_meta, upsert_config.as_ref(), backend)?;
     let graphql_upsert_enabled = upsert_config.as_ref().is_some_and(|config| {
-        config
-            .fields
-            .iter()
-            .all(|field| field.graphql_create_visible)
+        config.fields.iter().all(|field| {
+            field.graphql_create_visible
+                || upsert_bound_keys
+                    .iter()
+                    .any(|key| key.field_name == field.field_name)
+        })
     });
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
     let pk_is_bytes = is_byte_vec_type(&pk_type_ty);
@@ -2809,12 +3111,48 @@ fn generate_graphql_operations_unfiltered(
             .unwrap_or_default(),
     );
     let changed_started_signal = entity_meta.changed_started;
+    let replay_publisher = if changed_replay {
+        let row_fields = fields.iter().map(|field| &field.ident);
+        let key_heap = if has_composite_primary_key {
+            let parts = primary_key_fields.iter().map(|field| &field.field_name);
+            quote! { #( .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.key.#parts)) )* }
+        } else {
+            quote! {}
+        };
+        quote! {
+            #[doc(hidden)]
+            fn __gom_publish_changed_replay(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                event: ::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>,
+            ) {
+                use ::graphql_orm::graphql::subscriptions::ChangedReplaySize;
+                let payload = event.event.as_ref();
+                let row_bytes = payload.entity.as_ref().map_or(0usize, |row| {
+                    0usize #( .saturating_add(ChangedReplaySize::replay_heap_bytes(&row.#row_fields)) )*
+                });
+                let event_bytes = ChangedReplaySize::replay_heap_bytes(&payload.id)
+                    .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.source_entity))
+                    .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.source_id))
+                    .saturating_add(ChangedReplaySize::replay_heap_bytes(&payload.path))
+                    .saturating_add(row_bytes)
+                    #key_heap;
+                ::graphql_orm::graphql::subscriptions::publish_changed_replay(db, event, event_bytes);
+            }
+        }
+    } else {
+        quote! {}
+    };
     let subscription_key_method = quote! {
         #[doc(hidden)]
         pub const __GOM_CHANGED_ROOT_NAME: &'static str = #subscription_name;
 
         #[doc(hidden)]
         pub const __GOM_CHANGED_STARTED_SIGNAL: bool = #changed_started_signal;
+
+        #[doc(hidden)]
+        pub const __GOM_CHANGED_REPLAY: bool = #changed_replay;
+
+        #replay_publisher
 
         #[doc(hidden)]
         pub const __GOM_INTERPRETATION_SOURCE: &'static str = #interpretation_source;
@@ -2879,10 +3217,17 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     };
-    let queue_subscription_witness =
-        subscription_witness_emission(quote! { hook_ctx.queue_event(witness); });
-    let emit_subscription_witness =
-        subscription_witness_emission(quote! { db.emit_event(witness); });
+    let queue_witness = if changed_replay {
+        quote! { hook_ctx.queue_changed_replay(witness, Self::__gom_publish_changed_replay); }
+    } else {
+        quote! { hook_ctx.queue_event(witness); }
+    };
+    let queue_subscription_witness = subscription_witness_emission(queue_witness.clone());
+    let emit_subscription_witness = subscription_witness_emission(if changed_replay {
+        quote! { Self::__gom_publish_changed_replay(db, witness); }
+    } else {
+        quote! { db.emit_event(witness); }
+    });
     let propagated_witness_emission = if crate::entity::has_repository_entity_attribute(
         &input.attrs,
     ) {
@@ -2894,7 +3239,7 @@ fn generate_graphql_operations_unfiltered(
                 event.entity = ::std::option::Option::None;
                 if let ::std::option::Option::Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
                     event, Self::__gom_subscription_key_values(parent_entity), false, provenance,
-                ) { hook_ctx.queue_event(witness); }
+                ) { #queue_witness }
             }
         }
     };
@@ -3461,7 +3806,7 @@ fn generate_graphql_operations_unfiltered(
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
-            if meta.decimal.is_some() {
+            if meta.decimal.is_some() || meta.mssql_type.is_some() {
                 insert_binds_graphql.push(push_create_input_sql_value_tokens(
                     backend,
                     struct_name,
@@ -3570,9 +3915,10 @@ fn generate_graphql_operations_unfiltered(
                     )
                 })
             {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { v });
                 let bind_tokens = quote! {
                     match input.#field_name {
-                        ::std::option::Option::Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64)),
+                        ::std::option::Option::Some(v) => bind_values.push(#integer_bind),
                         ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                     }
                 };
@@ -3596,8 +3942,10 @@ fn generate_graphql_operations_unfiltered(
                     "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 )
             }) {
+                let integer_bind =
+                    integer_bind_tokens(backend, field_type, &meta, quote! { input.#field_name });
                 let bind_tokens = quote! {
-                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(input.#field_name as i64));
+                    bind_values.push(#integer_bind);
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
@@ -3662,6 +4010,8 @@ fn generate_graphql_operations_unfiltered(
         if !meta.is_primary_key && !is_timestamp && meta.write {
             // All update fields are wrapped in Option (even if already optional)
             // This allows distinguishing between "not provided" and "set to null"
+            let graphql_check_index = update_field_checks_graphql.len();
+            let repo_check_index = update_field_checks_repo.len();
             let is_already_optional = is_option_type(field_type);
             let update_type = quote! { ::std::option::Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
@@ -4020,12 +4370,13 @@ fn generate_graphql_operations_unfiltered(
                         )
                     })
             {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { *v });
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
                         match val {
-                            ::std::option::Option::Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Int((*v) as i64)),
+                            ::std::option::Option::Some(v) => values.push(#integer_bind),
                             ::std::option::Option::None => values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                         }
                     }
@@ -4086,11 +4437,12 @@ fn generate_graphql_operations_unfiltered(
                     "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 )
             }) {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { *val });
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int((*val) as i64));
+                        values.push(#integer_bind);
                     }
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
@@ -4130,6 +4482,24 @@ fn generate_graphql_operations_unfiltered(
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
                 update_field_checks_repo.push(update_tokens);
+            }
+            if let Some(sql_type) = &meta.mssql_type {
+                for checks in [
+                    &mut update_field_checks_graphql[graphql_check_index..],
+                    &mut update_field_checks_repo[repo_check_index..],
+                ] {
+                    for check in checks {
+                        *check = quote! {{
+                            let bind_start = values.len();
+                            #check
+                            for value in &mut values[bind_start..] {
+                                *value = ::std::mem::replace(
+                                    value, ::graphql_orm::graphql::orm::SqlValue::Null
+                                ).with_mssql_type(#sql_type);
+                            }
+                        }};
+                    }
+                }
             }
         }
     }
@@ -4467,6 +4837,44 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
+    let subscription_after_arg_name = apply_graphql_case("after", argument_case);
+    let (
+        subscription_after_arg,
+        open_changed,
+        after_arg,
+        frame_cursor,
+        cursor_none,
+        replay_adapter,
+    ) = if changed_replay {
+        (
+            quote! {
+                #[__gom_catalogue_type(Option<String>)]
+                #[graphql(name = #subscription_after_arg_name, desc = "Resume from an opaque Changed cursor on the same server")]
+                after: ::std::option::Option<::std::string::String>,
+            },
+            quote! { open_generated_changed_after },
+            quote! { , after },
+            quote! { pub cursor: ::std::option::Option<::std::string::String>, },
+            quote! { cursor: ::std::option::Option::None, },
+            quote! {
+                const REPLAY_ROOT: ::std::option::Option<&'static str> = ::std::option::Option::Some(#subscription_name);
+
+                fn with_replay_cursor(mut payload: Self::Payload, cursor: ::std::string::String) -> Self::Payload {
+                    payload.cursor = ::std::option::Option::Some(cursor);
+                    payload
+                }
+            },
+        )
+    } else {
+        (
+            quote! {},
+            quote! { open_generated_changed },
+            quote! {},
+            quote! {},
+            quote! {},
+            quote! {},
+        )
+    };
     let changed_payload_value = if changed_started {
         quote! { #changed_frame::from(__gom_event) }
     } else {
@@ -4495,6 +4903,7 @@ fn generate_graphql_operations_unfiltered(
             pub struct #changed_frame {
                 /// True only on the started frame, which carries no change.
                 pub started: bool,
+                #frame_cursor
                 pub action: ::std::option::Option<::graphql_orm::graphql::orm::ChangeAction>,
                 #[graphql(name = #change_kind_field_name)]
                 pub change_kind: ::std::option::Option<::graphql_orm::graphql::orm::ChangeKind>,
@@ -4516,6 +4925,7 @@ fn generate_graphql_operations_unfiltered(
                 fn from(event: #changed_event) -> Self {
                     Self {
                         started: false,
+                        #cursor_none
                         action: ::std::option::Option::Some(event.action),
                         change_kind: ::std::option::Option::Some(event.change_kind),
                         id: ::std::option::Option::Some(event.id),
@@ -4533,6 +4943,7 @@ fn generate_graphql_operations_unfiltered(
                 fn __gom_started() -> Self {
                     Self {
                         started: true,
+                        #cursor_none
                         action: ::std::option::Option::None,
                         change_kind: ::std::option::Option::None,
                         id: ::std::option::Option::None,
@@ -4716,6 +5127,51 @@ fn generate_graphql_operations_unfiltered(
                     ),
                 ));
             }
+        }
+    }
+    // #908: a principal-bound key, a transient input and a hook
+    // acknowledgement belong to the generated GraphQL upsert. A generated
+    // create has no binding and would store the key type's default value.
+    {
+        let shape_selected = |shape: &str| {
+            entity_meta
+                .mutation_shapes
+                .as_ref()
+                .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+        };
+        let public_upsert =
+            mutations_disabled.is_none() && generates_public_upsert && shape_selected("upsert");
+        for (option, span) in [
+            (
+                "upsert_bound_key",
+                entity_meta.upsert_bound_keys.first().map(|key| key.span),
+            ),
+            (
+                "transient_input",
+                entity_meta.transient_input.as_ref().map(|input| input.span),
+            ),
+            ("upsert_acknowledge", entity_meta.upsert_acknowledge),
+        ] {
+            let Some(span) = span else {
+                continue;
+            };
+            if !public_upsert {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "{option} requires the generated GraphQL upsert mutation: declare upsert = \"...\" over public or bound key fields, keep mutations enabled and select upsert in mutation_shapes"
+                    ),
+                ));
+            }
+        }
+        if let Some(key) = entity_meta.upsert_bound_keys.first()
+            && generates_public_create
+            && shape_selected("create")
+        {
+            return Err(syn::Error::new(
+                key.span,
+                "upsert_bound_key requires mutation_shapes without create: a generated create has no principal binding and would store the key type's default value",
+            ));
         }
     }
     // #851: a required ExpectedVersion and a conditional assurance selector
@@ -4917,6 +5373,12 @@ fn generate_graphql_operations_unfiltered(
                 pub fn err(msg: impl ::std::convert::Into<::std::string::String>) -> Self {
                     Self { success: false, error: ::std::option::Option::Some(msg.into()), action: ::std::option::Option::None, entity: ::std::option::Option::None }
                 }
+
+                /// An acknowledged request that wrote nothing: the existing
+                /// row, with no action.
+                pub fn unchanged(entity: #struct_name) -> Self {
+                    Self { success: true, error: ::std::option::Option::None, action: ::std::option::Option::None, entity: ::std::option::Option::Some(entity) }
+                }
             }
         }
     } else {
@@ -5060,7 +5522,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>> = async {
                 hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 hook_ctx.require_state_machine("upsert")?;
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 #composite_upsert_policy_guard
                 let current_entity = Self::__gom_fetch_by_upsert_on(hook_ctx, &input).await?;
                 if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
@@ -5158,6 +5620,157 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
+    // #908: bound keys are resolved before the entity policy and the
+    // transaction, and written again after the input transform.
+    let bound_key_idents = (0..upsert_bound_keys.len())
+        .map(|index| quote::format_ident!("__gom_bound_key_{index}"))
+        .collect::<Vec<_>>();
+    let principal_key_resolution = upsert_bound_keys
+        .iter()
+        .zip(&bound_key_idents)
+        .map(|(key, ident)| {
+            let binding = &key.binding;
+            quote! {
+                let #ident = ::graphql_orm::graphql::orm::__bind_principal_key::<#binding>(ctx)?;
+            }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    let principal_key_assignment = upsert_bound_keys
+        .iter()
+        .zip(&bound_key_idents)
+        .map(|(key, ident)| {
+            let field_name = &key.field_name;
+            quote! { input.#field_name = ::std::clone::Clone::clone(&#ident); }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    let principal_key_assertions = upsert_bound_keys
+        .iter()
+        .map(|key| {
+            let identity = crate::entity::relation_column_identity(backend, &key.db_column, true);
+            let case_sensitive = backend == BackendKind::Postgres;
+            let message = format!(
+                "upsert_bound_key field `{}` of `{}` is not a server-only column; every field mapping its column must be #[graphql_orm(private)] with no filter, order, subscribe, search or input exposure, and #[graphql(skip)] when the entity derive does not generate its object; it cannot be a primary-key column; an entity certifies no column when its table or any column name is non-ASCII, longer than 63 bytes or starts with `__gom_`",
+                key.field_name, struct_name
+            );
+            quote! {
+                const _: () = assert!(
+                    ::graphql_orm::graphql::orm::generated_relation_column_is_server_only(
+                        <#struct_name as ::graphql_orm::graphql::orm::GeneratedRelationReadability>::SERVER_ONLY_COLUMNS,
+                        #identity,
+                        #case_sensitive,
+                    ),
+                    concat!(#message),
+                );
+            }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    // Exact comparison of each stored bound member with the bound value: the
+    // database's own equality may fold case, accents or padding.
+    let principal_key_mismatch = |row: proc_macro2::TokenStream| {
+        let members = upsert_bound_keys
+            .iter()
+            .zip(&bound_key_idents)
+            .map(|(key, ident)| {
+                let field_name = &key.field_name;
+                quote! { #row.#field_name != #ident }
+            });
+        quote! { false #(|| #members)* }
+    };
+    let principal_key_preimage_check = if upsert_bound_keys.is_empty() {
+        quote! {}
+    } else {
+        let mismatch = principal_key_mismatch(quote! { current_entity });
+        quote! {
+            if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
+                if #mismatch {
+                    return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch(&__gom_outcome));
+                }
+            }
+        }
+    };
+    // The written row must hold the bound key exactly, and an insert must not
+    // have landed on a row the lookup did not see (one hidden by RLS, or one
+    // that only the database's equality matches).
+    let principal_key_postimage_check = if upsert_bound_keys.is_empty() {
+        quote! {}
+    } else {
+        let mismatch = principal_key_mismatch(quote! { entity });
+        quote! {
+            let __gom_written_id: ::std::string::String = #pk_id_for_entity;
+            if #mismatch || (current_entity.is_none() && __gom_written_id != __gom_created_event_id)
+            {
+                return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch(&__gom_outcome));
+            }
+        }
+    };
+    // A written row that cannot be read back by the bound key is the same
+    // ownership refusal, not a distinguishable "not found".
+    let upsert_missing_post_image = if upsert_bound_keys.is_empty() {
+        quote! { ::graphql_orm::async_graphql::Error::new("Entity not found after upsert") }
+    } else {
+        quote! { hook_ctx.__refuse_principal_key_mismatch(&__gom_outcome) }
+    };
+    let principal_key_created_id = if upsert_bound_keys.is_empty() {
+        quote! {}
+    } else {
+        quote! { let __gom_created_event_id = ::std::clone::Clone::clone(&event_id); }
+    };
+    // Generated updates never assign a principal-bound column, whatever an
+    // input transform put in the input.
+    let principal_key_update_reset = upsert_bound_keys
+        .iter()
+        .map(|key| {
+            let field_name = &key.field_name;
+            quote! { input.#field_name = ::std::default::Default::default(); }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    let mut transient_default_check = quote! {};
+    let (transient_argument, transient_store) = match &entity_meta.transient_input {
+        Some(transient) => {
+            let ty = &transient.ty;
+            let (max_bytes, max_nodes) = (transient.max_bytes, transient.max_nodes);
+            let bounded = quote! {
+                ::graphql_orm::graphql::orm::BoundedTransientInput<#ty, #max_bytes, #max_nodes>
+            };
+            let name = apply_graphql_case(&transient.name, argument_case);
+            let description =
+                "Transient input for this request; never stored or published".to_string();
+            // `secret` keeps the value out of async-graphql's rendered
+            // execution document; the directive marks it in the schema.
+            let attribute = quote! {
+                #[graphql(
+                    name = #name,
+                    desc = #description,
+                    secret,
+                    directive = ::graphql_orm::graphql::orm::transient_input_argument::apply()
+                )]
+            };
+            transient_default_check = quote! {
+                ::graphql_orm::graphql::orm::__refuse_transient_variable_defaults(ctx, #name)?;
+            };
+            // The catalogue records the declared type, not the wrapper.
+            if transient.required {
+                (
+                    quote! { #attribute #[__gom_catalogue_type(#ty)] __gom_transient: #bounded, },
+                    quote! { hook_ctx.__set_transient_input::<#ty>(__gom_transient.0)?; },
+                )
+            } else {
+                (
+                    quote! {
+                        #attribute
+                        #[__gom_catalogue_type(::std::option::Option<#ty>)]
+                        __gom_transient: ::std::option::Option<#bounded>,
+                    },
+                    quote! {
+                        if let ::std::option::Option::Some(__gom_transient) = __gom_transient {
+                            hook_ctx.__set_transient_input::<#ty>(__gom_transient.0)?;
+                        }
+                    },
+                )
+            }
+        }
+        None => (quote! {}, quote! {}),
+    };
     let upsert_graphql_method = mutations::upsert::resolver(mutations::upsert::ResolverInput {
         upsert_operation_description: &upsert_operation_description,
         upsert_mutation_name: &upsert_mutation_name,
@@ -5191,6 +5804,16 @@ fn generate_graphql_operations_unfiltered(
         notify_on_updated: &notify_on_updated,
         mutation_output_release: &mutation_output_release,
         generates_public_upsert: mutations_disabled.is_none() && generates_public_upsert,
+        principal_key_resolution: &principal_key_resolution,
+        principal_key_assignment: &principal_key_assignment,
+        principal_key_preimage_check: &principal_key_preimage_check,
+        principal_key_created_id: &principal_key_created_id,
+        upsert_missing_post_image: &upsert_missing_post_image,
+        transient_default_check: &transient_default_check,
+        principal_key_postimage_check: &principal_key_postimage_check,
+        transient_argument: &transient_argument,
+        transient_store: &transient_store,
+        acknowledge: entity_meta.upsert_acknowledge.is_some(),
     });
 
     let upsert_repository_method = if upsert_config.is_some() {
@@ -5285,7 +5908,7 @@ fn generate_graphql_operations_unfiltered(
                 ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>>> {
                     ::std::boxed::Box::pin(async move {
                         hook_ctx.require_state_machine("upsert")?;
-                        let db = hook_ctx.database().clone();
+                        let db = hook_ctx.__policy();
                         let mut input = input;
                         let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                             #entity_name_lit,
@@ -5418,7 +6041,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_cas: ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> = async {
 
                     let current_entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     if let ::std::option::Option::Some(ref current) = current_entity {
                         db.ensure_writable_row(
                             ::std::option::Option::None,
@@ -6001,6 +6624,7 @@ fn generate_graphql_operations_unfiltered(
                     #[__gom_catalogue_type(Option<Vec<#key_type>>)]
                     #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: ::std::option::Option<::std::vec::Vec<#key_type>>,
                     #subscription_started_arg
+                    #subscription_after_arg
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_payload_type>>>> {
                     // Keep the adapter local so private entity and key types stay private.
                     struct #adapter;
@@ -6014,6 +6638,7 @@ fn generate_graphql_operations_unfiltered(
                         const ENTITY_NAME: &'static str = #entity_name_lit;
                         const ENTITY_FIELD: &'static str = #entity_result_field_name;
                         const KEY_ONLY_DELETES: bool = #key_only_deletes;
+                        #replay_adapter
 
                         fn key_values(key: &Self::Key) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
                             #struct_name::__gom_key_values(key)
@@ -6074,8 +6699,8 @@ fn generate_graphql_operations_unfiltered(
                         }
                     }
 
-                    ::graphql_orm::graphql::subscriptions::open_generated_changed::<#backend_marker, #adapter>(
-                        ctx, _filter, key, keys, #started_arg,
+                    ::graphql_orm::graphql::subscriptions::#open_changed::<#backend_marker, #adapter>(
+                        ctx, _filter, key, keys, #started_arg #after_arg,
                     ).await
                 }
             }
@@ -6230,7 +6855,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<Self> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync))
                         .await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
@@ -6536,7 +7161,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<Self> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::SqlValue;
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync))
@@ -6598,7 +7223,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<::graphql_orm::graphql::orm::InsertIfAbsentOutcome<Self>> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::SqlValue;
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync))
@@ -6674,7 +7299,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<::std::option::Option<Self>> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     let ::std::option::Option::Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
                         return ::std::result::Result::Ok(::std::option::Option::None);
@@ -6773,7 +7398,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<bool> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     let ::std::option::Option::Some(entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
                         return ::std::result::Result::Ok(false);
@@ -6832,7 +7457,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     if where_input.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
@@ -6886,7 +7511,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     if where_input.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
@@ -6940,7 +7565,7 @@ fn generate_graphql_operations_unfiltered(
                     let __gom_result: ::graphql_orm::Result<::graphql_orm::graphql::orm::PredicateUpdateOutcome<Self>> = async {
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery, OrmBackend, SqlDialect};
-                    let db = hook_ctx.database().clone();
+                    let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
                     if expected.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("conditional update requires a non-empty typed expected predicate"));
@@ -7172,7 +7797,7 @@ fn generate_graphql_operations_unfiltered(
                     ::std::boxed::Box::pin(async move {
                         let entity = Self::__gom_fetch_by_key_on(context, key).await?;
                         if let ::std::option::Option::Some(entity) = entity.as_ref() {
-                            if !context.database().can_read_row(::std::option::Option::None, #entity_name_lit,
+                            if !context.__policy().can_read_row(::std::option::Option::None, #entity_name_lit,
                                 <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                 ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                                 entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
@@ -7320,7 +7945,7 @@ fn generate_graphql_operations_unfiltered(
                 if rows.len() > maximum {
                     return ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
                 }
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 for row in &rows {
                     db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -7371,7 +7996,7 @@ fn generate_graphql_operations_unfiltered(
                 if rows.len() > maximum {
                     return ::std::result::Result::Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
                 }
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 for row in &rows {
                     db.ensure_writable_row(::std::option::Option::None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -8261,6 +8886,7 @@ fn generate_graphql_operations_unfiltered(
             mutation_output_release: &mutation_output_release,
             update_many_operation_description: &update_many_operation_description,
             update_many_mutation_name: &update_many_mutation_name,
+            principal_key_update_reset: &principal_key_update_reset,
             update_many_requires_scopes: &update_many_requires_scopes,
             where_arg_name: &where_arg_name,
             where_arg_description: &where_arg_description,
@@ -8558,6 +9184,8 @@ fn generate_graphql_operations_unfiltered(
 
         #upsert_result_definition
 
+        #principal_key_assertions
+
         #changed_event_object
 
         #changed_frame_object
@@ -8728,7 +9356,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
 
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                     #entity_name_lit,
                     hook_ctx,
@@ -8822,7 +9450,7 @@ fn generate_graphql_operations_unfiltered(
                 let ::std::option::Option::Some(current_entity) = current_entity else {
                     return ::std::result::Result::Ok(::std::option::Option::None);
                 };
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 db.ensure_writable_row(
                     ::std::option::Option::None,
                     #entity_name_lit,
@@ -8954,7 +9582,7 @@ fn generate_graphql_operations_unfiltered(
                 if matched_entities.is_empty() {
                     return ::std::result::Result::Ok(0);
                 }
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 for entity in &matched_entities {
                     db.ensure_writable_row(
                         ::std::option::Option::None,
@@ -9092,7 +9720,7 @@ fn generate_graphql_operations_unfiltered(
                 let ::std::option::Option::Some(entity) = entity else {
                     return ::std::result::Result::Ok(false);
                 };
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 db.ensure_writable_row(
                     ::std::option::Option::None,
                     #entity_name_lit,
@@ -9182,7 +9810,7 @@ fn generate_graphql_operations_unfiltered(
                     return ::std::result::Result::Ok(0);
                 }
 
-                let db = hook_ctx.database().clone();
+                let db = hook_ctx.__policy();
                 for entity in &matched_entities {
                     db.ensure_writable_row(
                         ::std::option::Option::None,
@@ -9591,6 +10219,7 @@ fn generate_graphql_operations_unfiltered(
                             ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                             &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                        #principal_key_update_reset
                         #(#update_runtime_policy_checks)*
                     } else {
                         let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::repository_in_transaction(
@@ -9650,7 +10279,7 @@ fn generate_graphql_operations_unfiltered(
                     Self::__gom_require_managed_version_headroom(entity)?;
                 }
                 for (entity, (_, _, mutation_changes)) in matched_entities.iter().zip(&row_plans) {
-                    hook_ctx.run_mutation_hook(
+                    hook_ctx.__run_generated_mutation_hook(
                         graphql_ctx,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
@@ -9694,7 +10323,7 @@ fn generate_graphql_operations_unfiltered(
                         access_surface,
                         &entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                        hook_ctx.run_mutation_hook(
+                        hook_ctx.__run_generated_mutation_hook(
                             graphql_ctx,
                             &::graphql_orm::graphql::orm::MutationEvent {
                                 phase: ::graphql_orm::graphql::orm::MutationPhase::After,
@@ -10019,7 +10648,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 for entity in &matched_entities {
-                    hook_ctx.run_mutation_hook(
+                    hook_ctx.__run_generated_mutation_hook(
                         graphql_ctx,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
@@ -10056,7 +10685,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 for entity in &matched_entities {
-                    hook_ctx.run_mutation_hook(
+                    hook_ctx.__run_generated_mutation_hook(
                         graphql_ctx,
                         &::graphql_orm::graphql::orm::MutationEvent {
                             phase: ::graphql_orm::graphql::orm::MutationPhase::After,
