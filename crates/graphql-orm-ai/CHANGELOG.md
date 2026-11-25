@@ -10,11 +10,24 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.166.0
+
+- Updated the legacy approval-index upgrade tests for ORM 0.225.0. On SQLite
+  and PostgreSQL, a filter on that index changes the source schema hash and
+  prevents automatic admission of the replacement. [Migration](MIGRATION.md#01650-to-01660)
+
 ## Unreleased - 0.165.0
 
-- Updated the legacy approval-index upgrade tests for ORM 0.224.0. On SQLite
-  and PostgreSQL, a filter on that index changes the source schema hash and
-  prevents automatic admission of the replacement. [Migration](MIGRATION.md#01640-to-01650)
+Requires ORM 0.224.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change. See the
+[migration guide](MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
+
+- **Fixed (#291):** the crate's internal database handle forwards
+  repository field decisions for fields the host owns to the host policy's
+  `can_read_repository_field_with_authority` and
+  `can_write_repository_field_with_authority`. A host refusal written in
+  those methods is no longer skipped on that handle. Decisions for the
+  crate's own key-less fields are unchanged.
 
 ## Unreleased - 0.164.0
 

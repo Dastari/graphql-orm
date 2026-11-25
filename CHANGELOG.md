@@ -14,14 +14,54 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.224.0
+## Unreleased - ORM/macros 0.225.0
 
 - **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters
   during introspection. SQL Server distinguishes a filtered index when the
   catalog indicates a filter and the definition is unavailable. SQLite and
   PostgreSQL emit a failing statement if asked to render an opaque predicate.
   PostgreSQL preserves declared single-value filters through introspection.
-  [Migration](MIGRATION.md#02230-to-02240-opaque-partial-index-predicates)
+  [Migration](MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+
+## Unreleased - ORM/macros 0.224.0 and AI 0.165.0
+
+- **Added (#291).** A mutation hook's nested writes can be authorized from
+  the request that caused them. With
+  `DatabaseBuilder::propagate_request_authority_to_hooks(true)`, a hook that a
+  generated GraphQL mutation invokes presents a `HookRequestAuthority` (the
+  request's subject, and its accepted agql-auth identity with `auth-agql`) on
+  the entity and row policy checks of the operations it makes through its
+  `MutationContext`. It is off by default and grants nothing by itself.
+  `ScopeEntityPolicy` then holds the originating subject to its scope
+  requirement, so a cleanup hook no longer fails `UNAUTHENTICATED` for a
+  caller that holds the scope. The authority belongs to the transaction: no
+  `Database` handle carries it, so a repository call, another transaction, a
+  spawned task, a post-commit action or a later request never presents it.
+  It is attached only by a generated GraphQL mutation whose request is
+  admitted to write the mutation's entity, never by
+  `MutationContext::run_mutation_hook`, and every read of it checks that the
+  hook invocation is still running. Repository field decisions do not
+  receive it.
+- **Added (#291).** `EntityPolicy`, `RowPolicy` and `FieldPolicy` have
+  `*_with_authority` methods that receive a `PolicyAuthority`: the named
+  `SystemAccess` of the handle or scope, and, for entity and row decisions, a
+  hook's originating request. The ORM always calls them. Their defaults call
+  the existing methods with the same arguments, so existing policies are
+  unchanged. A policy can now refuse a call that presents no authority
+  (`ctx` is `None` and `PolicyAuthority::is_none()`) while admitting a named
+  worker or a hook. `Database::policy_authority()` returns a handle's
+  authority.
+- **Added (#291).** `AgqlCurrentAuthorityPolicy` admits a hook's nested
+  entity decision on the originating request's accepted identity, with the
+  same status and authority revalidation as a request, when the host's
+  `AgqlBindingAuthorizer::authorize_hook_operation` allows it. The default
+  denies, so `ctx = None` calls stay refused until the host implements it.
+- **Fixed (#291), AI 0.164.0.** The AI crate's internal handle forwards
+  host-owned repository field decisions to the host policy's
+  `*_with_authority` methods; see the
+  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
+  **No action.** See the
+  [migration guide](MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
 
 ## Unreleased - ORM/macros 0.223.0
 

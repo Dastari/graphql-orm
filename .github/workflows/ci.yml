@@ -321,7 +321,7 @@ jobs:
       - name: Require current authority, strict policies, pagination, and private event delivery
         run: |
           bash scripts/run-security-test-targets.sh sqlite,auth-agql \
-            current_authority authorization_mode authorized_pagination \
+            current_authority hook_request_authority_agql authorization_mode authorized_pagination \
             subscription_release_authorization subscription_provenance_authorization \
             subscription_repository_provenance
       - name: Require exact receiver-purpose admission
